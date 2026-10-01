@@ -23,4 +23,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq shellcheck
 
       - name: Validate source and configuration
-        run: ./scripts/validate.sh
+        run: |
+          npm ci --prefix rootfs/opt/claude-cowork-bridge --ignore-scripts --no-audit --no-fund
+          ./scripts/validate.sh

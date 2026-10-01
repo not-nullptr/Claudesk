@@ -27,6 +27,11 @@ jq -e \
 curl -fsS "$base_url/" > "$tmp_dir/index.html"
 grep -F "$renderer_base/assets/v1/index-" "$tmp_dir/index.html" >/dev/null
 grep -F "/remote-preload.js?v=$release" "$tmp_dir/index.html" >/dev/null
+grep -F "/remote-folder-picker.js?v=$release" "$tmp_dir/index.html" >/dev/null
+curl -fsS "$base_url/api/remote/folders" > "$tmp_dir/folders.json"
+jq -e '.ok == true and (.value.root | type == "string")
+  and .value.path == .value.root and .value.parent == null
+  and (.value.folders | type == "array")' "$tmp_dir/folders.json" >/dev/null
 if grep -E '[?&]claudesk-(edit|code|session|ask|entry)' "$tmp_dir/index.html" >/dev/null; then
   printf '%s\n' 'chat smoke: query-suffixed renderer module remains' >&2
   exit 1
@@ -35,7 +40,7 @@ fi
 entry_path="$(sed -n 's/.*<script type="module"[^>]*src="\([^"]*index-[^"]*\.js\)".*/\1/p' "$tmp_dir/index.html")"
 [ -n "$entry_path" ]
 curl -fsS "$base_url$entry_path" > "$tmp_dir/entry.js"
-grep -F 'duration:r=6500' "$tmp_dir/entry.js" >/dev/null
+node --check "$tmp_dir/entry.js"
 
 asset_list="$tmp_dir/renderer-assets.txt"
 jq -er '(.renderer.files[].path), (.renderer.markers[].matches[].path)' \
@@ -49,25 +54,8 @@ while IFS= read -r asset; do
 done < "$asset_list"
 cat "$tmp_dir"/renderer-*.js > "$tmp_dir/renderer-patched.js"
 
-for marker in \
-  'ls=true' \
-  'Ps=void 0!==ie||!!x?.rewind' \
-  'if(Ce&&void 0!==ie){const e=ca(Q,n.uuid);' \
-  'Fs=ls&&!Ts' \
-  'editMessage:As&&!i?oa:void 0' \
-  'isResend:!0' \
-  'D=U&&!m&&!B&&u&&d&&l&&!e.sendFailed&&!R&&(M?v&&!_:v)' \
-  'icon:"Edit","data-testid":"code-action-bar-edit"' \
-  'a&&(0,eP.jsx)(UG,{onRewind:a,buttonVariant:c})' \
-  '229===e.keyCode' \
-  'Math.abs(e.timeStamp-zp)<500'; do
-  grep -F "$marker" "$tmp_dir/renderer-patched.js" >/dev/null
-done
-if grep -F 'false,a&&(0,eP.jsx)(UG,{onRewind:a,buttonVariant:c})' \
-  "$tmp_dir/renderer-patched.js" >/dev/null; then
-  printf '%s\n' 'chat smoke: Code Edit remains hidden' >&2
-  exit 1
-fi
+project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+node "$project_dir/scripts/verify-renderer-markers.mjs" "$tmp_dir"
 
 curl -fsS "$base_url/remote-preload.js?v=$release" > "$tmp_dir/remote-preload.js"
 curl -fsS "$base_url/service-worker.js?v=$release" > "$tmp_dir/service-worker.js"

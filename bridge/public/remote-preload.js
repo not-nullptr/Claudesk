@@ -505,24 +505,14 @@
         return async () => (await browseBrowserFiles(false))?.paths ?? null;
       }
       if (method === "browseFolder") {
-        return async (title) => {
-          const prompt = String(title || "");
-          const codeRoute = /^\/code(?:\/|$)/.test(globalThis.location.pathname);
-          if (
-            /where to create|project location/i.test(prompt)
-            || (
-              codeRoute
-              && /change project directory|^choose a folder$|select a folder for this task/i.test(prompt)
-            )
-          ) return "/workspace";
-          return (await browseBrowserFiles(true))?.root ?? null;
+        return async (title, _allowCreate, _trust, initialPath) => {
+          const paths = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({ title, initialPath });
+          return paths?.[0] ?? null;
         };
       }
       if (method === "browseFolders") {
-        return async () => {
-          const root = (await browseBrowserFiles(true))?.root;
-          return root ? [root] : null;
-        };
+        return async (title, _allowCreate, _trust, initialPath) =>
+          globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({ title, multiple: true, initialPath });
       }
       if (method === "getSystemPath") return async () => "/workspace";
       if (method === "writeFileDownload" || method === "writeFileDownloadAndOpen") {
@@ -545,7 +535,8 @@
       }
     }
     if (surface === "CoworkUserFiles") {
-      if (method === "pickTarget") return async () => "/workspace";
+      if (method === "pickTarget") return async () =>
+        (await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({}))?.[0] ?? null;
       if (method === "reveal") {
         return async () => false;
       }

@@ -67,9 +67,10 @@ cp -a "$injection_dir" "$extract_dir/bridge-wrapper"
 /usr/bin/node "$asar_cli" pack "$extract_dir" "$patched_asar" --unpack '**/*.node'
 test -s "$patched_asar"
 
+# Reject renderer drift before replacing the working Electron archive.
+prepare_renderer
 cp -f "$active_asar" "$official_asar"
 mv -f "$patched_asar" "$active_asar"
 sha256sum "$active_asar" | awk '{ print $1 }' > "$patched_sha_file"
 printf '%s\n' "$requested_mode" > "$patched_mode_file"
-prepare_renderer
 printf '[cowork-wrapper] enabled; official app.asar patched with Cowork IPC entry (%s)\n' "$requested_mode"

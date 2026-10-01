@@ -362,3 +362,16 @@ body,
     min-height: calc(100dvh - var(--claude-remote-safe-top) - var(--claude-remote-safe-bottom));
   }
 }
+
+.remote-folder-picker { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; border: 1px solid #aaa8; border-radius: 16px; color: var(--text-primary, #292723); background: var(--bg-100, #faf9f5); font: inherit; overflow: auto; }
+.remote-folder-picker::backdrop { background: #0008; }
+.remote-folder-picker h2 { font-size: 1.15rem; font-weight: 600; margin: 0 0 8px; }
+.remote-folder-picker p { margin: 8px 0; }
+.remote-folder-picker-path { overflow-wrap: anywhere; font-family: monospace; }
+.remote-folder-picker-navigation, .remote-folder-picker-footer, .remote-folder-picker-row { display: flex; align-items: center; gap: 12px; }
+.remote-folder-picker-footer { justify-content: flex-end; margin-top: 16px; }
+.remote-folder-picker button { padding: 8px 12px; border: 1px solid #aaa6; border-radius: 8px; cursor: pointer; text-align: left; }
+.remote-folder-picker button:disabled { opacity: .5; cursor: default; }
+.remote-folder-picker-entries { max-height: 45dvh; overflow: auto; margin-top: 12px; }
+.remote-folder-picker-row { margin: 6px 0; }
+.remote-folder-picker-row button { flex: 1; overflow-wrap: anywhere; }

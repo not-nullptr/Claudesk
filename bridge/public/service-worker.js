@@ -5,6 +5,7 @@ const SHELL_ASSETS = [
   `/remote-main-menu.css?v=${RELEASE}`,
   `/remote-main-menu.js?v=${RELEASE}`,
   `/remote-preload.js?v=${RELEASE}`,
+  `/remote-folder-picker.js?v=${RELEASE}`,
   `/remote-shell.css?v=${RELEASE}`,
   `/manifest.webmanifest?v=${RELEASE}`,
   "/desktop-icon.png",

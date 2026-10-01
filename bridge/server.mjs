@@ -6,6 +6,7 @@ import { dirname, extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { createDownloadHandler } from "./downloads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
+import { listWorkspaceFolders } from "./workspace-folders.mjs";
 
 const host = process.env.BRIDGE_HOST || "0.0.0.0";
 const port = Number(process.env.BRIDGE_PORT || 8080);
@@ -1018,6 +1019,11 @@ async function sendSessionMessage(sessionId, message) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === "GET" && url.pathname === "/api/remote/folders") {
+    const value = await listWorkspaceFolders(workspaceRoot, url.searchParams.get("path") || workspaceRoot);
+    sendJson(response, 200, { ok: true, value });
+    return;
+  }
   if (protocolRules.some((rule) => rule.path.test(url.pathname))) {
     await forwardOfficialProtocol(request, response, url);
     return;
@@ -1519,6 +1525,7 @@ async function serveOfficialIndex(response) {
     `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
     `<script src="/remote-main-menu.js?v=${release.patchRelease}"></script>`,
     `<script src="/remote-preload.js?v=${release.patchRelease}"></script>`,
+    `<script src="/remote-folder-picker.js?v=${release.patchRelease}"></script>`,
   ].join("");
   // The official entry lists its CSS after the module script. Put our narrow
   // remote overrides at the very end of <head>, otherwise the official button
@@ -1566,6 +1573,7 @@ const localStaticFiles = new Set([
   "/remote-main-menu.css",
   "/remote-main-menu.js",
   "/remote-preload.js",
+  "/remote-folder-picker.js",
   "/remote-shell.css",
   "/service-worker.js",
 ]);

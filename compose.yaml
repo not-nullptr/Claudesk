@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CLAUDE_DESKTOP_VERSION: "${CLAUDE_DESKTOP_VERSION:-1.28929.0}"
+        CLAUDE_DESKTOP_VERSION: "${CLAUDE_DESKTOP_VERSION:-2.9939.4}"
     image: local/claude-desktop-nas:official-linux
     container_name: claude-desktop
     hostname: claude-desktop

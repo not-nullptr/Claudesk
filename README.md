@@ -109,6 +109,44 @@ docker compose down
 `ops/systemd/claudesk-monthly-update.timer` 在每月 1 日 04:30（Asia/Taipei）构建候选镜像；
 只有当前单版本 Renderer 补丁准备和基本冒烟通过后才切换，失败会保留或恢复上一镜像。
 
+## Desktop 2.x 升级
+
+当前固定版本为 **2.9939.4**（2026-10-01 检查官方 stable APT 仓库）。升级已有部署时，
+将本机 `.env` 的 `CLAUDE_DESKTOP_VERSION` 改为 `2.9939.4`，确保
+`CLAUDE_COWORK_HOST_BASH=0`，然后重新构建并运行现有 smoke scripts。
+Desktop 2.x 使用官方原生编辑、rewind 与问题处理；旧版 1.x 的编译代码补丁已移除。
+可选 container-host Bash 模式尚不支持 2.x，会在修改安装包前明确拒绝启动。
+请在更新前停止 Desktop 并备份持久化 `/config`；新版本可能迁移会话数据。
+
+可在不启动 Electron 的情况下检查官方包的 renderer：
+
+```bash
+npm ci --prefix rootfs/opt/claude-cowork-bridge --ignore-scripts
+node scripts/desktop-compatibility-smoke.mjs /path/to/extracted/resources/ion-dist
+```
+
+该检查覆盖默认模式和 Gateway 设置开关、生成模块语法和包版本边界。
+它不能替代 Linux/KVM 主机上的 Chat、Cowork 与实际 Gateway 端到端验证。
+
+### 更新韧性
+
+每月检查只会部署 `config/release.json` 声明的已审查版本。发现更高版本时记录
+`awaiting-compatibility-profile` 并保留当前服务；构建参数不能覆盖兼容性声明。
+维护者升级时必须检查新官方包、更新版本声明，并运行 compatibility 与 smoke 检查。
+包入口与 renderer 使用同一版本声明。Frontend 补丁使用 Acorn AST 按协议比较、
+路由跳转和稳定属性识别目标，不依赖 chunk 文件名、局部变量名、空白或引号风格。
+只替换必要表达式，保留其他 bundle 字节及模块图；缺失或重复目标会明确拒绝。
+原生能力检查也使用语法结构，避免仅因 IME 等表达式重新编译而误判功能缺失。
+详见 [Frontend 补丁维护](docs/frontend-patches.md)。
+
+Renderer 在验证全部目标后才发布生成文件，并最后原子更新 manifest 指针；验证失败保留旧文件。
+候选检查沿用部署的 Gateway 开关。Desktop 和 bridge 一起构建、切换和恢复；恢复使用
+正在运行的原始 image ID，失败或中断触发恢复，恢复失败记录 `rollback-failed`。
+镜像恢复不撤销官方程序对持久化会话数据的迁移，升级前仍需备份 `/config`。
+
+`scripts/validate.sh` 包含编译变量漂移、缺失/重复目标、旧 renderer 保留及模拟更新失败测试。
+这些测试使用临时目录和模拟 Docker，不修改真实部署；真实 Electron/KVM 验证仍需生产同类主机。
+
 ## 配置项
 
 ### 必填与基础运行
@@ -117,7 +155,7 @@ docker compose down
 | --- | --- | --- |
 | `COWORK_WEB_PORT` | `15821` | 宿主机公开端口，映射到 Bridge `8080` |
 | `COWORK_BRIDGE_INTERNAL_PORT` | `9222` | Desktop 内部 Cowork adapter 端口，仅 loopback |
-| `CLAUDE_DESKTOP_VERSION` | `1.28929.0` | 构建时固定安装的官方 Desktop 精确版本 |
+| `CLAUDE_DESKTOP_VERSION` | `2.9939.4` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
@@ -153,6 +191,18 @@ Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/
 - `POST /api/remote/settings`：Gateway 编辑器桥接（需显式打开）。
 - `GET|PUT /api/account_profile`：受限的账户资料/指令设置。
 - `/api/bootstrap` 及选定的组织协议路由：转发官方启动请求。
+
+### 服务器工作目录选择
+
+Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网页内的服务器目录选择器，
+浏览挂载的 `/workspace`，支持子目录、空目录、多选与取消，返回服务器绝对路径。
+它不再上传访问者电脑上的整个目录，也不把所有选择固定为 `/workspace`。
+普通文件附件仍使用浏览器文件选择与上传。
+
+`GET /api/remote/folders?path=...` 只列出工作区内的文件夹；拒绝越界路径和指向工作区外的符号链接。
+目录确认前再次检查服务器路径。官方 bundle 内确实包含 SSH `FolderBrowserModal`，
+但该组件依赖官方 React Query / Intl 环境，当前没有从任意 Cowork/Code 页面调用它的公共入口。
+此实现通过 preload 替换现有选目录 API，不新增 frontend bundle 补丁，保留官方信任确认与会话处理。
 
 ### Chat 回退与诊断接口
 
@@ -228,6 +278,7 @@ README 预览按 PC 端 720px、移动端 280px 展示，避免窄屏截图在�
 
 Bridge 源码在 `bridge/`，Electron 注入包装器在 `bridge-wrapper/`，启动脚本在 `rootfs/`。修改 IPC allowlist 时，必须同时检查外层 Bridge 和 loopback adapter，并在说明中写清楚为什么该方法需要远程暴露。
 
+先运行 `npm ci --prefix rootfs/opt/claude-cowork-bridge --ignore-scripts` 安装补丁解析器与测试依赖。
 提交前至少运行 `./scripts/validate.sh` 与相关 smoke script。请不要提交 `.env`、Gateway Key、真实会话数据或 `/workspace` 里的私有文件。
 
 ## 许可证与致谢

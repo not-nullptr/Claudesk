@@ -25,9 +25,12 @@ FROM node:22-alpine AS wrapper-builder
 WORKDIR /src
 
 COPY bridge-wrapper ./bridge-wrapper
+COPY rootfs/opt/claude-cowork-bridge/package*.json ./renderer-patcher/
 
 RUN npm install --prefix /opt/asar --omit=dev @electron/asar@3.2.17 && \
+    npm ci --prefix /src/renderer-patcher --omit=dev --ignore-scripts --no-audit --no-fund && \
     mkdir -p /out/injection && \
+    cp -a /src/renderer-patcher/node_modules /out/node_modules && \
     cp -a bridge-wrapper /out/injection/bridge-wrapper && \
     cp -a /opt/asar /out/asar
 
@@ -45,7 +48,7 @@ RUN npm install \
 
 FROM jlesage/baseimage-gui:debian-12-v4.11.3
 
-ARG CLAUDE_DESKTOP_VERSION=1.28929.0
+ARG CLAUDE_DESKTOP_VERSION=2.9939.4
 
 RUN add-pkg \
         ca-certificates \
@@ -97,7 +100,7 @@ COPY bridge/public/fonts/AnthropicSerif-Text-Regular-CJK.otf \
 # reports regular 0644 files as executable.  The upstream init script uses
 # `test -x` to distinguish literal environment files from scripts, so make that
 # decision from the actual mode bits instead.
-RUN node -e 'const fs=require("fs");const p="/opt/claude-cowork-bridge/release.json";const r=JSON.parse(fs.readFileSync(p));r.desktopVersion=process.argv[1];fs.writeFileSync(p,JSON.stringify(r,null,2)+"\n")' "${CLAUDE_DESKTOP_VERSION}" && \
+RUN node -e 'const r=require("/opt/claude-cowork-bridge/release.json");if(r.desktopVersion!==process.argv[1])throw new Error("Desktop version has no reviewed compatibility profile")' "${CLAUDE_DESKTOP_VERSION}" && \
     fc-cache -f && \
     sed -i \
         's/if \[ -x "${fpath}" \]; then/if stat -c "%A" "${fpath}" | grep -q "[xst]"; then/' \

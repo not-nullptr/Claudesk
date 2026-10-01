@@ -6,6 +6,7 @@ project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
 
 find bridge bridge-wrapper rootfs/opt \
+    -type d -name node_modules -prune -o \
     -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
     -exec node --check {} \;
 
@@ -13,6 +14,11 @@ find rootfs scripts -type f -name '*.sh' -exec sh -n {} \;
 
 node scripts/security-smoke.mjs
 node scripts/bridge-parity-smoke.mjs
+node scripts/update-resilience-smoke.mjs
+node scripts/renderer-patches-smoke.mjs
+node scripts/updater-smoke.mjs
+node scripts/workspace-folders-smoke.mjs
+node scripts/folder-picker-ui-smoke.mjs
 
 jq -e . \
     bridge/public/manifest.webmanifest \
