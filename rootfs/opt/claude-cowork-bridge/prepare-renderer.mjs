@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -74,6 +75,9 @@ const generatedFiles = [];
 await mkdir(dirname(outputRoot), { recursive: true });
 const stagingRoot = await mkdtemp(`${outputRoot}.staging-`);
 try {
+  // Container initialization runs as root; Electron serves these assets as
+  // the app user. mkdtemp defaults to 0700, even after the directory is renamed.
+  await chmod(stagingRoot, 0o755);
   for (const relativePath of changedFiles) {
     const destination = resolve(stagingRoot, relativePath);
     const officialSource = officialSources.get(resolve(ionRoot, relativePath));

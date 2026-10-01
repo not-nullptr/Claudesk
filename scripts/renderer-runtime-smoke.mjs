@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -28,6 +29,44 @@ export function route(){const allowed=typeof window!=='undefined'&&window.locati
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
   assert.equal(manifest.patches.length, 2);
+  const generation = join(state, release.desktopVersion, release.patchRelease);
+  const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
+  const handler = wrapper.slice(wrapper.indexOf("async function serveIon("),
+    wrapper.indexOf("async function serveDesktopIcon("));
+  const overlayRoot = "/state";
+  const patchedPath = posix.join(overlayRoot, release.desktopVersion, release.patchRelease, "bundle.js");
+  const files = new Map([[patchedPath, Buffer.from("patched")],
+    ["/ion/bundle.js", Buffer.from("original")], ["/ion/unchanged.js", Buffer.from("unchanged")]]);
+  const serve = vm.runInNewContext(`${handler}\nserveIon`, {
+    rendererManifest: manifest, RENDERER_STATE_ROOT: overlayRoot, ION_ROOT: "/ion",
+    normalize: posix.normalize, resolve: posix.resolve, extname: posix.extname,
+    ionMimeTypes: { ".js": "application/javascript" },
+    stat: async path => { if (!files.has(path)) throw new Error("unreadable overlay");
+      return { isFile: () => true }; },
+    readFile: async path => files.get(path),
+  });
+  let body;
+  const response = { writeHead() {}, end(value) { body = value.toString(); } };
+  await serve(response, `${manifest.basePath}/bundle.js`);
+  assert.equal(body, "patched", "HTTP must select the manifest's patched file");
+  await serve(response, `${manifest.basePath}/unchanged.js`);
+  assert.equal(body, "unchanged", "unchanged assets still come from ion-dist");
+  files.delete(patchedPath);
+  await assert.rejects(serve(response, `${manifest.basePath}/bundle.js`), /unreadable overlay/,
+    "unreadable patches must never silently fall back to the original bundle");
+  if (process.platform !== "win32") {
+    assert.equal((await stat(generation)).mode & 0o777, 0o755,
+      "root-prepared overlays must be traversable by the Electron app user");
+    if (process.getuid?.() === 0) {
+      await chmod(temporary, 0o755);
+      const served = spawnSync(process.execPath, ["-e",
+        "process.stdout.write(require('fs').readFileSync(process.argv[1], 'utf8'))",
+        join(generation, "bundle.js")], { uid: 65534, gid: 65534, encoding: "utf8" });
+      assert.equal(served.status, 0, served.stderr);
+      assert.ok(served.stdout.includes("gatewaySettingsEnabled"),
+        "an unprivileged asset server must read the patched bytes");
+    }
+  }
   console.log(`renderer-runtime-smoke: ESM staging passed on ${process.version}`);
 } finally {
   await rm(temporary, { recursive: true, force: true });

@@ -2,7 +2,7 @@
 
 const http = require("node:http");
 const { randomBytes } = require("node:crypto");
-const { createReadStream, existsSync, readFileSync } = require("node:fs");
+const { createReadStream, readFileSync } = require("node:fs");
 const { createConnection } = require("node:net");
 const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
@@ -1629,7 +1629,10 @@ async function serveIon(response, pathname) {
     rendererManifest.patchRelease,
     safePath,
   );
-  const filePath = prepared && existsSync(overlayPath)
+  // A declared patch must be served or fail visibly. Falling back when the
+  // overlay is unreadable silently restores the upstream redirect guard.
+  const patched = prepared && rendererManifest.files.some(file => file.path === safePath);
+  const filePath = patched
     ? overlayPath
     : resolve(ION_ROOT, safePath);
   if (filePath !== ION_ROOT && !filePath.startsWith(`${ION_ROOT}/`)) {
