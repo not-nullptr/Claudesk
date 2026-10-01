@@ -546,7 +546,7 @@ const relayConsoleToken = randomBytes(24).toString("base64url");
 const relayConsolePrefix = `__CLAUDE_REMOTE_EVENT_V2__:${relayConsoleToken}:`;
 const relayedEventQueue = [];
 const relayConsoleContents = new Set();
-let registeredRelayContentsId = null;
+const registeredRelayContentsIds = new Set();
 
 function enqueueRelayedEvent(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
@@ -572,11 +572,11 @@ function attachRelayConsole(contents) {
     } catch {}
   });
   contents.on("did-finish-load", () => {
-    if (registeredRelayContentsId === contents.id) registeredRelayContentsId = null;
+    registeredRelayContentsIds.delete(contents.id);
   });
   contents.once("destroyed", () => {
     relayConsoleContents.delete(contents.id);
-    if (registeredRelayContentsId === contents.id) registeredRelayContentsId = null;
+    registeredRelayContentsIds.delete(contents.id);
   });
 }
 
@@ -1051,7 +1051,10 @@ function validateAccountProfileUpdate(method, pathname, body) {
 function rendererCandidates() {
   return webContents.getAllWebContents().filter((item) => {
     if (item.isDestroyed()) return false;
-    return item.getType() === "window" && item.getURL().startsWith("app://localhost");
+    // The official main surface can live in a WebContentsView. Restrict by
+    // the app origin, rather than excluding every non-window renderer.
+    const url = item.getURL();
+    return url === "app://localhost" || url.startsWith("app://localhost/");
   });
 }
 
@@ -1507,10 +1510,9 @@ async function readStore(surface, store) {
 }
 
 async function ensureRelayedEventsRegistered() {
-  if (registeredRelayContentsId !== null) {
-    const current = webContents.fromId(registeredRelayContentsId);
-    if (current && !current.isDestroyed()) return;
-    registeredRelayContentsId = null;
+  for (const id of registeredRelayContentsIds) {
+    const current = webContents.fromId(id);
+    if (!current || current.isDestroyed()) registeredRelayContentsIds.delete(id);
   }
   const listeners = Object.fromEntries(
     [...relayedListeners].map(([surface, methods]) => [surface, [...methods]]),
@@ -1551,17 +1553,18 @@ async function ensureRelayedEventsRegistered() {
   const deadline = Date.now() + rendererReadyTimeoutMs;
   do {
     for (const contents of rendererCandidates()) {
+      if (registeredRelayContentsIds.has(contents.id)) continue;
       attachRelayConsole(contents);
       try {
         const registered = await contents.executeJavaScript(expression, true);
         if (registered === true) {
-          registeredRelayContentsId = contents.id;
-          return;
+          registeredRelayContentsIds.add(contents.id);
         }
       } catch (error) {
         lastError = error;
       }
     }
+    if (registeredRelayContentsIds.size) return;
     if (Date.now() < deadline) await wait(rendererReadyPollMs);
   } while (Date.now() < deadline);
   if (lastError) throw lastError;
