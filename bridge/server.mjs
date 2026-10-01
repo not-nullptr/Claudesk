@@ -409,6 +409,7 @@ if (codeActionsEnabled) {
 
 const allowedSettingsMethods = gatewaySettingsEnabled
   ? new Map([
+      ["AppPreferences", new Set(["getPreferences", "setPreference"])],
       ["Custom3pSetup", new Set([
         "createConfig",
         "deleteConfig",
@@ -928,6 +929,20 @@ function validateInvocation(surface, method, args) {
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
 }
 
+function validateCodePreference(method, args) {
+  if (method === "getPreferences" && args.length === 0) return;
+  const [key, value] = args;
+  const accountMap = ["bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key);
+  if (method !== "setPreference" || args.length !== 2
+    || !(key === "bypassPermissionsModeEnabled" && typeof value === "boolean"
+      || accountMap && value && typeof value === "object" && !Array.isArray(value)
+        && Object.entries(value).every(([account, enabled]) =>
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(account)
+          && typeof enabled === "boolean"))) {
+    throw new ApiError(400, "Code preference is not allowed");
+  }
+}
+
 function validateSettingsInvocation(surface, method, args) {
   if (!gatewaySettingsEnabled) {
     throw new ApiError(404, "Remote Gateway settings are disabled");
@@ -936,6 +951,10 @@ function validateSettingsInvocation(surface, method, args) {
     throw new ApiError(400, "Gateway settings method is not allowed");
   }
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
+  if (surface === "AppPreferences") {
+    if (!codeActionsEnabled) throw new ApiError(404, "Code settings are disabled");
+    validateCodePreference(method, args);
+  }
   if (method === "getLoginDesktop3pStatus" && args.length !== 0) {
     throw new ApiError(400, "getLoginDesktop3pStatus does not accept arguments");
   }

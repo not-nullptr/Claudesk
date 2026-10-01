@@ -477,6 +477,7 @@ if (codeActionsEnabled) {
 
 const allowedSettingsMethods = gatewaySettingsEnabled
   ? new Map([
+      ["AppPreferences", new Set(["getPreferences", "setPreference"])],
       ["Custom3pSetup", new Set([
         "createConfig",
         "deleteConfig",
@@ -939,8 +940,26 @@ function validateSettingsInvocation(surface, method, args) {
     throw new Error("Gateway settings method is not allowed");
   }
   if (!Array.isArray(args)) throw new Error("args must be an array");
+  if (surface === "AppPreferences") {
+    if (!codeActionsEnabled) throw new Error("Code settings are disabled");
+    validateCodePreference(method, args);
+  }
   if (method === "getLoginDesktop3pStatus" && args.length !== 0) {
     throw new Error("getLoginDesktop3pStatus does not accept arguments");
+  }
+}
+
+function validateCodePreference(method, args) {
+  if (method === "getPreferences" && args.length === 0) return;
+  const [key, value] = args;
+  const accountMap = ["bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key);
+  if (method !== "setPreference" || args.length !== 2
+    || !(key === "bypassPermissionsModeEnabled" && typeof value === "boolean"
+      || accountMap && value && typeof value === "object" && !Array.isArray(value)
+        && Object.entries(value).every(([account, enabled]) =>
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(account)
+          && typeof enabled === "boolean"))) {
+    throw new Error("Code preference is not allowed");
   }
 }
 
@@ -1455,6 +1474,10 @@ async function invokeSettings(surface, method, args, argsEncoding) {
   }
   const result = JSON.parse(serialized);
   if (!result.ok) throw new Error(result.error || "Gateway settings IPC call failed");
+  if (surface === "AppPreferences" && method === "getPreferences") {
+    return Object.fromEntries(Object.entries(result.value || {}).filter(([key]) =>
+      ["bypassPermissionsModeEnabled", "bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key)));
+  }
   return result.value;
 }
 

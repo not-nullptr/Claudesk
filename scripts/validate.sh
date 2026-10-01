@@ -20,6 +20,7 @@ node scripts/renderer-runtime-smoke.mjs
 node scripts/updater-smoke.mjs
 node scripts/workspace-folders-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
+node scripts/code-preferences-smoke.mjs
 
 jq -e . \
     bridge/public/manifest.webmanifest \

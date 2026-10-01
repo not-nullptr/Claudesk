@@ -635,7 +635,10 @@
           api[method] = (...args) => invokeSettings(surface, method, args);
         }
       }
-      settingsRoot[surface] = Object.freeze(api);
+      if (surface === "AppPreferences") {
+        if (!config.codeActionsEnabled) continue;
+        settingsRoot[surface] = createCodePreferences();
+      } else settingsRoot[surface] = Object.freeze(api);
     }
     Object.defineProperty(globalThis, "claude.settings", {
       configurable: false,
@@ -690,6 +693,35 @@
       const setupObserver = new MutationObserver(enhanceSetupPage);
       setupObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
+  }
+
+  function createCodePreferences() {
+    const listeners = new Set();
+    let timer, previous;
+    async function refresh() {
+      const value = await invokeSettings("AppPreferences", "getPreferences", []);
+      const next = JSON.stringify(value);
+      if (next !== previous) {
+        previous = next;
+        for (const listener of listeners) listener(value);
+      }
+      return value;
+    }
+    return Object.freeze({
+      getPreferences: refresh,
+      async setPreference(key, value) {
+        await invokeSettings("AppPreferences", "setPreference", [key, value]);
+        await refresh();
+      },
+      onPreferencesChanged(listener) {
+        listeners.add(listener);
+        if (!timer) timer = setInterval(() => refresh().catch(() => {}), 1000);
+        return () => {
+          listeners.delete(listener);
+          if (!listeners.size) { clearInterval(timer); timer = undefined; }
+        };
+      },
+    });
   }
 
   function currentRemoteRoute() {
