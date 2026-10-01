@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  renderer-runtime:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --prefix rootfs/opt/claude-cowork-bridge --omit=dev --ignore-scripts --no-audit --no-fund
+      - run: node scripts/renderer-runtime-smoke.mjs
+
   static-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10

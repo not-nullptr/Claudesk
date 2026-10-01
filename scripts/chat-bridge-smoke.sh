@@ -40,7 +40,7 @@ fi
 entry_path="$(sed -n 's/.*<script type="module"[^>]*src="\([^"]*index-[^"]*\.js\)".*/\1/p' "$tmp_dir/index.html")"
 [ -n "$entry_path" ]
 curl -fsS "$base_url$entry_path" > "$tmp_dir/entry.js"
-node --check "$tmp_dir/entry.js"
+node --input-type=module --check < "$tmp_dir/entry.js"
 
 asset_list="$tmp_dir/renderer-assets.txt"
 jq -er '(.renderer.files[].path), (.renderer.markers[].matches[].path)' \
@@ -50,7 +50,7 @@ asset_index=0
 while IFS= read -r asset; do
   asset_index=$((asset_index + 1))
   curl -fsS "$base_url$renderer_base/$asset" > "$tmp_dir/renderer-$asset_index.js"
-  node --check "$tmp_dir/renderer-$asset_index.js"
+  node --input-type=module --check < "$tmp_dir/renderer-$asset_index.js"
 done < "$asset_list"
 cat "$tmp_dir"/renderer-*.js > "$tmp_dir/renderer-patched.js"
 

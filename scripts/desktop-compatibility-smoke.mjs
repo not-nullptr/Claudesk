@@ -36,8 +36,11 @@ try {
     assert.equal(manifest.markers.length, 4);
     if (gateway === "1") gatewayManifest = manifest;
     for (const file of manifest.files) {
-      const syntax = spawnSync(process.execPath, ["--check", join(state,
-        release.desktopVersion, release.patchRelease, file.path)], { encoding: "utf8" });
+      const generated = await readFile(join(state,
+        release.desktopVersion, release.patchRelease, file.path), "utf8");
+      const syntax = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+        encoding: "utf8", input: generated,
+      });
       assert.equal(syntax.status, 0, syntax.stderr);
     }
   }

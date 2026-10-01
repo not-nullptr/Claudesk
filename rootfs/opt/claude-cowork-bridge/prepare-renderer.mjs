@@ -80,7 +80,11 @@ try {
     const generatedSource = sources.get(resolve(ionRoot, relativePath));
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(destination, generatedSource, { mode: 0o644 });
-    const syntax = spawnSync(process.execPath, ["--check", destination], { encoding: "utf8" });
+    // These browser bundles are ESM regardless of the staging directory's
+    // package scope. Node 18 otherwise checks .js files as CommonJS.
+    const syntax = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+      encoding: "utf8", input: generatedSource,
+    });
     if (syntax.status !== 0) {
       throw new Error(`generated renderer syntax invalid: ${relativePath}\n${syntax.stderr}`);
     }
