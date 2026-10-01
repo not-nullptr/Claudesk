@@ -3,12 +3,13 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.textContent = ""; }
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.textContent = ""; this.dataset = {}; }
   setAttribute(name, value) { this[name] = value; }
   append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
-  dispatch(name) { for (const callback of this.listeners[name] || []) callback({ preventDefault() {} }); }
+  dispatch(name, event = {}) { for (const callback of this.listeners[name] || []) callback({ preventDefault() {}, ...event }); }
+  getBoundingClientRect() { return { left: 100, top: 100, right: 660, bottom: 600 }; }
   click() { assert.ok(!this.disabled); this.dispatch("click"); }
   focus() {}
   showModal() { this.open = true; }
@@ -62,6 +63,26 @@ assert.ok(all().some(node => node.textContent === "Folder unavailable"));
 button("Workspace").click();
 await settle();
 body.children[0].dispatch("cancel");
+assert.equal(await result, null);
+result = pick();
+await settle();
+const search = all().find(node => node.type === "search");
+search.value = "b";
+search.dispatch("input");
+assert.equal(button("a").parent.hidden, true);
+assert.equal(button("b").parent.hidden, false);
+const dialog = body.children[0];
+const outside = { target: dialog, clientX: 10, clientY: 10 };
+dialog.dispatch("pointerdown", { target: button("b"), clientX: 200, clientY: 200 });
+dialog.dispatch("click", outside);
+assert.equal(body.children.length, 1, "dragging from inside must not dismiss");
+dialog.dispatch("pointerdown", outside);
+dialog.dispatch("click", outside);
+assert.equal(await result, null, "clicking the backdrop dismisses the picker");
+
+result = pick();
+await settle();
+all().find(node => node["aria-label"] === "Close folder picker").click();
 assert.equal(await result, null);
 
 result = pick({ multiple: true });
