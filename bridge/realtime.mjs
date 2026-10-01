@@ -32,6 +32,8 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
   let revision = 0;
   let statePollInFlight = false;
   let eventPollInFlight = false;
+  let eventRevision = 0;
+  const lastSessionEvent = new Map();
 
   function send(response, event, data) {
     if (response.destroyed || response.writableEnded) return false;
@@ -57,6 +59,7 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
     if (!clients.size || statePollInFlight) return;
     statePollInFlight = true;
     try {
+      await pollDesktopEvents();
       const sessions = await desktop.invoke("LocalAgentModeSessions", "getAll", []);
       const summaries = sessions.map(summarizeSession);
       const snapshot = {
@@ -86,20 +89,31 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
       for (const sessionId of selectedIds) {
         const session = sessionsById.get(sessionId);
         if (!session) continue;
+        // Native stream deltas own active turns. Disk-backed snapshots may lag
+        // those deltas and reset the reducer's active content-block indexes.
+        if (session.isRunning) {
+          transcripts.delete(sessionId);
+          continue;
+        }
+        if (now - (lastSessionEvent.get(sessionId) || 0) < 1500) continue;
         const previous = transcripts.get(sessionId);
         const activityKey = `${session.lastActivityAt ?? ""}:${Boolean(session.isRunning)}`;
         const shouldPoll = !previous
-          || session.isRunning
           || previous.activityKey !== activityKey
           || now - previous.polledAt >= 10000;
         if (!shouldPoll) continue;
 
         try {
+          const before = eventRevision;
           const transcript = await desktop.invoke(
             "LocalAgentModeSessions",
             "getTranscript",
             [sessionId],
           );
+          // Drain events queued during the read before publishing a snapshot.
+          // If a turn started while it was being read, discard that snapshot.
+          await pollDesktopEvents();
+          if (eventPollInFlight || before !== eventRevision) continue;
           const transcriptDigest = digest(transcript);
           transcripts.set(sessionId, {
             activityKey,
@@ -144,7 +158,18 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
     eventPollInFlight = true;
     try {
       const events = await desktop.pollEvents();
-      for (const event of events) broadcast("desktop-ipc", event);
+      for (const event of events) {
+        eventRevision++;
+        const sessionId = event.payload?.sessionId;
+        if (sessionId) {
+          lastSessionEvent.set(sessionId, Date.now());
+          transcripts.delete(sessionId);
+        }
+        broadcast("desktop-ipc", event);
+      }
+      for (const id of lastSessionEvent.keys()) {
+        if (![...clients.values()].some(client => client.sessionId === id)) lastSessionEvent.delete(id);
+      }
     } catch (error) {
       broadcast("sync-error", { error: error.message });
     } finally {
@@ -178,15 +203,8 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
       sessionId,
     });
     if (latestSessions) send(response, "sessions", latestSessions);
-    const transcript = sessionId ? transcripts.get(sessionId) : null;
-    if (transcript) {
-      send(response, "transcript", {
-        sessionId,
-        value: transcript.value,
-        isRunning: transcript.isRunning,
-        observedAt: new Date().toISOString(),
-      });
-    }
+    // Reconcile from a fresh read after draining pending native events. A
+    // cached transcript could predate a turn that started before reconnect.
     void pollState();
 
     const close = () => {

@@ -331,7 +331,7 @@
       const sessionId = new URL(descriptor.url, globalThis.location.href)
         .searchParams.get("sessionId");
       const transcript = sessionId ? latestTranscriptEvents.get(sessionId) : null;
-      if (transcript) {
+      if (transcript && transcript.isRunning === false) {
         queueMicrotask(() => {
           if (!callbacks.has(callback)) return;
           try {
@@ -340,9 +340,6 @@
               sessionId: transcript.sessionId,
               messages: Array.isArray(transcript.value) ? transcript.value : [],
             });
-            if (transcript.isRunning === false) {
-              callback({ type: "close", sessionId: transcript.sessionId });
-            }
           } catch {}
         });
       }
@@ -797,6 +794,7 @@
     events.addEventListener("desktop-ipc", (event) => {
       try {
         const payload = JSON.parse(event.data);
+        if (payload.payload?.sessionId) latestTranscriptEvents.delete(payload.payload.sessionId);
         dispatch(payload.surface, payload.method, payload.payload);
       } catch {}
     });
@@ -811,7 +809,7 @@
     events.addEventListener("transcript", (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (typeof payload.sessionId !== "string" || !payload.sessionId) return;
+        if (typeof payload.sessionId !== "string" || !payload.sessionId || payload.isRunning !== false) return;
         latestTranscriptEvents.set(payload.sessionId, payload);
         if (latestTranscriptEvents.size > 16) {
           latestTranscriptEvents.delete(latestTranscriptEvents.keys().next().value);
@@ -821,12 +819,6 @@
           sessionId: payload.sessionId,
           messages: Array.isArray(payload.value) ? payload.value : [],
         });
-        if (payload.isRunning === false) {
-          dispatch("LocalAgentModeSessions", "onOnEvent", {
-            type: "close",
-            sessionId: payload.sessionId,
-          });
-        }
       } catch {}
     });
   }
