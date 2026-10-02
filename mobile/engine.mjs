@@ -111,14 +111,15 @@ function createQueue() {
 const DONE = Symbol("done");
 const ABORTED = Symbol("aborted");
 
-// CLAUDE_MOBILE_TOOL_BLOCKS=0 hides tool calls and shows only the answer text.
-// How the iOS app draws tool rows has not been verified on a device, so this is
-// the way back if they misrender.
+// CLAUDE_MOBILE_TOOL_BLOCKS=0 hides tool calls and CLAUDE_MOBILE_THINKING=0 hides
+// the model's reasoning. How the iOS app draws these rows has not been verified
+// on a device, so they are the way back if they misrender.
 export function createEngine({
   store,
   desktop,
   log = console,
   toolBlocks = process.env.CLAUDE_MOBILE_TOOL_BLOCKS !== "0",
+  thinking = process.env.CLAUDE_MOBILE_THINKING !== "0",
 }) {
   let identity = null;
   const activeTurns = new Map(); // conversationUuid -> { abort, assistantUuid }
@@ -289,6 +290,7 @@ export function createEngine({
     const { messages, leaf } = transcriptToMessages(entries, {
       assistantUuidFor: (humanUuid) => entry?.assistantByHuman?.[humanUuid],
       toolBlocks,
+      thinking,
     });
     return {
       uuid,
@@ -815,7 +817,7 @@ export function createEngine({
   // The assistant text Desktop has stored for a human turn.
   async function storedAnswer(sessionId, humanUuid) {
     const entries = (await desktop.ipc(SURFACE, "getTranscript", [sessionId])) || [];
-    const { messages } = transcriptToMessages(entries, { toolBlocks: false });
+    const { messages } = transcriptToMessages(entries, { toolBlocks: false, thinking: false });
     const assistant = messages.find((message) => message.sender === "assistant" && message.parent_uuid === humanUuid);
     return assistant ? messageText(assistant) : "";
   }
@@ -832,6 +834,7 @@ export function createEngine({
       assistantUuid,
       model: model || conversation.model,
       toolBlocks,
+      thinking,
     });
     const queue = createQueue();
     const live = {
@@ -840,14 +843,15 @@ export function createEngine({
       assistantUuid,
       text: "",
       blocks: [],
+      version: -1,
       startedAt: nowIso(),
     };
     const stopListening = listen(sessionId, (payload) => {
       for (const event of translator.accept(payload)) queue.push(event);
-      const liveBlocks = translator.blocks;
-      if (translator.text !== live.text || liveBlocks.length !== live.blocks.length) {
+      if (translator.version !== live.version) {
+        live.version = translator.version;
         live.text = translator.text;
-        live.blocks = liveBlocks;
+        live.blocks = translator.blocks;
         scheduleNotify(uuid);
       }
       if (translator.finished) queue.push(DONE);

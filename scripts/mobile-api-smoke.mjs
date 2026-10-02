@@ -218,16 +218,29 @@ try {
   assert.equal(conversation.chat_messages[3].uuid, assistant2);
   assert.equal(conversation.chat_messages[2].parent_message_uuid, assistant1);
 
-  // ---- a turn with thinking and a tool call: the call is shown, thinking is not ----
+  // ---- a turn with reasoning and a tool call: both are shown ----
   const human3 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const assistant3 = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const tool = await send(convUuid, { prompt: "[tool] third", parent_message_uuid: assistant2, turn_message_uuids: turn(human3, assistant3) });
   assert.equal(tool.text, "Echo: third");
   assert.equal(tool.kinds.filter((kind) => kind === "message_start").length, 1, "one assistant message for the whole turn");
   const toolStarts = tool.records.filter((record) => record.event === "content_block_start");
-  assert.deepEqual(toolStarts.map((record) => record.data.index), [0, 1, 2]);
-  assert.deepEqual(toolStarts.map((record) => record.data.content_block.type), ["tool_use", "tool_result", "text"], "tool call, its result, then the answer");
-  assert.equal(toolStarts[0].data.content_block.name, "view", "Read is presented as claude.ai's file view tool");
+  assert.deepEqual(toolStarts.map((record) => record.data.index), [0, 1, 2, 3, 4]);
+  assert.deepEqual(
+    toolStarts.map((record) => record.data.content_block.type),
+    ["thinking", "tool_use", "tool_result", "thinking", "text"],
+    "reasoning, the tool call, its result, more reasoning, then the answer",
+  );
+  assert.equal(
+    tool.records
+      .filter((record) => record.event === "content_block_delta" && record.data.delta.type === "thinking_delta" && record.data.index === 0)
+      .map((record) => record.data.delta.thinking)
+      .join(""),
+    "I should look.",
+    "reasoning streams as thinking deltas",
+  );
+  assert.ok(!JSON.stringify(tool.records).includes("signature"), "the opaque signature is never sent");
+  assert.equal(toolStarts[1].data.content_block.name, "view", "Read is presented as claude.ai's file view tool");
   assert.equal(
     tool.records
       .filter((record) => record.event === "content_block_delta" && record.data.delta.type === "input_json_delta")
@@ -235,16 +248,22 @@ try {
       .join(""),
     '{"file_path":"/x"}',
   );
-  assert.equal(toolStarts[1].data.content_block.tool_use_id, toolStarts[0].data.content_block.id);
-  assert.equal(toolStarts[1].data.content_block.content[0].text, "file body");
-  assert.equal(tool.records.filter((record) => record.event === "content_block_stop").length, 3, "every block is closed");
+  assert.equal(toolStarts[2].data.content_block.tool_use_id, toolStarts[1].data.content_block.id);
+  assert.equal(toolStarts[2].data.content_block.content[0].text, "file body");
+  assert.equal(tool.records.filter((record) => record.event === "content_block_stop").length, 5, "every block is closed");
   conversation = await readConversation(convUuid);
   assert.equal(conversation.chat_messages.length, 6, "tool results and thinking are not separate messages");
   assert.equal(texts(conversation)[5], "Echo: third");
   const stored = conversation.chat_messages[5].content;
-  assert.deepEqual(stored.map((block) => block.type), ["tool_use", "tool_result", "text"], "history keeps the tool call");
-  assert.deepEqual(stored[0].input, { file_path: "/x" });
-  assert.ok(!JSON.stringify(conversation).includes("hmm"), "thinking is not exposed");
+  assert.deepEqual(stored.map((block) => block.type), ["thinking", "tool_use", "tool_result", "thinking", "text"], "history keeps the reasoning and the tool call");
+  assert.deepEqual(stored[1].input, { file_path: "/x" });
+  assert.deepEqual([stored[0].thinking, stored[3].thinking], ["I should look.", "hmm"]);
+  assert.ok(!JSON.stringify(conversation).includes("signature"), "the opaque signature is not stored in history");
+  assert.deepEqual(
+    conversation.chat_messages[1].content.map((block) => block.type),
+    ["thinking", "text"],
+    "even a plain turn shows its reasoning",
+  );
 
   // The Connect snapshot shows the same turn as a timeline group with a tool row.
   const snapshot = await (await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/ReadConversation", {
@@ -255,7 +274,12 @@ try {
   const turnGroups = snapshot.update.displayGroups.filter((group) => group.messageId === assistant3);
   assert.deepEqual(turnGroups.map((group) => group.style), [2, 1]);
   assert.equal(turnGroups[0].summary, "Read file");
-  const toolRow = snapshot.update.contentBlocks.find((block) => block.displayGroupId === turnGroups[0].id);
+  const timeline = snapshot.update.contentBlocks.filter((block) => block.displayGroupId === turnGroups[0].id);
+  assert.deepEqual(timeline.map((block) => block.title), ["Thought", "Read file", "Thought"], "reasoning and the call share the timeline");
+  assert.equal(timeline[0].text, "I should look.");
+  assert.deepEqual(timeline[0].summaries, [{ summary: "I should look." }]);
+  assert.ok(timeline[0].thinkingDisplay.startedAt && timeline[0].thinkingDisplay.completedAt);
+  const toolRow = timeline.find((block) => block.rowKind);
   assert.deepEqual(
     [toolRow.title, toolRow.state, toolRow.rowKind, toolRow.inputSummary, toolRow.text],
     ["Read file", 2, 3, "/x", "file body"],
@@ -408,7 +432,7 @@ try {
   assert.equal(sentOverConnect.status, 200);
   await waitFor(async () => {
     const connectRead = await readConversation(connectConversation).catch(() => null);
-    return connectRead?.chat_messages?.length === 2 && connectRead.chat_messages[1].content[0].text === "Echo: Via connect";
+    return connectRead?.chat_messages?.length === 2 && texts(connectRead)[1] === "Echo: Via connect";
   }, "the Connect message to complete");
   assert.equal((await readConversation(connectConversation)).chat_messages[1].uuid, connectAssistant);
 

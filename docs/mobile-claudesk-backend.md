@@ -39,7 +39,13 @@ sessions are never listed, read or modified, and a completion cannot adopt their
 - **Edit is destructive.** Desktop Chat has one linear branch, so editing a message
   discards it and everything after it, exactly as in the web UI. There are no
   sibling branches; `setCurrentLeaf` is acknowledged and ignored.
-- **Tool calls are shown, thinking is not.** A tool call and its result appear inline:
+- **Reasoning and tool calls are shown.** Whatever Desktop reports as the model's
+  reasoning is sent as a `thinking` block on the REST stream and in history, and as a
+  reasoning row (text, a short heading, start and completion times) on the Connect
+  surface: a reasoning summary for closed-weights models, the raw reasoning for
+  open-weights ones. Models that report none (some open-weights routes) show none.
+  Desktop's opaque signature is never forwarded. `CLAUDE_MOBILE_THINKING=0` hides it.
+  A tool call and its result appear inline:
   as `tool_use` / `tool_result` blocks on the REST stream and in history, and as a
   timeline group with a tool row (title, input summary, state, result text) on the
   Connect surface. Desktop's shell is presented as `bash_tool`, web search as
@@ -48,6 +54,9 @@ sessions are never listed, read or modified, and a completion cannot adopt their
   shows only the answer text. Tool results are cut at 12,000 characters.
 - **Tool permission prompts** are not expected in Chat (the probe saw none while the
   model read files), but nothing on the phone could answer one. They are logged.
+- **Model errors are shown as the answer.** When the gateway rejects a call (for example
+  `API Error: 400 Upstream /v1/responses ...`), Desktop records that text as the
+  reply, and so does the phone, rather than showing an empty message.
 - **Reconnects.** If the event stream drops mid-turn, the live text may be cut short;
   the stored transcript is complete and is what the app sees on its next read.
 - Mobile needs Claudesk: if the bridge is down, requests fail with 502/503 and the

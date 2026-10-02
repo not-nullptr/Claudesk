@@ -7,8 +7,8 @@
 // (one per content block: thinking, text, tool_use), tool_result entries and
 // synthetic isMeta notes, until the next human entry. The facade presents a
 // turn as one human message and one assistant message whose content keeps the
-// text, tool calls and tool results in order (thinking is left out).
-import { restToolResult, restToolUse } from "./blocks.mjs";
+// reasoning, text, tool calls and tool results in order.
+import { restThinking, restToolResult, restToolUse } from "./blocks.mjs";
 
 const mentionPattern = /^\s*@"([^"\n]+)"\s*\n?/;
 
@@ -18,15 +18,22 @@ function hasToolResult(entry) {
 }
 
 // Content blocks of one turn's assistant side, in transcript order.
-function assistantBlocks(entries, { toolBlocks }) {
+function assistantBlocks(entries, { toolBlocks, thinking, startedAt }) {
   const blocks = [];
   const uses = new Map(); // tool_use id -> { name, input }
+  // A reasoning block ends when its entry is written and began when the previous
+  // entry (the prompt, or a tool result) was.
+  let previous = startedAt;
   for (const entry of entries) {
+    const began = previous;
+    previous = entry.timestamp ?? previous;
     const content = Array.isArray(entry.message?.content) ? entry.message.content : [];
     if (entry.type === "assistant") {
       for (const block of content) {
         if (block?.type === "text" && typeof block.text === "string") {
           blocks.push({ type: "text", text: block.text, citations: [], is_closed: true });
+        } else if (thinking && block?.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
+          blocks.push(restThinking({ thinking: block.thinking, startedAt: began, stoppedAt: entry.timestamp }));
         } else if (toolBlocks && block?.type === "tool_use") {
           uses.set(block.id, { name: block.name, input: block.input });
           blocks.push(restToolUse({
@@ -93,10 +100,14 @@ function textContent(text, closed = true) {
  * @param {{ assistantUuidFor?: (humanUuid: string) => string | undefined, toolBlocks?: boolean }} [options]
  *   assistantUuidFor returns the assistant message uuid the mobile client chose
  *   for a turn; otherwise the turn's first assistant entry uuid is used.
- *   toolBlocks (default true) includes tool calls and results in assistant content.
+ *   toolBlocks (default true) includes tool calls and results in assistant content;
+ *   thinking (default true) includes the model's reasoning.
  * @returns {{ messages: object[], leaf: string | null, lastHumanUuid: string | null }}
  */
-export function transcriptToMessages(entries, { assistantUuidFor = () => undefined, toolBlocks = true } = {}) {
+export function transcriptToMessages(
+  entries,
+  { assistantUuidFor = () => undefined, toolBlocks = true, thinking = true } = {},
+) {
   const turns = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (isHumanEntry(entry)) {
@@ -131,7 +142,7 @@ export function transcriptToMessages(entries, { assistantUuidFor = () => undefin
     previousUuid = human.uuid;
 
     if (!turn.assistant.length) continue;
-    const content = assistantBlocks(turn.body, { toolBlocks });
+    const content = assistantBlocks(turn.body, { toolBlocks, thinking, startedAt: turn.human.timestamp });
     const last = turn.assistant.at(-1);
     const assistant = {
       uuid: assistantUuidFor(human.uuid) || turn.assistant[0].uuid,

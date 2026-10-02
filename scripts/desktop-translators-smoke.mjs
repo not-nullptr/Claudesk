@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
-  BLOCK, RUN, ROW, SUMMARY, bardSegments, describeTool, messageText, resultText, restToolResult, restToolUse,
+  BLOCK, RUN, ROW, SUMMARY, bardSegments, describeTool, messageText, resultText, restThinking, restToolResult, restToolUse,
 } from "../mobile/blocks.mjs";
 import { createTurnTranslator } from "../mobile/events.mjs";
 import { isHumanEntry, splitMentions, transcriptToMessages } from "../mobile/transcript.mjs";
@@ -22,6 +22,7 @@ const text = (message) => messageText(message);
 // What matters about a block, independent of timestamps.
 const shape = (blocks) => blocks.map((block) => {
   if (block.type === "text") return { type: "text", text: block.text };
+  if (block.type === "thinking") return { type: "thinking" };
   if (block.type === "tool_use") return { type: "tool_use", id: block.id, name: block.name, input: block.input };
   return { type: "tool_result", id: block.tool_use_id, name: block.name, error: block.is_error, text: block.content[0].text };
 });
@@ -59,20 +60,28 @@ assert.equal(text(messages[1]), "pong");
 assert.equal(text(messages[2]), "Describe this image in at most five words.");
 assert.equal(text(messages[3]), "Red dot on white background.");
 assert.equal(text(messages[7]), "walrus");
-assert.ok(messages.every((message) => !JSON.stringify(message.content).includes("<signature>")), "thinking is not included");
+assert.ok(messages.every((message) => !JSON.stringify(message.content).includes("<signature>")), "the opaque signature is not forwarded");
 assert.equal(messages[3].stop_reason, "end_turn");
 assert.equal(leaf, messages[7].uuid);
 assert.equal(lastHumanUuid, humans[3].uuid);
 
 // The image turn: Desktop saved the image and the model tried to Read it, which was refused.
-assert.deepEqual(messages[3].content.map((block) => block.type), ["tool_use", "tool_result", "text"]);
-const [readUse, readResult] = messages[3].content;
+assert.deepEqual(messages[3].content.map((block) => block.type), ["thinking", "tool_use", "tool_result", "thinking", "text"]);
+const readUse = messages[3].content.find((block) => block.type === "tool_use");
+const readResult = messages[3].content.find((block) => block.type === "tool_result");
 assert.equal(readUse.name, "view", "Read is presented under claude.ai's file-view name");
 assert.match(readUse.input.file_path, /images\/1\.png$/);
 assert.equal(readResult.tool_use_id, readUse.id);
 assert.equal(readResult.is_error, true);
 assert.match(readResult.content[0].text, /outside this session's scratch directory/);
-assert.ok(messages[1].content.every((block) => block.type === "text"), "a plain turn has only text");
+assert.deepEqual(messages[1].content.map((block) => block.type), ["thinking", "text"], "reasoning comes before the answer");
+const reasoning = messages[1].content[0];
+assert.equal(reasoning.type, "thinking");
+assert.ok(reasoning.thinking.length > 20);
+assert.deepEqual(reasoning.summaries, []);
+assert.equal(reasoning.cut_off, false);
+assert.ok(reasoning.start_timestamp && reasoning.stop_timestamp);
+assert.ok(!("signature" in reasoning));
 
 // An @"path" mention becomes an attachment, not message text.
 assert.equal(text(messages[6]), "What is the secret word in that file? One word.");
@@ -82,10 +91,18 @@ assert.match(messages[6].attachments[0].path, /^\/workspace\/RemoteUploads\/[0-9
 assert.deepEqual(splitMentions('@"/a/b.txt"\n@"/c d/e.zip"\nhello'), { text: "hello", files: ["/a/b.txt", "/c d/e.zip"] });
 assert.deepEqual(splitMentions("no mention @\"inline\" here"), { text: 'no mention @"inline" here', files: [] });
 
-// toolBlocks: false is the escape hatch back to text only.
-const textOnly = transcriptToMessages(probe.transcript, { toolBlocks: false }).messages;
+// toolBlocks: false and thinking: false are the escape hatches.
+const textOnly = transcriptToMessages(probe.transcript, { toolBlocks: false, thinking: false }).messages;
 assert.deepEqual(textOnly[3].content.map((block) => block.type), ["text"]);
 assert.equal(text(textOnly[3]), "Red dot on white background.");
+assert.deepEqual(
+  transcriptToMessages(probe.transcript, { thinking: false }).messages[3].content.map((block) => block.type),
+  ["tool_use", "tool_result", "text"],
+);
+assert.deepEqual(
+  transcriptToMessages(probe.transcript, { toolBlocks: false }).messages[3].content.map((block) => block.type),
+  ["thinking", "thinking", "text"],
+);
 
 // The uuid the mobile client chose for an assistant message wins when known.
 const chosen = "11111111-1111-4111-8111-111111111111";
@@ -104,6 +121,7 @@ assert.deepEqual(transcriptToMessages([]).messages, []);
 assert.deepEqual(transcriptToMessages(undefined).messages, []);
 
 // ---- the live stream matches the stored transcript, turn by turn ----
+let streamedReasoning = 0;
 for (const [name, fixture] of [["chat", probe], ["tools", tools]]) {
   const turnHumans = fixture.transcript.filter(isHumanEntry);
   const stored = transcriptToMessages(fixture.transcript).messages.filter((message) => message.sender === "assistant");
@@ -129,6 +147,15 @@ for (const [name, fixture] of [["chat", probe], ["tools", tools]]) {
 
     // The stream and the transcript describe the same assistant message.
     assert.deepEqual(shape(translator.blocks), shape(stored[index].content), `${label}: live blocks equal stored blocks`);
+    // The fixtures keep only the first few thinking deltas of a recording, so live
+    // reasoning is a prefix of (not equal to) the stored text.
+    translator.blocks.forEach((block, position) => {
+      if (block.type !== "thinking") return;
+      const full = stored[index].content[position].thinking;
+      assert.ok(full.startsWith(block.thinking), `${label}: reasoning streams from the start`);
+      assert.ok(block.stop_timestamp, `${label}: reasoning is closed`);
+      streamedReasoning += block.thinking.length;
+    });
     const streamedText = out
       .filter((item) => item.event === "content_block_delta" && item.data.delta.type === "text_delta")
       .map((item) => item.data.delta.text)
@@ -138,20 +165,32 @@ for (const [name, fixture] of [["chat", probe], ["tools", tools]]) {
   }
 }
 
+assert.ok(streamedReasoning > 0, "reasoning is streamed, not only stored");
+
 // ---- Bash and web search, as recorded ----
 const toolHumans = tools.transcript.filter(isHumanEntry);
 const toolMessages = transcriptToMessages(tools.transcript).messages;
 const [bashAnswer, searchAnswer] = [toolMessages[1], toolMessages[3]];
-assert.deepEqual(bashAnswer.content.map((block) => block.type), ["tool_use", "tool_result", "text"]);
-assert.equal(bashAnswer.content[0].name, "bash_tool", "the shell is presented as bash_tool");
-assert.equal(bashAnswer.content[0].input.command, "echo probe-ok && uname -s");
-assert.equal(bashAnswer.content[1].content[0].text, "probe-ok\nLinux\n");
-assert.equal(bashAnswer.content[1].is_error, false);
+const kindsOf = (message) => message.content.map((block) => block.type);
+const pick = (message, type) => message.content.find((block) => block.type === type);
+assert.deepEqual(kindsOf(bashAnswer), ["thinking", "tool_use", "tool_result", "thinking", "text"]);
+assert.equal(pick(bashAnswer, "tool_use").name, "bash_tool", "the shell is presented as bash_tool");
+assert.equal(pick(bashAnswer, "tool_use").input.command, "echo probe-ok && uname -s");
+assert.equal(pick(bashAnswer, "tool_result").content[0].text, "probe-ok\nLinux\n");
+assert.equal(pick(bashAnswer, "tool_result").is_error, false);
 assert.match(text(bashAnswer), /probe-ok/);
-assert.deepEqual(searchAnswer.content.map((block) => block.type), ["tool_use", "tool_result", "text"]);
-assert.equal(searchAnswer.content[0].name, "web_search");
-assert.match(searchAnswer.content[0].input.query, /Node\.js/);
-assert.match(searchAnswer.content[1].content[0].text, /^Web search results for query/);
+assert.match(bashAnswer.content[0].thinking, /shell command/i, "the reasoning before the call is kept");
+// Stored reasoning is timed from the entry before it (the prompt, or a tool result) to its own entry.
+const thinkingEntries = tools.transcript.filter((entry) => entry.message?.content?.some?.((block) => block.type === "thinking"));
+assert.equal(bashAnswer.content[0].start_timestamp, toolHumans[0].timestamp, "the first reasoning block starts at the prompt");
+assert.equal(bashAnswer.content[0].stop_timestamp, thinkingEntries[0].timestamp);
+const bashResultEntry = tools.transcript.find((entry) => entry.message?.content?.some?.((block) => block.type === "tool_result"));
+assert.equal(bashAnswer.content[3].start_timestamp, bashResultEntry.timestamp, "reasoning after a tool call starts at its result");
+assert.ok(Date.parse(bashAnswer.content[3].stop_timestamp) >= Date.parse(bashAnswer.content[3].start_timestamp));
+assert.deepEqual(kindsOf(searchAnswer), ["thinking", "tool_use", "tool_result", "thinking", "text"]);
+assert.equal(pick(searchAnswer, "tool_use").name, "web_search");
+assert.match(pick(searchAnswer, "tool_use").input.query, /Node\.js/);
+assert.match(pick(searchAnswer, "tool_result").content[0].text, /^Web search results for query/);
 
 // The live stream carries the tool input as it is typed.
 const bashLive = liveTurn(tools, toolHumans[0].uuid);
@@ -163,11 +202,35 @@ assert.equal(JSON.parse(jsonDeltas.map((item) => item.data.delta.partial_json).j
 const resultStart = bashLive.out.find((item) => item.event === "content_block_start" && item.data.content_block.type === "tool_result");
 assert.equal(resultStart.data.content_block.tool_use_id, toolStart.data.content_block.id);
 
-// toolBlocks: false streams only text.
-const hidden = liveTurn(tools, toolHumans[0].uuid, { toolBlocks: false });
+// The reasoning streams as thinking_delta events.
+const thinkingStart = bashLive.out.find((item) => item.event === "content_block_start" && item.data.content_block.type === "thinking");
+assert.equal(thinkingStart.data.index, 0, "reasoning comes first");
+assert.equal(thinkingStart.data.content_block.thinking, "");
+const thinkingDeltas = bashLive.out.filter((item) => item.event === "content_block_delta" && item.data.delta.type === "thinking_delta");
+assert.ok(thinkingDeltas.length > 0 && thinkingDeltas.every((item) => typeof item.data.delta.thinking === "string"));
+assert.equal(bashLive.translator.blocks[0].thinking, thinkingDeltas.filter((item) => item.data.index === 0).map((item) => item.data.delta.thinking).join(""));
+assert.ok(!JSON.stringify(bashLive.out).includes("signature"), "the signature is never forwarded");
+
+// The switches: neither streams the hidden kind.
+const noThinking = liveTurn(tools, toolHumans[0].uuid, { thinking: false });
+assert.deepEqual([...new Set(noThinking.translator.blocks.map((block) => block.type))].sort(), ["text", "tool_result", "tool_use"]);
+const noTools = liveTurn(tools, toolHumans[0].uuid, { toolBlocks: false });
+assert.deepEqual([...new Set(noTools.translator.blocks.map((block) => block.type))].sort(), ["text", "thinking"]);
+const hidden = liveTurn(tools, toolHumans[0].uuid, { toolBlocks: false, thinking: false });
 assert.ok(hidden.out.filter((item) => item.event === "content_block_start").every((item) => item.data.content_block.type === "text"));
 assert.equal(hidden.translator.blocks.length, 1);
 assert.match(hidden.translator.text, /probe-ok/);
+
+// version moves on every change, so watchers hear about reasoning as it arrives.
+const versioned = createTurnTranslator({ sessionId: "s", humanUuid: "h", assistantUuid: "a" });
+const seen = [versioned.version];
+const feed = (event) => { versioned.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "stream_event", event } }); seen.push(versioned.version); };
+feed({ type: "message_start", message: {} });
+feed({ type: "content_block_start", index: 0, content_block: { type: "thinking" } });
+feed({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hm" } });
+feed({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "m" } });
+assert.deepEqual(seen.slice(1).map((value, position) => value > seen[position]), [false, true, true, true]);
+assert.equal(versioned.blocks[0].thinking, "hmm");
 
 // Events for other sessions or other turns are ignored, and so is a sub-agent.
 const other = createTurnTranslator({ sessionId: "local_other", humanUuid: humans[0].uuid, assistantUuid: "a" });
@@ -253,7 +316,9 @@ assert.deepEqual(bashRows.groups.map((group) => group.style), [2, 1], "tool call
 assert.equal(bashRows.groups[0].runState, RUN.SETTLED);
 assert.equal(bashRows.groups[0].summary, "Ran command");
 assert.equal(bashRows.groups[0].isComplete, true);
-const [row, answerBlock] = bashRows.contentBlocks;
+const [thought1, row, thought2, answerBlock] = bashRows.contentBlocks;
+assert.deepEqual([thought1.title, thought1.state, thought2.title], ["Thought", BLOCK.COMPLETE, "Thought"]);
+assert.equal(thought1.displayGroupId, bashRows.groups[0].id, "reasoning shares the timeline group with the tool call");
 assert.deepEqual(
   [row.title, row.state, row.rowKind, row.inputSummary, row.inputSummaryKind, row.toolDisplayName, row.text],
   ["Ran command", BLOCK.COMPLETE, ROW.SHELL, "echo probe-ok && uname -s", SUMMARY.COMMAND, "Bash", "probe-ok\nLinux\n"],
@@ -264,11 +329,11 @@ assert.match(answerBlock.text, /probe-ok/);
 assert.equal(new Set(bashRows.contentBlocks.map((block) => block.id)).size, bashRows.contentBlocks.length, "block ids are unique");
 
 const refused = bardSegments("m2", messages[3].content);
-assert.equal(refused.contentBlocks[0].state, BLOCK.ERROR);
+assert.equal(refused.contentBlocks.find((block) => block.rowKind).state, BLOCK.ERROR);
 assert.equal(refused.groups[0].runState, RUN.FAILED);
 
 // While a call runs it has no result yet.
-const running = bardSegments("m3", [bashAnswer.content[0]], { live: true });
+const running = bardSegments("m3", [pick(bashAnswer, "tool_use")], { live: true });
 assert.equal(running.contentBlocks[0].state, BLOCK.RUNNING);
 assert.equal(running.contentBlocks[0].title, "Running command");
 assert.equal(running.groups[0].runState, RUN.WORKING);
@@ -283,6 +348,60 @@ assert.deepEqual(run.groups.map((group) => group.style), [2, 1, 2]);
 assert.equal(run.groups[0].summary, "Used 2 tools");
 assert.deepEqual(run.contentBlocks.filter((block) => block.displayGroupId === run.groups[0].id).map((block) => block.index), [0, 1]);
 assert.deepEqual(run.groups.map((group) => group.index), [0, 1, 2]);
+
+// Reasoning rows: running while it streams, then settled, with a heading from its first sentence.
+const pondering = restThinking({ thinking: "Let me weigh the options. First, the cost.", startedAt: "2026-10-02T12:00:00.000Z" });
+const thinkingLive = bardSegments("m7", [pondering], { live: true });
+assert.deepEqual(thinkingLive.groups.map((group) => group.style), [2]);
+assert.equal(thinkingLive.groups[0].runState, RUN.WORKING);
+assert.equal(thinkingLive.groups[0].summary, "Thinking");
+assert.equal(thinkingLive.groups[0].statusText, "Thinking");
+const [thinkingRow] = thinkingLive.contentBlocks;
+assert.deepEqual([thinkingRow.title, thinkingRow.state, thinkingRow.isComplete], ["Thinking", BLOCK.RUNNING, false]);
+assert.equal(thinkingRow.text, "Let me weigh the options. First, the cost.");
+assert.deepEqual(thinkingRow.summaries, [{ summary: "Let me weigh the options." }]);
+assert.deepEqual(thinkingRow.thinkingDisplay, { startedAt: "2026-10-02T12:00:00.000Z" });
+const thinkingDone = bardSegments("m8", [{ ...pondering, stop_timestamp: "2026-10-02T12:00:04.000Z" }, { type: "text", text: "Answer" }], { live: true });
+assert.equal(thinkingDone.groups[0].runState, RUN.SETTLED);
+assert.equal(thinkingDone.groups[0].summary, "Thought");
+assert.deepEqual(thinkingDone.contentBlocks[0].thinkingDisplay, { startedAt: "2026-10-02T12:00:00.000Z", completedAt: "2026-10-02T12:00:04.000Z" });
+assert.equal(thinkingDone.contentBlocks[0].state, BLOCK.COMPLETE);
+assert.equal(thinkingDone.contentBlocks[1].state, BLOCK.RUNNING, "the answer is the part still streaming");
+assert.equal(bardSegments("m9", [restThinking({ thinking: "" }), { type: "text", text: "x" }]).groups.length, 1, "empty reasoning is skipped");
+const longThought = bardSegments("m10", [restThinking({ thinking: "z".repeat(40000), stoppedAt: "t" })]);
+assert.equal(longThought.contentBlocks[0].text.length, 30000);
+assert.equal(longThought.contentBlocks[0].isTruncated, true);
+assert.equal(new Set(bardSegments("m11", [restThinking({ thinking: "a", stoppedAt: "t" }), restThinking({ thinking: "b", stoppedAt: "t" })]).contentBlocks.map((block) => block.id)).size, 2, "reasoning block ids are unique");
+
+// The heading is a short label cut at a word boundary.
+const headingOf = (thinking) => bardSegments("h", [restThinking({ thinking, stoppedAt: "t" })]).contentBlocks[0].summaries?.[0]?.summary;
+assert.equal(headingOf("Short one. And a second sentence."), "Short one.");
+assert.equal(headingOf("First line\nsecond line"), "First line");
+const longHeading = headingOf("The user is asking me to calculate seventeen multiplied by twenty three and wants me to think carefully.");
+assert.ok(longHeading.length <= 61 && longHeading.endsWith("…") && !longHeading.includes("  "));
+assert.match(longHeading, /^The user is asking me to calculate seventeen multiplied by( twenty)?…$/, "cut at a word boundary");
+assert.equal(headingOf(""), undefined);
+
+// A failed model call is reported by Desktop as an assistant message with no stream events.
+const failedCall = createTurnTranslator({ sessionId: "s", humanUuid: "h", assistantUuid: "a" });
+assert.deepEqual(failedCall.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "API Error: 400 Upstream /v1/responses returned HTTP 400" }] } } }), []);
+const failedOut = failedCall.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "result", subtype: "success", stop_reason: "stop_sequence" } });
+assert.deepEqual(kinds(failedOut), ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
+assert.equal(failedCall.text, "API Error: 400 Upstream /v1/responses returned HTTP 400");
+assert.equal(failedCall.blocks[0].is_closed, true);
+assert.ok(failedCall.finished && !failedCall.error);
+// ...but a normal streamed answer is not repeated from the assistant message.
+const streamed = createTurnTranslator({ sessionId: "s", humanUuid: "h", assistantUuid: "a" });
+for (const event of [
+  { type: "message_start", message: {} },
+  { type: "content_block_start", index: 0, content_block: { type: "text" } },
+  { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "391" } },
+  { type: "content_block_stop", index: 0 },
+]) streamed.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "stream_event", event } });
+streamed.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "assistant", message: { content: [{ type: "text", text: "391" }] } } });
+const streamedEnd = streamed.accept({ type: "message", sessionId: "s", userMessageUuid: "h", message: { type: "result", subtype: "success" } });
+assert.deepEqual(kinds(streamedEnd), ["message_delta", "message_stop"]);
+assert.equal(streamed.text, "391");
 
 // A live text answer is marked as still running; an empty message still has a block.
 const writing = bardSegments("m5", [{ type: "text", text: "partial" }], { live: true });

@@ -8,6 +8,7 @@
 // not been verified on a device yet (see CLAUDE_MOBILE_TOOL_BLOCKS).
 
 const MAX_RESULT_CHARS = 12000;
+const MAX_THINKING_CHARS = 30000;
 const MAX_INPUT_CHARS = 2000;
 
 // BardToolRowKind
@@ -50,6 +51,15 @@ function summaryText(input, field) {
     if (keys.length) return JSON.stringify(input);
   }
   return typeof input === "string" ? input : "";
+}
+
+// A short label for a reasoning block: its first sentence, cut at a word
+// boundary. Desktop does not provide titles, so this is only a collapsed-row label.
+function headingOf(thinking, limit = 60) {
+  const first = oneLine(String(thinking).split(/(?<=[.!?])\s|\n/)[0], 1000);
+  if (first.length <= limit) return first;
+  const cut = first.slice(0, limit);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 20)).replace(/[,;:\s]+$/, "")}…`;
 }
 
 // Presentation facts for one tool call. Accepts Desktop's tool names and the
@@ -135,6 +145,20 @@ export function restToolResult({ toolUseId, name, input, content, isError = fals
   };
 }
 
+// A reasoning block. For closed-weights models Desktop reports the model's
+// reasoning summary here and for open-weights models the raw reasoning; either
+// way it is the `thinking` text. The opaque signature is not forwarded.
+export function restThinking({ thinking = "", startedAt = null, stoppedAt = null }) {
+  return {
+    type: "thinking",
+    thinking,
+    summaries: [],
+    cut_off: false,
+    start_timestamp: startedAt,
+    stop_timestamp: stoppedAt,
+  };
+}
+
 // The text of a message: only its text blocks.
 export function messageText(message) {
   return (message?.content ?? [])
@@ -146,68 +170,106 @@ export function messageText(message) {
 // ---- Connect rows ----
 
 // Splits an assistant message's blocks into display groups: each text block is
-// an inline group, and a run of consecutive tool calls shares one timeline
-// group. `live` marks a message that is still streaming.
+// an inline group, and a run of consecutive reasoning and tool-call blocks
+// shares one timeline group. `live` marks a message that is still streaming.
 export function bardSegments(messageUuid, blocks, { live = false } = {}) {
   const results = new Map(blocks.filter((b) => b.type === "tool_result").map((b) => [b.tool_use_id, b]));
   const groups = [];
   const contentBlocks = [];
-  let toolRun = null;
+  let run = null;
   let textCount = 0;
+  let thinkingCount = 0;
 
   const nextGroupId = () => `${messageUuid}-g${groups.length}`;
 
-  function flushTools() {
-    if (!toolRun) return;
-    const { group, items } = toolRun;
-    toolRun = null;
-    const rows = items.map((use, position) => {
-      const result = results.get(use.id);
-      const tool = describeTool(use.name, use.input);
-      const running = !result && live;
-      const failed = Boolean(result?.is_error);
-      return {
-        tool,
-        block: {
-          id: use.id,
-          displayGroupId: group.id,
-          index: position,
-          isComplete: !running,
-          title: running ? tool.runningTitle : tool.doneTitle,
-          state: running ? BLOCK.RUNNING : failed ? BLOCK.ERROR : BLOCK.COMPLETE,
-          text: result?.content?.[0]?.text ?? "",
-          isTruncated: Boolean(result?.meta?.truncated),
-          toolDisplayName: tool.displayName,
-          inputSummary: tool.inputSummary,
-          rowKind: tool.kind,
-          inputSummaryKind: tool.inputSummaryKind,
-          titleSource: 1, // BardTitleSource LIFECYCLE
+  function thinkingRow(block, group, position) {
+    thinkingCount += 1;
+    const running = live && !block.stop_timestamp;
+    const body = block.thinking.length > MAX_THINKING_CHARS ? block.thinking.slice(0, MAX_THINKING_CHARS) : block.thinking;
+    const heading = headingOf(block.thinking);
+    return {
+      block: {
+        id: `${messageUuid}-thinking${thinkingCount}`,
+        displayGroupId: group.id,
+        index: position,
+        isComplete: !running,
+        title: running ? "Thinking" : "Thought",
+        state: running ? BLOCK.RUNNING : BLOCK.COMPLETE,
+        text: body,
+        isTruncated: body.length < block.thinking.length,
+        summaries: heading ? [{ summary: heading }] : [],
+        thinkingDisplay: {
+          ...(block.start_timestamp ? { startedAt: block.start_timestamp } : {}),
+          ...(block.stop_timestamp ? { completedAt: block.stop_timestamp } : {}),
         },
-        running,
-        failed,
-      };
-    });
+      },
+      running,
+      failed: false,
+      thinking: true,
+    };
+  }
+
+  function toolRow(use, group, position) {
+    const result = results.get(use.id);
+    const tool = describeTool(use.name, use.input);
+    const running = !result && live;
+    const failed = Boolean(result?.is_error);
+    return {
+      block: {
+        id: use.id,
+        displayGroupId: group.id,
+        index: position,
+        isComplete: !running,
+        title: running ? tool.runningTitle : tool.doneTitle,
+        state: running ? BLOCK.RUNNING : failed ? BLOCK.ERROR : BLOCK.COMPLETE,
+        text: result?.content?.[0]?.text ?? "",
+        isTruncated: Boolean(result?.meta?.truncated),
+        toolDisplayName: tool.displayName,
+        inputSummary: tool.inputSummary,
+        rowKind: tool.kind,
+        inputSummaryKind: tool.inputSummaryKind,
+        titleSource: 1, // BardTitleSource LIFECYCLE
+      },
+      running,
+      failed,
+      thinking: false,
+    };
+  }
+
+  function flushRun() {
+    if (!run) return;
+    const { group, items } = run;
+    run = null;
+    const rows = items.map((item, position) => (
+      item.type === "thinking" ? thinkingRow(item, group, position) : toolRow(item, group, position)
+    ));
+    const tools = rows.filter((row) => !row.thinking);
     const working = rows.some((row) => row.running);
     group.isComplete = !working;
-    group.runState = working ? RUN.WORKING : rows.every((row) => row.failed) ? RUN.FAILED : RUN.SETTLED;
-    group.summary = rows.length === 1 ? rows[0].block.title : `Used ${rows.length} tools`;
+    group.runState = working
+      ? RUN.WORKING
+      : tools.length && tools.every((row) => row.failed) ? RUN.FAILED : RUN.SETTLED;
+    group.summary = tools.length === 0
+      ? (working ? "Thinking" : "Thought")
+      : tools.length === 1 ? tools[0].block.title : `Used ${tools.length} tools`;
     group.statusText = working ? rows.find((row) => row.running).block.title : "";
     contentBlocks.push(...rows.map((row) => row.block));
   }
 
   for (const block of blocks) {
     if (block.type === "tool_result") continue;
-    if (block.type === "tool_use") {
-      if (!toolRun) {
+    if (block.type === "thinking" || block.type === "tool_use") {
+      if (block.type === "thinking" && !block.thinking) continue;
+      if (!run) {
         const group = { id: nextGroupId(), messageId: messageUuid, index: groups.length, style: 2, isComplete: true };
         groups.push(group);
-        toolRun = { group, items: [] };
+        run = { group, items: [] };
       }
-      toolRun.items.push(block);
+      run.items.push(block);
       continue;
     }
     if (block.type !== "text") continue;
-    flushTools();
+    flushRun();
     const group = { id: nextGroupId(), messageId: messageUuid, index: groups.length, style: 1, isComplete: true };
     groups.push(group);
     textCount += 1;
@@ -220,9 +282,9 @@ export function bardSegments(messageUuid, blocks, { live = false } = {}) {
       text: block.text,
     });
   }
-  flushTools();
+  flushRun();
 
-  // The block still being written is the last one when the message is live.
+  // The answer being written is the last block when the message is live.
   if (live) {
     const last = groups.at(-1);
     const lastBlock = contentBlocks.filter((b) => b.displayGroupId === last?.id).at(-1);
