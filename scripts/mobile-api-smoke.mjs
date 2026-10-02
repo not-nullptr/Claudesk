@@ -180,13 +180,14 @@ try {
   // docs/mobile-code-re-findings.md.
   const sessionsLeg = await call("/v1/code/sessions?limit=30&statuses=active&statuses=paused&statuses=archived");
   assert.equal(sessionsLeg.status, 200, "the code session list leg answers");
-  assert.deepEqual(await sessionsLeg.json(), { data: [], nextCursor: null, resumeToken: null });
+  // Snake_case wire keys: the app's JSONDecoder runs .convertFromSnakeCase.
+  assert.deepEqual(await sessionsLeg.json(), { data: [], next_cursor: null, resume_token: null });
 
   const environmentsLeg = await call(
     `/v1/environment_providers/private/organizations/${org.uuid}/environments?limit=50`,
   );
   assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
-  assert.deepEqual(await environmentsLeg.json(), { environments: [], hasMore: false, firstId: null, lastId: null });
+  assert.deepEqual(await environmentsLeg.json(), { environments: [], has_more: false, first_id: null, last_id: null });
 
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");

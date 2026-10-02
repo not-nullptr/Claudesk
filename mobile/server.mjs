@@ -620,16 +620,24 @@ async function handleOptionalEmptyRoutes(request, response, url) {
 //   GET /v1/code/sessions                                  -> ListSessionsResponse
 //   GET /v1/environment_providers/private/organizations/…  -> EnvironmentListResponse
 //   GET /api/organizations/…/experiences                   -> ExperienceListResponse
+//
+// WIRE CASING: the app's shared JSONDecoder sets .convertFromSnakeCase and
+// these DTOs carry no custom CodingKeys raw values, so camelCase Swift
+// properties — nextCursor, resumeToken, hasMore, firstId, lastId — arrive on
+// the wire as snake_case (next_cursor, …). The account endpoint this facade
+// already serves proves it (it sends email_address, created_at, …).
+// Enum *values* are NOT touched by the strategy: they are the literals the
+// app declares as raw values.
 // Secrets at rest: none of these responses carries a credential, so nothing
 // here is redacted.
 async function handleCodeRoutes(request, response, url) {
   const path = url.pathname;
   if (path === "/v1/code/sessions" && request.method === "GET") {
-    // `statuses` repeats; `limit`, `cursor`, `tags`, `excludeTags`,
-    // `includeTriggerSessions`, `triggerId` are the accepted params. No
+    // `statuses` repeats; `limit`, `cursor`, `tags`, `exclude_tags`,
+    // `include_trigger_sessions`, `trigger_id` are the accepted params. No
     // sessions exist on a self-hosted account yet, so return the empty page
-    // with the envelope keys the app decodes (data / nextCursor / resumeToken).
-    sendJson(response, 200, { data: [], nextCursor: null, resumeToken: null });
+    // with the envelope keys the app decodes.
+    sendJson(response, 200, { data: [], next_cursor: null, resume_token: null });
     return true;
   }
   const environmentMatch = path.match(
@@ -637,8 +645,8 @@ async function handleCodeRoutes(request, response, url) {
   );
   if (environmentMatch && request.method === "GET") {
     // Remote devices are environments of kind `bridge`; without a paired
-    // Desktop bridge there are none. firstId/lastId are the pagination window.
-    sendJson(response, 200, { environments: [], hasMore: false, firstId: null, lastId: null });
+    // Desktop bridge there are none. first_id/last_id are the pagination window.
+    sendJson(response, 200, { environments: [], has_more: false, first_id: null, last_id: null });
     return true;
   }
   return false;

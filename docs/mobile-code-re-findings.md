@@ -166,22 +166,49 @@ So `CurrentUserAccess`'s `{feature,status}` items use **snake_case enum values**
 snake_case names already sent (`features`, `account_features`,
 `organization_permissions`).
 
-FACT (resolved): the app **does** install `.convertFromSnakeCase` on its shared
-`JSONDecoder` (factory at 0x1001e5768, setter call at 0x1001e5854) and
-`.convertToSnakeCase` on its shared `JSONEncoder`. **But every response DTO
-declares explicit camelCase `CodingKeys`, and an explicit `CodingKeys` overrides
-the strategy** — so the wire body is camelCase anyway. Proof: the `stringValue`
-thunk for `ByocEnvironmentConfiguration.CodingKeys` at 0x101f32310 returns the
-literals `"cwd"` (0x101f32320), `"taskSetupScript"` (0x101f32338) and
-`"environmentType"` (0x101f32354). Hence **send camelCase field names in every
-response body**; only the hand-built query params (`limit`, `included_worker_types`,
-`include_trigger_sessions`) are snake_case.
+FACT (resolved): the wire body is **snake_case**. The app's shared `JSONDecoder`
+(factory 0x1001e5768, `keyDecodingStrategy` setter call 0x1001e5854; 42 call
+sites) installs `.convertFromSnakeCase`, and its shared `JSONEncoder`
+(0x1001e59f4) installs `.convertToSnakeCase`. So a camelCase Swift property such
+as `nextCursor` is **`next_cursor`** in the JSON. Evidence, three independent
+ways:
+
+1. The repo's own spec states it (`docs/mobile-spec/…API-Spec….md` §"JSON
+   codec": `emailAddress → email_address`, `modelSelectorState →
+   model_selector_state`) and the facade's already-working `/api/account`
+   endpoint sends `email_address` / `created_at` / `is_verified`.
+2. These DTOs carry **no** custom `CodingKeys` raw values: the snake spellings
+   (`next_cursor`, `status_bucket`, `self_hosted_runner_pool_id`,
+   `connector_domains_withheld`) do **not** occur anywhere in the binary. The
+   only `*_kind`/`*_token` hits (`environment_kind` 0x1048010b8, `resume_token`
+   0x1047e63b8) are parts of unrelated analytics strings
+   (`default_environment_kind`, `missing_resume_token`). With a custom raw value
+   the literal would have to be present — it is not, so the strategy supplies
+   the conversion.
+3. Positive control: a DTO that *does* use camelCase literals is a
+   proto-JSON message, not a REST DTO — `entityId` has a literal (0x104b78b14)
+   and `pageOffset` too (0x104b7cd58), while the REST side has `page_offset`
+   (0x1041d10a6). Two codecs, two casings; the Code REST DTOs are on the
+   snake_case one.
+
+CAUTION: `.convertFromSnakeCase` rewrites **dictionary keys only**, never
+string-raw **enum values**. Enum values must be the literal raw values the app
+declares (`requires_action`, `review_ready`, `provision_failed`, `same-dir`, …).
 
 FACT: `EnvironmentResource.config` is a **flat** object whose `environmentType`
 is `"anthropic" | "byoc" | "paired"`, but discrimination is on the **sibling
 `kind`** field, not on `environmentType` — `kind` is `"anthropic" | "byoc" |
 "bridge" | "unknown"`. `BridgeSpawnMode` wire values are `"single-session" |
 "worktree" | "same-dir"` (not the Swift case spellings).
+NOTE: the earlier claim that BYOC's `cwd`/`taskSetupScript` thunk (0x101f32310)
+proved explicit camelCase keys was wrong — those literals are the *case names*
+of a synthesised `CodingKeys` enum (a raw value defaults to the case name), not
+custom raw values. Their presence is expected under either strategy.
+
+Enum raw values recovered for the session responses: `SessionListStatusFilter` =
+`active | paused | archived | provision_failed`; `SessionStatusBucket` =
+`blocked | review_ready | waiting | completed | failed | unknown`;
+`EnvironmentKind` = `anthropic_cloud | byoc | bridge | unknown`.
 
 ## Gating: `CodeBlockedReason`
 
@@ -203,10 +230,12 @@ the server should report `claude_code_web` as `available` there.
    `{"experiences": [], "rules": {"global": {}, "placements": {}}}`.
    (Also covers the `bannerMs` leg.)
 2. **`GET /v1/environment_providers/private/organizations/<uuid>/environments`** →
-   `200` `{"environments": [], "hasMore": false}` (or a single `bridge` device if
-   the Desktop bridge is paired). Covers the `devicesMs` leg.
-3. **`GET /v1/code/sessions`** → `200` `{"data": [], "nextCursor": null}`.
-   Covers the `sessionsMs` leg. Real rows come later from Desktop IPC.
+   `200` `{"environments": [], "has_more": false, "first_id": null, "last_id": null}`
+   (or a single `bridge` device if the Desktop bridge is paired). Covers the
+   `devicesMs` leg.
+3. **`GET /v1/code/sessions`** → `200` `{"data": [], "next_cursor": null,
+   "resume_token": null}`. Covers the `sessionsMs` leg. Real rows come later from
+   Desktop IPC.
 4. `GET /v1/code/sessions/<id>` and `/v1/code/sessions/watch` (SSE) only when a
    session is actually opened; watch should emit `upserted`/`deleted` frames.
 
