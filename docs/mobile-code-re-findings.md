@@ -128,6 +128,25 @@ enabled, expId, tier, config`.
 The tab only needs the `codeSessionListBanner` placement, so an empty
 `{"experiences":[],"rules":{...}}` is enough to make the leg succeed.
 
+## Next: creating a session
+
+`POST /v1/code/sessions` body is **`CreateSessionRequest`** (@0x4ae956c):
+`title, environmentId, selfHostedRunnerPoolId, config, idempotencyKey`.
+Its `config` is **`CreateSessionRequestConfig`** (@0x4ae9588): `sources, cwd,
+outcomes, customSystemPrompt, appendSystemPrompt, model, effortLevel`.
+
+The client-side draft (**`CreateSessionParams`** @0x4b04ee4) carries the whole
+intent: `repos, environmentId, selfHostedRunnerPoolId, isRepoLessCloudCreate,
+message, modelId, effortLevel, fileAttachments, humanTypedText, permissionMode,
+chatProjectId, device, memoryMode, source` — that is what the composer fills in
+before the wire request is built. A `POST` returns the created session (a
+`SessionResource`) and the watch stream then carries `upserted` frames.
+
+Session title/branch generation: `POST …/generate_title_and_branch` takes
+`GenerateTitleAndBranchParams{firstSessionMessage}` and returns
+`GenerateTitleAndBranchResponse{title, branchName}`; the session-title variant
+takes the same param and returns `{title}`.
+
 ## Wire casing
 
 FACT: every camelCase field name of `ListSessionsResponse`, `SessionResponse`,
@@ -147,10 +166,22 @@ So `CurrentUserAccess`'s `{feature,status}` items use **snake_case enum values**
 snake_case names already sent (`features`, `account_features`,
 `organization_permissions`).
 
-INFERENCE (to confirm): the sessions/environment DTOs are decoded with a plain
-`JSONDecoder` (no `.convertFromSnakeCase`), so the JSON keys are the camelCase
-field names above. If the app instead sets `.convertFromSnakeCase`, every key
-becomes snake_case — the capture is the tiebreaker.
+FACT (resolved): the app **does** install `.convertFromSnakeCase` on its shared
+`JSONDecoder` (factory at 0x1001e5768, setter call at 0x1001e5854) and
+`.convertToSnakeCase` on its shared `JSONEncoder`. **But every response DTO
+declares explicit camelCase `CodingKeys`, and an explicit `CodingKeys` overrides
+the strategy** — so the wire body is camelCase anyway. Proof: the `stringValue`
+thunk for `ByocEnvironmentConfiguration.CodingKeys` at 0x101f32310 returns the
+literals `"cwd"` (0x101f32320), `"taskSetupScript"` (0x101f32338) and
+`"environmentType"` (0x101f32354). Hence **send camelCase field names in every
+response body**; only the hand-built query params (`limit`, `included_worker_types`,
+`include_trigger_sessions`) are snake_case.
+
+FACT: `EnvironmentResource.config` is a **flat** object whose `environmentType`
+is `"anthropic" | "byoc" | "paired"`, but discrimination is on the **sibling
+`kind`** field, not on `environmentType` — `kind` is `"anthropic" | "byoc" |
+"bridge" | "unknown"`. `BridgeSpawnMode` wire values are `"single-session" |
+"worktree" | "same-dir"` (not the Swift case spellings).
 
 ## Gating: `CodeBlockedReason`
 
