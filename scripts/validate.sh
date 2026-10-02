@@ -23,6 +23,7 @@ node scripts/attachment-mentions-smoke.mjs
 node scripts/upload-stream-smoke.mjs
 node scripts/totp-smoke.mjs
 node scripts/desktop-translators-smoke.mjs
+node scripts/code-events-smoke.mjs
 node scripts/mobile-api-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
