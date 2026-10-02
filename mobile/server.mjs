@@ -172,7 +172,7 @@ function accountObject() {
     is_anonymous: false,
     settings: accountSettings(),
     memberships: [{
-      role: "owner",
+      role: plan.membershipRole,
       created_at: identity.createdAt,
       updated_at: identity.createdAt,
       organization: organizationObject(),
@@ -198,17 +198,30 @@ function accountSettings() {
 // The plan the account claims to be on, using the field values claude.ai
 // itself reports. The app decides what to unlock (the Code tab, for one) from
 // these, so a free-looking account gets upsells instead of the feature.
+//
+// `membershipRole` is the decisive one for Code. The app decodes the
+// membership role into an enum whose cases are the raw values `user`,
+// `developer`, `billing`, `admin`, `owner`, `primary_owner`,
+// `membership_admin`, `claude_code_user`, `managed`, `unknown`. Code is
+// provisioned to the `claude_code_user` cohort, so an account reported as
+// `owner` (what we used to send) is treated as a plain billing owner and the
+// Code surface is never offered.
+const CODE_CAPABILITY = "claude_code_web";
 const PLANS = {
-  free: { capabilities: ["chat"], analytics: "free", display: "Free", tier: "default_claude_ai", billing: null },
-  pro: { capabilities: ["chat", "claude_pro"], analytics: "pro", display: "Pro", tier: "default_claude_pro", billing: "stripe_subscription" },
-  max_5x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_5x", billing: "stripe_subscription" },
-  max_20x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_20x", billing: "stripe_subscription" },
+  free: { capabilities: ["chat"], analytics: "free", display: "Free", tier: "default_claude_ai", billing: null, membershipRole: "user" },
+  pro: { capabilities: ["chat", "claude_pro"], analytics: "pro", display: "Pro", tier: "default_claude_pro", billing: "stripe_subscription", membershipRole: "claude_code_user" },
+  max_5x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_5x", billing: "stripe_subscription", membershipRole: "claude_code_user" },
+  max_20x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_20x", billing: "stripe_subscription", membershipRole: "claude_code_user" },
 };
 const planName = process.env.CLAUDE_MOBILE_PLAN || "max_20x";
 const plan = PLANS[planName] || PLANS.max_20x;
 
 // What app_start must carry for the app to show the Code tab on a paid plan:
-// the remote-sessions flag and the claude_code_web access entry.
+// the remote-sessions flag and the claude_code_web access entry. The three
+// access lists below are separate surfaces in the app (account-level,
+// organization-level and the seat itself); an entry missing from any of them
+// can be the one that gates the tab, so a paid plan declares Code in all of
+// them.
 const paidPlan = plan !== PLANS.free;
 function orgGrowthbook() {
   return {
@@ -218,10 +231,11 @@ function orgGrowthbook() {
 }
 
 function userAccess() {
+  const codeAccess = paidPlan ? [{ feature: CODE_CAPABILITY, status: "available" }] : [];
   return {
-    features: paidPlan ? [{ feature: "claude_code_web", status: "available" }] : [],
-    account_features: [],
-    organization_permissions: [],
+    features: [...codeAccess],
+    account_features: [...codeAccess],
+    organization_permissions: [...codeAccess],
   };
 }
 

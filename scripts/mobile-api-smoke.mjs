@@ -151,6 +151,12 @@ try {
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
   assert.deepEqual(bootstrap.org_growthbook.features, { mobile_remote_enabled: { defaultValue: true } });
   assert.deepEqual(bootstrap.current_user_access.features, [{ feature: "claude_code_web", status: "available" }]);
+  // Code access must be declared on all three access surfaces, and the seat
+  // must be the claude_code_user role or the app never offers the Code tab.
+  assert.deepEqual(bootstrap.current_user_access.account_features, [{ feature: "claude_code_web", status: "available" }]);
+  assert.deepEqual(bootstrap.current_user_access.organization_permissions, [{ feature: "claude_code_web", status: "available" }]);
+  assert.equal(account.memberships[0].role, "claude_code_user");
+  assert.equal(bootstrap.account.memberships[0].role, "claude_code_user");
 
   const selected = await (await call(`/api/organizations/${org.uuid}/model_selector_state/chat`, {
     method: "PUT",
