@@ -120,7 +120,14 @@ export async function startFakeClaudesk() {
       push(session, { type: "assistant", message: { id: "msg_tool", role: "assistant", content: [{ type: "thinking", thinking: "I should look.", signature: "s" }], stop_reason: "tool_use" } });
       push(session, { type: "assistant", message: { id: "msg_tool", role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "/x" } }], stop_reason: "tool_use" } });
       push(session, { type: "user", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "file body" }] } });
-      broadcast({ ...base, message: { type: "user" } });
+      broadcast({
+        ...base,
+        message: {
+          type: "user",
+          parent_tool_use_id: null,
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "file body" }] },
+        },
+      });
     }
     stream({ type: "message_start", message: { id: "msg_text", role: "assistant", model: session.model, content: [] } });
     stream({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });

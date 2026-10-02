@@ -23,6 +23,7 @@ iOS app ──REST/SSE + Connect──▶ mobile service ──HTTP (docker netw
 | later messages | `sendMessage` |
 | streaming | Desktop's `onOnEvent` stream (Anthropic stream events wrapped in `stream_event`), translated by `events.mjs` |
 | history | `getTranscript` (Claude Code JSONL), translated by `transcript.mjs` |
+| tool calls | `tool_use` / `tool_result` pairs, presented by `blocks.mjs` |
 | edit, retry | `rewind(sessionId, humanMessageUuid)` then `sendMessage`, like the web UI |
 | stop | `stop` |
 | rename, model | `updateSession({title})`, `setModel` |
@@ -38,8 +39,13 @@ sessions are never listed, read or modified, and a completion cannot adopt their
 - **Edit is destructive.** Desktop Chat has one linear branch, so editing a message
   discards it and everything after it, exactly as in the web UI. There are no
   sibling branches; `setCurrentLeaf` is acknowledged and ignored.
-- **Only text is shown.** Thinking and tool calls happen in Desktop but are not sent
-  to the app yet, because how the app renders them has not been captured.
+- **Tool calls are shown, thinking is not.** A tool call and its result appear inline:
+  as `tool_use` / `tool_result` blocks on the REST stream and in history, and as a
+  timeline group with a tool row (title, input summary, state, result text) on the
+  Connect surface. Desktop's shell is presented as `bash_tool`, web search as
+  `web_search`, file reads as `view`. How the iOS app actually draws these rows has
+  not been verified on a device; `CLAUDE_MOBILE_TOOL_BLOCKS=0` hides tool calls and
+  shows only the answer text. Tool results are cut at 12,000 characters.
 - **Tool permission prompts** are not expected in Chat (the probe saw none while the
   model read files), but nothing on the phone could answer one. They are logged.
 - **Reconnects.** If the event stream drops mid-turn, the live text may be cut short;
@@ -60,7 +66,8 @@ body. The schema already names the pieces (`cowork/sessions`, `cowork/remote_dev
 ## Tests
 
 - `scripts/desktop-translators-smoke.mjs` replays data recorded from a live bridge
-  (`scripts/fixtures/desktop-chat-probe.json`).
+  (`scripts/fixtures/desktop-chat-probe.json`, `desktop-tools-probe.json`) and checks
+  that the live stream and the stored transcript give identical blocks.
 - `scripts/mobile-api-smoke.mjs` runs the whole service against
   `scripts/lib/fake-claudesk.mjs`.
 - `scripts/desktop-session-probe.mjs` is a manual probe that records fresh fixtures

@@ -160,7 +160,10 @@ try {
   };
   const chatPath = (uuid, action = "") => `/api/organizations/${org.uuid}/chat_conversations/${uuid}${action}`;
   const readConversation = async (uuid) => (await call(chatPath(uuid))).json();
-  const texts = (conversation) => conversation.chat_messages.map((message) => message.content.map((part) => part.text).join(""));
+  const texts = (conversation) => conversation.chat_messages.map((message) => message.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(""));
   const send = async (uuid, body, action = "/completion") => {
     const response = await call(chatPath(uuid, action), { method: "POST", body });
     assert.equal(response.status, 200, await response.clone().text());
@@ -215,17 +218,49 @@ try {
   assert.equal(conversation.chat_messages[3].uuid, assistant2);
   assert.equal(conversation.chat_messages[2].parent_message_uuid, assistant1);
 
-  // ---- a turn with thinking and a tool call: only the answer text reaches the phone ----
+  // ---- a turn with thinking and a tool call: the call is shown, thinking is not ----
   const human3 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const assistant3 = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const tool = await send(convUuid, { prompt: "[tool] third", parent_message_uuid: assistant2, turn_message_uuids: turn(human3, assistant3) });
   assert.equal(tool.text, "Echo: third");
-  assert.equal(tool.kinds.filter((kind) => kind === "message_start").length, 1);
-  assert.deepEqual(tool.records.filter((record) => record.event === "content_block_start").map((record) => record.data.index), [0]);
-  assert.ok(tool.records.filter((record) => record.event === "content_block_start").every((record) => record.data.content_block.type === "text"));
+  assert.equal(tool.kinds.filter((kind) => kind === "message_start").length, 1, "one assistant message for the whole turn");
+  const toolStarts = tool.records.filter((record) => record.event === "content_block_start");
+  assert.deepEqual(toolStarts.map((record) => record.data.index), [0, 1, 2]);
+  assert.deepEqual(toolStarts.map((record) => record.data.content_block.type), ["tool_use", "tool_result", "text"], "tool call, its result, then the answer");
+  assert.equal(toolStarts[0].data.content_block.name, "view", "Read is presented as claude.ai's file view tool");
+  assert.equal(
+    tool.records
+      .filter((record) => record.event === "content_block_delta" && record.data.delta.type === "input_json_delta")
+      .map((record) => record.data.delta.partial_json)
+      .join(""),
+    '{"file_path":"/x"}',
+  );
+  assert.equal(toolStarts[1].data.content_block.tool_use_id, toolStarts[0].data.content_block.id);
+  assert.equal(toolStarts[1].data.content_block.content[0].text, "file body");
+  assert.equal(tool.records.filter((record) => record.event === "content_block_stop").length, 3, "every block is closed");
   conversation = await readConversation(convUuid);
   assert.equal(conversation.chat_messages.length, 6, "tool results and thinking are not separate messages");
   assert.equal(texts(conversation)[5], "Echo: third");
+  const stored = conversation.chat_messages[5].content;
+  assert.deepEqual(stored.map((block) => block.type), ["tool_use", "tool_result", "text"], "history keeps the tool call");
+  assert.deepEqual(stored[0].input, { file_path: "/x" });
+  assert.ok(!JSON.stringify(conversation).includes("hmm"), "thinking is not exposed");
+
+  // The Connect snapshot shows the same turn as a timeline group with a tool row.
+  const snapshot = await (await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/ReadConversation", {
+    method: "POST",
+    body: { conversationId: convUuid },
+  })).json();
+  assert.equal(snapshot.outcome, 1);
+  const turnGroups = snapshot.update.displayGroups.filter((group) => group.messageId === assistant3);
+  assert.deepEqual(turnGroups.map((group) => group.style), [2, 1]);
+  assert.equal(turnGroups[0].summary, "Read file");
+  const toolRow = snapshot.update.contentBlocks.find((block) => block.displayGroupId === turnGroups[0].id);
+  assert.deepEqual(
+    [toolRow.title, toolRow.state, toolRow.rowKind, toolRow.inputSummary, toolRow.text],
+    ["Read file", 2, 3, "/x", "file body"],
+  );
+  assert.equal(snapshot.update.contentBlocks.find((block) => block.displayGroupId === turnGroups[1].id).text, "Echo: third");
 
   // ---- edit a message: Desktop rewinds to it and the new text is a fresh turn ----
   const human2b = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";

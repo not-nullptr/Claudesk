@@ -7,13 +7,15 @@
 //   { type: "message", sessionId, userMessageUuid,
 //     message: { type: "stream_event", event: <Anthropic stream event> } }
 // ending with message.type === "result". A tool-using turn contains several
-// inner Anthropic messages (message_start ... message_stop) and still counts as
-// one assistant message here, so inner message boundaries are folded and the
-// final message_delta / message_stop are emitted once, from the result event.
+// inner Anthropic messages (message_start ... message_stop) with the tool
+// results arriving between them as `user` messages; it still counts as one
+// assistant message here, so inner message boundaries are folded and the final
+// message_delta / message_stop are emitted once, from the result event.
 //
-// Only text blocks are surfaced for now. Thinking and tool_use blocks are
-// skipped because their on-screen rendering in the iOS app has not been
-// captured yet; adding them means handling more content_block types below.
+// Text and tool calls are surfaced (a tool call is a tool_use block followed by
+// a tool_result block). Thinking is skipped, and so is anything a sub-agent does
+// (parent_tool_use_id set).
+import { restToolResult, restToolUse, trimInput } from "./blocks.mjs";
 import { serverStopReason } from "./transcript.mjs";
 
 function nowIso() {
@@ -21,9 +23,9 @@ function nowIso() {
 }
 
 /**
- * @param {{ sessionId: string, humanUuid: string, assistantUuid: string, model?: string }} turn
+ * @param {{ sessionId: string, humanUuid: string, assistantUuid: string, model?: string, toolBlocks?: boolean }} turn
  */
-export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, model }) {
+export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, model, toolBlocks = true }) {
   let started = false;
   let finished = false;
   let nextIndex = 0;
@@ -31,18 +33,30 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
   let text = "";
   let error = null;
   let stopReason = "end_turn";
-  const textBlocks = new Map(); // `${innerMessage}:${index}` -> output index
+  const outputIndex = new Map(); // `${innerMessage}:${index}` -> output index
+  const blocks = []; // normalized content blocks, in order
+  const blockAt = new Map(); // output index -> block
+  const jsonBuffers = new Map(); // output index -> partial tool input
+  const toolUses = new Map(); // tool_use id -> { name, input }
+  const seenResults = new Set();
   const openBlocks = new Set(); // output indices started but not yet stopped
 
-  function blockStart(index) {
+  function startEvent(innerModel) {
+    started = true;
+    return {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: { uuid: assistantUuid, parent_uuid: humanUuid || null, model: innerModel || model },
+      },
+    };
+  }
+
+  function blockStart(index, block) {
     openBlocks.add(index);
     return {
       event: "content_block_start",
-      data: {
-        type: "content_block_start",
-        index,
-        content_block: { type: "text", text: "", citations: [], is_closed: false },
-      },
+      data: { type: "content_block_start", index, content_block: { ...block } },
     };
   }
 
@@ -52,6 +66,19 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
       event: "content_block_stop",
       data: { type: "content_block_stop", index, stop_timestamp: nowIso() },
     };
+  }
+
+  function addBlock(block) {
+    const index = nextIndex;
+    nextIndex += 1;
+    blocks.push(block);
+    blockAt.set(index, block);
+    return index;
+  }
+
+  function addText() {
+    const block = { type: "text", text: "", citations: [], is_closed: false };
+    return { index: addBlock(block), block };
   }
 
   function finish(reason) {
@@ -66,15 +93,101 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
     ];
   }
 
-  function startEvent(innerModel) {
-    started = true;
-    return {
-      event: "message_start",
-      data: {
-        type: "message_start",
-        message: { uuid: assistantUuid, parent_uuid: humanUuid || null, model: innerModel || model },
-      },
-    };
+  function streamEvent(event, out) {
+    if (event?.type === "message_start") {
+      innerMessage += 1;
+      if (!started) out.push(startEvent(event.message?.model));
+      return;
+    }
+    if (event?.type === "content_block_start") {
+      const kind = event.content_block?.type;
+      const key = `${innerMessage}:${event.index}`;
+      if (kind === "text") {
+        if (!started) out.push(startEvent());
+        const { index, block } = addText();
+        outputIndex.set(key, index);
+        out.push(blockStart(index, block));
+      } else if (toolBlocks && kind === "tool_use") {
+        if (!started) out.push(startEvent());
+        const { id, name } = event.content_block;
+        toolUses.set(id, { name, input: {} });
+        const block = restToolUse({ id, name, input: {}, startedAt: nowIso() });
+        const index = addBlock(block);
+        outputIndex.set(key, index);
+        jsonBuffers.set(index, "");
+        out.push(blockStart(index, block));
+      }
+      return;
+    }
+    if (event?.type === "content_block_delta") {
+      const index = outputIndex.get(`${innerMessage}:${event.index}`);
+      if (index === undefined) return;
+      const block = blockAt.get(index);
+      if (block?.type === "text" && event.delta?.type === "text_delta" && event.delta.text) {
+        block.text += event.delta.text;
+        text += event.delta.text;
+        out.push({
+          event: "content_block_delta",
+          data: { type: "content_block_delta", index, delta: { type: "text_delta", text: event.delta.text } },
+        });
+      } else if (block?.type === "tool_use" && event.delta?.type === "input_json_delta" && event.delta.partial_json) {
+        jsonBuffers.set(index, `${jsonBuffers.get(index) ?? ""}${event.delta.partial_json}`);
+        out.push({
+          event: "content_block_delta",
+          data: {
+            type: "content_block_delta",
+            index,
+            delta: { type: "input_json_delta", partial_json: event.delta.partial_json },
+          },
+        });
+      }
+      return;
+    }
+    if (event?.type === "content_block_stop") {
+      const index = outputIndex.get(`${innerMessage}:${event.index}`);
+      if (index === undefined) return;
+      const block = blockAt.get(index);
+      if (block?.type === "text") block.is_closed = true;
+      if (block?.type === "tool_use") {
+        let input = {};
+        try {
+          input = JSON.parse(jsonBuffers.get(index) || "{}");
+        } catch {
+          // Keep an empty input rather than failing the turn on malformed JSON.
+        }
+        toolUses.set(block.id, { name: toolUses.get(block.id)?.name, input });
+        block.input = trimInput(input);
+        block.stop_timestamp = nowIso();
+      }
+      out.push(blockStop(index));
+      return;
+    }
+    if (event?.type === "message_delta" && event.delta?.stop_reason) {
+      stopReason = serverStopReason(event.delta.stop_reason);
+    }
+  }
+
+  // Tool results arrive as `user` messages carrying tool_result blocks.
+  function toolResults(message, out) {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const item of content) {
+      if (item?.type !== "tool_result" || seenResults.has(item.tool_use_id)) continue;
+      seenResults.add(item.tool_use_id);
+      if (!started) out.push(startEvent());
+      const use = toolUses.get(item.tool_use_id);
+      const block = restToolResult({
+        toolUseId: item.tool_use_id,
+        name: use?.name,
+        input: use?.input,
+        content: item.content,
+        isError: item.is_error,
+        at: nowIso(),
+      });
+      const index = addBlock(block);
+      out.push(blockStart(index, block));
+      out.push(blockStop(index));
+    }
   }
 
   // Returns the canonical events for one Desktop event payload.
@@ -82,39 +195,17 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
     if (finished || payload?.type !== "message" || payload.sessionId !== sessionId) return [];
     if (payload.userMessageUuid && humanUuid && payload.userMessageUuid !== humanUuid) return [];
     const message = payload.message;
+    if (message?.parent_tool_use_id) return []; // a sub-agent's own traffic
     const out = [];
 
     if (message?.type === "stream_event") {
-      const event = message.event;
-      if (event?.type === "message_start") {
-        innerMessage += 1;
-        if (!started) out.push(startEvent(event.message?.model));
-      } else if (event?.type === "content_block_start") {
-        if (event.content_block?.type === "text") {
-          if (!started) out.push(startEvent());
-          const index = nextIndex;
-          nextIndex += 1;
-          textBlocks.set(`${innerMessage}:${event.index}`, index);
-          out.push(blockStart(index));
-        }
-      } else if (event?.type === "content_block_delta") {
-        const index = textBlocks.get(`${innerMessage}:${event.index}`);
-        if (index !== undefined && event.delta?.type === "text_delta" && event.delta.text) {
-          text += event.delta.text;
-          out.push({
-            event: "content_block_delta",
-            data: { type: "content_block_delta", index, delta: { type: "text_delta", text: event.delta.text } },
-          });
-        }
-      } else if (event?.type === "content_block_stop") {
-        const index = textBlocks.get(`${innerMessage}:${event.index}`);
-        if (index !== undefined) out.push(blockStop(index));
-      } else if (event?.type === "message_delta" && event.delta?.stop_reason) {
-        stopReason = serverStopReason(event.delta.stop_reason);
-      }
+      streamEvent(message.event, out);
       return out;
     }
-
+    if (message?.type === "user" && toolBlocks) {
+      toolResults(message, out);
+      return out;
+    }
     if (message?.type === "result") {
       if (message.is_error || (message.subtype && message.subtype !== "success")) {
         error = new Error(
@@ -141,19 +232,24 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
       ? fullText.slice(text.length)
       : "";
     if (missing) {
-      let index = [...openBlocks].at(-1);
+      let index = [...openBlocks].filter((i) => blockAt.get(i)?.type === "text").at(-1);
       if (index === undefined) {
-        index = nextIndex;
-        nextIndex += 1;
-        out.push(blockStart(index));
+        const added = addText();
+        index = added.index;
+        out.push(blockStart(index, added.block));
       }
+      blockAt.get(index).text += missing;
       text += missing;
       out.push({
         event: "content_block_delta",
         data: { type: "content_block_delta", index, delta: { type: "text_delta", text: missing } },
       });
     }
-    for (const index of [...openBlocks]) out.push(blockStop(index));
+    for (const index of [...openBlocks]) {
+      const block = blockAt.get(index);
+      if (block?.type === "text") block.is_closed = true;
+      out.push(blockStop(index));
+    }
     out.push(...finish());
     return out;
   }
@@ -164,6 +260,7 @@ export function createTurnTranslator({ sessionId, humanUuid, assistantUuid, mode
     get finished() { return finished; },
     get started() { return started; },
     get text() { return text; },
+    get blocks() { return blocks.map((block) => ({ ...block })); },
     get error() { return error; },
     get stopReason() { return stopReason; },
   };

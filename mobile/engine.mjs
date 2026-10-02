@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { bardSegments, messageText } from "./blocks.mjs";
 import { DesktopError } from "./desktop-client.mjs";
 import { createTurnTranslator } from "./events.mjs";
 import { transcriptToMessages } from "./transcript.mjs";
@@ -110,7 +111,15 @@ function createQueue() {
 const DONE = Symbol("done");
 const ABORTED = Symbol("aborted");
 
-export function createEngine({ store, desktop, log = console }) {
+// CLAUDE_MOBILE_TOOL_BLOCKS=0 hides tool calls and shows only the answer text.
+// How the iOS app draws tool rows has not been verified on a device, so this is
+// the way back if they misrender.
+export function createEngine({
+  store,
+  desktop,
+  log = console,
+  toolBlocks = process.env.CLAUDE_MOBILE_TOOL_BLOCKS !== "0",
+}) {
   let identity = null;
   const activeTurns = new Map(); // conversationUuid -> { abort, assistantUuid }
   const liveTurns = new Map(); // conversationUuid -> { humanUuid, humanText, assistantUuid, text }
@@ -279,6 +288,7 @@ export function createEngine({ store, desktop, log = console }) {
   function project(uuid, session, entries, entry) {
     const { messages, leaf } = transcriptToMessages(entries, {
       assistantUuidFor: (humanUuid) => entry?.assistantByHuman?.[humanUuid],
+      toolBlocks,
     });
     return {
       uuid,
@@ -325,7 +335,7 @@ export function createEngine({ store, desktop, log = console }) {
       index: humanIndex + 1,
       created_at: live.startedAt,
       updated_at: nowIso(),
-      content: textContent(live.text, false),
+      content: live.blocks.length ? live.blocks : textContent(live.text, false),
       attachments: [],
       files: [],
       live: true,
@@ -805,9 +815,9 @@ export function createEngine({ store, desktop, log = console }) {
   // The assistant text Desktop has stored for a human turn.
   async function storedAnswer(sessionId, humanUuid) {
     const entries = (await desktop.ipc(SURFACE, "getTranscript", [sessionId])) || [];
-    const { messages } = transcriptToMessages(entries);
+    const { messages } = transcriptToMessages(entries, { toolBlocks: false });
     const assistant = messages.find((message) => message.sender === "assistant" && message.parent_uuid === humanUuid);
-    return assistant?.content?.map((part) => part.text).join("") ?? "";
+    return assistant ? messageText(assistant) : "";
   }
 
   // Streams one assistant turn as canonical SSE events; REST and Connect
@@ -821,6 +831,7 @@ export function createEngine({ store, desktop, log = console }) {
       humanUuid,
       assistantUuid,
       model: model || conversation.model,
+      toolBlocks,
     });
     const queue = createQueue();
     const live = {
@@ -828,12 +839,15 @@ export function createEngine({ store, desktop, log = console }) {
       humanText: plan.text || humanMessage.content?.map((part) => part.text).join("") || "",
       assistantUuid,
       text: "",
+      blocks: [],
       startedAt: nowIso(),
     };
     const stopListening = listen(sessionId, (payload) => {
       for (const event of translator.accept(payload)) queue.push(event);
-      if (translator.text !== live.text) {
+      const liveBlocks = translator.blocks;
+      if (translator.text !== live.text || liveBlocks.length !== live.blocks.length) {
         live.text = translator.text;
+        live.blocks = liveBlocks;
         scheduleNotify(uuid);
       }
       if (translator.finished) queue.push(DONE);
@@ -1062,25 +1076,22 @@ export function createEngine({ store, desktop, log = console }) {
         stopReason: bardStopReasonNumber[message.stop_reason || "end_turn"] || 0,
         turnStartKind: 1,
       });
-      const groupId = `${message.uuid}-group`;
-      displayGroups.push({
-        id: groupId,
-        messageId: message.uuid,
-        index: 0,
-        style: 1,
-        isComplete: complete,
-      });
-      contentBlocks.push({
-        id: `${message.uuid}-text`,
-        displayGroupId: groupId,
-        index: 0,
-        isComplete: complete,
-        state: complete ? 2 : 1, // CONTENT_BLOCK_STATE_COMPLETE : _RUNNING
-        text: message.content
-          .filter((part) => part?.type === "text" && part.text)
-          .map((part) => part.text)
-          .join("\n"),
-      });
+      if (message.sender === "human") {
+        const groupId = `${message.uuid}-group`;
+        displayGroups.push({ id: groupId, messageId: message.uuid, index: 0, style: 1, isComplete: true });
+        contentBlocks.push({
+          id: `${message.uuid}-text`,
+          displayGroupId: groupId,
+          index: 0,
+          isComplete: true,
+          state: 2, // CONTENT_BLOCK_STATE_COMPLETE
+          text: messageText({ content: message.content }),
+        });
+        return;
+      }
+      const segments = bardSegments(message.uuid, message.content, { live: !complete });
+      displayGroups.push(...segments.groups);
+      contentBlocks.push(...segments.contentBlocks);
     });
     return {
       replaceAllState: true,

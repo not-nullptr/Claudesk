@@ -136,6 +136,7 @@ services:
       # front of Claude Desktop); this service no longer talks to the gateway.
       CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-http://claude-desktop:8080}"
       CLAUDE_MOBILE_CAPTURE: "${CLAUDE_MOBILE_CAPTURE:-0}"
+      CLAUDE_MOBILE_TOOL_BLOCKS: "${CLAUDE_MOBILE_TOOL_BLOCKS:-1}"
     depends_on:
       cowork-bridge:
         condition: service_healthy

@@ -6,6 +6,7 @@ COPY mobile/server.mjs ./server.mjs
 COPY mobile/desktop-client.mjs ./desktop-client.mjs
 COPY mobile/transcript.mjs ./transcript.mjs
 COPY mobile/events.mjs ./events.mjs
+COPY mobile/blocks.mjs ./blocks.mjs
 COPY mobile/capture.mjs ./capture.mjs
 COPY mobile/store.mjs ./store.mjs
 COPY mobile/auth.mjs ./auth.mjs

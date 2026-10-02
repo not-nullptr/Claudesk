@@ -6,13 +6,50 @@
 // One Desktop turn is: a human entry, then any number of assistant entries
 // (one per content block: thinking, text, tool_use), tool_result entries and
 // synthetic isMeta notes, until the next human entry. The facade presents a
-// turn as one human message and one assistant message.
+// turn as one human message and one assistant message whose content keeps the
+// text, tool calls and tool results in order (thinking is left out).
+import { restToolResult, restToolUse } from "./blocks.mjs";
 
 const mentionPattern = /^\s*@"([^"\n]+)"\s*\n?/;
 
 function hasToolResult(entry) {
   const content = entry?.message?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool_result");
+}
+
+// Content blocks of one turn's assistant side, in transcript order.
+function assistantBlocks(entries, { toolBlocks }) {
+  const blocks = [];
+  const uses = new Map(); // tool_use id -> { name, input }
+  for (const entry of entries) {
+    const content = Array.isArray(entry.message?.content) ? entry.message.content : [];
+    if (entry.type === "assistant") {
+      for (const block of content) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          blocks.push({ type: "text", text: block.text, citations: [], is_closed: true });
+        } else if (toolBlocks && block?.type === "tool_use") {
+          uses.set(block.id, { name: block.name, input: block.input });
+          blocks.push(restToolUse({
+            id: block.id, name: block.name, input: block.input, startedAt: entry.timestamp, stoppedAt: entry.timestamp,
+          }));
+        }
+      }
+    } else if (toolBlocks && hasToolResult(entry)) {
+      for (const block of content) {
+        if (block?.type !== "tool_result") continue;
+        const use = uses.get(block.tool_use_id);
+        blocks.push(restToolResult({
+          toolUseId: block.tool_use_id,
+          name: use?.name,
+          input: use?.input,
+          content: block.content,
+          isError: block.is_error,
+          at: entry.timestamp,
+        }));
+      }
+    }
+  }
+  return blocks;
 }
 
 export function isHumanEntry(entry) {
@@ -53,18 +90,25 @@ function textContent(text, closed = true) {
 
 /**
  * @param {object[]} entries Desktop transcript entries.
- * @param {{ assistantUuidFor?: (humanUuid: string) => string | undefined }} [options]
+ * @param {{ assistantUuidFor?: (humanUuid: string) => string | undefined, toolBlocks?: boolean }} [options]
  *   assistantUuidFor returns the assistant message uuid the mobile client chose
  *   for a turn; otherwise the turn's first assistant entry uuid is used.
+ *   toolBlocks (default true) includes tool calls and results in assistant content.
  * @returns {{ messages: object[], leaf: string | null, lastHumanUuid: string | null }}
  */
-export function transcriptToMessages(entries, { assistantUuidFor = () => undefined } = {}) {
+export function transcriptToMessages(entries, { assistantUuidFor = () => undefined, toolBlocks = true } = {}) {
   const turns = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (isHumanEntry(entry)) {
-      turns.push({ human: entry, assistant: [] });
-    } else if (turns.length && entry?.type === "assistant" && !entry.isSidechain) {
-      turns.at(-1).assistant.push(entry);
+      turns.push({ human: entry, assistant: [], body: [] });
+    } else if (turns.length && !entry.isSidechain && !entry.isMeta) {
+      const turn = turns.at(-1);
+      if (entry.type === "assistant") {
+        turn.assistant.push(entry);
+        turn.body.push(entry);
+      } else if (hasToolResult(entry)) {
+        turn.body.push(entry);
+      }
     }
   }
 
@@ -87,13 +131,7 @@ export function transcriptToMessages(entries, { assistantUuidFor = () => undefin
     previousUuid = human.uuid;
 
     if (!turn.assistant.length) continue;
-    // Assistant entries hold one content block each; keep the text ones. Thinking
-    // and tool blocks are not shown on mobile yet.
-    const answer = turn.assistant.flatMap((entry) => Array.isArray(entry.message?.content)
-      ? entry.message.content
-        .filter((block) => block?.type === "text" && typeof block.text === "string")
-        .map((block) => block.text)
-      : []);
+    const content = assistantBlocks(turn.body, { toolBlocks });
     const last = turn.assistant.at(-1);
     const assistant = {
       uuid: assistantUuidFor(human.uuid) || turn.assistant[0].uuid,
@@ -102,7 +140,7 @@ export function transcriptToMessages(entries, { assistantUuidFor = () => undefin
       index: messages.length,
       created_at: turn.assistant[0].timestamp,
       updated_at: last.timestamp,
-      content: textContent(answer.join("\n\n")),
+      content: content.length ? content : textContent(""),
       attachments: [],
       files: [],
       stop_reason: serverStopReason(last.message?.stop_reason),
