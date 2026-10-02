@@ -642,11 +642,24 @@ async function handleCodeRoutes(request, response, url) {
 
   // One line per Code request, with what it answered. The Code tab fails as a
   // single opaque "Something went wrong" on the phone, so the server log is the
-  // only place the failing leg is visible. Recorded after the response so the
-  // status is known; `trace` is the line itself, never request content.
+  // only place the failing leg is visible. An SSE leg never emits `finish`
+  // while it is open, so it is logged when the headers go out instead — that is
+  // the moment its status is known — and `finish` covers the rest.
   const trace = (status) =>
     console.log(`[mobile-code] ${method} ${path} -> ${status}`);
-  response.once("finish", () => trace(response.statusCode));
+  let traced = false;
+  response.once("finish", () => {
+    if (!traced) trace(response.statusCode);
+  });
+  response.once("close", () => {
+    if (!traced) trace(response.statusCode);
+  });
+  const originalWriteHead = response.writeHead.bind(response);
+  response.writeHead = (...args) => {
+    traced = true;
+    trace(args[0] ?? response.statusCode);
+    return originalWriteHead(...args);
+  };
 
   async function fail(error) {
     const status = error?.status || 500;
@@ -721,6 +734,17 @@ async function handleCodeRoutes(request, response, url) {
     } catch (error) {
       await fail(error);
     }
+    return true;
+  }
+
+  // The transcript's streaming read. The app opens an event *stream* for a
+  // session it is showing (the detail screen), separate from the paged `events`
+  // read below: history arrives as the same SessionWatchFrame records the live
+  // turn uses, so one code path renders both. It must match before the paged
+  // matcher below, which is anchored and would otherwise miss it.
+  const eventsStreamMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events\/stream$/);
+  if (eventsStreamMatch && method === "GET") {
+    await streamCodeEvents(request, response, url, eventsStreamMatch[1]);
     return true;
   }
 
@@ -868,6 +892,53 @@ async function streamCodeWatch(request, response, url, sessionId) {
   const unsubscribe = desktopId
     ? codeEngine.listen(desktopId, (record) => emit(desktopId, record))
     : codeEngine.listenAll((record, id) => emit(id, record));
+
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
+  const done = () => {
+    clearInterval(keepalive);
+    unsubscribe?.();
+  };
+  request.on("close", done);
+  response.on("close", done);
+}
+
+// GET /v1/code/sessions/{id}/events/stream — the transcript as SSE. The app
+// opens this for a session it is showing, so it must do two things in order:
+// replay the history it already has as `upserted` frames, then follow live
+// records. Replaying first means a client that only listens here still draws
+// the whole conversation; the live frames then keep it current. `from_sequence_num`
+// lets a reconnecting client skip what it has already rendered.
+async function streamCodeEvents(request, response, url, sessionId) {
+  const desktopId = codeSessionDesktopId(sessionId);
+  if (!desktopId) {
+    sendErrorEnvelope(response, 404, "not_found", "session not found");
+    return;
+  }
+  let envelopes;
+  try {
+    envelopes = await codeEngine.sessionEventEnvelopes(sessionId);
+  } catch (error) {
+    sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
+      error?.message || "could not read the transcript");
+    return;
+  }
+
+  response.writeHead(200, SSE_HEADERS);
+  const floor = Number(url.searchParams.get("from_sequence_num"));
+  const from = Number.isFinite(floor) ? floor : 0;
+  for (const envelope of envelopes) {
+    if (envelope.sequence_num >= from) sendSseRecord(response, "upserted", envelope);
+  }
+
+  const emit = (id, record) => {
+    if (id !== desktopId) return;
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      sendSseRecord(response, frame.event, frame.data);
+    }
+  };
+  const unsubscribe = codeEngine.listen(desktopId, (record) => emit(desktopId, record));
 
   const keepalive = setInterval(() => {
     if (!response.writableEnded) response.write(": keepalive\n\n");

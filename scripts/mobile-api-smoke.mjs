@@ -835,6 +835,49 @@ try {
   const toolResult = withTool.data.find((envelope) => envelope.event_type === "tool_result");
   assert.equal(toolResult.payload.tool_use_id, toolEnvelope.payload.tool_call.id, "use and result pair up");
 
+  // The transcript *stream* leg: the app opens this for a session it is
+  // showing, so the history must arrive as `upserted` SSE frames before any
+  // live one. It stays open, so read a bounded prefix rather than to EOF.
+  const streamResponse = await call(codePath(createdResource.id, "/events/stream"));
+  assert.equal(streamResponse.status, 200, "the events stream leg answers");
+  const streamReader = streamResponse.body.getReader();
+  const streamDecoder = new TextDecoder();
+  let streamBuffer = "";
+  let streamed = [];
+  try {
+    while (streamed.length < withTool.data.length) {
+      const { value, done } = await streamReader.read();
+      if (done) break;
+      streamBuffer += streamDecoder.decode(value, { stream: true });
+      streamed = parseSse(streamBuffer).filter((record) => record.event === "upserted");
+    }
+  } finally {
+    streamReader.cancel().catch(() => {});
+  }
+  assert.equal(streamed.length, withTool.data.length, "the stream replays the whole transcript");
+  assert.deepEqual(
+    streamed.map((record) => record.data.sequence_num),
+    withTool.data.map((envelope) => envelope.sequence_num),
+    "the streamed history is the same ordered transcript the paged read returns",
+  );
+
+  // A resumed stream skips what the client already has.
+  const resumedResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=1"));
+  const resumedReader = resumedResponse.body.getReader();
+  let resumedBuffer = "";
+  let resumed = [];
+  try {
+    while (resumed.length < 1) {
+      const { value, done } = await resumedReader.read();
+      if (done) break;
+      resumedBuffer += new TextDecoder().decode(value, { stream: true });
+      resumed = parseSse(resumedBuffer).filter((record) => record.event === "upserted");
+    }
+  } finally {
+    resumedReader.cancel().catch(() => {});
+  }
+  assert.equal(resumed[0]?.data.sequence_num, 1, "from_sequence_num skips the frames already rendered");
+
   // The list leg now reports the session, with the app's enum values.
   const codeListed = await (await call("/v1/code/sessions")).json();
   assert.equal(codeListed.data.length, 1);

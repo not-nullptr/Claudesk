@@ -34,6 +34,15 @@ POST   /v1/code/sessions                       create   (CreateSessionRequest)
 GET    /v1/code/sessions/{id}                  detail   (SessionResource)
 POST   /v1/code/sessions/{id}/messages/stream  SEND (SendChannelMessageRequest)
 GET    /v1/code/sessions/{id}/events           list_client_events_v2 -> ListClientEventsResponse
+GET    /v1/code/sessions/{id}/events/stream    SSE — the transcript read the
+                                               session detail screen opens: the
+                                               history replayed as `upserted`
+                                               frames, then the live ones.
+                                               `from_sequence_num` resumes. Not
+                                               a literal in the binary (it is
+                                               composed from the events base);
+                                               found by watching the app's own
+                                               requests against the facade.
 GET    /v1/code/sessions/watch                 SSE      (SessionWatchFrame)
 GET    /v1/code/shared-sessions/{id}/events    shared_session_events_v2
 GET    /v1/code/channels[/{id}]                channel (project/thread) list

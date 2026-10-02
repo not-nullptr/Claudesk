@@ -483,6 +483,18 @@ export function createCodeEngine({
     };
   }
 
+  // The whole ordered transcript, for a caller that streams rather than pages
+  // it. Returns the SessionEventEnvelope[] the transcript pane renders; the
+  // sequence numbers are contiguous from the session's floor. Named apart from
+  // the imported `eventEnvelopes` translator, which turns raw entries into
+  // envelopes — this one reads a session's stored ones.
+  async function sessionEventEnvelopes(id) {
+    const desktopId = desktopSessionIdFor(id);
+    if (!desktopId) throw notFound();
+    const loaded = await loadSession(desktopId);
+    return loaded.envelopes;
+  }
+
   // ---------- turns ----------
 
   function activeTurnCount() {
@@ -645,6 +657,7 @@ export function createCodeEngine({
     updateSession,
     deleteSession,
     listEvents,
+    sessionEventEnvelopes,
     sendMessage,
     interrupt,
     permissionsFor,
