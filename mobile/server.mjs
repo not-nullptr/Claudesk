@@ -170,6 +170,7 @@ function accountObject() {
     updated_at: identity.createdAt,
     is_verified: true,
     is_anonymous: false,
+    capabilities: [...plan.capabilities],
     settings: accountSettings(),
     memberships: [{
       role: "owner",
@@ -229,7 +230,7 @@ function organizationObject() {
   return {
     uuid: identity.orgUuid,
     name: "Self-hosted",
-    capabilities: [...plan.capabilities, "claude_code"],
+    capabilities: [...plan.capabilities],
     analytics_subscription_plan: plan.analytics,
     plan_display_name: plan.display,
     rate_limit_tier: plan.tier,

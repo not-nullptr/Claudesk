@@ -128,9 +128,15 @@ try {
   assert.equal(older.status, 401, "a step before the last used one must not be accepted");
 
   const account = await (await call("/api/account")).json();
+  const bootstrap0 = await (await call(
+    `/api/bootstrap/${(account.memberships[0].organization.uuid)}/app_start?growthbook_format=sdk&include_system_prompts=false`,
+  )).json();
   assert.equal(account.email_address, "smoke@example.com");
   const org = account.memberships[0].organization;
-  assert.ok(org.capabilities.includes("claude_code"));
+  assert.deepEqual(org.capabilities, ["chat", "claude_max"]);
+  assert.deepEqual(account.capabilities, ["chat", "claude_max"]);
+  assert.deepEqual(bootstrap0.account.capabilities, ["chat", "claude_max"]);
+  assert.deepEqual(bootstrap0.account.memberships[0].organization.capabilities, ["chat", "claude_max"]);
   assert.ok(org.capabilities.includes("claude_max"));
   assert.equal(org.rate_limit_tier, "default_claude_max_20x");
   assert.equal(org.billing_type, "stripe_subscription");
@@ -141,9 +147,7 @@ try {
   assert.deepEqual(await readdir(join(dataDir, "conversations")), [], "legacy conversations are moved out");
   assert.deepEqual(await readdir(join(dataDir, "legacy-conversations")), ["old.json"]);
 
-  const bootstrap = await (await call(
-    `/api/bootstrap/${org.uuid}/app_start?growthbook_format=sdk&include_system_prompts=false`,
-  )).json();
+  const bootstrap = bootstrap0;
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
   assert.deepEqual(bootstrap.org_growthbook.features, { mobile_remote_enabled: { defaultValue: true } });
