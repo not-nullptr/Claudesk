@@ -22,6 +22,7 @@ import {
   toolCallFromUse,
   toolResultOutput,
 } from "../mobile/code-transcript.mjs";
+import { createCodeEventTranslator, frameFromPayload, isCodeRecord } from "../mobile/code-events.mjs";
 import {
   CODE_ID_PREFIX,
   SESSION_STATUS,
@@ -192,6 +193,41 @@ assert.deepEqual(pageEvents(numbered, { cursor: olderCursorFor(0), limit: 5 }).d
 assert.throws(() => pageEvents(numbered, { cursor: "nonsense" }), /invalid cursor/);
 // The page size is clamped rather than trusted.
 assert.equal(pageEvents(numbered, { limit: 100000 }).data.length, Math.min(numbered.length, 200));
+
+// ---- live records -> SessionWatchFrame ----
+assert.ok(isCodeRecord({ data: { surface: "LocalSessions", method: "onOnEvent" } }));
+assert.ok(!isCodeRecord({ data: { surface: "LocalAgentModeSessions", method: "onOnEvent" } }), "a Chat relay is not a Code record");
+assert.ok(!isCodeRecord(null));
+
+const translator = createCodeEventTranslator({ sessionId: "s1", startSequence: 40 });
+const first = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
+assert.equal(first.length, 1);
+assert.equal(first[0].event, "upserted");
+assert.equal(first[0].data.event_type, "user_message");
+assert.equal(first[0].data.sequence_num, 40, "the floor is honoured");
+assert.equal(translator.resumeFrom(), 41);
+// The same entry replayed (Desktop re-sends the tail on reconnect) keeps its
+// original sequence number, so the app's pager does not rewrite history.
+const replay = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
+assert.equal(replay[0].data.sequence_num, 40);
+assert.equal(translator.resumeFrom(), 41, "a replay does not advance the counter");
+// The next distinct entry advances.
+assert.equal(translator.accept({ method: "onOnEvent", payload: probe.transcript[1] })[0].data.sequence_num, 41);
+
+// A removal is a deletion frame, never an upsert of an empty row.
+const removed = translator.accept({ method: "onOnEvent", payload: { removed: true, entry: { uuid: "u-gone" } } });
+assert.deepEqual(removed, [{ event: "deleted", data: { session_id: null, event_id: "u-gone" } }]);
+// Nothing renderable produces no frame at all.
+assert.deepEqual(translator.accept({ method: "onOnEvent", payload: { entry: { type: "system" } } }), []);
+assert.deepEqual(translator.accept({ method: "onOnEvent", payload: null }), []);
+assert.deepEqual(translator.accept({ method: "onOnSomethingElse", payload: probe.transcript[0] }), []);
+
+// A permission prompt is recorded rather than drawn, and answering clears it.
+const prompt = { requestId: "req-1", sessionId: "s1", toolName: "Bash", input: { command: "ls" } };
+assert.deepEqual(translator.accept({ method: "onOnToolPermissionRequest", payload: prompt }), []);
+assert.deepEqual(translator.permissions(), [prompt]);
+assert.equal(translator.resolvePermission("req-1"), true);
+assert.deepEqual(translator.permissions(), []);
 
 // ---- the bridge environment offered as a runner ----
 const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2.1.284" });
