@@ -34,7 +34,7 @@ const client = createDesktopClient({
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const startedAt = Date.now();
-const record = { surface: SURFACE, sessionId: null, steps: [], events: [], argShapes: {}, errors: [] };
+const record = { surface: SURFACE, sessionId: null, steps: [], events: [], argShapes: {}, rejections: [], errors: [] };
 const note = (name, value) => {
   record.steps.push({ name, atMs: Date.now() - startedAt, value });
   console.log(`[code-probe] ${name}`);
@@ -60,10 +60,14 @@ async function tryShapes(label, method, candidates) {
       note(`${label}: ${method} accepted shape ${index}`, { argCount: candidate.length });
       return value;
     } catch (error) {
+      // The validation message names the argument Desktop wanted, so it is the
+      // most useful thing this probe ever prints — keep it, do not swallow it.
+      record.rejections.push({ label, method, index, args: candidate, message: error.message });
       if (!isValidationError(error)) {
         record.errors.push(`${label}: ${method} shape ${index} failed: ${error.message}`);
         throw error;
       }
+      console.error(`[code-probe]   shape ${index} rejected: ${error.message}`);
       note(`${label}: ${method} shape ${index} rejected`, candidate.map((item) => typeof item));
     }
   }
@@ -86,18 +90,25 @@ async function session() {
   return client.ipc(SURFACE, "getSession", [desktopSessionId]);
 }
 
-async function waitIdle(label) {
+async function waitIdle(label, timeoutMs = 180000) {
   await sleep(1500);
-  const deadline = Date.now() + 180000;
+  const deadline = Date.now() + timeoutMs;
+  let sawSession = false;
   while (Date.now() < deadline) {
     const current = await session().catch(() => null);
+    if (current) sawSession = true;
     if (current && (current.isRunning === false || current.status === "idle")) {
       await sleep(1500);
       return current;
     }
     await sleep(1000);
   }
-  record.errors.push(`${label}: still running after 180s`);
+  // A session that never appeared means the turn was never dispatched (a
+  // rejected `start`), not that it is slow — say so rather than making the
+  // reader guess why the probe paused for three minutes.
+  record.errors.push(sawSession
+    ? `${label}: still running after ${Math.round(timeoutMs / 1000)}s`
+    : `${label}: no session was ever created, so nothing ran (check the start rejections above)`);
   return null;
 }
 
@@ -111,12 +122,15 @@ try {
   note("getAll", { count: Array.isArray(all) ? all.length : null });
 
   // 2. start — the create shape. The phone's CreateSessionRequest maps onto this.
-  await tryShapes("start", "start", [
+  const started = await tryShapes("start", "start", [
     [{ sessionId, message: "Reply with exactly one word: pong", messageUuid: randomUUID() }],
     [{ sessionId, message: "Reply with exactly one word: pong", messageUuid: randomUUID(), sessionType: "code" }],
     [{ sessionId, prompt: "Reply with exactly one word: pong" }],
     [desktopSessionId, "Reply with exactly one word: pong"],
   ]);
+  if (started === undefined) {
+    throw new Error("start was rejected in every shape; the rest of the probe would only record a session that does not exist");
+  }
   const afterStart = await waitIdle("start");
   note("start: session after turn", afterStart ?? null);
   if (afterStart) record.sessionId = afterStart.sessionId ?? afterStart.id ?? desktopSessionId;
