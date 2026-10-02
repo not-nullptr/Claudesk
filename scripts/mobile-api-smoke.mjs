@@ -149,7 +149,15 @@ try {
   const bootstrap = bootstrap0;
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
-  assert.deepEqual(bootstrap.org_growthbook.features, { mobile_remote_enabled: { defaultValue: true } });
+  // Every Code-relevant growthbook flag must be declared on a paid plan, in the
+  // SDK shape the app's GrowthBookFeatureDefinition decodes ({ key, defaultValue,
+  // rules }). The kill switch is the one flag that must stay off.
+  const gb = bootstrap.org_growthbook.features;
+  assert.deepEqual(gb.mobile_remote_enabled, { key: "mobile_remote_enabled", defaultValue: true, rules: [] });
+  assert.deepEqual(gb.mobile_cowork_tab_enabled, { key: "mobile_cowork_tab_enabled", defaultValue: true, rules: [] });
+  assert.deepEqual(gb.claudeai_hub_code_sessions, { key: "claudeai_hub_code_sessions", defaultValue: true, rules: [] });
+  assert.deepEqual(gb.claudeai_projects_nav_kill_switch, { key: "claudeai_projects_nav_kill_switch", defaultValue: false, rules: [] });
+  assert.ok(Object.values(gb).every((f) => "key" in f && "defaultValue" in f && "rules" in f), "every feature uses the SDK shape");
   assert.deepEqual(bootstrap.current_user_access.features, [{ feature: "claude_code_web", status: "available" }]);
   // Code access must be declared on all three access surfaces, and the seat
   // must be the claude_code_user role or the app never offers the Code tab.

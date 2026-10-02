@@ -223,11 +223,55 @@ const plan = PLANS[planName] || PLANS.max_20x;
 // can be the one that gates the tab, so a paid plan declares Code in all of
 // them.
 const paidPlan = plan !== PLANS.free;
+
+// GrowthBook flags that can gate the Code / Cowork surfaces in the iOS app.
+// Names are taken from the app's own GrowthBookFeatures table (static analysis
+// of the binary), so every key here is one the app actually reads. Each feature
+// is emitted in the SDK shape the app's GrowthBookFeatureDefinition expects:
+// { key, defaultValue, rules }.
+const CODE_FLAGS = [
+  "mobile_remote_enabled",
+  "mobile_cowork_tab_enabled",
+  "claudeai_hub_code_sessions",
+  "claudeai_hub_cowork_session_chat",
+  "claudeai_code_warm_start",
+  "claudeai_code_usage_enabled",
+  "claudeai_code_session_drafts",
+  "claudeai_code_session_feedback",
+  "claudeai_code_sessions_widget_enabled",
+  "claudeai_code_sessions_widget_projects_enabled",
+  "claudeai_code_session_without_repo",
+  "claudeai_code_project_clawd",
+  "claudeai_code_project_drawer_pins",
+  "claudeai_code_project_opens_to_overview",
+  "claudeai_code_project_swipe_to_overview",
+  "claudeai_code_project_remote_control",
+  "claudeai_code_project_drive_folder_browser",
+  "claudeai_code_send_environment_setup",
+  "claudeai_code_collapse_long_user_messages",
+  "claudeai_code_routine_create_form",
+  "claudeai_drawer_search",
+  "claudeai_projects_nav_kill_switch",
+  "claudeai_projects_tab_skip_legacy_fetch",
+  "claudeai_continue_on_cloud",
+  "claudeai_single_attention_mark",
+];
+
+// Kill switches are named "..._kill_switch": they *disable* a surface when on,
+// so they get false; every other Code flag defaults to off in the real app and
+// we flip it on, making the empirical test unambiguous either way.
+function growthbookFeatures() {
+  if (!paidPlan) return {};
+  const features = {};
+  for (const key of CODE_FLAGS) {
+    const value = key.endsWith("_kill_switch") ? false : true;
+    features[key] = { key, defaultValue: value, rules: [] };
+  }
+  return features;
+}
+
 function orgGrowthbook() {
-  return {
-    features: paidPlan ? { mobile_remote_enabled: { defaultValue: true } } : {},
-    experiments: [],
-  };
+  return { features: growthbookFeatures(), experiments: [] };
 }
 
 function userAccess() {
@@ -344,7 +388,7 @@ async function handleAuth(request, response, url) {
     return true;
   }
   if (url.pathname === "/api/bootstrap" || url.pathname === "/api/bootstrap/device") {
-    sendJson(response, 200, { growthbook: { features: {}, experiments: [] } });
+    sendJson(response, 200, { growthbook: { features: growthbookFeatures(), experiments: [] } });
     return true;
   }
   if (url.pathname === "/api/supported_regions") {
