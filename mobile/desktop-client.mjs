@@ -4,6 +4,8 @@
 // to Desktop directly. The same Desktop sessions back the Claudesk web UI, so
 // anything created here shows up there and vice versa.
 
+import { randomUUID } from "node:crypto";
+
 const undefinedSentinelKey = "__claudeRemoteUndefinedV1";
 // Desktop validates IPC arguments positionally; the bridge decodes this
 // sentinel back to `undefined` (see encodeIpcValue in bridge/server.mjs).
@@ -108,19 +110,38 @@ export function createDesktopClient({
   }
 
   // Uploads bytes under /workspace/RemoteUploads and returns the server paths
-  // (same order as the input).
+  // (same order as the input). Each file is sent as a raw request body.
   async function upload(files) {
-    const payload = await request("/api/remote/files/upload", {
-      method: "POST",
-      body: {
-        files: files.map((file) => ({
-          relativePath: file.name,
-          dataBase64: Buffer.from(file.data).toString("base64"),
-        })),
-      },
-      timeoutMs: 120000,
-    });
-    return payload.value;
+    const batch = randomUUID();
+    const paths = [];
+    let batchRoot = "";
+    for (const file of files) {
+      let response;
+      let payload;
+      try {
+        response = await fetchImpl(
+          `${root}/api/remote/files/upload?batch=${batch}&path=${encodeURIComponent(file.name)}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/octet-stream" },
+            body: Buffer.from(file.data),
+            signal: AbortSignal.timeout(600000),
+          },
+        );
+        payload = await response.json().catch(() => ({}));
+      } catch (error) {
+        throw new DesktopError(`Claudesk bridge unreachable: ${error.message}`, 503);
+      }
+      if (!response.ok || payload?.ok === false) {
+        throw new DesktopError(
+          payload?.error || `Claudesk bridge returned HTTP ${response.status}`,
+          response.status >= 400 ? response.status : 502,
+        );
+      }
+      paths.push(payload.value.path);
+      batchRoot = payload.value.root;
+    }
+    return { paths, root: batchRoot };
   }
 
   // A short title for a new chat, written by Desktop the same way it does for

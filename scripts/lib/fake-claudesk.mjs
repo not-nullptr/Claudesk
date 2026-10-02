@@ -242,6 +242,17 @@ export async function startFakeClaudesk() {
         model_selector_state: [{ id: "chat", model: "stub-sonnet" }],
       });
     }
+    // Uploads are raw bodies, like the real bridge's streaming route.
+    if (request.method === "POST" && url.pathname === "/api/remote/files/upload") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const relativePath = url.searchParams.get("path");
+      const batch = url.searchParams.get("batch");
+      calls.push({ route: "upload", names: [relativePath], contentType: request.headers["content-type"] });
+      const root = `/workspace/RemoteUploads/${batch}`;
+      uploads.push({ path: `${root}/${relativePath}`, bytes: Buffer.concat(chunks) });
+      return json(200, { ok: true, value: { path: `${root}/${relativePath}`, root, bytes: uploads.at(-1).bytes.length } });
+    }
     let body = "";
     for await (const chunk of request) body += chunk;
     const parsed = body ? JSON.parse(body) : {};
@@ -249,15 +260,6 @@ export async function startFakeClaudesk() {
       calls.push({ route: "title", message: parsed.first_session_message, model: parsed.model });
       if (state.titleDelayMs) await new Promise((resolve) => setTimeout(resolve, state.titleDelayMs));
       return json(200, { title: state.titleResult ?? `Title for ${String(parsed.first_session_message).slice(0, 24)}` });
-    }
-    if (request.method === "POST" && url.pathname === "/api/remote/files/upload") {
-      calls.push({ route: "upload", names: parsed.files.map((file) => file.relativePath) });
-      const root = `/workspace/RemoteUploads/${randomUUID()}`;
-      const paths = parsed.files.map((file) => {
-        uploads.push({ path: `${root}/${file.relativePath}`, bytes: Buffer.from(file.dataBase64, "base64") });
-        return `${root}/${file.relativePath}`;
-      });
-      return json(200, { ok: true, value: { paths, root } });
     }
     if (request.method === "POST" && url.pathname === "/api/remote/ipc") {
       const args = decode(parsed.args) ?? [];

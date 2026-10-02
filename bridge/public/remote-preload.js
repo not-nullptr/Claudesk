@@ -476,20 +476,6 @@
     };
   }
 
-  function fileAsBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.addEventListener("load", () => {
-        const value = String(reader.result || "");
-        const separator = value.indexOf(",");
-        if (separator < 0) reject(new Error("Browser file encoding failed"));
-        else resolve(value.slice(separator + 1));
-      }, { once: true });
-      reader.addEventListener("error", () => reject(reader.error || new Error("Browser file read failed")), { once: true });
-      reader.readAsDataURL(file);
-    });
-  }
-
   function chooseBrowserFiles({ directory = false, multiple = true } = {}) {
     return new Promise((resolve) => {
       const input = document.createElement("input");
@@ -519,21 +505,63 @@
     });
   }
 
+  let uploadLimitBytes = 0;
+
+  async function uploadLimit() {
+    if (uploadLimitBytes) return uploadLimitBytes;
+    try {
+      const response = await fetch("/api/remote/files/limits");
+      const payload = await response.json();
+      uploadLimitBytes = Number(payload?.value?.maxBytes) || 0;
+    } catch {
+      // The server enforces the limit regardless; this only gives an early, clear error.
+    }
+    return uploadLimitBytes;
+  }
+
+  function formatUploadSize(bytes) {
+    if (bytes >= 1024 ** 3) return `${+(bytes / 1024 ** 3).toFixed(2)} GiB`;
+    if (bytes >= 1024 ** 2) return `${+(bytes / 1024 ** 2).toFixed(2)} MiB`;
+    return `${Math.ceil(bytes / 1024)} KiB`;
+  }
+
+  function newUploadBatchId() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  // Each file is sent as its own request with the raw file as the body, which
+  // the browser streams from disk; the server writes it to disk as it arrives.
+  // Files of one call share a batch id and so one server directory.
   async function uploadBrowserFiles(files) {
     if (!files.length) return null;
-    const payload = [];
-    let totalSize = 0;
-    for (const file of files) {
-      totalSize += file.size;
-      if (totalSize > 50 * 1024 * 1024) {
-        throw new Error("The selected files exceed the 50 MiB upload limit");
-      }
-      payload.push({
-        dataBase64: await fileAsBase64(file),
-        relativePath: file.webkitRelativePath || file.name,
-      });
+    const limit = await uploadLimit();
+    const totalSize = Array.from(files).reduce((sum, file) => sum + file.size, 0);
+    if (limit && totalSize > limit) {
+      throw new Error(`The selected files exceed the ${formatUploadSize(limit)} upload limit`);
     }
-    return bridgeRequest("/api/remote/files/upload", { files: payload });
+    const batch = newUploadBatchId();
+    const paths = [];
+    let batchRoot = "";
+    for (const file of files) {
+      const relativePath = file.webkitRelativePath || file.name;
+      const response = await fetch(
+        `/api/remote/files/upload?batch=${batch}&path=${encodeURIComponent(relativePath)}`,
+        { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `Upload of ${relativePath} failed (HTTP ${response.status})`);
+      }
+      paths.push(payload.value.path);
+      batchRoot = payload.value.root;
+    }
+    const firstParts = (files[0].webkitRelativePath || files[0].name).replaceAll("\\", "/").split("/");
+    return { paths, root: firstParts.length > 1 ? `${batchRoot}/${firstParts[0]}` : batchRoot };
   }
 
   async function browseBrowserFiles(directory) {

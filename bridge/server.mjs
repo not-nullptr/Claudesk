@@ -1,10 +1,11 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, extname, normalize, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { createDownloadHandler } from "./downloads.mjs";
+import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
 
@@ -709,6 +710,11 @@ function isDocumentNavigation(request) {
 }
 
 const realtime = createRealtimeController({ desktop, isChatSession, ApiError });
+const uploads = createUploadHandler({
+  ApiError,
+  workspaceRoot,
+  maxBytes: parseUploadLimit(process.env.COWORK_UPLOAD_MAX_BYTES),
+});
 const handleDownload = createDownloadHandler({
   ApiError,
   artifactsRoot,
@@ -737,76 +743,6 @@ async function readRequestBuffer(request, maxSize = 1024 * 1024) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
-}
-
-function validateUploadRelativePath(value) {
-  if (typeof value !== "string" || !value || value.length > 2048) {
-    throw new ApiError(400, "upload relative path is invalid");
-  }
-  const parts = value.replaceAll("\\", "/").split("/");
-  if (
-    parts.length > 64
-    || parts.some((part) => !part || part === "." || part === ".." || /[\u0000-\u001f]/.test(part))
-  ) {
-    throw new ApiError(400, "upload relative path is invalid");
-  }
-  return parts;
-}
-
-async function receiveBrowserUpload(request) {
-  const encoded = await readRequestBuffer(request, 72 * 1024 * 1024);
-  let body;
-  try {
-    body = JSON.parse(encoded.toString("utf8"));
-  } catch {
-    throw new ApiError(400, "upload request must be valid JSON");
-  }
-  if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > 128) {
-    throw new ApiError(400, "upload files must be a non-empty array");
-  }
-
-  const uploadsRoot = resolve(workspaceRoot, "RemoteUploads");
-  const uploadRoot = resolve(uploadsRoot, randomUUID());
-  try {
-    await mkdir(uploadsRoot, { recursive: true });
-    await mkdir(uploadRoot, { recursive: false });
-  } catch (error) {
-    console.error(`[bridge] cannot create ${uploadRoot}: ${error.message}`);
-    throw new ApiError(
-      500,
-      `The server cannot store uploads in ${uploadsRoot} (${error.code || "error"}). `
-      + `The bridge runs as uid ${process.getuid?.()}; it must match the owner of /workspace (PUID/PGID).`,
-    );
-  }
-  const uploaded = [];
-  let decodedBytes = 0;
-  for (const file of body.files) {
-    const parts = validateUploadRelativePath(file?.relativePath);
-    if (
-      typeof file?.dataBase64 !== "string"
-      || file.dataBase64.length > 70 * 1024 * 1024
-      || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.dataBase64)
-    ) {
-      throw new ApiError(400, "upload file data is invalid");
-    }
-    const data = Buffer.from(file.dataBase64, "base64");
-    decodedBytes += data.length;
-    if (decodedBytes > 50 * 1024 * 1024) {
-      throw new ApiError(413, "uploaded files exceed the 50 MiB batch limit");
-    }
-    const target = resolve(uploadRoot, ...parts);
-    if (!target.startsWith(`${uploadRoot}/`)) {
-      throw new ApiError(400, "upload target is invalid");
-    }
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, data, { flag: "wx", mode: 0o600 });
-    uploaded.push(target);
-  }
-  const firstParts = validateUploadRelativePath(body.files[0].relativePath);
-  const commonRoot = firstParts.length > 1
-    ? resolve(uploadRoot, firstParts[0])
-    : uploadRoot;
-  return { paths: uploaded, root: commonRoot };
 }
 
 function validateStoreRead(surface, store) {
@@ -1057,17 +993,21 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/remote/files/limits") {
+    sendJson(response, 200, { ok: true, value: uploads.limits() });
+    return;
+  }
   if (request.method === "POST" && url.pathname === "/api/remote/files/upload") {
-    const value = await receiveBrowserUpload(request);
+    const value = await uploads.receive(request, response, url);
     sendJson(response, 200, { ok: true, value });
     return;
   }
   if (await handleDownload(request, response, url)) return;
 
   if (request.method === "POST" && url.pathname === "/api/remote/ipc") {
-    // Official Desktop carries image attachments as base64 in send/start IPC.
-    // A 50 MiB attachment expands to roughly 67 MiB in JSON, so this route
-    // needs the same bounded allowance as the dedicated browser upload route.
+    // Official Desktop carries image attachments as base64 in send/start IPC,
+    // so this route needs a larger bounded allowance than other JSON routes.
+    // Files go through the streaming upload route instead.
     const body = await readJson(request, 72 * 1024 * 1024);
     validateInvocation(body.surface, body.method, body.args ?? []);
     const startedAt = Date.now();
@@ -1646,6 +1586,10 @@ const server = http.createServer(async (request, response) => {
     }
   }
 });
+
+// Node ends any request that takes longer than five minutes to arrive, which a
+// large upload over a slow link can exceed. Headers must still arrive in time.
+server.requestTimeout = 0;
 
 server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
