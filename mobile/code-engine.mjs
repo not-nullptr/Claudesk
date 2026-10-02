@@ -51,33 +51,55 @@ function asCodeError(error) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Arguments for each LocalSessions IPC call, in one place. See
- * docs/mobile-code-full-parity.md §7: the exact shapes are settled by the live
- * probe, and this is the only place that changes when they are.
+ * Arguments for each LocalSessions IPC call, in one place.
+ *
+ * These are no longer guesses. Desktop's own IPC schema is readable from the
+ * installed app's ASAR (`/usr/lib/claude-desktop/resources/app.asar` →
+ * `/.vite/build/index.chunk-*.js`): each interface registers as
+ * `[methodName, [[paramName, validator], ...], resultValidator]`, and the
+ * validators are `F = typeof === "string"`, `L = optional`, `z = array-of`.
+ * The signatures below are transcribed from that registry, so a mismatch here
+ * is a bug against a known contract rather than an unknown.
+ *
+ * `sessionId` is a plain string everywhere — no prefix or brand — so the
+ * facade's `code_` tag is stripped before the call and never leaves this file.
  */
 const ipcArgs = {
-  getAll: () => [[]],
+  getAll: () => [],
   getSession: (desktopId) => [desktopId],
   getTranscript: (desktopId) => [desktopId],
-  start: (desktopId, { message, messageUuid, model, title }) => [{
-    sessionId: desktopId,
+  // `start` takes one argument named `info`; its validator requires BOTH
+  // `cwd` and `message` to be strings. Omitting `cwd` is what made every
+  // earlier probe shape fail identically ("Argument \"info\" at position 0").
+  start: (desktopId, { cwd, message, messageUuid, model, title }) => [{
+    cwd,
     message,
-    messageUuid,
+    sessionId: desktopId,
+    ...(messageUuid ? { messageUuid } : {}),
     ...(model ? { model } : {}),
     ...(title ? { title } : {}),
-    sessionType: "code",
   }],
-  // sendMessage's tail arguments mirror the Chat surface (images, files,
-  // folders, uuid, thinking flags); Code sends text only.
+  // The Code surface has no positional gap before `messageUuid` (unlike Chat):
+  // it is simply the next optional argument after `message`.
   sendMessage: (desktopId, { message, messageUuid }) => [desktopId, message, undefined, undefined, messageUuid],
   interrupt: (desktopId) => [desktopId],
   delete: (desktopId) => [desktopId],
   setModel: (desktopId, model) => [desktopId, model],
-  setEffort: (desktopId, effort) => [desktopId, effort],
+  // The parameter is `effortLevel`, not `effort` (positional, so it still
+  // transmits — named correctly here for the record).
+  setEffort: (desktopId, effortLevel) => [desktopId, effortLevel],
   setPermissionMode: (desktopId, mode) => [desktopId, mode],
   updateSession: (desktopId, patch) => [desktopId, patch],
   archive: (desktopId) => [desktopId],
-  respondToToolPermission: (desktopId, requestId, behavior) => [desktopId, requestId, behavior],
+  // Two arguments, `requestId` first — NOT sessionId-first — and the second is
+  // `decision`, whose values are `once | always | deny` (read off Desktop's own
+  // call site). `updatedInput` is an optional third, sent only with an edit.
+  respondToToolPermission: (requestId, decision, updatedInput) => [
+    requestId,
+    decision,
+    ...(updatedInput === undefined ? [] : [updatedInput]),
+  ],
+  getDefaultWorkspaceFolders: () => [],
 };
 
 export function createCodeEngine({
@@ -240,6 +262,24 @@ export function createCodeEngine({
     return desktop.ipc(SURFACE, "getSession", ipcArgs.getSession(desktopId));
   }
 
+  // `start` requires a `cwd`, and it must be a path Desktop can actually use
+  // (it is a real filesystem read on the Desktop side, not a label). Prefer
+  // what the caller asked for, then Desktop's own default workspace folder,
+  // then the directory the environment leg already advertises.
+  let cachedDefaultCwd = null;
+  async function resolveCwd(requested = null) {
+    if (requested) return String(requested);
+    if (cachedDefaultCwd) return cachedDefaultCwd;
+    let folders = [];
+    try {
+      folders = (await desktop.ipc(SURFACE, "getDefaultWorkspaceFolders", ipcArgs.getDefaultWorkspaceFolders())) || [];
+    } catch (error) {
+      log.error(`[mobile-code] cannot read default workspace folders: ${error.message}`);
+    }
+    cachedDefaultCwd = (Array.isArray(folders) && folders.find((folder) => typeof folder === "string")) || "/workspace";
+    return cachedDefaultCwd;
+  }
+
   async function fetchTranscript(desktopId) {
     return (await desktop.ipc(SURFACE, "getTranscript", ipcArgs.getTranscript(desktopId))) || [];
   }
@@ -340,18 +380,16 @@ export function createCodeEngine({
       if (error instanceof CodeError) throw error;
       // getSession on an unknown id is expected to fail; that is the happy path.
     }
-    const patch = {};
-    if (title) patch.title = String(title).slice(0, 200);
-    if (cwd) patch.cwd = cwd;
-    if (Object.keys(patch).length) {
-      try {
-        await desktop.ipc(SURFACE, "updateSession", ipcArgs.updateSession(desktopId, patch));
-      } catch (error) {
-        log.error(`[mobile-code] cannot prepare session: ${error.message}`);
-      }
-    }
+    // A Code session is created by Desktop's `start`, which needs the first
+    // message — so there is nothing to create yet at this point. Record the
+    // caller's intent in meta and let the first `sendMessage` run `start` with
+    // it (see sendMessage below). `updateSession` is deliberately NOT called:
+    // Desktop rejects it for a session that does not exist, so the old code's
+    // "prepare the session" step only ever logged an error.
     await updateMeta(desktopId, (entry) => {
       entry.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
+      entry.cwd = cwd || entry.cwd || null;
+      if (title) entry.title = String(title).slice(0, 200);
     });
     const record = {
       sessionId: desktopId,
@@ -461,11 +499,13 @@ export function createCodeEngine({
     const exists = Boolean(loaded?.session);
     try {
       if (!exists) {
+        const meta = (await loadMeta()).sessions[desktopId];
         await desktop.ipc(SURFACE, "start", ipcArgs.start(desktopId, {
+          cwd: await resolveCwd(loaded?.session?.cwd ?? meta?.cwd ?? null),
           message: body,
           messageUuid,
-          model: loaded?.session?.model ?? undefined,
-          title: body.replace(/\s+/g, " ").trim().slice(0, 60),
+          model: loaded?.session?.model ?? meta?.model ?? undefined,
+          title: meta?.title || body.replace(/\s+/g, " ").trim().slice(0, 60),
         }));
       } else {
         if (interrupt) await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId)).catch(() => {});
@@ -524,11 +564,21 @@ export function createCodeEngine({
       .map(([requestId, request]) => ({ request_id: requestId, session_id: codeIdFor(desktopId), payload: request.payload }));
   }
 
+  // Desktop's `decision` is one of `once | always | deny`; the app's own
+  // vocabulary ("allow"/"deny"/"allow_always") is mapped onto those here. A
+  // wrong value would validate (the parameter is a plain string) and then be
+  // ignored downstream, so an unknown one is rejected loudly instead.
+  const PERMISSION_DECISIONS = { allow: "once", allow_once: "once", allow_always: "always", always: "always", deny: "deny" };
+
   async function respondToPermission(id, requestId, behavior = "allow") {
     const desktopId = desktopSessionIdFor(id);
     if (!desktopId) throw notFound();
+    const decision = PERMISSION_DECISIONS[behavior];
+    if (!decision) {
+      throw new CodeError(`unknown permission decision: ${behavior}`, 400, "invalid_request_error");
+    }
     try {
-      await desktop.ipc(SURFACE, "respondToToolPermission", ipcArgs.respondToToolPermission(desktopId, requestId, behavior));
+      await desktop.ipc(SURFACE, "respondToToolPermission", ipcArgs.respondToToolPermission(requestId, decision));
     } catch (error) {
       throw asCodeError(error);
     }

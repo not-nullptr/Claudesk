@@ -78,7 +78,12 @@ export const BRIDGE_SPAWN_MODE = Object.freeze({
 export function sessionStatusOf(record, { pendingApproval = false } = {}) {
   if (pendingApproval) return SESSION_STATUS.requiresAction;
   if (record?.isArchived) return SESSION_STATUS.archived;
-  if (record?.isRunning) return SESSION_STATUS.running;
+  // Desktop's session object has both `isRunning` (the process is live) and
+  // `turnRunning` (a turn is actually in flight). The app's "running" means the
+  // latter: a warm-but-idle session should read as idle, not spinning. Fall
+  // back to `isRunning` when `turnRunning` is absent.
+  const busy = record?.turnRunning === undefined ? record?.isRunning : record?.turnRunning;
+  if (busy) return SESSION_STATUS.running;
   const raw = typeof record?.status === "string" ? record.status : "";
   if (Object.values(SESSION_STATUS).includes(raw)) return raw;
   return SESSION_STATUS.idle;

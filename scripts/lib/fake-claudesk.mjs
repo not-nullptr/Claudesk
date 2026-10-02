@@ -26,7 +26,7 @@ export async function startFakeClaudesk() {
   const uploads = [];
   const calls = [];
   const clients = new Set();
-  const state = { down: false, chunkDelayMs: 5, titleDelayMs: 0, titleResult: undefined };
+  const state = { down: false, chunkDelayMs: 5, titleDelayMs: 0, titleResult: undefined, codeWorkspaceFolder: "/workspace" };
 
   const models = [
     {
@@ -171,12 +171,25 @@ export async function startFakeClaudesk() {
   // "[tool]" runs a Bash tool round, "[permission]" asks for approval first.
   const codeSessions = new Map();
 
-  function addCodeSession({ sessionId = randomUUID(), title = "Untitled", model = "stub-sonnet" } = {}) {
+  function addCodeSession({ sessionId = randomUUID(), title = "Untitled", model = "stub-sonnet", cwd = state.codeWorkspaceFolder } = {}) {
     const now = Date.now();
     // No `sessionType`: the real `LocalSessions.getAll` rows carry none — the
     // surface is what makes them Code sessions. Mirroring that keeps the fake
-    // from hiding a filter that would drop every real session.
-    const session = { sessionId, title, model, isArchived: false, isRunning: false, createdAt: now, lastActivityAt: now, transcript: [] };
+    // from hiding a filter that would drop every real session. The fields below
+    // marked * are the ones Desktop's own result validator requires.
+    const session = {
+      sessionId, // *
+      cwd, // *
+      originCwd: cwd,
+      userSelectedFolders: [], // * (array of strings)
+      isRunning: false, // *
+      title,
+      model,
+      isArchived: false,
+      createdAt: now,
+      lastActivityAt: now,
+      transcript: [],
+    };
     codeSessions.set(sessionId, session);
     return session;
   }
@@ -192,6 +205,7 @@ export async function startFakeClaudesk() {
 
   async function runCodeTurn(session, { text, messageUuid, permission = false }) {
     session.isRunning = true;
+    session.turnRunning = true;
     pushCodeEntry(session, {
       uuid: messageUuid,
       type: "user",
@@ -206,6 +220,7 @@ export async function startFakeClaudesk() {
       const requestId = `req_${randomUUID()}`;
       codeRequests.set(requestId, { sessionId: session.sessionId, toolName: "Bash", input: { command: "ls" } });
       session.isRunning = false;
+      session.turnRunning = false;
       broadcast(
         { sessionId: session.sessionId, requestId, toolName: "Bash", input: { command: "ls" } },
         { surface: "LocalSessions", method: "onOnToolPermissionRequest" },
@@ -220,16 +235,28 @@ export async function startFakeClaudesk() {
     pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "s" }], stop_reason: "end_turn" } });
     pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `Echo: ${answer}` }], stop_reason: "end_turn" } });
     session.isRunning = false;
+      session.turnRunning = false;
   }
 
   const codeRequests = new Map();
+
+  // Desktop validates arguments before doing any work and names the offending
+  // parameter. Reproducing that here is the whole point: a wrong shape must be
+  // a loud offline failure, not something only the live bridge notices.
+  function ipcValidationError(iface, method, param, position) {
+    return new Error(`Argument "${param}" at position ${position} to method "${method}" in interface "${iface}" failed to pass validation`);
+  }
 
   const codeHandlers = {
     getAll: () => [...codeSessions.values()].map(summary),
     getSession: ([id]) => (codeSessions.has(id) ? summary(codeSessions.get(id)) : undefined),
     getTranscript: ([id]) => codeSessions.get(id)?.transcript ?? [],
+    // `start` takes one `info` object whose `cwd` and `message` are both
+    // required strings — verified from Desktop's own IPC schema.
     start: ([info]) => {
-      const session = addCodeSession({ sessionId: info.sessionId, title: info.title, model: info.model });
+      if (typeof info?.cwd !== "string") throw ipcValidationError("LocalSessions", "start", "info", 0);
+      if (typeof info?.message !== "string") throw ipcValidationError("LocalSessions", "start", "info", 0);
+      const session = addCodeSession({ sessionId: info.sessionId, title: info.title, model: info.model, cwd: info.cwd });
       void runCodeTurn(session, { text: info.message, messageUuid: info.messageUuid, permission: /\[permission\]/.test(info.message) });
       return { sessionId: info.sessionId };
     },
@@ -247,12 +274,18 @@ export async function startFakeClaudesk() {
       const session = codeSessions.get(id);
       if (session) session.isRunning = false;
     },
-    respondToToolPermission: ([id, requestId, behavior]) => {
+    // Two arguments, requestId first, and `decision` is one of
+    // once | always | deny — a wrong value would pass Desktop's (string)
+    // validator and be silently ignored, so it is rejected here instead.
+    respondToToolPermission: ([requestId, decision]) => {
+      if (!["once", "always", "deny"].includes(decision)) {
+        throw new Error(`invalid permission decision "${decision}"; expected once | always | deny`);
+      }
       const request = codeRequests.get(requestId);
       if (!request) throw new Error(`Permission "${requestId}" not found`);
       codeRequests.delete(requestId);
-      const session = codeSessions.get(id);
-      if (session) void runCodeTurn(session, { text: `(approved:${behavior})`, messageUuid: randomUUID() });
+      const session = codeSessions.get(request.sessionId);
+      if (session) void runCodeTurn(session, { text: `(approved:${decision})`, messageUuid: randomUUID() });
     },
     delete: ([id]) => { codeSessions.delete(id); },
     updateSession: ([id, options]) => {
@@ -264,10 +297,10 @@ export async function startFakeClaudesk() {
       if (!session) throw new Error(`Session "${id}" not found`);
       session.model = model;
     },
-    setEffort: ([id, effort]) => {
+    setEffort: ([id, effortLevel]) => {
       const session = codeSessions.get(id);
       if (!session) throw new Error(`Session "${id}" not found`);
-      session.effort = effort;
+      session.effort = effortLevel;
     },
     setPermissionMode: ([id, mode]) => {
       const session = codeSessions.get(id);
@@ -278,6 +311,7 @@ export async function startFakeClaudesk() {
       const session = codeSessions.get(id);
       if (session) session.isArchived = true;
     },
+    getDefaultWorkspaceFolders: () => [state.codeWorkspaceFolder],
   };
 
   const handlers = {

@@ -53,6 +53,10 @@ assert.equal(statusBucketOf(SESSION_STATUS.requiresAction), STATUS_BUCKET.blocke
 assert.equal(statusBucketOf(SESSION_STATUS.running), STATUS_BUCKET.working);
 assert.equal(statusBucketOf(SESSION_STATUS.idle), STATUS_BUCKET.completed);
 assert.equal(sessionStatusOf({ isRunning: true }), SESSION_STATUS.running);
+// Desktop has both `isRunning` (process live) and `turnRunning` (turn in
+// flight). A warm session with no turn in flight reads as idle, not running.
+assert.equal(sessionStatusOf({ isRunning: true, turnRunning: true }), SESSION_STATUS.running);
+assert.equal(sessionStatusOf({ isRunning: true, turnRunning: false }), SESSION_STATUS.idle, "a warm session with no turn in flight is idle");
 assert.equal(sessionStatusOf({ isArchived: true }), SESSION_STATUS.archived);
 assert.equal(sessionStatusOf({}), SESSION_STATUS.idle);
 assert.equal(sessionStatusOf({}, { pendingApproval: true }), SESSION_STATUS.requiresAction, "an open prompt outranks a running worker");

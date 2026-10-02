@@ -789,7 +789,10 @@ try {
   const startCall = claudesk.codeIpcCalls("start").at(-1);
   assert.ok(startCall, "the first message uses start on LocalSessions");
   assert.equal(startCall.args[0].sessionId, codeDesktopId, "the unprefixed Desktop id goes to Desktop");
-  assert.equal(startCall.args[0].sessionType, "code", "…and it is a Code session, not a chat");
+  // `cwd` is required by Desktop's `info` validator; without it every start
+  // shape fails. `sessionType` is NOT a field on this surface's rows.
+  assert.equal(typeof startCall.args[0].cwd, "string", "start carries the required cwd");
+  assert.equal(startCall.args[0].sessionType, undefined, "…and no sessionType, which this surface does not use");
 
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
 
@@ -909,7 +912,12 @@ try {
     { method: "POST", body: { behavior: "allow" } },
   );
   assert.equal(answered.status, 200);
-  assert.equal(claudesk.codeIpcCalls("respondToToolPermission").at(-1).args[1], prompts.prompts[0].request_id);
+  // Desktop's signature is `(requestId, decision)` — requestId FIRST, no
+  // sessionId — and the decision is one of once | always | deny.
+  const respondCall = claudesk.codeIpcCalls("respondToToolPermission").at(-1);
+  assert.equal(respondCall.args[0], prompts.prompts[0].request_id, "requestId is the first argument");
+  assert.equal(respondCall.args[1], "once", "the app's 'allow' maps to Desktop's 'once'");
+  assert.equal(respondCall.args.length, 2, "…and no sessionId is sent");
   await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length === 0,
     "the prompt to clear once answered");
 
@@ -920,6 +928,23 @@ try {
   const codeDeleted = await call(codePath(manualCodeId), { method: "DELETE" });
   assert.equal(codeDeleted.status, 200);
   assert.ok(!claudesk.codeSessions.has(manualId), "delete removes the Desktop session");
+
+  // The fake bridge now reproduces Desktop's own argument validation, so the
+  // shape bugs that only the live bridge used to catch fail here instead. These
+  // two guard the contract directly: a start without `cwd` is rejected, and a
+  // permission decision outside once|always|deny is rejected.
+  const badStart = await fetch(`${claudesk.url}/api/remote/ipc`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ surface: "LocalSessions", method: "start", args: [{ message: "no cwd" }] }),
+  }).then((r) => r.json());
+  assert.match(badStart.error, /failed to pass validation/, "a start without cwd fails validation like Desktop");
+  const badDecision = await fetch(`${claudesk.url}/api/remote/ipc`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ surface: "LocalSessions", method: "respondToToolPermission", args: ["req_x", "allow"] }),
+  }).then((r) => r.json());
+  assert.match(badDecision.error, /invalid permission decision/, "a raw 'allow' decision is refused");
 
   // The out-of-scope legs answer 200 with empty envelopes, not 404s, so those
   // screens render empty states instead of errors.

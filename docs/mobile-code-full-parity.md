@@ -152,39 +152,81 @@ Two things are **not** implemented here and answer clean empty states rather
 than 404s, so those screens render: routines/triggers/channels, projects, the
 git/PR/diff legs, and self-hosted runner pools.
 
-## 7. Open questions to settle on a live bridge
+## 7. The Desktop IPC contract (read from the app, not guessed)
 
-These need `scripts/code-session-probe.mjs` against a real Desktop (they cannot
-be read from the binary). The facade is written **against the fake bridge** in
-`scripts/lib/fake-claudesk.mjs`, which implements the shapes below; each is
-isolated so a probe result only touches one place.
+The `LocalSessions` argument shapes are **not** recoverable from the iOS binary
+and do not need to be probed: they are in the **installed Desktop app's ASAR**,
+in this container at
 
-The 2026-10 probe run (`/tmp/desktop-code-probe.json`, 18 live sessions) settled
-the first batch:
+```
+/usr/lib/claude-desktop/resources/app.asar
+  → /.vite/build/index.chunk-<hash>.js
+```
 
-| # | Question | Where the answer lives | Status |
-|---|---|---|---|
-| 5 | Whether `getAll` mixes Chat/Cowork/Code rows | `code-engine.mjs` `listSessions` filter | **settled — it does not.** `LocalSessions.getAll` returned 18 sessions, all `local_…`, and **none carried a `sessionType`**. The surface *is* the discriminator, so the filter now keeps every row with an id. (The old `sessionType === "code"` test dropped all 18.) |
-| 6 | Whether the paired Desktop needs an `environment` before a session can start | `code-transcript.mjs` `bridgeEnvironment` | **settled — no.** Real Code sessions already exist and are addressable by `getSession` with a plain `local_…` id; the bridge device is offered as a runner, not provisioned before use. |
-| 7 | Which prefix Code session ids use | `code-ids.mjs` | **settled — `local_<uuid>`, the same prefix as Chat.** Collisions are avoided by surface, never by prefix: `code_` is a facade-level tag stripped before every IPC call, and the chat legs are backed by a different Desktop surface, so a `local_` id reaching the Code routes can only mean a Code session. |
-| 8 | What the `mode=code` event stream emits | `code-events.mjs` | **partly settled.** It opens with a `sessions` snapshot `{chat, cowork, observedAt}` — but note those buckets come from `bridge/realtime.mjs`'s `pollState`, which reads `LocalAgentModeSessions.getAll`, i.e. the *Chat* surface. Per-session `LocalSessions.onOnEvent` frames still need a live turn to observe. |
-| 9 | The real create path | `code-engine.mjs` `ipcArgs.start` | **open, and now the only blocker.** All four first-round shapes were rejected with `Argument "info" at position 0 to method "start" ... failed to pass validation`, which names the argument but not its contents. The probe now leads with `info`-object shapes and, if all fail, tries `createSession`/`warmSession` and records which the surface accepts. |
-| 1 | Arg order/shape of `getTranscript` vs `getTranscriptTail` | `code-engine.mjs` `ipcArgs.getTranscript` | open — the first probe run never got a session to read; assumes `[sessionId]` → full entry array |
-| 2 | Whether `sendMessage` returns a message id or only an ack | `code-engine.mjs` `sendMessage` return | open — ack synthesized from the `clientMessageId` the app sent |
-| 3 | Which `onOnEvent` payloads are `upserted` vs `deleted` | `code-events.mjs` `frameFromPayload` | open — assumes one entry per record, `removed`/`deleted` marks a removal |
-| 4 | Tool-call payload → `ToolCall` field mapping | `code-transcript.mjs` `toolCallFromUse` | open — reuses `blocks.mjs`, so a Code and a Chat tool row look the same |
+Each interface registers as `[method, [[paramName, validator], ...], resultValidator]`,
+and the validators are small combinators: `F = typeof === "string"`,
+`L = optional` (undefined or inner), `R = nullable`, `z = array-of`. The
+validator that raises `Argument "X" at position N to method "M" … failed to pass
+validation` walks those `[paramName, validator]` pairs — which is why the error
+names the *parameter* but never its shape, and why the earlier shape-guessing
+probe could not converge.
 
-Questions 1-4 are now reachable: they only need a session to exist, which the
-create-path fix unblocks.
+The signatures the facade depends on:
 
-Run it (it spends a few inference calls on the configured gateway and always
-deletes the session it created):
+| Method | Parameters |
+|---|---|
+| `start` | `info` — **`cwd: string` and `message: string` are both required**; optional include `sessionId`, `model`, `title`, `permissionMode`, `useWorktree`, `effort`, `fastMode`, `mcpServers`, `attachments`, `additionalDirectories` |
+| `getAll` | *(none)* → array of session objects (`sessionId`, `cwd`, `originCwd`, `isRunning` required; no `sessionType`) |
+| `getSession` | `sessionId` |
+| `getTranscript` | `sessionId` → array of entries |
+| `getTranscriptTail` | `sessionId`, `limit` (number) |
+| `sendMessage` | `sessionId`, `message`, then optional tails (`images`, `userSelectedFiles`, `messageUuid`, …) — **no positional gap** |
+| `interrupt` / `stop` | `sessionId` |
+| `delete` | `sessionId` |
+| `setModel` | `sessionId`, `model` |
+| `setEffort` | `sessionId`, **`effortLevel`** |
+| `setPermissionMode` | `sessionId`, `mode` (`default\|acceptEdits\|plan\|bypassPermissions\|dontAsk\|auto`) |
+| `updateSession` | `sessionId`, `options` (all fields optional; **rejected for a session that does not exist**) |
+| `respondToToolPermission` | **`requestId`, `decision`** (+ optional `updatedInput`) — two args, `requestId` first, **no `sessionId`**. `decision ∈ once \| always \| deny` |
+| `getDefaultWorkspaceFolders` | *(none)* → `string[]` — the source of a new session's `cwd` |
+
+`sessionId` is a plain string everywhere: no prefix, no regex, no brand. The
+`code_` tag is therefore purely the facade's own convention, never sent to
+Desktop.
+
+### Corrections this produced
+
+Five bugs passed against the fake bridge and could only fail live; all are fixed
+and now guarded offline, because `scripts/lib/fake-claudesk.mjs` reproduces
+Desktop's validation:
+
+1. `start` sent no `cwd` — the single reason every probe shape was rejected.
+2. `respondToToolPermission` sent `(sessionId, requestId, behavior)`; the real
+   call is `(requestId, decision)` with `decision ∈ once|always|deny`. The old
+   `"allow"` would have validated (plain string) and been silently ignored.
+3. `createSession` fabricated a session Desktop had never heard of; the first
+   `sendMessage` is what actually creates one.
+4. `sendMessage` inserted a positional `undefined` gap copied from Chat.
+5. `setEffort`'s parameter is named `effortLevel`.
+
+Also corrected against the live surface: **`getAll` rows carry no `sessionType`**
+(18 real rows, all `local_…`), so filtering on `sessionType === "code"` dropped
+every session — the surface is the discriminator. And **Code ids are `local_<uuid>`**,
+the same prefix Chat uses; collisions are avoided by surface, not by prefix.
+
+### What is still open
+
+Only the **listener payloads**, which the type schema does not describe:
+`onOnEvent`'s framing (entry vs wrapper, and what marks a removal) and
+`onOnToolPermissionRequest`'s payload. `scripts/code-session-probe.mjs` is now a
+small live watcher for exactly those — it starts one real session (with the
+verified `{cwd, message}`), records both listeners, and deletes the session.
 
 ```sh
 CLAUDE_REMOTE_CODE_ACTIONS=1 \
-CLAUDE_MOBILE_DESKTOP_URL=http://127.0.0.1:8080 \
+CLAUDE_MOBILE_DESKTOP_URL=http://127.0.0.1:15821 \
   node scripts/code-session-probe.mjs --tools --out /tmp/desktop-code-probe.json
 ```
 
-`--tools` also provokes a permission prompt so `respondToToolPermission`'s
-arguments and the `onOnToolPermissionRequest` payload are recorded.
+`--tools` also provokes a permission prompt. From the host, use the published
+port (15821), not the in-network 8080.
