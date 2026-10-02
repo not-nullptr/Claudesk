@@ -310,6 +310,47 @@ function organizationObject() {
   };
 }
 
+// The org usage card. Shape recovered from the IPA's `UsageResponse` coding
+// keys: `limits` is a list of `MessageLimit` windows (`fiveHour`, `sevenDay`,
+// `sevenDayOpus`, `sevenDaySonnet`, `overage`), each a `MessageLimitWindow`
+// (`status`, `resetsAt`, `utilization`, `surpassedThreshold`, `period`,
+// `limitScope`, `groupUuid`); `spend` and `extraUsage` are the credit blocks.
+//
+// This deployment has no metered upstream — Claudesk forwards to the account's
+// own gateway — so reporting every window at zero utilization is the honest
+// answer, and it renders as "no usage" rather than erroring.
+function usageObject() {
+  const window = (period, limitScope) => ({
+    status: "allowed",
+    resets_at: null,
+    utilization: 0,
+    surpassed_threshold: false,
+    period,
+    limit_scope: limitScope,
+    group_uuid: null,
+  });
+  return {
+    limits: [
+      window("five_hour", "session"),
+      window("seven_day", "weekly_all"),
+      window("seven_day_opus", "weekly_model"),
+      window("seven_day_sonnet", "weekly_model"),
+    ],
+    spend: {
+      monthly_credit_limit: null,
+      is_enabled: false,
+      cap: null,
+      out_of_credits: false,
+      disabled_until: null,
+    },
+    extra_usage: {
+      is_enabled: false,
+      monthly_credit_limit: null,
+      spend: null,
+    },
+  };
+}
+
 function isSecureRequest(request) {
   return request.headers["x-forwarded-proto"] === "https"
     || (request.socket?.encrypted ?? false);
@@ -469,6 +510,10 @@ async function handleAccountRoutes(request, response, url) {
   }
   if (path === "/api/organizations") {
     sendJson(response, 200, [organizationObject()]);
+    return true;
+  }
+  if (/^\/api\/organizations\/[0-9a-f-]{36}\/usage$/i.test(path)) {
+    sendJson(response, 200, usageObject());
     return true;
   }
   if (path === "/api/account/settings") {
@@ -794,6 +839,16 @@ async function handleCodeRoutes(request, response, url) {
     return true;
   }
 
+  // The app pushes its own client events (presence, attestation, the "I loaded
+  // these events" ack) to the same collection it reads history from. There is no
+  // upstream for them on this facade — Desktop owns the transcript — so accept
+  // and discard rather than 404, which is what made the detail screen error.
+  if (/^\/v1\/code\/sessions\/[^/]+\/events$/.test(path) && method === "POST") {
+    await readJson(request).catch(() => ({}));
+    sendJson(response, 200, {});
+    return true;
+  }
+
   const streamMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/messages\/stream$/);
   if (streamMatch && method === "POST") {
     await streamCodeMessage(request, response, url, streamMatch[1]);
@@ -812,10 +867,9 @@ async function handleCodeRoutes(request, response, url) {
   }
 
   // --- environments: the paired Desktop offered as a runner -------------------
-  const environmentMatch = path.match(
-    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i,
-  );
-  if (environmentMatch && method === "GET") {
+  const environmentsBase =
+    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i;
+  if (environmentsBase.test(path) && method === "GET") {
     const online = await desktopReady();
     sendJson(response, 200, {
       environments: [bridgeEnvironment({ online, cliVersion: desktopVersion() })],
@@ -823,6 +877,23 @@ async function handleCodeRoutes(request, response, url) {
       first_id: BRIDGE_ENVIRONMENT_ID,
       last_id: BRIDGE_ENVIRONMENT_ID,
     });
+    return true;
+  }
+
+  // The by-id read the detail screen makes to resolve the session's runner. It
+  // asks for `anthropic-bridge-local` (BRIDGE_ENVIRONMENT_ID) — the one record
+  // the list above advertises — and gets that single resource back.
+  const environmentByIdMatch = path.match(
+    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/([^/]+)$/i,
+  );
+  if (environmentByIdMatch && method === "GET") {
+    const id = decodeURIComponent(environmentByIdMatch[1]);
+    if (id !== BRIDGE_ENVIRONMENT_ID) {
+      sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
+      return true;
+    }
+    const online = await desktopReady();
+    sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
     return true;
   }
 
@@ -841,7 +912,11 @@ async function handleCodeRoutes(request, response, url) {
     sendJson(response, 200, {});
     return true;
   }
-  if (path.startsWith("/v1/code/github/") && method === "GET") {
+  // The app reaches these with GET and POST alike (`get-batch-branch-status` is
+  // a POST — it takes a list of refs in the body). Both answer the same empty
+  // envelope: an absent PR/branch list is a real state, a 404 is an error.
+  if (path.startsWith("/v1/code/github/")) {
+    if (method === "POST") await readJson(request).catch(() => ({}));
     sendJson(response, 200, { data: [], next_cursor: null });
     return true;
   }

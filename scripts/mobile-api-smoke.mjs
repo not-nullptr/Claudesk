@@ -1008,6 +1008,57 @@ try {
   }
   assert.equal((await call("/v1/code/shared-sessions")).status, 200);
 
+  // The git legs are reached with POST as well as GET (`get-batch-branch-status`
+  // takes the refs in its body); both must answer the empty envelope, because a
+  // 404 on this leg is what surfaced as "Something went wrong" on the detail
+  // screen's PR row.
+  for (const method of ["GET", "POST"]) {
+    const response = await call("/v1/code/github/get-batch-branch-status", {
+      method,
+      body: method === "POST" ? { refs: [{ repo: "o/r", ref: "main" }] } : undefined,
+    });
+    assert.equal(response.status, 200, `github get-batch-branch-status answers to ${method}`);
+    assert.deepEqual(await response.json(), { data: [], next_cursor: null });
+  }
+
+  // The app pushes its own client events to the collection it reads history
+  // from. The facade has no upstream to forward them to, but a 404 here broke
+  // the detail screen, so it must be accepted and discarded.
+  const pushedEvents = await call(codePath(createdResource.id, "/events"), {
+    method: "POST",
+    body: { events: [{ kind: "load_events" }] },
+  });
+  assert.equal(pushedEvents.status, 200, "client events are accepted, not 404");
+  assert.deepEqual(await pushedEvents.json(), {});
+
+  // The by-id environment read resolves the same single bridge device the list
+  // advertises; an unknown id is a real 404.
+  const environmentById = await call(
+    `/v1/environment_providers/private/organizations/${org.uuid}/environments/anthropic-bridge-local`,
+  );
+  assert.equal(environmentById.status, 200, "the by-id environment read answers");
+  const environmentResource = await environmentById.json();
+  assert.equal(environmentResource.environment_id, "anthropic-bridge-local");
+  assert.equal(environmentResource.kind, "bridge");
+  assert.equal(
+    (await call(`/v1/environment_providers/private/organizations/${org.uuid}/environments/nope`)).status,
+    404,
+    "an unknown environment id is still a 404",
+  );
+
+  // The org usage card. Its windows are the UsageResponse `limits` list; every
+  // window reports zero utilization on an unmetered self-hosted deployment.
+  const usage = await call(`/api/organizations/${org.uuid}/usage`);
+  assert.equal(usage.status, 200, "the org usage leg answers");
+  const usageBody = await usage.json();
+  assert.ok(Array.isArray(usageBody.limits) && usageBody.limits.length > 0, "usage carries windows");
+  for (const limit of usageBody.limits) {
+    assert.equal(limit.utilization, 0, "every usage window reports zero utilization");
+    assert.equal(limit.surpassed_threshold, false);
+    assert.ok(limit.period && limit.limit_scope, "each window names its period and scope");
+  }
+  assert.ok(usageBody.spend && usageBody.extra_usage, "usage carries the credit blocks");
+
   // Code sessions must never leak into the Chat surface, and vice versa.
   const chatsAfter = await (await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).json();
   assert.ok(chatsAfter.data.every((item) => !String(item.uuid).startsWith("code_")), "Code sessions stay out of the chat list");

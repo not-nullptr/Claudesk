@@ -49,13 +49,31 @@ GET    /v1/code/channels[/{id}]                channel (project/thread) list
 GET    /v1/code/triggers[/{id}]                routines
 GET    /v1/code/webhook-triggers
 GET    /v1/code/runners/self-hosted/pools
-GET    /v1/code/github/{compare-refs,get-batch-branch-status,get-file-content,
-                       pull-request,set-pr-auto-merge,submit-pull-request-review}
+GET    /v1/code/github/{compare-refs,get-file-content,pull-request}
+POST   /v1/code/github/{get-batch-branch-status,set-pr-auto-merge,
+                        submit-pull-request-review}   ← POST despite the name
 GET    /v1/code/repos/resync
 GET    /api/claude_code/organizations/{org}/…  (per-session sub-resources)
 GET    /api/organizations/{org}/experiences    banner leg
+GET    /api/organizations/{org}/usage          org usage card       (UsageResponse)
 GET    /v1/environment_providers/private/organizations/{org}/environments
+GET    /v1/environment_providers/private/organizations/{org}/environments/{id}
 ```
+
+Two of these were only found by watching the app's own traffic against the
+facade, because neither is a plain literal in the binary:
+
+- **`POST /v1/code/sessions/{id}/events`** — the app pushes its *own* client
+  events (presence, the "I loaded these events" ack, client attestation) to the
+  same collection it reads history from. `sendEventsHandler` and the event kinds
+  `load_events` / `send_events` / `ws_close` / `sse_probe` in the string pool are
+  what the app sends here. There is no upstream for them on the facade, but a
+  404 breaks the detail screen.
+- **`POST /v1/code/github/get-batch-branch-status`** — a POST (it carries the
+  refs in the body), reached alongside its GET siblings once a PR row exists.
+- **`GET …/environments/{id}`** — the by-id read the detail screen makes to
+  resolve a session's runner; it asks for the same `anthropic-bridge-local`
+  record the list advertises.
 
 Paging everywhere is `{data|rows, next_cursor, has_more}` (snake_case).
 
@@ -67,7 +85,17 @@ ClientEventsPage       rows, maxSequenceNum, newestEventId, nextCursor, hasMore
 ListClientEventsResponse  data, nextCursor
 SessionWatchFrame      event    (one frame per SSE record)
 SessionWatchEvent      upserted | deleted
+UsageResponse          limits, spend, extraUsage
+MessageLimit           status, resetsAt, remaining, overageInUse, notice,
+                       perModelLimit, overageStatus, overageResetsAt,
+                       windows, model     (windows: [MessageLimitWindow])
+MessageLimitWindow     status, resetsAt, utilization, surpassedThreshold,
+                       period, limitScope, groupUuid
 ```
+
+The usage card's window `period` values are `five_hour | seven_day |
+seven_day_opus | seven_day_sonnet | overage`; an unmetered self-hosted
+deployment reports every one at `utilization: 0`.
 
 So history = paged `ClientEventsPage` seeded by walking **down** from the newest
 `sequenceNum` until `hasMore == false`; live = `sessions/watch` SSE emitting a
