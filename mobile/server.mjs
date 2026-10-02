@@ -640,6 +640,14 @@ async function handleCodeRoutes(request, response, url) {
   const path = url.pathname;
   const method = request.method;
 
+  // One line per Code request, with what it answered. The Code tab fails as a
+  // single opaque "Something went wrong" on the phone, so the server log is the
+  // only place the failing leg is visible. Recorded after the response so the
+  // status is known; `trace` is the line itself, never request content.
+  const trace = (status) =>
+    console.log(`[mobile-code] ${method} ${path} -> ${status}`);
+  response.once("finish", () => trace(response.statusCode));
+
   async function fail(error) {
     const status = error?.status || 500;
     sendErrorEnvelope(response, status, error?.type || "internal", error?.message || "internal error");

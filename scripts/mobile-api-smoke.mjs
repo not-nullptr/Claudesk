@@ -842,6 +842,16 @@ try {
   assert.equal(codeListed.data[0].status, "idle");
   assert.equal(codeListed.data[0].status_bucket, "completed");
 
+  // The app's list filter vocabulary (`active|paused|archived`) is a different
+  // axis from a row's `status`; comparing them directly emptied the list. An
+  // `active` filter must keep a non-archived session, and `archived` must drop it.
+  const activeFiltered = await (await call("/v1/code/sessions?statuses=active")).json();
+  assert.equal(activeFiltered.data.length, 1, "an `active` filter keeps a live session");
+  const archivedFiltered = await (await call("/v1/code/sessions?statuses=archived")).json();
+  assert.equal(archivedFiltered.data.length, 0, "an `archived` filter drops a live session");
+  const bothFiltered = await (await call("/v1/code/sessions?statuses=active&statuses=archived")).json();
+  assert.equal(bothFiltered.data.length, 1, "repeated statuses are OR-ed, not AND-ed");
+
   // The watch leg pushes a frame per change; drive a turn and read one live.
   const watchPromise = call(codePath(createdResource.id, "/watch"));
   const watchRecordsPromise = watchPromise.then(async (response) => {

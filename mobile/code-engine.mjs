@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import { DesktopError } from "./desktop-client.mjs";
-import { codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
+import { SESSION_STATUS, codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
 import { eventEnvelopes, pageEvents, sessionResource, sessionResponse } from "./code-transcript.mjs";
 import { createCodeEventTranslator, isCodeRecord } from "./code-events.mjs";
 
@@ -345,8 +345,29 @@ export function createCodeEngine({
       });
     });
     if (Array.isArray(statuses) && statuses.length) {
-      const wanted = new Set(statuses);
-      rows = rows.filter((row) => wanted.has(row.status));
+      // `statuses` carries the app's *list filter* vocabulary
+      // (`SessionListStatusFilter`: active | paused | archived |
+      // provisionFailed), which is not the same axis as a row's `status`
+      // (`SessionStatus`: idle | running | requires_action | archived | …).
+      // Comparing them directly matched nothing, so any filtered request came
+      // back empty. Map the filter onto the row's own status instead.
+      const matches = (row, filter) => {
+        switch (filter) {
+          case "archived":
+            return row.status === SESSION_STATUS.archived;
+          case "active":
+            // Everything not archived: a live or finished session.
+            return row.status !== SESSION_STATUS.archived;
+          case "paused":
+            // Nothing in Desktop parks a Code session as "paused"; a session
+            // waiting on an approval is the closest thing, and it is already
+            // reported as requires_action.
+            return row.status === SESSION_STATUS.requiresAction;
+          default:
+            return row.status === filter;
+        }
+      };
+      rows = rows.filter((row) => statuses.some((filter) => matches(row, filter)));
     }
     if (Array.isArray(tags) && tags.length) {
       const wanted = new Set(tags);
