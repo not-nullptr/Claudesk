@@ -134,15 +134,48 @@ This is exactly the shape `mobile/engine.mjs` already uses for Chat
 in `mobile/server.mjs`, with the session record translated to `SessionResource`
 and the turn translated to `SessionEventEnvelope` / `ToolCall`.
 
+### What was built (this landing)
+
+| Module | Role |
+|---|---|
+| `mobile/code-ids.mjs` | `code_<desktopSessionId>` scheme and the enum literal tables + status/bucket/connection/worker derivations |
+| `mobile/code-transcript.mjs` | `SessionResponse`/`SessionResource`, transcript entry → `SessionEventEnvelope`, `ToolCall`, the cursor pager, and the bridge environment record |
+| `mobile/code-events.mjs` | live `LocalSessions.onOnEvent` records → `SessionWatchFrame` (upserted/deleted), with the per-session sequence counter |
+| `mobile/code-engine.mjs` | the engine: list/create/detail/update/delete, history paging, send, interrupt, permissions, live watch, `code-meta.json` |
+
+The id scheme is deliberately distinct from Chat's `local_<uuid>`: a Code
+session is `code_<desktopSessionId>`, so the two can never be confused and a
+Desktop id is never adopted by the wrong surface. Both still satisfy the
+bridge's `^[A-Za-z0-9_-]+$` sessionId charset.
+
+Two things are **not** implemented here and answer clean empty states rather
+than 404s, so those screens render: routines/triggers/channels, projects, the
+git/PR/diff legs, and self-hosted runner pools.
+
 ## 7. Open questions to settle on a live bridge
 
-These need `desktop-session-probe.mjs` against a real Desktop (they cannot be
-read from the binary):
+These need `scripts/code-session-probe.mjs` against a real Desktop (they cannot
+be read from the binary). The facade is written **against the fake bridge** in
+`scripts/lib/fake-claudesk.mjs`, which implements the shapes below; each is
+isolated so a probe result only touches one place.
 
-1. Exact arg order/shape of `LocalSessions.getTranscript` vs `getTranscriptTail`
-   (`from_sequence_num`? `limit`?) — the phone wants ascending-above-a-floor.
-2. Whether `LocalSessions.sendMessage` returns a message id or only an ack.
-3. Turn framing: which `onOnEvent` payload variants correspond to
-   `SessionWatchFrame.upserted` vs `deleted`.
-4. Tool-call payload → `ToolCall` field mapping (best-effort; the phone degrades
-   to plain text if fields are missing).
+| # | Question | Where the answer lives | Status |
+|---|---|---|---|
+| 1 | Arg order/shape of `getTranscript` vs `getTranscriptTail` | `code-engine.mjs` `ipcArgs.getTranscript` | open — assumes `[sessionId]` returning the full entry array |
+| 2 | Whether `sendMessage` returns a message id or only an ack | `code-engine.mjs` `sendMessage` return | open — the ack is synthesized from the `clientMessageId` the app sent |
+| 3 | Which `onOnEvent` payloads are `upserted` vs `deleted` | `code-events.mjs` `frameFromPayload` | open — assumes one entry per record, `removed`/`deleted` marks a removal |
+| 4 | Tool-call payload → `ToolCall` field mapping | `code-transcript.mjs` `toolCallFromUse` | open — reuses `blocks.mjs`, so a Code and a Chat tool row look the same |
+| 5 | Whether `getAll` mixes Chat/Cowork/Code rows | `code-engine.mjs` `listSessions` filter | open — filters on `sessionType === "code"` |
+| 6 | Whether the paired Desktop needs an `environment` before a session can start | `code-transcript.mjs` `bridgeEnvironment` | open — assumes not; sessions are created by the first `start` |
+
+Run it (it spends a few inference calls on the configured gateway and always
+deletes the session it created):
+
+```sh
+CLAUDE_REMOTE_CODE_ACTIONS=1 \
+CLAUDE_MOBILE_DESKTOP_URL=http://127.0.0.1:8080 \
+  node scripts/code-session-probe.mjs --tools --out /tmp/desktop-code-probe.json
+```
+
+`--tools` also provokes a permission prompt so `respondToToolPermission`'s
+arguments and the `onOnToolPermissionRequest` payload are recorded.
