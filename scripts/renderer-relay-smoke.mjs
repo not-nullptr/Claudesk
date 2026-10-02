@@ -29,14 +29,27 @@ vm.createContext(sandbox);
 vm.runInContext(section('function rendererCandidates()', 'async function evaluateInOfficialRenderer(')
   + section('async function ensureRelayedEventsRegistered()', 'async function drainRelayedEvents('), sandbox);
 await sandbox.ensureRelayedEventsRegistered();
-assert.deepEqual([...registered], [1, 2], 'embedded app views must register alongside the shell window');
+assert.deepEqual([...registered], [2], 'one embedded app view owns the broadcast relay');
+assert.equal(callbacks.has(1), false, 'shell must not duplicate app-view broadcasts');
 assert.equal(callbacks.has(3), false, 'external origins must not be injected');
 const original = callbacks.get(2);
 await sandbox.ensureRelayedEventsRegistered();
 assert.equal(callbacks.get(2), original, 'polling must not duplicate subscriptions');
-for (const text of ['turn one', 'turn two']) callbacks.get(2)({ type: 'message', sessionId: 'session', message: { text } });
+for (const text of ['turn one', 'turn two']) {
+  // Desktop broadcasts each event to every subscribed renderer.
+  for (const callback of callbacks.values()) callback({ type: 'message', sessionId: 'session', message: { text } });
+}
 assert.deepEqual(received.map(event => event.payload.message.text), ['turn one', 'turn two']);
 views[1].destroyed = true;
+callbacks.delete(2);
 await sandbox.ensureRelayedEventsRegistered();
 assert.equal(registered.has(2), false);
-console.log('renderer-relay-smoke: embedded views stream, shell and external origins are handled, subscriptions are not duplicated');
+assert.deepEqual([...registered], [1], 'a destroyed view fails over to the surviving shell');
+callbacks.get(1)({type:'message',sessionId:'session',message:{text:'after failover'}});
+assert.equal(received.at(-1).payload.message.text, 'after failover');
+// A newly opened view must not steal ownership while the shell is live.
+views[1].destroyed = false;
+await sandbox.ensureRelayedEventsRegistered();
+assert.deepEqual([...registered], [1]);
+assert.equal(callbacks.has(2), false);
+console.log('renderer-relay-smoke: one broadcast authority, embedded views preferred, failover and external-origin exclusion retained');

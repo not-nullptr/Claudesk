@@ -1514,12 +1514,17 @@ async function ensureRelayedEventsRegistered() {
     const current = webContents.fromId(id);
     if (!current || current.isDestroyed()) registeredRelayContentsIds.delete(id);
   }
+  // These are process-wide IPC broadcasts. Subscribing in both the shell and
+  // its embedded app view duplicates block starts/deltas in the browser feed.
+  // Keep one live authority; fail over only when that renderer disappears or
+  // reloads. Prefer the app view over the shell when starting registration.
+  if (registeredRelayContentsIds.size) return;
   const listeners = Object.fromEntries(
     [...relayedListeners].map(([surface, methods]) => [surface, [...methods]]),
   );
   const expression = `(() => {
     const root = globalThis["claude.web"];
-    if (!root?.LocalAgentModeSessions) return "__COWORK_BRIDGE_NOT_AVAILABLE__";
+    if (typeof root?.LocalAgentModeSessions?.onOnEvent !== "function") return "__COWORK_BRIDGE_NOT_AVAILABLE__";
     const relayKey = "__CLAUDE_REMOTE_EVENT_RELAY_V2__";
     if (!globalThis[relayKey]) {
       const relay = { unsubscribers: [] };
@@ -1552,13 +1557,16 @@ async function ensureRelayedEventsRegistered() {
   let lastError = null;
   const deadline = Date.now() + rendererReadyTimeoutMs;
   do {
-    for (const contents of rendererCandidates()) {
+    const candidates = rendererCandidates().sort((left, right) =>
+      Number(left.getType() === "window") - Number(right.getType() === "window"));
+    for (const contents of candidates) {
       if (registeredRelayContentsIds.has(contents.id)) continue;
       attachRelayConsole(contents);
       try {
         const registered = await contents.executeJavaScript(expression, true);
         if (registered === true) {
           registeredRelayContentsIds.add(contents.id);
+          return;
         }
       } catch (error) {
         lastError = error;
