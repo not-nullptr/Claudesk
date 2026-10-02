@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
   connectMethods,
@@ -260,12 +260,20 @@ const CODE_FLAGS = [
 // Kill switches are named "..._kill_switch": they *disable* a surface when on,
 // so they get false; every other Code flag defaults to off in the real app and
 // we flip it on, making the empirical test unambiguous either way.
+// The app's GrowthBook client evaluates features by hashing the flag name and
+// looking it up in the features map — base64(sha256(exact_key)), "=" padding
+// included. The map must therefore be keyed by the hash, with the plaintext
+// name kept in each feature's `key` for attribution.
+function hashedFeatureKey(key) {
+  return createHash("sha256").update(key, "utf8").digest("base64");
+}
+
 function growthbookFeatures() {
   if (!paidPlan) return {};
   const features = {};
   for (const key of CODE_FLAGS) {
     const value = key.endsWith("_kill_switch") ? false : true;
-    features[key] = { key, defaultValue: value, rules: [] };
+    features[hashedFeatureKey(key)] = { key, defaultValue: value, rules: [] };
   }
   return features;
 }

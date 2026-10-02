@@ -3,6 +3,7 @@
 // inference gateway, runs the facade in-process, and drives the
 // device-confirmed sequence plus a Connect probe. See docs/mobile-spec.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,13 +152,18 @@ try {
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
   // Every Code-relevant growthbook flag must be declared on a paid plan, in the
   // SDK shape the app's GrowthBookFeatureDefinition decodes ({ key, defaultValue,
-  // rules }). The kill switch is the one flag that must stay off.
+  // rules }). The app's client hashes the flag name (base64(sha256(exact_key)),
+  // "=" padding included) and looks it up in the features map, so the map must
+  // be keyed by the hash — sha256("mobile_remote_enabled") is hard-coded here to
+  // catch a truncation or padding change. The kill switch must stay off.
+  const hashedKey = (name) => createHash("sha256").update(name, "utf8").digest("base64");
   const gb = bootstrap.org_growthbook.features;
-  assert.deepEqual(gb.mobile_remote_enabled, { key: "mobile_remote_enabled", defaultValue: true, rules: [] });
-  assert.deepEqual(gb.mobile_cowork_tab_enabled, { key: "mobile_cowork_tab_enabled", defaultValue: true, rules: [] });
-  assert.deepEqual(gb.claudeai_hub_code_sessions, { key: "claudeai_hub_code_sessions", defaultValue: true, rules: [] });
-  assert.deepEqual(gb.claudeai_projects_nav_kill_switch, { key: "claudeai_projects_nav_kill_switch", defaultValue: false, rules: [] });
-  assert.ok(Object.values(gb).every((f) => "key" in f && "defaultValue" in f && "rules" in f), "every feature uses the SDK shape");
+  assert.equal(gb["/OPPJjAiEpYsGXP+aHJjqhqjyrSLYaaLpql/T6dzsQA="].key, "mobile_remote_enabled");
+  assert.deepEqual(gb["/OPPJjAiEpYsGXP+aHJjqhqjyrSLYaaLpql/T6dzsQA="], { key: "mobile_remote_enabled", defaultValue: true, rules: [] });
+  assert.deepEqual(gb[hashedKey("mobile_cowork_tab_enabled")], { key: "mobile_cowork_tab_enabled", defaultValue: true, rules: [] });
+  assert.deepEqual(gb[hashedKey("claudeai_hub_code_sessions")], { key: "claudeai_hub_code_sessions", defaultValue: true, rules: [] });
+  assert.deepEqual(gb[hashedKey("claudeai_projects_nav_kill_switch")], { key: "claudeai_projects_nav_kill_switch", defaultValue: false, rules: [] });
+  assert.ok(Object.keys(gb).every((k) => hashedKey(gb[k].key) === k), "every feature is keyed by base64(sha256(its key))");
   assert.deepEqual(bootstrap.current_user_access.features, [{ feature: "claude_code_web", status: "available" }]);
   // Code access must be declared on all three access surfaces, and the seat
   // must be the claude_code_user role or the app never offers the Code tab.
