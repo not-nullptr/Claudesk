@@ -561,6 +561,13 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     sendJson(response, 200, []);
     return true;
   }
+  if (rest === "experiences" && request.method === "GET") {
+    // The Code tab's bannerMs leg. ExperienceListResponse = {experiences,rules};
+    // no server-driven banners/spotlights are configured here, so the lists are
+    // empty. The app tolerates an empty list and simply draws no experience.
+    sendJson(response, 200, { experiences: [], rules: { global: {}, placements: {} } });
+    return true;
+  }
   const isNoOpObject = [
     "memory/settings",
     "reflections/settings",
@@ -600,6 +607,38 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     || rest === "reflections/time_spent") {
     await readJson(request).catch(() => ({}));
     sendJson(response, 200, {});
+    return true;
+  }
+  return false;
+}
+
+// ---- Claude Code surface -------------------------------------------------
+// The iOS Code tab loads four legs when it opens (CodeTabLoadResult names them
+// sessionsMs / devicesMs / projectsMs / reposMs / bannerMs). The shapes below
+// are read from the app's Swift Codable types; see
+// docs/mobile-code-re-findings.md for the type descriptors and field lists.
+//   GET /v1/code/sessions                                  -> ListSessionsResponse
+//   GET /v1/environment_providers/private/organizations/…  -> EnvironmentListResponse
+//   GET /api/organizations/…/experiences                   -> ExperienceListResponse
+// Secrets at rest: none of these responses carries a credential, so nothing
+// here is redacted.
+async function handleCodeRoutes(request, response, url) {
+  const path = url.pathname;
+  if (path === "/v1/code/sessions" && request.method === "GET") {
+    // `statuses` repeats; `limit`, `cursor`, `tags`, `excludeTags`,
+    // `includeTriggerSessions`, `triggerId` are the accepted params. No
+    // sessions exist on a self-hosted account yet, so return the empty page
+    // with the envelope keys the app decodes (data / nextCursor / resumeToken).
+    sendJson(response, 200, { data: [], nextCursor: null, resumeToken: null });
+    return true;
+  }
+  const environmentMatch = path.match(
+    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i,
+  );
+  if (environmentMatch && request.method === "GET") {
+    // Remote devices are environments of kind `bridge`; without a paired
+    // Desktop bridge there are none. firstId/lastId are the pagination window.
+    sendJson(response, 200, { environments: [], hasMore: false, firstId: null, lastId: null });
     return true;
   }
   return false;
@@ -1127,6 +1166,7 @@ async function handleApi(request, response, url) {
 
   if (await handleAccountRoutes(request, response, url)) return;
   if (await handleBootstrapRoute(request, response, url)) return;
+  if (await handleCodeRoutes(request, response, url)) return;
   if (await handleOptionalEmptyRoutes(request, response, url)) return;
   if (await handleFileDownload(request, response, url)) return;
   if (await handleConversationRoutes(request, response, url)) return;
@@ -1195,6 +1235,18 @@ const server = http.createServer(async (request, response) => {
     }
     if (url.pathname.startsWith("/api/")) {
       await handleApi(request, response, url);
+      return;
+    }
+    // The Code tab's session and environment legs live under /v1/, not /api/.
+    // Those still need a signed-in session, so authenticate before dispatch.
+    if (url.pathname.startsWith("/v1/")) {
+      if (!(await currentSession(request))) {
+        sendErrorEnvelope(response, 401, "authentication_error", "sign in required");
+        return;
+      }
+      if (await handleCodeRoutes(request, response, url)) return;
+      await captureUnhandled(request, url, "rest");
+      sendErrorEnvelope(response, 404, "not_found", `unknown API route ${url.pathname}`);
       return;
     }
     sendErrorEnvelope(response, 404, "not_found", "unknown route");

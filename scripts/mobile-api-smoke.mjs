@@ -172,6 +172,33 @@ try {
   assert.equal(account.memberships[0].role, "claude_code_user");
   assert.equal(bootstrap.account.memberships[0].role, "claude_code_user");
 
+  // The Code tab loads four legs the moment it opens (CodeTabLoadResult):
+  // the session list under /v1/, the environment (remote-device) list, the
+  // projects list and the experiences banner feed. Each must answer 200 with
+  // the envelope the app's Codable types decode, or the tab sits on its
+  // skeleton. Shapes come from the app's Swift metadata; see
+  // docs/mobile-code-re-findings.md.
+  const sessionsLeg = await call("/v1/code/sessions?limit=30&statuses=active&statuses=paused&statuses=archived");
+  assert.equal(sessionsLeg.status, 200, "the code session list leg answers");
+  assert.deepEqual(await sessionsLeg.json(), { data: [], nextCursor: null, resumeToken: null });
+
+  const environmentsLeg = await call(
+    `/v1/environment_providers/private/organizations/${org.uuid}/environments?limit=50`,
+  );
+  assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
+  assert.deepEqual(await environmentsLeg.json(), { environments: [], hasMore: false, firstId: null, lastId: null });
+
+  const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
+  assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");
+  assert.deepEqual(await experiencesLeg.json(), { experiences: [], rules: { global: {}, placements: {} } });
+
+  const projectsLeg = await call(`/api/organizations/${org.uuid}/projects`);
+  assert.equal(projectsLeg.status, 200, "the projects leg answers");
+
+  // An unauthenticated /v1/ request is rejected, not served as empty data.
+  const anonymousSessions = await fetch(`${base}/v1/code/sessions`);
+  assert.equal(anonymousSessions.status, 401, "the code legs require a session");
+
   const selected = await (await call(`/api/organizations/${org.uuid}/model_selector_state/chat`, {
     method: "PUT",
     body: { model: "stub-haiku" },
