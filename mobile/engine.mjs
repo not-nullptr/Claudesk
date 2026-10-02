@@ -120,6 +120,7 @@ export function createEngine({
   log = console,
   toolBlocks = process.env.CLAUDE_MOBILE_TOOL_BLOCKS !== "0",
   thinking = process.env.CLAUDE_MOBILE_THINKING !== "0",
+  titles = process.env.CLAUDE_MOBILE_TITLES !== "0",
 }) {
   let identity = null;
   const activeTurns = new Map(); // conversationUuid -> { abort, assistantUuid }
@@ -455,8 +456,10 @@ export function createEngine({
     const conversation = await getConversation(uuid);
     const sessionId = sessionIdFor(uuid);
     try {
-      if (typeof patch.name === "string") {
-        const name = patch.name.slice(0, 200);
+      // The app sends an empty name after a chat's first turn; applying it would
+      // erase the title, so only real names are written.
+      if (typeof patch.name === "string" && patch.name.trim()) {
+        const name = patch.name.trim().slice(0, 200);
         if (conversation.draft) await updateMeta(uuid, (entry) => { entry.draft.name = name; });
         else await desktop.ipc(SURFACE, "updateSession", [sessionId, { title: name }]);
       }
@@ -858,6 +861,9 @@ export function createEngine({
       }]);
       // start takes no effort level, so it applies once the session exists.
       await applyThinking(sessionId, { effort: thinkingPick.effort });
+      if (titles && !conversation.name && text.trim()) {
+        void generateTitle(conversation.uuid, text, model || conversation.model, title);
+      }
       await updateMeta(conversation.uuid, (entry) => {
         delete entry.draft;
         entry.is_temporary = Boolean(conversation.is_temporary);
@@ -878,6 +884,24 @@ export function createEngine({
       ]);
     }
     cache.delete(conversation.uuid);
+  }
+
+  // Replaces the provisional title (the first message) with one Desktop writes,
+  // as the web UI does for a new chat. Runs in the background; a chat the user
+  // renamed in the meantime keeps its name.
+  async function generateTitle(uuid, text, model, placeholder) {
+    const sessionId = sessionIdFor(uuid);
+    try {
+      const title = (await desktop.generateTitle({ message: text, model })).replace(/\s+/g, " ").trim().slice(0, 200);
+      if (!title) return;
+      const session = await desktop.ipc(SURFACE, "getSession", [sessionId]);
+      if (!session || (session.title && session.title !== placeholder)) return;
+      await desktop.ipc(SURFACE, "updateSession", [sessionId, { title }]);
+      cache.delete(uuid);
+      scheduleNotify(uuid, 0);
+    } catch (error) {
+      log.error(`[mobile-engine] cannot title ${sessionId}: ${error.message}`);
+    }
   }
 
   async function stopSession(sessionId) {

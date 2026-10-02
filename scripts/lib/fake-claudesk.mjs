@@ -26,7 +26,7 @@ export async function startFakeClaudesk() {
   const uploads = [];
   const calls = [];
   const clients = new Set();
-  const state = { down: false, chunkDelayMs: 5 };
+  const state = { down: false, chunkDelayMs: 5, titleDelayMs: 0, titleResult: undefined };
 
   const models = [
     {
@@ -245,6 +245,11 @@ export async function startFakeClaudesk() {
     let body = "";
     for await (const chunk of request) body += chunk;
     const parsed = body ? JSON.parse(body) : {};
+    if (request.method === "POST" && /\/dust\/generate_session_title$/.test(url.pathname)) {
+      calls.push({ route: "title", message: parsed.first_session_message, model: parsed.model });
+      if (state.titleDelayMs) await new Promise((resolve) => setTimeout(resolve, state.titleDelayMs));
+      return json(200, { title: state.titleResult ?? `Title for ${String(parsed.first_session_message).slice(0, 24)}` });
+    }
     if (request.method === "POST" && url.pathname === "/api/remote/files/upload") {
       calls.push({ route: "upload", names: parsed.files.map((file) => file.relativePath) });
       const root = `/workspace/RemoteUploads/${randomUUID()}`;

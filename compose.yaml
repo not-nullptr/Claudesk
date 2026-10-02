@@ -138,6 +138,7 @@ services:
       CLAUDE_MOBILE_CAPTURE: "${CLAUDE_MOBILE_CAPTURE:-0}"
       CLAUDE_MOBILE_TOOL_BLOCKS: "${CLAUDE_MOBILE_TOOL_BLOCKS:-1}"
       CLAUDE_MOBILE_THINKING: "${CLAUDE_MOBILE_THINKING:-1}"
+      CLAUDE_MOBILE_TITLES: "${CLAUDE_MOBILE_TITLES:-1}"
     depends_on:
       cowork-bridge:
         condition: service_healthy

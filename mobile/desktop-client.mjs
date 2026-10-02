@@ -123,6 +123,17 @@ export function createDesktopClient({
     return payload.value;
   }
 
+  // A short title for a new chat, written by Desktop the same way it does for
+  // the web UI (this runs a small model request). Empty when Desktop cannot.
+  async function generateTitle({ message, model }) {
+    const payload = await request(`/api/organizations/${bootstrapOrg}/dust/generate_session_title`, {
+      method: "POST",
+      body: { first_session_message: message, model },
+      timeoutMs: 90000,
+    });
+    return typeof payload?.title === "string" ? payload.title.trim() : "";
+  }
+
   // Chat models exactly as the web UI offers them (Desktop's own model
   // selector), plus the surface default.
   async function chatModels() {
@@ -204,5 +215,5 @@ export function createDesktopClient({
     };
   }
 
-  return { ipc, upload, chatModels, subscribe, baseUrl: root };
+  return { ipc, upload, generateTitle, chatModels, subscribe, baseUrl: root };
 }

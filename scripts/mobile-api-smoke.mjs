@@ -551,6 +551,60 @@ try {
   })).json();
   assert.equal(JSON.stringify(bardRead).includes('"max"'), true, "Connect reports the effort token back");
 
+  // ---- chat titles: Desktop writes one for a new chat, and an empty rename never erases it ----
+  const titleOf = (uuid) => sessionOf(uuid)?.title;
+  claudesk.resetCalls();
+  const titledUuid = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1";
+  await send(titledUuid, {
+    prompt: "Plan a trip to Lisbon",
+    create_conversation_params: { name: "", model: "stub-sonnet" },
+    turn_message_uuids: turn("a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2", "a3a3a3a3-a3a3-43a3-83a3-a3a3a3a3a3a3"),
+  });
+  assert.equal(claudesk.ipcCalls("start")[0].args[0].title, "Plan a trip to Lisbon", "the first message is the provisional title");
+  await waitFor(() => titleOf(titledUuid) === "Title for Plan a trip to Lisbon", "Desktop's generated title");
+  const titleCalls = claudesk.calls.filter((call) => call.route === "title");
+  assert.deepEqual(titleCalls.map((call) => [call.message, call.model]), [["Plan a trip to Lisbon", "stub-sonnet"]], "one title request, for the first message");
+  assert.equal((await readConversation(titledUuid)).name, "Title for Plan a trip to Lisbon");
+
+  const emptyRename = await call(chatPath(titledUuid), { method: "PUT", body: { name: "" } });
+  assert.equal(emptyRename.status, 200);
+  await actOn(titledUuid, { renameConversation: { title: "" } });
+  assert.equal(titleOf(titledUuid), "Title for Plan a trip to Lisbon", "an empty rename leaves the title alone");
+  await actOn(titledUuid, { renameConversation: { title: "Lisbon" } });
+  assert.equal(titleOf(titledUuid), "Lisbon", "a real rename still applies");
+  const followUp = await send(titledUuid, {
+    prompt: "More", parent_message_uuid: "a3a3a3a3-a3a3-43a3-83a3-a3a3a3a3a3a3",
+    turn_message_uuids: turn("a4a4a4a4-a4a4-44a4-84a4-a4a4a4a4a4a4", "a5a5a5a5-a5a5-45a5-85a5-a5a5a5a5a5a5"),
+  });
+  assert.equal(followUp.text, "Echo: More");
+  assert.equal(claudesk.calls.filter((call) => call.route === "title").length, 1, "later messages do not ask for another title");
+  assert.equal(titleOf(titledUuid), "Lisbon");
+
+  // A rename made while the title is still being written wins.
+  claudesk.state.titleDelayMs = 300;
+  const racedUuid = "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1";
+  await send(racedUuid, {
+    prompt: "Raced chat",
+    create_conversation_params: { name: "", model: "stub-sonnet" },
+    turn_message_uuids: turn("b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2", "b3b3b3b3-b3b3-43b3-83b3-b3b3b3b3b3b3"),
+  });
+  await actOn(racedUuid, { renameConversation: { title: "Mine" } });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(titleOf(racedUuid), "Mine", "a title written late does not overwrite the user's");
+
+  // When Desktop cannot write a title the provisional one stays.
+  claudesk.state.titleDelayMs = 0;
+  claudesk.state.titleResult = "";
+  const untitledUuid = "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1";
+  await send(untitledUuid, {
+    prompt: "Quiet chat",
+    create_conversation_params: { name: "", model: "stub-sonnet" },
+    turn_message_uuids: turn("c2c2c2c2-c2c2-42c2-82c2-c2c2c2c2c2c2", "c3c3c3c3-c3c3-43c3-83c3-c3c3c3c3c3c3"),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(titleOf(untitledUuid), "Quiet chat");
+  claudesk.state.titleResult = undefined;
+
   // ---- deleting removes the Desktop session ----
   claudesk.resetCalls();
   assert.equal((await call(chatPath(convUuid), { method: "DELETE" })).status, 200);
