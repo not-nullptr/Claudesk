@@ -815,19 +815,15 @@ async function handleCodeRoutes(request, response, url) {
   const eventsMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events$/);
   if (eventsMatch && method === "GET") {
     try {
-      const limit = Number(url.searchParams.get("limit")) || 50;
+      // `sort_order=desc` is what the app sends (newest page first); the engine
+      // honours it and the response already carries both key sets the app reads
+      // (`rows`/`data`, `nextCursor`/`next_cursor`, …).
       const page = await codeEngine.listEvents(eventsMatch[1], {
         cursor: url.searchParams.get("cursor"),
-        limit,
+        limit: Number(url.searchParams.get("limit")) || 50,
+        sortOrder: url.searchParams.get("sort_order") || "desc",
       });
-      // The client's own decoder names these; it reads either key set.
-      sendJson(response, 200, {
-        data: page.data,
-        next_cursor: page.next_cursor,
-        has_more: page.has_more,
-        max_sequence_num: page.max_sequence_num,
-        newest_event_id: page.newest_event_id,
-      });
+      sendJson(response, 200, page);
     } catch (error) {
       await fail(error);
     }

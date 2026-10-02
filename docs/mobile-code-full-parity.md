@@ -149,8 +149,8 @@ it, so a session with no live activity still draws.
 
 ```
 GET    /v1/code/sessions/{id}/events          list_client_events_v2
-SessionEventEnvelope   eventId, sequenceNum, eventType, source, payload, createdAt
 ClientEventsPage       rows, maxSequenceNum, newestEventId, nextCursor, hasMore
+ClientEventsPage.Row   sequenceNum, message        ← message is a StdoutMessage
 ListClientEventsResponse  data, nextCursor
 UsageResponse          limits, spend, extraUsage
 MessageLimit           status, resetsAt, remaining, overageInUse, notice,
@@ -165,18 +165,28 @@ seven_day_opus | seven_day_sonnet | overage`; an unmetered self-hosted
 deployment reports every one at `utilization: 0`.
 
 So history = paged `ClientEventsPage` seeded by walking **down** from the newest
-`sequenceNum` until `hasMore == false`; live = `sessions/watch` SSE emitting a
-`SessionWatchFrame{event}` per change, resumable `from_sequence_num`. The pager
-type confirms the algorithm: `SessionTranscriptPager`
-(@0x4b063bc) with `olderCursor`, `lastSequenceNum`, `readsGapAscending`,
-`initialEventsLimit` — it reads **ascending above** a floor and pages **older**
-on demand, and tolerates a truncated catch-up.
+`sequenceNum` until `hasMore == false`; live = the `…/events/stream` follow,
+resumable `from_sequence_num`. The pager type confirms the algorithm:
+`SessionTranscriptPager` (@0x4b063bc) with `olderCursor`, `lastSequenceNum`,
+`readsGapAscending`, `initialEventsLimit` — it reads **ascending above** a floor
+and pages **older** on demand, and tolerates a truncated catch-up.
 
-`payload` carries the actual turn content. The rendering types are
-`ToolCall` (@0x4b050fc, 22 fields: `id name displayName status input output
-outputImages subagentToolCalls gitOperation fileMetadata artifactId …`) and the
-transcript block union (`SessionTranscriptEntry` / `DisplayBlock*` /
-`AssistantTextBlockView`, `CodeThinkingView`, `CollapsedToolCallList`).
+Settled on device (2026-10-03): the detail screen opens **both** `…/events?
+sort_order=desc&limit=200` and `…/events/stream?from_sequence_num=0`, and both
+carry a `StdoutMessage` — a row is `{sequence_num, message}` where `message` is
+the same type the stream's `client_event` wraps (`ClientEventsPage.Row.message`
+and `StdoutMessage.sdkMessage` share a field-descriptor type slot). So a row's
+`message` — not a `payload` — carries the turn; the envelope type
+(`SessionEventEnvelope`: `event_id, sequence_num, event_type, source, payload`)
+is what the facade *used* to answer with, and it is why the transcript drew
+blank.
+
+The rendering types are `ToolCall` (@0x4b050fc, 22 fields: `id name displayName
+status input output outputImages subagentToolCalls gitOperation fileMetadata
+artifactId …`) and the transcript block union (`SessionTranscriptEntry` /
+`DisplayBlock*` / `AssistantTextBlockView`, `CodeThinkingView`,
+`CollapsedToolCallList`); they are built app-side from the `message`'s
+stream-json content blocks.
 
 ## 4. Sending a message
 

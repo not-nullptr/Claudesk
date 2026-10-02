@@ -360,6 +360,44 @@ export function isRenderableEntry(entry) {
   return isRenderableEnvelope(eventEnvelopeForEntry(entry, 0));
 }
 
+// ---- paged history rows (GET …/events) -------------------------------------
+//
+// The paged read is the OTHER half of the transcript and it speaks the SAME
+// payload type as the live leg. `ClientEventsPage.Row` (type descriptor
+// 0x4ae917c) is `{sequenceNum, message}` and its `message` field's type slot is
+// byte-identical to `StdoutMessage.sdkMessage` (`01 29 f9 51`, resolving to the
+// same symbol) — i.e. a row's `message` IS a `StdoutMessage`, the exact type the
+// SSE `client_event` wraps. Emitting our own `SessionEventEnvelope`
+// (`{event_id, sequence_num, event_type, source, payload}`) here is why the app
+// decoded the page, found no `message` on any row, and drew a blank transcript.
+//
+// `ClientEventsPage` itself is `{rows, maxSequenceNum, newestEventId,
+// nextCursor, hasMore}` — the coding-key cluster at reflstr 0x4ba374f reads
+// `…connectionStatus desc asc rows maxSequenceNum newestEventId nextCursor
+// hasMore message`. So the response body is `{rows: […]}` (or
+// `ListClientEventsResponse`'s `{data: […], nextCursor}`, same element type).
+export function pageRowForEntry(entry, sequenceNum) {
+  return { sequence_num: sequenceNum, message: streamJsonFor(entry) };
+}
+
+// The paged envelope the app reads: newest-first rows plus the cursor and the
+// counters. `data` and `rows` are both emitted because the app reads either key
+// set across its two response shapes (see above).
+export function clientEventsPage(rows, { nextCursor = null, hasMore = false, maxSequenceNum = null, newestEventId = null } = {}) {
+  return {
+    data: rows,
+    rows,
+    next_cursor: nextCursor,
+    nextCursor,
+    has_more: hasMore,
+    hasMore,
+    max_sequence_num: maxSequenceNum,
+    maxSequenceNum,
+    newest_event_id: newestEventId,
+    newestEventId,
+  };
+}
+
 // ---- paging ----------------------------------------------------------------
 
 // The app reads events ASCENDING above a floor and pages OLDER on demand, so a

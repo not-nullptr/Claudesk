@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { DesktopError } from "./desktop-client.mjs";
 import { SESSION_STATUS, codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
-import { eventEnvelopes, pageEvents, sessionResource, sessionResponse } from "./code-transcript.mjs";
+import { clientEventsPage, eventEnvelopes, pageEvents, pageRowForEntry, sessionResource, sessionResponse } from "./code-transcript.mjs";
 import { createCodeEventTranslator, isCodeRecord } from "./code-events.mjs";
 
 const SURFACE = "LocalSessions";
@@ -469,18 +469,37 @@ export function createCodeEngine({
 
   // ---------- history ----------
 
-  async function listEvents(id, { cursor = null, limit = 50 } = {}) {
+  // The paged history read (GET …/events). `ClientEventsPage.Row` is
+  // `{sequenceNum, message}` where `message` is a `StdoutMessage` — the SAME
+  // payload type the live `client_event` frame carries — so a row is built from
+  // the raw entry, not from our SessionEventEnvelope. `sort_order=desc` is what
+  // the app asks for, which is also our paging direction (newest window first,
+  // older on demand).
+  async function listEvents(id, { cursor = null, limit = 50, sortOrder = "desc" } = {}) {
     const desktopId = desktopSessionIdFor(id);
     if (!desktopId) throw notFound();
     const loaded = await loadSession(desktopId);
     const page = pageEvents(loaded.envelopes, { cursor, limit });
-    return {
-      data: page.data,
-      next_cursor: page.next_cursor,
-      max_sequence_num: loaded.envelopes.length ? loaded.envelopes.at(-1).sequence_num : null,
-      newest_event_id: loaded.envelopes.at(-1)?.event_id ?? null,
-      has_more: page.has_more,
-    };
+    // `page.data` is the ascending window of envelopes; the wire wants rows in
+    // the request's own order, so reverse for the default (desc) read.
+    const window = sortOrder === "asc" ? page.data : [...page.data].reverse();
+    const rows = window.map((envelope) => pageRowForEntry(entryForEnvelope(loaded, envelope), envelope.sequence_num));
+    const newest = loaded.envelopes.length ? loaded.envelopes.at(-1) : null;
+    return clientEventsPage(rows, {
+      nextCursor: page.next_cursor,
+      hasMore: page.has_more,
+      maxSequenceNum: newest?.sequence_num ?? null,
+      newestEventId: newest?.event_id ?? null,
+    });
+  }
+
+  // The raw entry behind a stored envelope, matched on uuid. The paged read
+  // streams the entry itself (as a StdoutMessage), so it needs the entry, not
+  // the envelope; a envelope with no matching entry is still emitted with a
+  // null message rather than dropped, so the pager's sequence floor stays dense.
+  function entryForEnvelope(loaded, envelope) {
+    if (!envelope?.event_id) return null;
+    return loaded.entries.find((entry) => entry?.uuid === envelope.event_id) ?? null;
   }
 
   // The whole ordered transcript, for a caller that streams rather than pages

@@ -805,27 +805,35 @@ try {
 
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
 
-  // History: ascending sequence numbers, one envelope per transcript entry,
-  // with the tool rendering built on blocks.mjs.
-  const history = await (await call(codePath(createdResource.id, "/events?limit=50"))).json();
-  assert.ok(history.data.length >= 3, "the turn's entries are in the history");
+  // History: the app reads `ClientEventsPage` — `rows` of `{sequence_num,
+  // message}` where `message` is the SAME `StdoutMessage` the live
+  // `client_event` frame wraps. It asks with `sort_order=desc`, so the newest
+  // row comes first.
+  const history = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=50"))).json();
+  assert.ok(history.rows.length >= 3, "the turn's rows are in the history");
+  assert.ok(history.data, "the response carries `data` as well as `rows`");
+  const ascending = [...history.rows].reverse();
   assert.deepEqual(
-    history.data.map((envelope) => envelope.sequence_num),
-    history.data.map((_, index) => index),
-    "sequence numbers are contiguous from 0",
+    ascending.map((row) => row.sequence_num),
+    ascending.map((_, index) => index),
+    "sequence numbers are contiguous from 0 (read oldest-first)",
   );
-  assert.equal(history.data[0].event_type, "user_message");
-  assert.equal(history.data[0].payload.text, "Reply with exactly one word: pong");
-  assert.equal(history.data.at(-1).event_type, "assistant_text");
-  assert.equal(history.data.at(-1).payload.text, "Echo: Reply with exactly one word: pong");
-  assert.equal(history.newest_event_id, history.data.at(-1).event_id);
+  assert.equal(history.rows.at(-1).message.user.type, "user", "the oldest row is the user's message");
+  assert.equal(history.rows.at(-1).message.user.uuid, sentUuid, "the user row carries the app's uuid");
+  const lastRow = history.rows[0];
+  assert.equal(lastRow.message.assistant.type, "assistant", "the newest row is the assistant's reply");
+  assert.equal(lastRow.message.assistant.message.content[0].text, "Echo: Reply with exactly one word: pong");
+  // A row must NOT carry our internal envelope fields — that shape is what made
+  // the app decode a page of rows it could not draw.
+  assert.ok(!("event_type" in lastRow) && !("payload" in lastRow), "a row is {sequence_num, message}, not an envelope");
+  assert.equal(history.newest_event_id, lastRow.message.assistant.uuid, "newest_event_id is the newest message's uuid");
 
-  // Paging back from the newest envelope yields an older, gap-free window.
-  const olderPage = await (await call(codePath(createdResource.id, `/events?limit=2`))).json();
-  assert.equal(olderPage.data.length, 2);
+  // Paging back from the newest row yields an older, gap-free window.
+  const olderPage = await (await call(codePath(createdResource.id, `/events?sort_order=desc&limit=2`))).json();
+  assert.equal(olderPage.rows.length, 2, "the window is the requested size");
   assert.equal(olderPage.has_more, true, "one entry is still older than this window");
-  const oldest = await (await call(codePath(createdResource.id, `/events?cursor=${encodeURIComponent(olderPage.next_cursor)}`))).json();
-  assert.equal(oldest.data.at(-1).sequence_num, olderPage.data[0].sequence_num - 1, "the older window is contiguous");
+  const oldest = await (await call(codePath(createdResource.id, `/events?sort_order=desc&cursor=${encodeURIComponent(olderPage.next_cursor)}`))).json();
+  assert.equal(oldest.rows.at(-1).sequence_num, olderPage.rows.at(-1).sequence_num - 1, "the older window is contiguous");
   assert.equal(oldest.has_more, false, "the oldest window ends the walk");
 
   // A tool round: the Bash call is presented under the Chat surface's name, so
@@ -835,17 +843,24 @@ try {
     body: { body: "List the files [tool]" },
   });
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the tool turn to finish");
-  const withTool = await (await call(codePath(createdResource.id, "/events?limit=50"))).json();
-  const toolEnvelope = withTool.data.find((envelope) => envelope.event_type === "tool_use");
-  assert.ok(toolEnvelope, "the tool call reaches the transcript");
-  assert.equal(toolEnvelope.payload.tool_call.display_name, "Bash", "blocks.mjs renders the Code tool row");
-  assert.equal(toolEnvelope.payload.tool_call.status, "complete");
-  assert.equal(toolEnvelope.payload.tool_call.input.command, "ls");
-  const toolResult = withTool.data.find((envelope) => envelope.event_type === "tool_result");
-  assert.equal(toolResult.payload.tool_use_id, toolEnvelope.payload.tool_call.id, "use and result pair up");
+  const withTool = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=50"))).json();
+  // The tool round is encoded in the assistant/user stream-json messages: the
+  // assistant emits a `tool_use` content block, the user a `tool_result` one.
+  const toolUse = withTool.rows
+    .flatMap((row) => Object.values(row.message ?? {}))
+    .flatMap((msg) => (Array.isArray(msg?.message?.content) ? msg.message.content : []))
+    .find((block) => block?.type === "tool_use");
+  assert.ok(toolUse, "the tool call reaches the transcript");
+  assert.equal(toolUse.name, "mcp__workspace__bash", "the raw stream-json tool name is passed through");
+  assert.equal(toolUse.input.command, "ls");
+  const toolResult = withTool.rows
+    .flatMap((row) => Object.values(row.message ?? {}))
+    .flatMap((msg) => (Array.isArray(msg?.message?.content) ? msg.message.content : []))
+    .find((block) => block?.type === "tool_result");
+  assert.equal(toolResult.tool_use_id, toolUse.id, "use and result pair up");
 
   // The transcript *stream* leg: the app opens this for a session it is
-  // showing, so the history must arrive as `upserted` SSE frames before any
+  // showing, so the history must arrive as `client_event` SSE frames before any
   // live one. It stays open, so read a bounded prefix rather than to EOF.
   const streamResponse = await call(codePath(createdResource.id, "/events/stream"));
   assert.equal(streamResponse.status, 200, "the events stream leg answers");
@@ -884,11 +899,14 @@ try {
     const nested = record.data.client_event.sdk_message;
     return (nested.user ?? nested.assistant ?? nested.system ?? nested.result ?? nested.unknown)?.uuid;
   });
-  assert.deepEqual(
-    streamedUuids,
-    withTool.data.map((envelope) => envelope.event_id),
-    "the streamed entries line up 1:1 with the paged read's sequence",
-  );
+  // Both legs carry the same `StdoutMessage` — the stream oldest-first, the
+  // paged read newest-first — so they must agree message-for-message once the
+  // page is reversed. That is the whole point of one payload type.
+  const pagedUuids = [...withTool.rows].reverse().map((row) => {
+    const nested = row.message ?? {};
+    return (nested.user ?? nested.assistant ?? nested.system ?? nested.result ?? nested.unknown)?.uuid;
+  });
+  assert.deepEqual(streamedUuids, pagedUuids, "the streamed entries line up 1:1 with the paged read");
 
   // A resumed stream skips what the client already has (the frame for the
   // second entry, at index 1).

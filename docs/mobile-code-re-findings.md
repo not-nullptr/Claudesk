@@ -123,6 +123,48 @@ and `<SdkMessage>` is essentially the Desktop transcript entry
 (`{type, uuid, message, parentUuid, timestamp, origin, …}`) — see
 `mobile/code-transcript.mjs#streamJsonFor`.
 
+### The paged read is the same payload type (settled on device, 2026-10-03)
+
+The session detail screen does **two** reads, and both carry the same message:
+
+```
+GET /v1/code/sessions/{id}/events?sort_order=desc&limit=200   the page
+GET /v1/code/sessions/{id}/events/stream?from_sequence_num=0  the live follow
+POST /v1/code/sessions/{id}/events   (x2)                     the app's ack
+```
+
+Both paths appear only in the app's own request log — they are composed from the
+`v1/code/sessions/` base, so neither is a whole-string literal in the binary.
+`SessionsApi+Events.swift` owns the `list_client_events_v2` page; the stream
+leg is built alongside it.
+
+`ClientEventsPage` (type descriptor @0x4ae917c has its nested `Row`) is
+
+```
+ClientEventsPage        rows, maxSequenceNum, newestEventId, nextCursor, hasMore
+ClientEventsPage.Row    sequenceNum, message
+ListClientEventsResponse data, nextCursor
+```
+
+Evidence for the keys: the coding-key cluster at `__swift5_reflstr` **0x4ba374f**
+reads `…connectionStatus desc asc rows maxSequenceNum newestEventId nextCursor
+hasMore message`, and the `ListClientEventsResponse` cluster at **0x4ba37c0**
+reads `…offendingSequenceNum context underlyingTypeName missing data clientEvent
+ephemeralEvent deliveryUpdate sessionUpdate catchUpTruncated decodeFailure
+fromSequenceNum…` (so `data` is the response, and the frame cases follow).
+
+FACT: a row's `message` **is** a `StdoutMessage`. In the field descriptors,
+`ClientEventsPage.Row.message`'s type slot holds the bytes `01 29 f9 51` —
+**byte-identical** to `StdoutMessage.sdkMessage`'s slot (both resolve to the
+same `__LINKEDIT` symbol). So the paged read and the SSE stream deliver the same
+type, and a row is `{sequence_num, message: {<case>: …}}`, not an envelope.
+
+Emitting our own `SessionEventEnvelope` (`{event_id, sequence_num, event_type,
+source, payload}`) on this leg is what left the transcript blank: the app
+decoded a page whose rows had no `message`, so it had nothing to draw, while
+`…/events/stream` was answering 200 with perfectly good frames the screen never
+consulted for history.
+
 ## Endpoint 2 — `GET /v1/environment_providers/private/organizations/<uuid>/environments`
 
 String at `v1/environment_providers/private/organizations/` (VA 0x1047e91d0).
