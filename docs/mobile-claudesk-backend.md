@@ -52,6 +52,18 @@ sessions are never listed, read or modified, and a completion cannot adopt their
   `web_search`, file reads as `view`. How the iOS app actually draws these rows has
   not been verified on a device; `CLAUDE_MOBILE_TOOL_BLOCKS=0` hides tool calls and
   shows only the answer text. Tool results are cut at 12,000 characters.
+- **Reasoning effort and thinking mode.** Each model in the model list carries
+  Desktop's own `thinking` block (`effort_options`, `mode_options`, `always_on`), which
+  is what the web UI builds its effort picker from; models without it show no picker.
+  The app's pick arrives as `effort` / `thinking_mode` on a REST completion, or as
+  `effort_level_token` / `thinking_mode_token` in a Connect send or settings update, and
+  is applied to the Desktop session with `setEffort` and `setExtendedThinking` (a mode
+  of `off` turns thinking off, any other offered mode turns it on). Values the model
+  does not offer are ignored. The pick is remembered and reported back in the
+  conversation's settings. `start` has no effort field, so on a chat's very first
+  message the effort is applied right after the session is created and may only take
+  hold from the second turn. Whether the iOS app reads the `thinking` block from this
+  model list in the form the web UI does is not verified on a device.
 - **Tool permission prompts** are not expected in Chat (the probe saw none while the
   model read files), but nothing on the phone could answer one. They are logged.
 - **Model errors are shown as the answer.** When the gateway rejects a call (for example

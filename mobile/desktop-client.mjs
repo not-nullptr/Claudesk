@@ -137,7 +137,15 @@ export function createDesktopClient({
     const surface = surfaces.find((item) => item?.id === "chat") || surfaces[0];
     const models = (surface?.models || [])
       .filter((model) => model && typeof model.id === "string")
-      .map((model) => ({ id: model.id, name: model.name || model.id, description: model.description || "" }));
+      .map((model) => ({
+        id: model.id,
+        name: model.name || model.id,
+        description: model.description || "",
+        // Effort levels and thinking modes the model offers (the web UI builds its
+        // effort picker from this); absent for models that cannot reason.
+        thinking: model.thinking && typeof model.thinking === "object" ? model.thinking : undefined,
+        supports1mContext: model.supports_1m_context === true,
+      }));
     const state = (bootstrap?.model_selector_state || []).find((item) => item?.id === "chat");
     const defaultModel = models.find((model) => model.id === state?.model)?.id || models[0]?.id || null;
     return { models, defaultModel };

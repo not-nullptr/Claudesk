@@ -29,7 +29,17 @@ export async function startFakeClaudesk() {
   const state = { down: false, chunkDelayMs: 5 };
 
   const models = [
-    { id: "stub-sonnet", name: "Stub Sonnet", description: "stub" },
+    {
+      id: "stub-sonnet",
+      name: "Stub Sonnet",
+      description: "stub",
+      // Same shape Desktop's model selector returns for a reasoning model.
+      thinking: {
+        type: "effort_and_mode",
+        effort_options: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id, name: id })),
+        mode_options: [{ id: "auto", name: "Thinking" }, { id: "off", name: "Off" }],
+      },
+    },
     { id: "stub-haiku", name: "Stub Haiku", description: "stub" },
   ];
 
@@ -193,6 +203,16 @@ export async function startFakeClaudesk() {
       const session = sessions.get(id);
       if (!session) throw new Error(`Session "${id}" not found`);
       session.model = model;
+    },
+    setEffort: ([id, effort]) => {
+      const session = sessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      session.effort = effort;
+    },
+    setExtendedThinking: ([id, enabled]) => {
+      const session = sessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      session.extendedThinking = enabled;
     },
     archive: ([id]) => {
       const session = sessions.get(id);

@@ -278,7 +278,7 @@ export function createEngine({
       created_at: entry.draft.created_at,
       updated_at: entry.draft.created_at,
       current_leaf_message_uuid: null,
-      settings: { enabled_mcp_tools: {} },
+      settings: conversationSettings(entry),
       revision: revisionFor(uuid),
       is_running: false,
       draft: true,
@@ -302,7 +302,7 @@ export function createEngine({
       created_at: isoFrom(session.createdAt),
       updated_at: isoFrom(session.lastActivityAt),
       current_leaf_message_uuid: leaf,
-      settings: { enabled_mcp_tools: {} },
+      settings: conversationSettings(entry),
       revision: revisionFor(uuid),
       is_running: Boolean(session.isRunning),
       messages,
@@ -464,6 +464,13 @@ export function createEngine({
         if (conversation.draft) await updateMeta(uuid, (entry) => { entry.draft.model = patch.model; });
         else if (patch.model !== conversation.model) await desktop.ipc(SURFACE, "setModel", [sessionId, patch.model]);
       }
+      if (patch.effort || patch.thinking_mode) {
+        const choice = { effort: patch.effort, thinkingMode: patch.thinking_mode };
+        await rememberThinking(uuid, choice);
+        if (!conversation.draft) {
+          await applyThinking(sessionId, await thinkingFor(conversation.model, choice));
+        }
+      }
       // Desktop can archive a Chat session but has no way to restore one, so
       // un-archiving is not applied.
       if (patch.is_archived === true && !conversation.draft) {
@@ -523,7 +530,7 @@ export function createEngine({
           created_at: isoFrom(session.createdAt),
           updated_at: isoFrom(session.lastActivityAt),
           current_leaf_message_uuid: null,
-          settings: { enabled_mcp_tools: {} },
+          settings: conversationSettings(entry),
           revision: revisionFor(uuid),
           messages: [],
         };
@@ -562,7 +569,61 @@ export function createEngine({
       section: "main",
       disabled: false,
       capabilities: {},
+      // The same effort/mode options the web UI offers; the app builds its
+      // effort picker from them.
+      ...(model.thinking ? { thinking: model.thinking } : {}),
+      ...(model.supports1mContext ? { supports_1m_context: true } : {}),
     }));
+  }
+
+  // What the app picked for reasoning, limited to what the model offers. Desktop
+  // takes the effort level separately from the on/off thinking switch.
+  async function thinkingFor(model, { effort, thinkingMode } = {}) {
+    if (!effort && !thinkingMode) return {};
+    const { models } = await chatModels().catch(() => ({ models: [] }));
+    const config = models.find((item) => item.id === model)?.thinking;
+    if (!config) return {};
+    const offers = (options, id) => Array.isArray(options) && options.some((option) => option?.id === id);
+    return {
+      effort: offers(config.effort_options, effort) ? effort : undefined,
+      extendedThinking: offers(config.mode_options, thinkingMode) ? thinkingMode !== "off" : undefined,
+    };
+  }
+
+  // Pushes a pick to an existing Desktop session. Desktop clamps the effort to
+  // what the model supports; a failure must not fail the turn.
+  async function applyThinking(sessionId, { effort, extendedThinking }) {
+    try {
+      if (effort) await desktop.ipc(SURFACE, "setEffort", [sessionId, effort]);
+      if (extendedThinking !== undefined) await desktop.ipc(SURFACE, "setExtendedThinking", [sessionId, extendedThinking]);
+    } catch (error) {
+      log.error(`[mobile-engine] cannot apply reasoning settings: ${error.message}`);
+    }
+  }
+
+  function conversationSettings(entry) {
+    const settings = { enabled_mcp_tools: {} };
+    if (entry?.thinking?.effort) settings.effort_level_token = entry.thinking.effort;
+    if (entry?.thinking?.mode) settings.thinking_mode_token = entry.thinking.mode;
+    return settings;
+  }
+
+  function bardSettings(settings) {
+    return {
+      ...(settings?.effort_level_token ? { effortLevelToken: settings.effort_level_token } : {}),
+      ...(settings?.thinking_mode_token ? { thinkingModeToken: settings.thinking_mode_token } : {}),
+    };
+  }
+
+  async function rememberThinking(uuid, { effort, thinkingMode }) {
+    if (!effort && !thinkingMode) return;
+    await updateMeta(uuid, (entry) => {
+      entry.thinking = {
+        ...entry.thinking,
+        ...(effort ? { effort } : {}),
+        ...(thinkingMode ? { mode: thinkingMode } : {}),
+      };
+    });
   }
 
   // ---------- turn plumbing ----------
@@ -629,6 +690,8 @@ export function createEngine({
   async function prepareTurn({ conversation, body, retry = false }) {
     const turnUuids = body.turn_message_uuids || {};
     const model = typeof body.model === "string" && body.model ? body.model : undefined;
+    const effort = typeof body.effort === "string" && body.effort ? body.effort : undefined;
+    const thinkingMode = typeof body.thinking_mode === "string" && body.thinking_mode ? body.thinking_mode : undefined;
     const assistantRaw = turnUuids.assistant_message_uuid || body.assistant_message_uuid;
     const assistantUuid = uuidPattern.test(String(assistantRaw)) ? assistantRaw : randomUUID();
 
@@ -645,7 +708,7 @@ export function createEngine({
         humanMessage: human,
         assistantUuid,
         model,
-        plan: { kind: "retry", humanUuid: human.uuid, text: "", attachments: [] },
+        plan: { kind: "retry", humanUuid: human.uuid, text: "", attachments: [], effort, thinkingMode },
       };
     }
 
@@ -702,7 +765,7 @@ export function createEngine({
       humanMessage,
       assistantUuid,
       model,
-      plan: { kind, humanUuid, text: prompt, attachments, rewindTo },
+      plan: { kind, humanUuid, text: prompt, attachments, rewindTo, effort, thinkingMode },
     };
   }
 
@@ -774,6 +837,9 @@ export function createEngine({
       entry.assistantByHuman = { ...(entry.assistantByHuman || {}), [plan.humanUuid]: assistantUuid };
     });
 
+    const thinkingPick = await thinkingFor(model || conversation.model, plan);
+    await rememberThinking(conversation.uuid, plan);
+
     if (plan.kind === "start") {
       const title = (conversation.name || text).replace(/\s+/g, " ").trim().slice(0, 60);
       await desktop.ipc(SURFACE, "start", [{
@@ -788,19 +854,27 @@ export function createEngine({
         userSelectedFolders: [],
         syntheticMessage: false,
         documentFunnelEnabled: false,
+        ...(thinkingPick.extendedThinking !== undefined ? { extendedThinkingEnabled: thinkingPick.extendedThinking } : {}),
       }]);
+      // start takes no effort level, so it applies once the session exists.
+      await applyThinking(sessionId, { effort: thinkingPick.effort });
       await updateMeta(conversation.uuid, (entry) => {
         delete entry.draft;
         entry.is_temporary = Boolean(conversation.is_temporary);
       });
     } else {
       if (model && model !== conversation.model) await desktop.ipc(SURFACE, "setModel", [sessionId, model]);
+      await applyThinking(sessionId, { effort: thinkingPick.effort });
+      // extendedThinking is sendMessage's twelfth argument.
       await desktop.ipc(SURFACE, "sendMessage", [
         sessionId,
         message,
         images.length ? images : undefined,
         undefined,
         plan.humanUuid,
+        ...(thinkingPick.extendedThinking === undefined
+          ? []
+          : [undefined, undefined, undefined, undefined, undefined, undefined, thinkingPick.extendedThinking]),
       ]);
     }
     cache.delete(conversation.uuid);
@@ -938,7 +1012,7 @@ export function createEngine({
   // Starts the turn in the background; the app watches progress through
   // ReadConversation / StreamTimeline snapshots.
   async function connectSendMessage({
-    conversationId, messageId, assistantMessageId, parentMessageId, text, model, attachments,
+    conversationId, messageId, assistantMessageId, parentMessageId, text, model, attachments, effort, thinkingMode,
   }) {
     let conversation;
     try {
@@ -955,6 +1029,8 @@ export function createEngine({
         turn_message_uuids: { human_message_uuid: messageId, assistant_message_uuid: assistantMessageId },
         parent_message_uuid: parentMessageId || undefined,
         model,
+        effort,
+        thinking_mode: thinkingMode,
         attachments: attachments || [],
       },
     });
@@ -1059,7 +1135,7 @@ export function createEngine({
       updatedAt: conversation.updated_at,
       model: { identifier: conversation.model, default: false },
       currentLeafMessageId: conversation.current_leaf_message_uuid || "",
-      settings: {},
+      settings: bardSettings(conversation.settings),
       isStarred: Boolean(conversation.is_starred),
       isTemporary: Boolean(conversation.is_temporary),
       revisionNs: String(conversation.revision || 0),

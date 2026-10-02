@@ -81,6 +81,18 @@ function newConversationDefaults() {
   };
 }
 
+// Reasoning picks travel as BardConversationSettings tokens, either on a send
+// (settings_update) or on their own (update_conversation_settings).
+function reasoningPick(update) {
+  const settings = update?.settings ?? update ?? {};
+  const effort = settings.effortLevelToken ?? settings.effort_level_token;
+  const mode = settings.thinkingModeToken ?? settings.thinking_mode_token;
+  return {
+    effort: typeof effort === "string" && effort ? effort : undefined,
+    thinkingMode: typeof mode === "string" && mode ? mode : undefined,
+  };
+}
+
 function mutationAck(request, applied) {
   const mutation = request?.header?.mutationId || request?.header?.mutation_id || {};
   return {
@@ -141,6 +153,7 @@ const connectMethods = {
           text: sendMessage.text ?? "",
           model: sendMessage.model?.identifier,
           attachments: sendMessage.attachments ?? [],
+          ...reasoningPick(sendMessage.settingsUpdate ?? sendMessage.settings_update),
         });
         return mutationAck(request, true);
       }
@@ -168,6 +181,14 @@ const connectMethods = {
         await engine.updateConversation(conversationId, {
           model: setConversationModel.model?.identifier || "",
         });
+        return mutationAck(request, true);
+      }
+      const updateSettings = request.updateConversationSettings ?? request.update_conversation_settings;
+      if (updateSettings) {
+        const { effort, thinkingMode } = reasoningPick(updateSettings);
+        if (effort || thinkingMode) {
+          await engine.updateConversation(conversationId, { effort, thinking_mode: thinkingMode });
+        }
         return mutationAck(request, true);
       }
       const setCurrentLeaf = request.setCurrentLeaf ?? request.set_current_leaf;

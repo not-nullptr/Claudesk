@@ -436,6 +436,93 @@ try {
   }, "the Connect message to complete");
   assert.equal((await readConversation(connectConversation)).chat_messages[1].uuid, connectAssistant);
 
+  // ---- reasoning effort and thinking mode, as the app's picker sends them ----
+  const modelEntry = (id) => bootstrap.model_selector_config[0].models.find((m) => m.id === id);
+  assert.deepEqual(
+    modelEntry("stub-sonnet").thinking.effort_options.map((option) => option.id),
+    ["low", "medium", "high", "xhigh", "max"],
+    "the model list keeps Claudesk's effort options so the app can show its picker",
+  );
+  assert.equal(modelEntry("stub-haiku").thinking, undefined, "a model without reasoning options has no picker");
+
+  claudesk.resetCalls();
+  const reasonUuid = "e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1";
+  await send(reasonUuid, {
+    prompt: "Think hard",
+    effort: "high",
+    thinking_mode: "off",
+    create_conversation_params: { name: "", model: "stub-sonnet" },
+    turn_message_uuids: turn("e2e2e2e2-e2e2-42e2-82e2-e2e2e2e2e2e2", "e3e3e3e3-e3e3-43e3-83e3-e3e3e3e3e3e3"),
+  });
+  const reasonStart = claudesk.ipcCalls("start")[0].args[0];
+  assert.equal(reasonStart.extendedThinkingEnabled, false, "thinking mode off reaches start");
+  assert.deepEqual(claudesk.ipcCalls("setEffort").map((call) => call.args), [[`local_${reasonUuid}`, "high"]]);
+  assert.equal(sessionOf(reasonUuid).effort, "high");
+  assert.equal((await readConversation(reasonUuid)).settings.effort_level_token, "high", "the pick is reported back");
+
+  claudesk.resetCalls();
+  await send(reasonUuid, {
+    prompt: "Again",
+    effort: "low",
+    thinking_mode: "auto",
+    parent_message_uuid: "e3e3e3e3-e3e3-43e3-83e3-e3e3e3e3e3e3",
+    turn_message_uuids: turn("e4e4e4e4-e4e4-44e4-84e4-e4e4e4e4e4e4", "e5e5e5e5-e5e5-45e5-85e5-e5e5e5e5e5e5"),
+  });
+  const order = claudesk.calls.filter((call) => call.route === "ipc").map((call) => call.method);
+  assert.ok(order.indexOf("setEffort") >= 0 && order.indexOf("setEffort") < order.indexOf("sendMessage"), "effort is set before the message goes out");
+  assert.equal(sessionOf(reasonUuid).effort, "low");
+  assert.equal(claudesk.ipcCalls("sendMessage").at(-1).args[11], true, "thinking mode reaches sendMessage as its twelfth argument");
+
+  claudesk.resetCalls();
+  await send(reasonUuid, {
+    prompt: "Unknown level",
+    effort: "turbo",
+    thinking_mode: "bogus",
+    parent_message_uuid: "e5e5e5e5-e5e5-45e5-85e5-e5e5e5e5e5e5",
+    turn_message_uuids: turn("e6e6e6e6-e6e6-46e6-86e6-e6e6e6e6e6e6", "e7e7e7e7-e7e7-47e7-87e7-e7e7e7e7e7e7"),
+  });
+  assert.equal(claudesk.ipcCalls("setEffort").length, 0, "levels the model does not offer are not forwarded");
+  assert.equal(claudesk.ipcCalls("sendMessage").at(-1).args.length, 5, "no thinking argument without a valid pick");
+
+  claudesk.resetCalls();
+  await send(convUuid, {
+    prompt: "No reasoning options",
+    model: "stub-haiku",
+    effort: "high",
+    parent_message_uuid: (await readConversation(convUuid)).current_leaf_message_uuid,
+    turn_message_uuids: turn("e8e8e8e8-e8e8-48e8-88e8-e8e8e8e8e8e8", "e9e9e9e9-e9e9-49e9-89e9-e9e9e9e9e9e9"),
+  });
+  assert.equal(claudesk.ipcCalls("setEffort").length, 0, "a model without effort options ignores the pick");
+
+  // Connect carries the same picks as conversation-settings tokens.
+  claudesk.resetCalls();
+  const reasonConnect = "f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1";
+  await call(`/api/organizations/${org.uuid}/chat_conversations`, { method: "POST", body: { uuid: reasonConnect, name: "", model: "stub-sonnet" } });
+  const actOn = (conversationId, action) => call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction", {
+    method: "POST",
+    body: { header: { conversationId, mutationId: { sessionId: "smoke", version: 1 } }, ...action },
+  });
+  await actOn(reasonConnect, { updateConversationSettings: { settings: { effortLevelToken: "medium" } } });
+  assert.equal(claudesk.ipcCalls("setEffort").length, 0, "a draft has no Desktop session to update yet");
+  assert.equal((await readConversation(reasonConnect)).settings.effort_level_token, "medium", "a draft remembers the pick");
+  await actOn(reasonConnect, { sendMessage: {
+    messageId: "f2f2f2f2-f2f2-42f2-82f2-f2f2f2f2f2f2",
+    assistantMessageId: "f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3",
+    text: "Connect think",
+    settingsUpdate: { settings: { effortLevelToken: "xhigh", thinkingModeToken: "off" } },
+  } });
+  await waitFor(() => claudesk.ipcCalls("start").length === 1, "the Connect send to start a session");
+  assert.equal(claudesk.ipcCalls("start")[0].args[0].extendedThinkingEnabled, false);
+  assert.equal(sessionOf(reasonConnect).effort, "xhigh");
+  await waitFor(async () => texts(await readConversation(reasonConnect))[1] === "Echo: Connect think", "the Connect reply");
+  await actOn(reasonConnect, { updateConversationSettings: { settings: { effortLevelToken: "max" } } });
+  assert.equal(sessionOf(reasonConnect).effort, "max", "a settings change reaches the live session");
+  const bardRead = await (await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/ReadConversation", {
+    method: "POST",
+    body: { conversationId: reasonConnect },
+  })).json();
+  assert.equal(JSON.stringify(bardRead).includes('"max"'), true, "Connect reports the effort token back");
+
   // ---- deleting removes the Desktop session ----
   claudesk.resetCalls();
   assert.equal((await call(chatPath(convUuid), { method: "DELETE" })).status, 200);
