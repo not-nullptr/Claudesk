@@ -114,6 +114,25 @@ function sendSseRecord(response, event, data) {
   response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+// A one-line summary of a `SessionSseFrame`'s payload for the trace above, so a
+// log reader can see which sdk_message case went out (and its ids) without
+// printing whole transcripts. Never throws — it runs inside request handling.
+function describeSdkMessage(data) {
+  try {
+    const inner = data?.client_event ?? data;
+    const sdk = inner?.sdk_message;
+    if (!sdk || typeof sdk !== "object") return "(none)";
+    const kind = Object.keys(sdk)[0] ?? "(empty)";
+    const msg = sdk[kind];
+    const uuid = msg?.uuid ? String(msg.uuid).slice(0, 8) : "-";
+    const subtype = msg?.subtype ? ` subtype=${msg.subtype}` : "";
+    const stop = msg?.message?.stop_reason ? ` stop=${msg.message.stop_reason}` : "";
+    return `${kind} uuid=${uuid}${subtype}${stop}`;
+  } catch {
+    return "(unreadable)";
+  }
+}
+
 function orgUuidFromPath(pathname) {
   const match = pathname.match(/^\/api\/organizations\/([0-9a-f-]{36})(\/|$)/i);
   return match ? match[1].toLowerCase() : null;
@@ -691,7 +710,7 @@ async function handleCodeRoutes(request, response, url) {
   // while it is open, so it is logged when the headers go out instead — that is
   // the moment its status is known — and `finish` covers the rest.
   const trace = (status) =>
-    console.log(`[mobile-code] ${method} ${path} -> ${status}`);
+    console.log(`[mobile-code] ${method} ${path}${url.search || ""} -> ${status}`);
   let traced = false;
   response.once("finish", () => {
     if (!traced) trace(response.statusCode);
@@ -964,7 +983,10 @@ async function streamCodeWatch(request, response, url, sessionId) {
   // `SessionWatchFrame` (upserted/deleted) — NOT the transcript leg's
   // `client_event`, which is a different protocol.
   const emit = (id, record) => {
-    for (const frame of codeEngine.watchFramesFor(id, record)) sendSseRecord(response, frame.event, frame.data);
+    for (const frame of codeEngine.watchFramesFor(id, record)) {
+      sendSseRecord(response, frame.event, frame.data);
+      console.log(`[mobile-code]   watch ${frame.event} ${id}`);
+    }
   };
   const unsubscribe = desktopId
     ? codeEngine.listen(desktopId, (record) => emit(desktopId, record))
@@ -1017,6 +1039,7 @@ async function streamCodeEvents(request, response, url, sessionId) {
   // advancing the counter), so number them the same way here instead of over
   // every raw entry.
   let sequence = 0;
+  let sent = 0;
   for (const entry of entries) {
     if (!isRenderableEntry(entry)) continue;
     const index = sequence;
@@ -1024,12 +1047,21 @@ async function streamCodeEvents(request, response, url, sessionId) {
     if (index < from) continue;
     const frame = sseFrameForEntry(entry);
     sendSseRecord(response, frame.event, frame.data);
+    sent += 1;
+    // One line per frame: the app's decoder is silent on the wire, so the only
+    // way to see what it was handed (and whether it read it) is to log the
+    // frame we actually wrote. `sent` counts only the frames past the floor.
+    if (sent <= 5 || sent % 25 === 0) {
+      console.log(`[mobile-code]   frame#${index} ${frame.event} sdk_message=${describeSdkMessage(frame.data)}`);
+    }
   }
+  console.log(`[mobile-code] events/stream ${sessionId}: ${entries.length} entries, ${sent} frames from ${from}`);
 
   const emit = (id, record) => {
     if (id !== desktopId) return;
     for (const frame of codeEngine.framesFor(desktopId, record)) {
       sendSseRecord(response, frame.event, frame.data);
+      console.log(`[mobile-code]   live ${frame.event} sdk_message=${describeSdkMessage(frame.data)}`);
     }
   };
   const unsubscribe = codeEngine.listen(desktopId, (record) => emit(desktopId, record));
