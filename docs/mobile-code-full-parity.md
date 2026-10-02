@@ -35,9 +35,10 @@ GET    /v1/code/sessions/{id}                  detail   (SessionResource)
 POST   /v1/code/sessions/{id}/messages/stream  SEND (SendChannelMessageRequest)
 GET    /v1/code/sessions/{id}/events           list_client_events_v2 -> ListClientEventsResponse
 GET    /v1/code/sessions/{id}/events/stream    SSE — the transcript read the
-                                               session detail screen opens: the
-                                               history replayed as `upserted`
-                                               frames, then the live ones.
+                                               session detail screen opens
+                                               (`SessionStreamWire`): the history
+                                               replayed as `client_event` frames,
+                                               then the live ones.
                                                `from_sequence_num` resumes. Not
                                                a literal in the binary (it is
                                                composed from the events base);
@@ -79,12 +80,78 @@ Paging everywhere is `{data|rows, next_cursor, has_more}` (snake_case).
 
 ## 3. Event / transcript model (this is what the transcript pane renders)
 
+**There are two distinct SSE protocols under `/v1/code/…`, and they do not
+share a frame shape.** Feeding one the other's envelope is what made the
+session detail screen open to "the messages failed to load" (the app's
+`SessionSseFrame` decoder rejects an `upserted` envelope and renders nothing).
+
+### 3a. The list leg — `SessionWatchWire`
+
 ```
+GET /v1/code/sessions/watch        (and /v1/code/sessions/{id}/watch)
+SessionWatchFrame   event          (the ONLY field — no payload)
+SessionWatchEvent   upserted | deleted
+```
+
+The list screen subscribes here to keep its rows current. The facade emits one
+`upserted`/`deleted` frame per Desktop `onOnEvent` record, carrying the entry's
+`SessionEventEnvelope` as the record payload.
+
+### 3b. The transcript leg — `SessionStreamWire`
+
+```
+GET  /v1/code/sessions/{id}/events/stream     the detail screen's transcript
+POST /v1/code/sessions/{id}/messages/stream   the send leg (same protocol)
+```
+
+Each SSE record's **`event:` name** is one of `client_event` or
+`ephemeral_event` (the only two the app's dispatcher compares against), and the
+**`data:`** is `SessionSseFrame`, a 6-case Swift enum:
+
+```
+SessionSseFrame   clientEvent | ephemeralEvent | deliveryUpdate | sessionUpdate
+                  | catchUpTruncated | decodeFailure
+StreamDeliveryUpdate      eventId, status, timestamp
+StreamSessionUpdate       connectionStatus
+StreamCatchUpTruncated    fromSequenceNum, atSequenceNum
+SessionStreamDecodeError              context, eventId, eventType, underlyingTypeName
+SessionStreamContractViolationError   context, missing
+```
+
+Swift synthesizes enum `Codable` as a **single-key object**, and the app's
+shared `JSONDecoder` runs `.convertFromSnakeCase` over the keys, so the wire is:
+
+```
+event: client_event
+data: {"client_event":{"sdk_message":<SdkMessage>}}
+```
+
+`clientEvent` carries a **`StdoutMessage`**, itself a synthesized enum keyed
+`sdk_message | control_request | control_response | control_cancel_request |
+stream_event | sources_changed | unknown`. Its `sdk_message` case is a
+**`SdkMessage`**, whose cases are the stream-json `type` values:
+
+```
+assistant | user | result | system | env_manager_log | tool_use_summary
+| rate_limit_event | prompt_suggestion | conversation_reset
+| composer_notice | composer_notice_dismissed | control_request
+| control_response | control_cancel_request | unknown
+```
+
+`SdkUserMessage` / `SdkAssistantMessage` / `SdkResultMessage` are **structs**
+declaring the stream-json fields (`type, uuid, message, parentToolUseId,
+timestamp, origin, …`) — i.e. the Desktop transcript entry passes through
+almost verbatim. `mobile/code-transcript.mjs#streamJsonFor` does that mapping;
+`#sseFrameForEntry` wraps it into the frame. History and live records both use
+it, so a session with no live activity still draws.
+
+### The paged history read (neither leg)
+
+```
+GET    /v1/code/sessions/{id}/events          list_client_events_v2
 SessionEventEnvelope   eventId, sequenceNum, eventType, source, payload, createdAt
 ClientEventsPage       rows, maxSequenceNum, newestEventId, nextCursor, hasMore
 ListClientEventsResponse  data, nextCursor
-SessionWatchFrame      event    (one frame per SSE record)
-SessionWatchEvent      upserted | deleted
 UsageResponse          limits, spend, extraUsage
 MessageLimit           status, resetsAt, remaining, overageInUse, notice,
                        perModelLimit, overageStatus, overageResetsAt,
@@ -177,7 +244,7 @@ and the turn translated to `SessionEventEnvelope` / `ToolCall`.
 |---|---|
 | `mobile/code-ids.mjs` | `code_<desktopSessionId>` scheme and the enum literal tables + status/bucket/connection/worker derivations |
 | `mobile/code-transcript.mjs` | `SessionResponse`/`SessionResource`, transcript entry → `SessionEventEnvelope`, `ToolCall`, the cursor pager, and the bridge environment record |
-| `mobile/code-events.mjs` | live `LocalSessions.onOnEvent` records → `SessionWatchFrame` (upserted/deleted), with the per-session sequence counter |
+| `mobile/code-events.mjs` | live `LocalSessions.onOnEvent` records → both SSE protocols: `client_event` frames for the transcript leg (`frameFromPayload`) and `SessionWatchFrame` upserted/deleted for the list leg (`watchFrameFromPayload`), with the per-session sequence counter |
 | `mobile/code-engine.mjs` | the engine: list/create/detail/update/delete, history paging, send, interrupt, permissions, live watch, `code-meta.json` |
 
 The id scheme is deliberately distinct from Chat's `local_<uuid>`: a Code

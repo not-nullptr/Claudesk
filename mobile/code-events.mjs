@@ -1,25 +1,28 @@
 // Desktop's Claude Code session events (LocalSessions.onOnEvent, relayed by the
-// bridge as `desktop-ipc` SSE records) -> the app's `SessionWatchFrame`s.
+// bridge as `desktop-ipc` SSE records) -> the app's SSE frames.
 //
-// The app's live channel (GET /v1/code/sessions/watch) emits one frame per
-// record:
-//   { event: "upserted", data: <SessionEventEnvelope>, ... }
-//   { event: "deleted",  data: { session_id, event_id } }
+// There are TWO Code SSE protocols, and this module serves both:
 //
-// Where events.mjs folds a Chat turn's Anthropic stream events into one
-// message, a Code conversation is *event-sourced*: every Desktop transcript
-// entry is already a discrete, ordered record, and the phone's pager
-// (SessionTranscriptPager) keys off its sequence number. So the translation is
-// mostly a reshape plus a monotonic sequence counter, and the shape-specific
-// part is confined to `frameFromPayload` — the one function the live probe in
-// scripts/code-session-probe.mjs is expected to correct.
+//   GET /v1/code/sessions/watch          (SessionWatchWire)
+//     { event: "upserted", data: <SessionEventEnvelope> }
+//     { event: "deleted",  data: { session_id, event_id } }
+//
+//   GET /v1/code/sessions/{id}/events/stream   (SessionStreamWire)
+//     { event: "client_event", data: { client_event: { sdk_message: <SdkMessage> } } }
+//
+// The list screen subscribes to `watch`; the session detail screen opens
+// `events/stream` for the transcript. The two do NOT share a frame shape — the
+// app decodes `SessionSseFrame` on the transcript leg and `SessionWatchFrame`
+// on the list leg, and feeding one the other's envelope is what made a session
+// open to "the messages failed to load". `frameFromPayload` produces the
+// transcript-leg frame; `watchFrameFromPayload` produces the list-leg one.
 //
 // The Desktop record the bridge relays looks like the Chat one:
 //   { surface: "LocalSessions", method: "onOnEvent", payload: <entry-or-update> }
 // and a permission prompt arrives the same way under
 // `onOnToolPermissionRequest`.
 
-import { eventEnvelopeForEntry } from "./code-transcript.mjs";
+import { eventEnvelopeForEntry, sseFrameForEntry } from "./code-transcript.mjs";
 
 // Is this relayed `desktop-ipc` record ours? The bridge broadcasts every
 // relayed record on every SSE connection regardless of mode
@@ -41,9 +44,13 @@ function entryPayload(payload) {
 }
 
 /**
- * One relayed LocalSessions record -> zero or more SessionWatchFrame frames.
+ * One relayed LocalSessions record -> the session-detail transcript frames.
  *
- * @returns {Array<{ event: "upserted" | "deleted", data: object }>}
+ * These are `SessionSseFrame` records for `GET …/events/stream`: a
+ * `client_event` whose payload is a stream-json message. A removal has no frame
+ * of its own on this leg, so it yields nothing (the app re-reads on reconnect).
+ *
+ * @returns {Array<{ event: "client_event", data: object }>}
  */
 export function frameFromPayload(method, payload) {
   if (method === "onOnToolPermissionRequest") {
@@ -54,24 +61,42 @@ export function frameFromPayload(method, payload) {
   if (method !== "onOnEvent") return [];
   const entry = entryPayload(payload);
   if (!entry) return [];
-  // Desktop signals a removal (rewind, deleted entry) rather than an upsert.
+  // A removal (rewind, deleted entry) carries no content to render here.
+  if (payload?.removed || payload?.deleted || entry?.removed) return [];
+  if (!entry.uuid) return [];
+  return [sseFrameForEntry(entry)];
+}
+
+/**
+ * One relayed LocalSessions record -> zero or more `SessionWatchFrame`s for the
+ * LIST leg (`GET /v1/code/sessions/watch`). This is a different protocol from
+ * `frameFromPayload`: the list screen's `SessionWatchEvent` is
+ * `upserted | deleted` over the whole session, not a transcript `client_event`.
+ *
+ * The payload carried here is the `SessionEventEnvelope`, unchanged from
+ * before the transcript-leg fix — the list leg was not the failing one and its
+ * exact payload is still being probed, so this keeps it byte-identical.
+ *
+ * @returns {Array<{ event: "upserted" | "deleted", data: object }>}
+ */
+export function watchFrameFromPayload(method, payload, sequence = 0) {
+  if (method !== "onOnEvent") return [];
+  const entry = entryPayload(payload);
+  if (!entry) return [];
   if (payload?.removed || payload?.deleted || entry?.removed) {
     return [{ event: "deleted", data: { session_id: payload?.sessionId ?? entry?.sessionId ?? null, event_id: entry?.uuid ?? null } }];
   }
   if (!entry.uuid) return [];
-  // Rows Desktop replays on reconnect land here too; the app de-dupes on
-  // event_id, and the sequence number stays monotonic because the caller
-  // assigns it.
-  return [{ event: "upserted", data: entry }];
+  return [{ event: "upserted", data: eventEnvelopeForEntry(entry, sequence) }];
 }
 
 /**
  * Stateful translation for one watched session.
  *
- * Sequence numbers are assigned here, contiguously from `startSequence`, and
- * every event is remembered by id so a Desktop replay on reconnect is returned
- * at its ORIGINAL sequence number (the app keys history off `sequenceNum`, so
- * re-sequencing a replay would rewrite its transcript).
+ * The transcript-leg frames carry the message content itself, so the only state
+ * kept here is which entries have been seen — the sequence counter backs
+ * `resumeFrom()`, the `from_sequence_num` a reconnecting client asks to resume
+ * at, and a Desktop replay on reconnect must not advance it.
  *
  * @param {{ sessionId?: string, startSequence?: number }} options
  */
@@ -98,21 +123,31 @@ export function createCodeEventTranslator({ sessionId = null, startSequence = 0 
       }
       const frames = [];
       for (const frame of frameFromPayload(method, payload)) {
-        if (frame.event === "deleted") {
-          frames.push(frame);
-          continue;
-        }
-        const entry = frame.data;
-        const known = seen.get(entry.uuid);
-        const sequence = known ?? nextSequence;
-        if (known === undefined) {
-          seen.set(entry.uuid, sequence);
+        // Count each distinct entry once, so `resumeFrom()` stays a floor the
+        // client can resume at even if Desktop replays rows on reconnect.
+        const entry = entryPayload(payload);
+        if (entry?.uuid && !seen.has(entry.uuid)) {
+          seen.set(entry.uuid, nextSequence);
           nextSequence += 1;
         }
-        frames.push({
-          event: "upserted",
-          data: eventEnvelopeForEntry(entry, sequence),
-        });
+        frames.push(frame);
+      }
+      return frames;
+    },
+
+    /**
+     * The same record, framed for the LIST leg (`SessionWatchFrame`). Shares
+     * this translator's `seen` map and sequence counter, so the two legs agree
+     * on ordering for a session watched on both.
+     *
+     * @param {{ method?: string, payload?: object }} record
+     */
+    acceptWatch({ method, payload } = {}) {
+      const entry = entryPayload(payload);
+      const frames = watchFrameFromPayload(method, payload, nextSequence);
+      if (entry?.uuid && !seen.has(entry.uuid)) {
+        seen.set(entry.uuid, nextSequence);
+        nextSequence += 1;
       }
       return frames;
     },

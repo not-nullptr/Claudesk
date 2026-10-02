@@ -76,6 +76,53 @@ statusBucket, revision, connectorDomainsWithheld`.
 Watch stream (`GET /v1/code/sessions/watch`, SSE): `SessionWatchEvent` (@0x4aea6d8)
 = `upserted | deleted`; the request carries `include_trigger_sessions`.
 
+## The two Code SSE protocols (settled from the binary)
+
+`/watch` and `/{id}/events/stream` are **different wire protocols**; emitting
+the watch shape on the transcript leg is what made a session open to "the
+messages failed to load".
+
+- **`SessionWatchWire`** (`GET /v1/code/sessions/watch`): `SessionWatchFrame`
+  (@0x4ae9b30) with a single field `event` of type `SessionWatchEvent`
+  (@0x4aea6d8 = `upserted | deleted`).
+- **`SessionStreamWire`** (`GET …/events/stream`, `POST …/messages/stream`):
+  `SessionSseFrame` (@0x4ae9230), a 6-case enum —
+  `clientEvent | ephemeralEvent | deliveryUpdate | sessionUpdate |
+  catchUpTruncated | decodeFailure` — with the payload structs
+  `StreamDeliveryUpdate` (@0x4ae9100), `StreamSessionUpdate` (@0x4ae9128),
+  `StreamCatchUpTruncated` (@0x4ae92ac), and the two error types
+  `SessionStreamDecodeError` (@0x4ae91c0 = `context, eventId, eventType,
+  underlyingTypeName`) and `SessionStreamContractViolationError` (@0x4ae91dc =
+  `context, missing`).
+
+Evidence for the wire casing:
+
+- `SessionSseFrame`'s `CodingKeys` field descriptor is the **only** cluster
+  holding its case names, contiguous at `__swift5_reflstr` **0x4ba37f0**:
+  `clientEvent ephemeralEvent deliveryUpdate sessionUpdate catchUpTruncated
+  decodeFailure`. Swift synthesizes enum `Codable` as a single-key object, and
+  the app's `JSONDecoder` runs `.convertFromSnakeCase` (keys only), so the wire
+  keys are `client_event`, `ephemeral_event`, … .
+- The SSE dispatcher (fn @0x101eb7b00) compares the SSE **`event:` name**
+  against exactly two inline Swift small-strings: `client_event` (built at
+  0x101eb7b34) and `ephemeral_event` (at 0x101eb7c2c).
+- The JSON body is decoded with `JSONDecoder.decode(_:from:)` at 0x101f08e08;
+  the failure paths build the two error types above.
+- `SessionSseFrame.clientEvent` carries `StdoutMessage` (@0x4ae70e8), whose
+  `CodingKeys` cluster (reflstr ~0x4ba1e08) is `controlRequest controlResponse
+  controlCancelRequest streamEvent sourcesChanged sdkMessage`; its
+  `sdkMessage` case is `SdkMessage` (@0x4ae7088), whose cases are the
+  stream-json `type` values (`assistant user result system envManagerLog
+  toolUseSummary rateLimitEvent promptSuggestion conversationReset
+  composerNotice composerNoticeDismissed controlRequest controlResponse
+  controlCancelRequest unknown`).
+
+So a transcript frame is
+`event: client_event` / `data: {"client_event":{"sdk_message":<SdkMessage>}}`,
+and `<SdkMessage>` is essentially the Desktop transcript entry
+(`{type, uuid, message, parentUuid, timestamp, origin, …}`) — see
+`mobile/code-transcript.mjs#streamJsonFor`.
+
 ## Endpoint 2 — `GET /v1/environment_providers/private/organizations/<uuid>/environments`
 
 String at `v1/environment_providers/private/organizations/` (VA 0x1047e91d0).

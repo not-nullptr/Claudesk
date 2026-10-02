@@ -777,15 +777,24 @@ try {
   const codeDesktopId = createdResource.id.slice("code_".length);
 
   // Send the first message: it creates the Desktop session (start), and the SSE
-  // leg acks with the optimistic message id before the turn runs.
+  // leg streams the turn as `client_event` frames (the same protocol the
+  // transcript leg speaks — there is no separate ack record; the app decodes
+  // every record on this leg as a `SessionSseFrame`).
   const sentUuid = "44444444-4444-4444-8444-444444444444";
   const sendRecords = await sseStream(codePath(createdResource.id, "/messages/stream"), {
     method: "POST",
     body: { body: "Reply with exactly one word: pong", client_message_id: sentUuid },
   });
-  const ack = sendRecords.find((record) => record.data?.type === "message_ack");
-  assert.ok(ack, "the send leg acknowledges first");
-  assert.equal(ack.data.message_id, sentUuid, "the app's optimistic uuid is honoured");
+  assert.ok(
+    sendRecords.some((record) => record.event === "client_event" && record.data?.client_event?.sdk_message),
+    "the send leg streams the turn as client_event frames",
+  );
+  const sendUser = sendRecords.find((record) => record.data?.client_event?.sdk_message?.user);
+  assert.equal(sendUser.data.client_event.sdk_message.user.uuid, sentUuid, "the app's optimistic uuid is honoured");
+  assert.ok(
+    !sendRecords.some((record) => record.data?.type === "message_ack"),
+    "there is no message_ack record — the app has no such case",
+  );
   const startCall = claudesk.codeIpcCalls("start").at(-1);
   assert.ok(startCall, "the first message uses start on LocalSessions");
   assert.equal(startCall.args[0].sessionId, codeDesktopId, "the unprefixed Desktop id goes to Desktop");
@@ -849,19 +858,40 @@ try {
       const { value, done } = await streamReader.read();
       if (done) break;
       streamBuffer += streamDecoder.decode(value, { stream: true });
-      streamed = parseSse(streamBuffer).filter((record) => record.event === "upserted");
+      streamed = parseSse(streamBuffer).filter((record) => record.event === "client_event");
     }
   } finally {
     streamReader.cancel().catch(() => {});
   }
   assert.equal(streamed.length, withTool.data.length, "the stream replays the whole transcript");
+  // The detail screen decodes `SessionSseFrame`, whose `client_event` payload is
+  // a stream-json message — NOT the list leg's `upserted` SessionEventEnvelope.
+  assert.ok(
+    streamed.every((record) => record.data?.client_event?.sdk_message),
+    "every transcript frame nests a stream-json sdk_message",
+  );
+  const streamedUser = streamed.find((record) => record.data.client_event.sdk_message.user);
+  assert.ok(streamedUser, "the user turn arrives as the `user` case");
+  const streamedAssistant = streamed.find((record) => record.data.client_event.sdk_message.assistant);
+  assert.ok(streamedAssistant, "the assistant turn arrives as the `assistant` case");
+  assert.ok(
+    !streamed.some((record) => "event_type" in (record.data ?? {})),
+    "a transcript frame is not a SessionEventEnvelope",
+  );
+  // The stream numbering must agree with the paged read's, or `from_sequence_num`
+  // means two different things on the two legs.
+  const streamedUuids = streamed.map((record) => {
+    const nested = record.data.client_event.sdk_message;
+    return (nested.user ?? nested.assistant ?? nested.system ?? nested.result ?? nested.unknown)?.uuid;
+  });
   assert.deepEqual(
-    streamed.map((record) => record.data.sequence_num),
-    withTool.data.map((envelope) => envelope.sequence_num),
-    "the streamed history is the same ordered transcript the paged read returns",
+    streamedUuids,
+    withTool.data.map((envelope) => envelope.event_id),
+    "the streamed entries line up 1:1 with the paged read's sequence",
   );
 
-  // A resumed stream skips what the client already has.
+  // A resumed stream skips what the client already has (the frame for the
+  // second entry, at index 1).
   const resumedResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=1"));
   const resumedReader = resumedResponse.body.getReader();
   let resumedBuffer = "";
@@ -871,12 +901,12 @@ try {
       const { value, done } = await resumedReader.read();
       if (done) break;
       resumedBuffer += new TextDecoder().decode(value, { stream: true });
-      resumed = parseSse(resumedBuffer).filter((record) => record.event === "upserted");
+      resumed = parseSse(resumedBuffer).filter((record) => record.event === "client_event");
     }
   } finally {
     resumedReader.cancel().catch(() => {});
   }
-  assert.equal(resumed[0]?.data.sequence_num, 1, "from_sequence_num skips the frames already rendered");
+  assert.ok(resumed[0]?.data?.client_event?.sdk_message, "from_sequence_num skips the frames already rendered");
 
   // The list leg now reports the session, with the app's enum values.
   const codeListed = await (await call("/v1/code/sessions")).json();

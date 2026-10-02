@@ -13,7 +13,7 @@ import {
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
 import { createCodeEngine } from "./code-engine.mjs";
-import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment } from "./code-transcript.mjs";
+import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment, isRenderableEntry, sseFrameForEntry } from "./code-transcript.mjs";
 import { desktopSessionIdFor as codeSessionDesktopId } from "./code-ids.mjs";
 import { createMobileStore } from "./store.mjs";
 import { createDesktopClient } from "./desktop-client.mjs";
@@ -960,9 +960,11 @@ async function streamCodeWatch(request, response, url, sessionId) {
   sendSseRecord(response, "hello", { from_sequence_num: fromSequence, session_id: sessionId });
 
   // A single-session watch filters to that session; the list screen's watch
-  // (no id) takes every Code session's frames.
+  // (no id) takes every Code session's frames. This leg speaks
+  // `SessionWatchFrame` (upserted/deleted) — NOT the transcript leg's
+  // `client_event`, which is a different protocol.
   const emit = (id, record) => {
-    for (const frame of codeEngine.framesFor(id, record)) sendSseRecord(response, frame.event, frame.data);
+    for (const frame of codeEngine.watchFramesFor(id, record)) sendSseRecord(response, frame.event, frame.data);
   };
   const unsubscribe = desktopId
     ? codeEngine.listen(desktopId, (record) => emit(desktopId, record))
@@ -979,11 +981,17 @@ async function streamCodeWatch(request, response, url, sessionId) {
   response.on("close", done);
 }
 
-// GET /v1/code/sessions/{id}/events/stream — the transcript as SSE. The app
-// opens this for a session it is showing, so it must do two things in order:
-// replay the history it already has as `upserted` frames, then follow live
-// records. Replaying first means a client that only listens here still draws
-// the whole conversation; the live frames then keep it current. `from_sequence_num`
+// GET /v1/code/sessions/{id}/events/stream — the transcript as SSE. This is the
+// leg the session DETAIL screen opens, and it speaks `SessionStreamWire`, whose
+// frames are `SessionSseFrame`s — NOT the `upserted`/`deleted` frames of the
+// list screen's `watch` leg. Each record is a `client_event` whose payload is a
+// stream-json message:
+//
+//   event: client_event
+//   data: {"client_event":{"sdk_message":<SdkMessage>}}
+//
+// It replays the stored history first (so a client that only listens here still
+// draws the whole conversation), then follows live records. `from_sequence_num`
 // lets a reconnecting client skip what it has already rendered.
 async function streamCodeEvents(request, response, url, sessionId) {
   const desktopId = codeSessionDesktopId(sessionId);
@@ -991,9 +999,9 @@ async function streamCodeEvents(request, response, url, sessionId) {
     sendErrorEnvelope(response, 404, "not_found", "session not found");
     return;
   }
-  let envelopes;
+  let entries;
   try {
-    envelopes = await codeEngine.sessionEventEnvelopes(sessionId);
+    entries = await codeEngine.sessionTranscript(sessionId);
   } catch (error) {
     sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
       error?.message || "could not read the transcript");
@@ -1003,8 +1011,19 @@ async function streamCodeEvents(request, response, url, sessionId) {
   response.writeHead(200, SSE_HEADERS);
   const floor = Number(url.searchParams.get("from_sequence_num"));
   const from = Number.isFinite(floor) ? floor : 0;
-  for (const envelope of envelopes) {
-    if (envelope.sequence_num >= from) sendSseRecord(response, "upserted", envelope);
+  // `from_sequence_num` indexes the SAME positions the paged read numbers, so
+  // the two legs agree on what "sequence 3" means. `eventEnvelopes` numbers the
+  // entries it keeps and skips the ones with nothing to render (without
+  // advancing the counter), so number them the same way here instead of over
+  // every raw entry.
+  let sequence = 0;
+  for (const entry of entries) {
+    if (!isRenderableEntry(entry)) continue;
+    const index = sequence;
+    sequence += 1;
+    if (index < from) continue;
+    const frame = sseFrameForEntry(entry);
+    sendSseRecord(response, frame.event, frame.data);
   }
 
   const emit = (id, record) => {
@@ -1026,10 +1045,11 @@ async function streamCodeEvents(request, response, url, sessionId) {
   response.on("close", done);
 }
 
-// POST /v1/code/sessions/{id}/messages/stream — acknowledge the send, then
-// stream the turn. The app reads the ack for the optimistic message id and then
-// takes the turn from /watch; the SSE body here carries the same frames so a
-// client that only listens on this leg still sees the answer.
+// POST /v1/code/sessions/{id}/messages/stream — send a turn. This leg is also
+// `SessionStreamWire`, so its body carries the same `client_event` frames as
+// `events/stream`: the frames for the optimistic user message and then the
+// assistant's reply, so a client that only listens here still draws the turn.
+// It closes once the session goes idle, completing the composer's request.
 async function streamCodeMessage(request, response, url, sessionId) {
   let body;
   try {
@@ -1049,35 +1069,41 @@ async function streamCodeMessage(request, response, url, sessionId) {
     return;
   }
   response.writeHead(200, SSE_HEADERS);
-  let ack;
+
+  // Follow this session's live records for the duration of the turn, the same
+  // frames `events/stream` would push — the send leg is just a second view of
+  // the same stream.
+  const emit = (record) => {
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      sendSseRecord(response, frame.event, frame.data);
+    }
+  };
+  const unsubscribe = codeEngine.listen(desktopId, emit);
+
   try {
-    ack = await codeEngine.sendMessage(sessionId, {
+    await codeEngine.sendMessage(sessionId, {
       text: String(text),
       clientMessageId: body?.client_message_id ?? null,
       interrupt: Boolean(body?.interrupt),
     });
   } catch (error) {
+    unsubscribe?.();
     sendSseRecord(response, "error", { type: "error", error: { type: error.type || "api_error", message: error.message } });
     response.end();
     return;
   }
-  sendSseRecord(response, "message", {
-    type: "message_ack",
-    message_id: ack.messageId,
-    thread_root_id: ack.threadRootId,
-    created_at: ack.createdAt,
-  });
 
-  // The turn itself is rendered by the transcript stream; close this leg once
-  // the session goes idle so the composer's request completes.
+  // The reply arrives on the listener; close this leg once the session goes
+  // idle so the composer's request completes.
   const keepalive = setInterval(() => {
     if (!response.writableEnded) response.write(": keepalive\n\n");
   }, 15000);
   const finished = () => {
     clearInterval(keepalive);
+    unsubscribe?.();
     if (!response.writableEnded) response.end();
   };
-  request.on("close", () => clearInterval(keepalive));
+  request.on("close", () => { clearInterval(keepalive); unsubscribe?.(); });
   const abort = new AbortController();
   request.on("close", () => abort.abort());
   await codeEngine.awaitTurn(desktopId, { signal: abort.signal }).catch(() => null);

@@ -257,6 +257,79 @@ export function eventEnvelopeForEntry(entry, sequenceNum) {
   return base;
 }
 
+// ---- transcript entries -> SessionSseFrame (the LIVE leg) -------------------
+//
+// The paged history read above answers with `SessionEventEnvelope`s, but the
+// leg the session detail screen actually opens (GET …/events/stream) speaks a
+// DIFFERENT protocol: `SessionStreamWire` -> `SessionSseFrame`, a 6-case Swift
+// enum decoded from each SSE record's JSON body with a single-key envelope:
+//
+//   {"client_event": {"sdk_message": <SdkMessage>}}
+//
+// The app's decoder runs `.convertFromSnakeCase`, so the camelCase `CodingKeys`
+// (`clientEvent`, `sdkMessage`) are what it looks for as `client_event` /
+// `sdk_message` on the wire (recovered from the binary: the CodingKeys cluster
+// at reflstr 0x4ba37f0 and the `client_event`/`ephemeral_event` small-strings
+// the SSE dispatcher compares the `event:` name against). The payload is a real
+// Claude Code stream-json message, not a bespoke shape.
+
+// One Desktop transcript entry -> the `SdkMessage` case that carries it. The
+// Desktop entry already IS the stream-json message for user/assistant turns
+// (`{parentUuid, isSidechain, type, message, uuid, timestamp, origin}`), so
+// this is a rename-and-pick, not a translation: the app's Sdk*Message structs
+// declare the same fields.
+export function streamJsonFor(entry) {
+  const type = entry?.type;
+  const messageType = entry?.message?.type;
+  if (type === "user") return { user: pick(entry, SDK_USER_FIELDS) };
+  if (type === "assistant") return { assistant: pick(entry, SDK_ASSISTANT_FIELDS) };
+  if (type === "system") return { system: pick(entry, SDK_SYSTEM_FIELDS) };
+  if (messageType === "result" || entry?.subtype) {
+    return { result: pick(entry.message ?? entry, SDK_RESULT_FIELDS) };
+  }
+  // Anything Desktop relays that the app has no case for still travels as
+  // `unknown` rather than being dropped, so a transcript never loses a row.
+  return { unknown: entry ?? null };
+}
+
+// A whole entry -> the SSE record the transcript leg emits.
+// @returns {{ event: "client_event", data: { client_event: object } }}
+export function sseFrameForEntry(entry) {
+  return { event: "client_event", data: { client_event: { sdk_message: streamJsonFor(entry) } } };
+}
+
+// Copy only the declared fields. An absent field is omitted rather than
+// nulled, so a key the app declares as optional is simply not present (the
+// Swift decoder treats a missing key and an explicit `null` differently, and an
+// omitted optional is the safe one).
+function pick(source, fields) {
+  const out = {};
+  for (const field of fields) {
+    const value = source?.[field];
+    if (value !== undefined) out[field] = value;
+  }
+  return out;
+}
+
+// Field names as the Sdk*Message structs declare them (from the type
+// descriptors); the decoder's key strategy accepts them verbatim.
+const SDK_USER_FIELDS = [
+  "type", "uuid", "message", "parentToolUseId", "isMeta", "isSynthetic",
+  "isVisibleInTranscriptOnly", "toolUseResult", "fileAttachments", "timestamp",
+  "createdAt", "isReplay", "origin",
+];
+const SDK_ASSISTANT_FIELDS = [
+  "type", "uuid", "message", "parentToolUseId", "isMeta", "isSynthetic", "error",
+  "isReplay", "isApiErrorMessage", "apiError", "contextUsage", "usageReport",
+  "localCommandSource", "toolUseMeta", "narrationBlockIndexes", "timestamp", "createdAt",
+];
+const SDK_SYSTEM_FIELDS = ["type", "uuid", "subtype", "apiKeySource", "cwd", "timestamp"];
+const SDK_RESULT_FIELDS = [
+  "type", "uuid", "subtype", "durationMs", "durationApiMs", "isError", "numTurns",
+  "totalCostUsd", "usage", "permissionDenials", "result", "isReplay",
+  "userMessageUuid", "queuedTurnCount",
+];
+
 // Apply the SAME sequence number to every envelope produced from one entry, so
 // the app's pager (a floor of sequence numbers) sees them atomically. Envelopes
 // are returned ascending in transcript order.
@@ -265,12 +338,26 @@ export function eventEnvelopes(entries, { startSequence = 0 } = {}) {
   let sequence = startSequence;
   for (const entry of Array.isArray(entries) ? entries : []) {
     const envelope = eventEnvelopeForEntry(entry, sequence);
-    // Skip entries that carry nothing to render (e.g. a bare system entry).
-    if (envelope.event_type === "unknown" && !envelope.event_id) continue;
-    sequence += 1;
+    // Skip entries that carry nothing to render (e.g. a bare system entry),
+    // WITHOUT advancing the counter — so `sequence_num` is a dense index both
+    // this paged read and the transcript stream agree on.
+    if (!isRenderableEnvelope(envelope)) continue;
     out.push(envelope);
+    sequence += 1;
   }
   return out;
+}
+
+// Whether an envelope carries something to render. A bare system/stub entry
+// does not. Both legs share this rule so `from_sequence_num` means one thing.
+export function isRenderableEnvelope(envelope) {
+  return envelope.event_type !== "unknown" || Boolean(envelope.event_id);
+}
+
+// The same rule, applied to a raw entry, for a caller that streams entries
+// directly (the transcript leg) rather than pre-built envelopes.
+export function isRenderableEntry(entry) {
+  return isRenderableEnvelope(eventEnvelopeForEntry(entry, 0));
 }
 
 // ---- paging ----------------------------------------------------------------

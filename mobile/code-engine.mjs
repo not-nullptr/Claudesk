@@ -495,6 +495,17 @@ export function createCodeEngine({
     return loaded.envelopes;
   }
 
+  // The raw Desktop transcript entries, for the transcript-stream leg. That leg
+  // speaks a different protocol (SessionSseFrame, whose payload is a stream-json
+  // message), so it needs the entries themselves, not the SessionEventEnvelopes
+  // the paged history read answers with.
+  async function sessionTranscript(id) {
+    const desktopId = desktopSessionIdFor(id);
+    if (!desktopId) throw notFound();
+    const loaded = await loadSession(desktopId);
+    return loaded.entries;
+  }
+
   // ---------- turns ----------
 
   function activeTurnCount() {
@@ -628,6 +639,11 @@ export function createCodeEngine({
     return translatorFor(desktopId).accept({ method, payload });
   }
 
+  /** The LIST leg's frames (`SessionWatchFrame`), for `GET /v1/code/sessions/watch`. */
+  function watchFramesFor(desktopId, { method, payload }) {
+    return translatorFor(desktopId).acceptWatch({ method, payload });
+  }
+
   /** The sequence to resume this session's SSE stream from. */
   function resumeFrom(desktopId) {
     return translatorFor(desktopId).resumeFrom();
@@ -658,6 +674,7 @@ export function createCodeEngine({
     deleteSession,
     listEvents,
     sessionEventEnvelopes,
+    sessionTranscript,
     sendMessage,
     interrupt,
     permissionsFor,
@@ -665,6 +682,7 @@ export function createCodeEngine({
     listen,
     listenAll,
     framesFor,
+    watchFramesFor,
     resumeFrom,
     awaitTurn,
     activeTurnCount,

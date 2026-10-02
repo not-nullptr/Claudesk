@@ -19,10 +19,12 @@ import {
   parseCursor,
   sessionResource,
   sessionResponse,
+  sseFrameForEntry,
+  streamJsonFor,
   toolCallFromUse,
   toolResultOutput,
 } from "../mobile/code-transcript.mjs";
-import { createCodeEventTranslator, frameFromPayload, isCodeRecord } from "../mobile/code-events.mjs";
+import { createCodeEventTranslator, frameFromPayload, isCodeRecord, watchFrameFromPayload } from "../mobile/code-events.mjs";
 import {
   CODE_ID_PREFIX,
   SESSION_STATUS,
@@ -198,33 +200,52 @@ assert.throws(() => pageEvents(numbered, { cursor: "nonsense" }), /invalid curso
 // The page size is clamped rather than trusted.
 assert.equal(pageEvents(numbered, { limit: 100000 }).data.length, Math.min(numbered.length, 200));
 
-// ---- live records -> SessionWatchFrame ----
+// ---- live records -> SessionSseFrame (the transcript leg) ----
 assert.ok(isCodeRecord({ data: { surface: "LocalSessions", method: "onOnEvent" } }));
 assert.ok(!isCodeRecord({ data: { surface: "LocalAgentModeSessions", method: "onOnEvent" } }), "a Chat relay is not a Code record");
 assert.ok(!isCodeRecord(null));
 
+// A live transcript record becomes a `client_event` whose payload is a
+// stream-json message nested `sdk_message`, NOT the watch leg's `upserted`.
+const live = frameFromPayload("onOnEvent", probe.transcript[0]);
+assert.equal(live.length, 1);
+assert.equal(live[0].event, "client_event");
+assert.ok(!("event_type" in live[0].data), "a transcript frame is not a SessionEventEnvelope");
+assert.ok(live[0].data.client_event.sdk_message.user, "the entry travels as the `user` SdkMessage case");
+assert.equal(live[0].data.client_event.sdk_message.user.uuid, probe.transcript[0].uuid);
+
 const translator = createCodeEventTranslator({ sessionId: "s1", startSequence: 40 });
 const first = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
 assert.equal(first.length, 1);
-assert.equal(first[0].event, "upserted");
-assert.equal(first[0].data.event_type, "user_message");
-assert.equal(first[0].data.sequence_num, 40, "the floor is honoured");
-assert.equal(translator.resumeFrom(), 41);
-// The same entry replayed (Desktop re-sends the tail on reconnect) keeps its
-// original sequence number, so the app's pager does not rewrite history.
-const replay = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
-assert.equal(replay[0].data.sequence_num, 40);
+assert.equal(first[0].event, "client_event");
+assert.equal(translator.resumeFrom(), 41, "the floor is honoured");
+// The same entry replayed (Desktop re-sends the tail on reconnect) does not
+// advance the counter.
+translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
 assert.equal(translator.resumeFrom(), 41, "a replay does not advance the counter");
 // The next distinct entry advances.
-assert.equal(translator.accept({ method: "onOnEvent", payload: probe.transcript[1] })[0].data.sequence_num, 41);
+translator.accept({ method: "onOnEvent", payload: probe.transcript[1] });
+assert.equal(translator.resumeFrom(), 42);
 
-// A removal is a deletion frame, never an upsert of an empty row.
-const removed = translator.accept({ method: "onOnEvent", payload: { removed: true, entry: { uuid: "u-gone" } } });
-assert.deepEqual(removed, [{ event: "deleted", data: { session_id: null, event_id: "u-gone" } }]);
+// A removal carries no content, so the transcript leg emits nothing for it.
+assert.deepEqual(translator.accept({ method: "onOnEvent", payload: { removed: true, entry: { uuid: "u-gone" } } }), []);
 // Nothing renderable produces no frame at all.
+// An entry with no uuid cannot be keyed, so it is dropped rather than emitted.
 assert.deepEqual(translator.accept({ method: "onOnEvent", payload: { entry: { type: "system" } } }), []);
 assert.deepEqual(translator.accept({ method: "onOnEvent", payload: null }), []);
 assert.deepEqual(translator.accept({ method: "onOnSomethingElse", payload: probe.transcript[0] }), []);
+
+// ---- the same record on the LIST leg -> SessionWatchFrame ----
+assert.equal(watchFrameFromPayload("onOnEvent", probe.transcript[0])[0].event, "upserted");
+assert.deepEqual(
+  watchFrameFromPayload("onOnEvent", { removed: true, entry: { uuid: "u-gone" } }),
+  [{ event: "deleted", data: { session_id: null, event_id: "u-gone" } }],
+  "a removal is a deletion frame on the watch leg",
+);
+const watchUpsert = watchFrameFromPayload("onOnEvent", probe.transcript[1]);
+assert.equal(watchUpsert[0].data.event_id, probe.transcript[1].uuid, "the watch leg carries the entry's envelope id");
+assert.equal(watchUpsert[0].data.sequence_num, 0, "a fresh watch frame starts at the floor");
+assert.deepEqual(watchFrameFromPayload("onOnSomethingElse", probe.transcript[0]), []);
 
 // A permission prompt is recorded rather than drawn, and answering clears it.
 const prompt = { requestId: "req-1", sessionId: "s1", toolName: "Bash", input: { command: "ls" } };
@@ -232,6 +253,24 @@ assert.deepEqual(translator.accept({ method: "onOnToolPermissionRequest", payloa
 assert.deepEqual(translator.permissions(), [prompt]);
 assert.equal(translator.resolvePermission("req-1"), true);
 assert.deepEqual(translator.permissions(), []);
+
+// ---- streamJsonFor: every Desktop entry kind maps to its SdkMessage case ----
+// The app's `SdkMessage` is a Swift enum whose cases ARE the stream-json `type`
+// values, so the payload key must match the entry, not a bespoke union.
+assert.ok(streamJsonFor({ type: "user", uuid: "u1" }).user);
+assert.ok(streamJsonFor({ type: "assistant", uuid: "a1" }).assistant);
+assert.ok(streamJsonFor({ type: "system", uuid: "s1" }).system);
+assert.ok(streamJsonFor({ uuid: "r1", message: { type: "result", subtype: "success" } }).result);
+assert.deepEqual(streamJsonFor({ type: "envManagerLog", uuid: "x" }), { unknown: { type: "envManagerLog", uuid: "x" } }, "an unknown kind still travels");
+// Undeclared fields are dropped; declared-but-absent ones are simply omitted,
+// so the app's non-optional decodes see the keys its struct declares.
+const user = streamJsonFor({ type: "user", uuid: "u1", message: { role: "user", content: "hi" }, rogue: 1 }).user;
+assert.equal(user.rogue, undefined, "an undeclared field is not forwarded");
+assert.equal(user.message.content, "hi");
+assert.ok(!("isMeta" in user), "an absent optional is omitted, not nulled");
+const frame = sseFrameForEntry({ type: "assistant", uuid: "a1", message: { role: "assistant", content: [] } });
+assert.deepEqual(Object.keys(frame.data), ["client_event"]);
+assert.deepEqual(Object.keys(frame.data.client_event), ["sdk_message"]);
 
 // ---- the bridge environment offered as a runner ----
 const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2.1.284" });
