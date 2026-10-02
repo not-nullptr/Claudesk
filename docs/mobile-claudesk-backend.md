@@ -70,6 +70,7 @@ sessions are never listed, read or modified, and a completion cannot adopt their
   `thinking_by_model`). The service stores the selection the app writes to
   `model_selector_state/chat`, reports it in bootstrap, and uses it for sends that carry
   no pick of their own. Feature flags that might gate the picker are unverified.
+- **Code tab gate.** On a paid plan, app_start carries the `mobile_remote_enabled` flag (in `org_growthbook`) and a `claude_code_web` access entry (in `current_user_access`); without them the Code tab is hidden. The sessions behind it are not implemented yet.
 - **Titles.** After a new chat's first message starts, the service asks Desktop to
   write a title (`dust/generate_session_title`, the same call the web UI makes, which
   runs one small model request) and applies it unless the chat was renamed meanwhile.

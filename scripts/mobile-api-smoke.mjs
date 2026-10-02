@@ -146,6 +146,8 @@ try {
   )).json();
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
+  assert.deepEqual(bootstrap.org_growthbook.features, { mobile_remote_enabled: { defaultValue: true } });
+  assert.deepEqual(bootstrap.current_user_access.features, [{ feature: "claude_code_web", status: "available" }]);
 
   const selected = await (await call(`/api/organizations/${org.uuid}/model_selector_state/chat`, {
     method: "PUT",

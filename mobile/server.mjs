@@ -207,6 +207,24 @@ const PLANS = {
 const planName = process.env.CLAUDE_MOBILE_PLAN || "max_20x";
 const plan = PLANS[planName] || PLANS.max_20x;
 
+// What app_start must carry for the app to show the Code tab on a paid plan:
+// the remote-sessions flag and the claude_code_web access entry.
+const paidPlan = plan !== PLANS.free;
+function orgGrowthbook() {
+  return {
+    features: paidPlan ? { mobile_remote_enabled: { defaultValue: true } } : {},
+    experiments: [],
+  };
+}
+
+function userAccess() {
+  return {
+    features: paidPlan ? [{ feature: "claude_code_web", status: "available" }] : [],
+    account_features: [],
+    organization_permissions: [],
+  };
+}
+
 function organizationObject() {
   return {
     uuid: identity.orgUuid,
@@ -447,12 +465,8 @@ async function handleBootstrapRoute(request, response, url) {
   const defaultModel = models.some((model) => model.id === chosen) ? chosen : models[0]?.id;
   sendJson(response, 200, {
     account: accountObject(),
-    org_growthbook: { features: {}, experiments: [] },
-    current_user_access: {
-      features: [],
-      account_features: [],
-      organization_permissions: [],
-    },
+    org_growthbook: orgGrowthbook(),
+    current_user_access: userAccess(),
     model_selector_state: [await chatSelectorState(defaultModel)],
     model_selector_config: [
       { id: "chat", models },
