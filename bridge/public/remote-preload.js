@@ -249,7 +249,94 @@
     config.chatSessionIds = [...chatSessionIds];
   }
 
+  // BEGIN browser attachments
+  // The official renderer asks Electron (webUtils.getPathForFile) for the
+  // local path of an attached file. A browser has none, so the Code composer
+  // can send a bare-name mention such as @"report.zip" that nothing on the
+  // server can resolve. Remember the Files the user attaches; when a message is
+  // sent, upload the ones it mentions through /api/remote/files/upload and
+  // replace the name with the uploaded /workspace/RemoteUploads path.
+  const attachmentTtlMs = 30 * 60 * 1000;
+  const pendingAttachments = new Map();
+  const attachmentMention = /@"([^"\n]+)"/g;
+
+  function rememberAttachments(files) {
+    const now = Date.now();
+    for (const file of Array.from(files || [])) {
+      if (!file || typeof file.name !== "string" || !file.name) continue;
+      pendingAttachments.delete(file.name);
+      pendingAttachments.set(file.name, { file, at: now });
+    }
+    while (pendingAttachments.size > 64) {
+      pendingAttachments.delete(pendingAttachments.keys().next().value);
+    }
+  }
+
+  function bareAttachmentName(mention) {
+    const name = mention.startsWith("./") ? mention.slice(2) : mention;
+    return name && !/[\\/]/.test(name) && !name.startsWith("~") ? name : "";
+  }
+
+  function mapStrings(value, transform, depth = 0) {
+    if (typeof value === "string") return transform(value);
+    if (depth > 8 || value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) {
+      return value.map((item) => mapStrings(item, transform, depth + 1));
+    }
+    if (Object.prototype.toString.call(value) !== "[object Object]") return value;
+    return Object.fromEntries(Object.entries(value).map(
+      ([key, item]) => [key, mapStrings(item, transform, depth + 1)],
+    ));
+  }
+
+  async function resolveAttachmentMentions(args) {
+    const now = Date.now();
+    for (const [name, entry] of pendingAttachments) {
+      if (now - entry.at > attachmentTtlMs) pendingAttachments.delete(name);
+    }
+    if (!pendingAttachments.size) return args;
+
+    const wanted = new Map();
+    mapStrings(args, (text) => {
+      for (const match of text.matchAll(attachmentMention)) {
+        const name = bareAttachmentName(match[1]);
+        const entry = name ? pendingAttachments.get(name) : undefined;
+        if (entry) wanted.set(name, entry.file);
+      }
+      return text;
+    });
+    if (!wanted.size) return args;
+
+    const names = [...wanted.keys()];
+    let uploaded;
+    try {
+      uploaded = await uploadBrowserFiles(names.map((name) => wanted.get(name)));
+    } catch (error) {
+      throw new Error(`Could not upload the attached files to the server: ${error.message}`);
+    }
+    if (!Array.isArray(uploaded?.paths) || uploaded.paths.length !== names.length) {
+      throw new Error("Could not upload the attached files to the server");
+    }
+    const resolved = new Map(names.map((name, index) => [name, uploaded.paths[index]]));
+    for (const name of names) pendingAttachments.delete(name);
+    return mapStrings(args, (text) => text.replace(attachmentMention, (whole, mention) => {
+      const path = resolved.get(bareAttachmentName(mention));
+      return path ? `@"${path}"` : whole;
+    }));
+  }
+  // END browser attachments
+
+  document.addEventListener("drop", (event) => rememberAttachments(event.dataTransfer?.files), true);
+  document.addEventListener("paste", (event) => rememberAttachments(event.clipboardData?.files), true);
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target?.tagName === "INPUT" && target.type === "file") rememberAttachments(target.files);
+  }, true);
+
   async function invoke(surface, method, args) {
+    if (surface === "LocalSessions" || surface === "LocalAgentModeSessions") {
+      args = await resolveAttachmentMentions(args);
+    }
     const value = await bridgeRequest("/api/remote/ipc", {
       surface,
       method,

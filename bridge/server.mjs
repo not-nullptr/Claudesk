@@ -766,9 +766,18 @@ async function receiveBrowserUpload(request) {
   }
 
   const uploadsRoot = resolve(workspaceRoot, "RemoteUploads");
-  await mkdir(uploadsRoot, { recursive: true });
   const uploadRoot = resolve(uploadsRoot, randomUUID());
-  await mkdir(uploadRoot, { recursive: false });
+  try {
+    await mkdir(uploadsRoot, { recursive: true });
+    await mkdir(uploadRoot, { recursive: false });
+  } catch (error) {
+    console.error(`[bridge] cannot create ${uploadRoot}: ${error.message}`);
+    throw new ApiError(
+      500,
+      `The server cannot store uploads in ${uploadsRoot} (${error.code || "error"}). `
+      + `The bridge runs as uid ${process.getuid?.()}; it must match the owner of /workspace (PUID/PGID).`,
+    );
+  }
   const uploaded = [];
   let decodedBytes = 0;
   for (const file of body.files) {

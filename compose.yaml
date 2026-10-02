@@ -75,6 +75,9 @@ services:
       dockerfile: bridge/Dockerfile
     image: local/claude-cowork-bridge:latest
     container_name: claude-cowork-bridge
+    # Browser uploads are written under /workspace and must be readable by the
+    # Desktop/Code processes, which run as PUID:PGID.
+    user: "${PUID:-1000}:${PGID:-1001}"
     network_mode: "service:claude-desktop"
     depends_on:
       claude-desktop:

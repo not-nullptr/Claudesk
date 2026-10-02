@@ -19,6 +19,7 @@ node scripts/renderer-patches-smoke.mjs
 node scripts/renderer-runtime-smoke.mjs
 node scripts/updater-smoke.mjs
 node scripts/workspace-folders-smoke.mjs
+node scripts/attachment-mentions-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
 node scripts/realtime-stream-smoke.mjs
