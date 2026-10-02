@@ -270,7 +270,7 @@ async function handleAuth(request, response, url) {
   if (url.pathname === "/api/auth/send_magic_link" && request.method === "POST") {
     const body = await readJson(request);
     try {
-      const value = await auth.sendMagicLink(request, body.email_address || body.emailAddress);
+      const value = await auth.sendMagicLink(request);
       sendJson(response, 200, value);
     } catch (error) {
       if (error instanceof AuthError) {
@@ -283,7 +283,7 @@ async function handleAuth(request, response, url) {
   if (url.pathname === "/api/auth/send_code" && request.method === "POST") {
     const body = await readJson(request);
     try {
-      await auth.sendMagicLink(request, body.email_address || body.emailAddress);
+      await auth.sendMagicLink(request);
       sendJson(response, 200, { sent: true, length: 6 });
     } catch (error) {
       if (error instanceof AuthError) {

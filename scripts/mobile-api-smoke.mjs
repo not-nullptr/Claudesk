@@ -7,11 +7,15 @@ import http from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { base32Decode, hotp, totpCounter } from "../mobile/totp.mjs";
 
 process.env.CLAUDE_MOBILE_API_EMAIL = "smoke@example.com";
+process.env.CLAUDE_MOBILE_API_TOTP_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+// A stale static code or password in the environment must have no effect.
 process.env.CLAUDE_MOBILE_API_PASSWORD = "smoke-pass";
 process.env.CLAUDE_MOBILE_API_CODE = "123456";
-process.env.CLAUDE_MOBILE_API_MAX_FAILURES = "3";
+process.env.CLAUDE_MOBILE_TRUST_PROXY = "1";
+process.env.CLAUDE_MOBILE_API_MAX_FAILURES = "5";
 process.env.CLAUDE_MOBILE_API_BASE_BAN_SECONDS = "60";
 process.env.CLAUDE_MOBILE_API_MAX_TOKENS = "256";
 
@@ -86,6 +90,18 @@ process.env.CLAUDE_MOBILE_PROTO_SCHEMA = new URL(
 
 const facade = await import("../mobile/server.mjs");
 
+const totpKey = base32Decode(process.env.CLAUDE_MOBILE_API_TOTP_SECRET);
+const codeAt = (offset) => hotp(totpKey, totpCounter() + offset);
+const wrongCode = () => {
+  const valid = new Set([-1, 0, 1].map(codeAt));
+  return ["000000", "111111", "222222"].find((code) => !valid.has(code));
+};
+const verifyBody = (code, email = "smoke@example.com", method = "code") => ({
+  credentials: method === "code"
+    ? { method, email_address: email, code }
+    : { method, email_address: email, password: code },
+});
+
 const base = "http://127.0.0.1:18471";
 let cookie = "";
 async function call(path, { method = "GET", body, headers = {} } = {}) {
@@ -126,18 +142,39 @@ try {
   assert.equal(magic.sent, true);
   assert.equal(magic.fallback_code_configuration.length, 6);
 
-  const wrong = await call("/api/auth/verify_magic_link", {
-    method: "POST",
-    body: { credentials: { method: "code", email_address: "smoke@example.com", code: "000000" } },
-  });
+  // Wrong codes, the old static code and the old password are all rejected.
+  const wrong = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(wrongCode()) });
   assert.equal(wrong.status, 401);
-
-  const verify = await call("/api/auth/verify_magic_link", {
+  const staticCode = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody("123456") });
+  assert.equal(staticCode.status, 401, "the static code must not log in");
+  const password = await call("/api/auth/verify_magic_link", {
     method: "POST",
-    body: { credentials: { method: "code", email_address: "smoke@example.com", code: "123456" } },
+    body: verifyBody("smoke-pass", "smoke@example.com", "password"),
   });
+  assert.equal(password.status, 401, "the password must not log in");
+
+  // A valid code for the wrong email fails and does not use up the code.
+  const current = codeAt(0);
+  const wrongEmail = await call("/api/auth/verify_magic_link", {
+    method: "POST",
+    body: verifyBody(current, "someone-else@example.com"),
+  });
+  assert.equal(wrongEmail.status, 401);
+
+  const verify = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(current) });
   assert.equal(verify.status, 200);
   assert.ok(cookie.startsWith("sessionKey="));
+
+  // The same code cannot be used twice, nor can an older step; the next step is accepted.
+  cookie = "";
+  const replay = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(current) });
+  assert.equal(replay.status, 401, "a used code must not be accepted again");
+  assert.equal(cookie, "");
+  const next = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(codeAt(1)) });
+  assert.equal(next.status, 200, "the next time step is accepted");
+  assert.ok(cookie.startsWith("sessionKey="));
+  const older = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(codeAt(-1)) });
+  assert.equal(older.status, 401, "a step before the last used one must not be accepted");
 
   const account = await (await call("/api/account")).json();
   assert.equal(account.email_address, "smoke@example.com");
@@ -245,16 +282,46 @@ try {
   });
   assert.equal(anonymousRpc.status, 401);
 
-  // fail2ban lockout: maxFailures=3, so the 4th attempt in a row must 429.
+  // fail2ban lockout: maxFailures=5, so a run of wrong codes ends in 429.
   let lastStatus = 0;
-  for (let index = 0; index < 4; index += 1) {
-    const attempt = await call("/api/auth/verify_magic_link", {
-      method: "POST",
-      body: { credentials: { method: "code", email_address: "smoke@example.com", code: "000000" } },
-    });
+  for (let index = 0; index < 6; index += 1) {
+    const attempt = await call("/api/auth/verify_magic_link", { method: "POST", body: verifyBody(wrongCode()) });
     lastStatus = attempt.status;
   }
   assert.equal(lastStatus, 429);
+
+  // The lockout is per client address as seen by the trusted proxy (the last
+  // X-Forwarded-For entry), so forging the left-hand entries cannot evade it,
+  // and another client of the same account is unaffected.
+  const via = (client, spoof) => ({ "x-forwarded-for": `${spoof}, ${client}` });
+  lastStatus = 0;
+  for (let index = 0; index < 6; index += 1) {
+    const attempt = await call("/api/auth/verify_magic_link", {
+      method: "POST",
+      body: verifyBody(wrongCode()),
+      headers: via("198.51.100.7", `forged-${index}`),
+    });
+    lastStatus = attempt.status;
+  }
+  assert.equal(lastStatus, 429, "forged X-Forwarded-For entries must not evade the lockout");
+  // Rotating the host part of an IPv6 address does not escape the lockout.
+  lastStatus = 0;
+  for (let index = 0; index < 6; index += 1) {
+    const attempt = await call("/api/auth/verify_magic_link", {
+      method: "POST",
+      body: verifyBody(wrongCode()),
+      headers: via(`2001:db8:5:6:${index}::${index + 1}`, "forged"),
+    });
+    lastStatus = attempt.status;
+  }
+  assert.equal(lastStatus, 429, "addresses in one IPv6 /64 must share a lockout");
+  const otherClient = await call("/api/auth/verify_magic_link", {
+    method: "POST",
+    body: verifyBody(wrongCode()),
+    headers: via("198.51.100.8", "forged-x"),
+  });
+  assert.equal(otherClient.status, 401, "another client must not be locked out");
+
   console.log("mobile-api-smoke: PASS");
 } finally {
   await rm(dataDir, { recursive: true, force: true });

@@ -7,6 +7,7 @@ COPY mobile/gateway.mjs ./gateway.mjs
 COPY mobile/system-prompt.mjs ./system-prompt.mjs
 COPY mobile/store.mjs ./store.mjs
 COPY mobile/auth.mjs ./auth.mjs
+COPY mobile/totp.mjs ./totp.mjs
 COPY mobile/engine.mjs ./engine.mjs
 COPY mobile/connect.mjs ./connect.mjs
 COPY mobile/proto.mjs ./proto.mjs
