@@ -13,7 +13,7 @@ for (const view of views) {
   view.isDestroyed = () => !!view.destroyed;
   view.getURL = () => view.url;
   view.getType = () => view.type;
-  const sandbox = { console: { debug(message) { received.push(JSON.parse(message.slice('relay:'.length))); } },
+  const sandbox = { console: { debug(message) { relay.enqueueRelayedEvent(JSON.parse(message.slice('relay:'.length)), view.id); } },
     'claude.web': { LocalAgentModeSessions: { onOnEvent(callback) { callbacks.set(view.id, callback); return () => {}; } } } };
   vm.createContext(sandbox);
   view.executeJavaScript = async expression => vm.runInContext(expression, sandbox);
@@ -26,30 +26,41 @@ const sandbox = {
   wait: async () => {},
 };
 vm.createContext(sandbox);
+const relay = { relayedListeners: sandbox.relayedListeners, relayedEventQueue: received,
+  relayedEventCopies: new Map(), relayedEventCopiesBytes: 0,
+  Date: { now: () => now } };
+let now = 10000;
+vm.createContext(relay);
+vm.runInContext(section('function enqueueRelayedEvent(', 'function attachRelayConsole('), relay);
 vm.runInContext(section('function rendererCandidates()', 'async function evaluateInOfficialRenderer(')
   + section('async function ensureRelayedEventsRegistered()', 'async function drainRelayedEvents('), sandbox);
 await sandbox.ensureRelayedEventsRegistered();
-assert.deepEqual([...registered], [2], 'one embedded app view owns the broadcast relay');
-assert.equal(callbacks.has(1), false, 'shell must not duplicate app-view broadcasts');
+assert.deepEqual([...registered], [1, 2], 'embedded app views must register alongside the shell window');
 assert.equal(callbacks.has(3), false, 'external origins must not be injected');
 const original = callbacks.get(2);
 await sandbox.ensureRelayedEventsRegistered();
 assert.equal(callbacks.get(2), original, 'polling must not duplicate subscriptions');
-for (const text of ['turn one', 'turn two']) {
-  // Desktop broadcasts each event to every subscribed renderer.
-  for (const callback of callbacks.values()) callback({ type: 'message', sessionId: 'session', message: { text } });
-}
+for (const text of ['turn one', 'turn two']) callbacks.get(2)({ type: 'message', sessionId: 'session', message: { text } });
 assert.deepEqual(received.map(event => event.payload.message.text), ['turn one', 'turn two']);
+const broadcast = {type:'message',sessionId:'session',message:{type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'thinking'}}}};
+for (const callback of callbacks.values()) callback(broadcast);
+assert.equal(received.length, 3, 'a block-start broadcast is delivered once across renderers');
+const repeated = {type:'message',sessionId:'session',message:{type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'ha'}}}};
+for(let occurrence=0;occurrence<3;occurrence++)for(const callback of callbacks.values())callback(repeated);
+assert.equal(received.length, 6, 'three identical deltas remain three, not one or six');
+callbacks.get(1)({type:'message',sessionId:'shell-only',message:{text:'shell turn'}});
+callbacks.get(2)({type:'message',sessionId:'view-only',message:{text:'view turn'}});
+assert.deepEqual(received.slice(-2).map(e=>e.payload.sessionId), ['shell-only','view-only'],
+  'events routed only to either renderer must reach the browser');
+now += 2600;
+callbacks.get(2)(repeated);
+assert.equal(received.length, 9, 'deduplication expires');
+for(let i=0;i<2100;i++)relay.enqueueRelayedEvent({surface:'LocalAgentModeSessions',method:'onOnEvent',payload:{i}},1);
+assert.ok(relay.relayedEventCopies.size<=2000, 'deduplication cache is bounded');
+assert.ok(relay.relayedEventCopiesBytes<=8*1024*1024);
+relay.enqueueRelayedEvent({surface:'LocalAgentModeSessions',method:'onOnEvent',payload:{text:'x'.repeat(40000)}},1);
+assert.ok(relay.relayedEventCopies.size<=2000, 'large events bypass the deduplication cache');
 views[1].destroyed = true;
-callbacks.delete(2);
 await sandbox.ensureRelayedEventsRegistered();
 assert.equal(registered.has(2), false);
-assert.deepEqual([...registered], [1], 'a destroyed view fails over to the surviving shell');
-callbacks.get(1)({type:'message',sessionId:'session',message:{text:'after failover'}});
-assert.equal(received.at(-1).payload.message.text, 'after failover');
-// A newly opened view must not steal ownership while the shell is live.
-views[1].destroyed = false;
-await sandbox.ensureRelayedEventsRegistered();
-assert.deepEqual([...registered], [1]);
-assert.equal(callbacks.has(2), false);
-console.log('renderer-relay-smoke: one broadcast authority, embedded views preferred, failover and external-origin exclusion retained');
+console.log('renderer-relay-smoke: embedded views stream, shell and external origins are handled, subscriptions are not duplicated');
