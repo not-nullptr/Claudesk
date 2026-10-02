@@ -106,6 +106,11 @@ function orgUuidFromPath(pathname) {
   return match ? match[1].toLowerCase() : null;
 }
 
+async function selectedModel() {
+  const saved = await store.readJsonFile("model-selection.json", null);
+  return typeof saved?.model === "string" ? saved.model : "";
+}
+
 function accountObject() {
   return {
     uuid: identity.accountUuid,
@@ -377,7 +382,8 @@ async function handleBootstrapRoute(request, response, url) {
   const match = url.pathname.match(/^\/api\/bootstrap\/([0-9a-f-]{36})\/app_start$/i);
   if (!match || request.method !== "GET") return false;
   const models = await engine.listModels();
-  const defaultModel = models[0]?.id;
+  const chosen = await selectedModel();
+  const defaultModel = models.some((model) => model.id === chosen) ? chosen : models[0]?.id;
   sendJson(response, 200, {
     account: accountObject(),
     org_growthbook: { features: {}, experiments: [] },
@@ -523,6 +529,21 @@ async function handleConversationRoutes(request, response, url) {
     return true;
   }
 
+  if (rest === "model_selector_state/chat") {
+    if (request.method === "GET") {
+      sendJson(response, 200, { id: "chat", model: (await selectedModel()) || (await engine.defaultModel()) });
+      return true;
+    }
+    if (["PUT", "POST", "PATCH"].includes(request.method)) {
+      const body = await readJson(request);
+      if (typeof body.model === "string" && body.model) {
+        await store.writeJsonFile("model-selection.json", { model: body.model });
+      }
+      sendJson(response, 200, { id: "chat", model: (await selectedModel()) || body.model });
+      return true;
+    }
+  }
+
   match = rest.match(/^(chat_conversations_v2|chat_conversations)$/);
   if (match && request.method === "GET") {
     const conversations = await engine.listConversations();
@@ -614,8 +635,22 @@ async function handleConversationRoutes(request, response, url) {
 // Streams one assistant turn over SSE in the mobile contract (§6.2), while
 // persisting canonical state so reopening or another surface sees the same IDs.
 async function handleCompletion(request, response, conversationId) {
-  const conversation = await engine.getConversation(conversationId);
   const body = await readJson(request, 72 * 1024 * 1024);
+  let conversation;
+  try {
+    conversation = await engine.getConversation(conversationId);
+  } catch (error) {
+    // A new chat carries a client-generated UUID plus create_conversation_params
+    // on its first completion; the conversation does not exist yet.
+    if (error.status !== 404) throw error;
+    const params = body.create_conversation_params || {};
+    conversation = await engine.createConversation({
+      uuid: conversationId,
+      name: params.name || "",
+      model: params.model || body.model || (await selectedModel()) || undefined,
+      isTemporary: Boolean(params.is_temporary),
+    });
+  }
   const isRetry = new URL(request.url, "http://localhost").pathname
     .endsWith("/retry_completion");
   const turn = await engine.prepareTurn({ conversation, body, retry: isRetry });

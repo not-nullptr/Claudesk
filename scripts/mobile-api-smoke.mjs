@@ -126,6 +126,24 @@ try {
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub/chat"));
 
+  const selected = await (await call(`/api/organizations/${org.uuid}/model_selector_state/chat`, {
+    method: "PUT",
+    body: { model: "stub/chat" },
+  })).json();
+  assert.deepEqual(selected, { id: "chat", model: "stub/chat" });
+
+  // New chats: the first completion carries a client UUID and
+  // create_conversation_params instead of a prior create call.
+  const freshUuid = "33333333-3333-4333-8333-333333333333";
+  const fresh = await call(
+    `/api/organizations/${org.uuid}/chat_conversations/${freshUuid}/completion`,
+    { method: "POST", body: { prompt: "Hi", create_conversation_params: { name: "", model: "stub/chat" } } },
+  );
+  assert.equal(fresh.status, 200);
+  assert.equal(parseSse(await fresh.text()).at(-1).event, "message_stop");
+  const freshReopened = await (await call(`/api/organizations/${org.uuid}/chat_conversations/${freshUuid}`)).json();
+  assert.equal(freshReopened.chat_messages.length, 2);
+
   const created = await (await call(`/api/organizations/${org.uuid}/chat_conversations`, {
     method: "POST",
     body: { name: "New conversation", model: "stub/chat" },

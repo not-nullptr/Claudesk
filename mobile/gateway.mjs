@@ -44,6 +44,24 @@ async function readJsonIfPresent(filePath) {
   }
 }
 
+// Display labels: the 3P config's labelOverride wins over the gateway's own
+// display_name; callers fall back to the model id.
+const modelLabels = new Map();
+
+export function modelLabel(id) {
+  return modelLabels.get(id) || "";
+}
+
+function rememberConfigLabels(models) {
+  if (!Array.isArray(models)) return;
+  for (const model of models) {
+    if (model && typeof model === "object" && typeof model.name === "string"
+      && typeof model.labelOverride === "string" && model.labelOverride) {
+      modelLabels.set(model.name, model.labelOverride);
+    }
+  }
+}
+
 function configListToNames(models) {
   if (!Array.isArray(models)) return [];
   return models
@@ -79,6 +97,7 @@ export async function getGatewayConfig() {
       "the applied Desktop 3P configuration does not define an inference gateway",
     );
   }
+  rememberConfigLabels(config?.inferenceModels);
   cachedConfig = {
     baseUrl: baseUrl.replace(/\/$/, ""),
     apiKey,
@@ -113,6 +132,12 @@ export async function listGatewayModels() {
     });
     if (response.ok) {
       const body = await response.json();
+      for (const model of Array.isArray(body?.data) ? body.data : []) {
+        if (typeof model?.id === "string" && typeof model?.display_name === "string"
+          && model.display_name && !modelLabels.has(model.id)) {
+          modelLabels.set(model.id, model.display_name);
+        }
+      }
       const ids = (Array.isArray(body?.data) ? body.data : [])
         .map((model) => typeof model?.id === "string" ? model.id : "")
         .filter(Boolean);

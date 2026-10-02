@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { startUpstreamCompletion, readUpstreamEvents, listGatewayModels } from "./gateway.mjs";
+import { startUpstreamCompletion, readUpstreamEvents, listGatewayModels, modelLabel } from "./gateway.mjs";
 
 // Canonical single-user chat engine. Both the REST/SSE surface and the
 // Connect/protobuf surface in connect.mjs adapt on top of this model, matching
@@ -171,11 +171,11 @@ export function createEngine({ store, maxTokens, log = console }) {
   async function listModels() {
     const ids = await listGatewayModels();
     return ids.map((id) => {
-      const label = id.split("/").pop() || id;
+      const label = modelLabel(id) || id.split("/").pop() || id;
       return {
         id,
         name: label,
-        short_name: label.slice(0, 16),
+        short_name: label.length > 16 ? label.slice(0, 15) + "\u2026" : label,
         section: "main",
         disabled: false,
         capabilities: {},
