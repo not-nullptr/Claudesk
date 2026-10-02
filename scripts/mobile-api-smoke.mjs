@@ -3,11 +3,11 @@
 // inference gateway, runs the facade in-process, and drives the
 // device-confirmed sequence plus a Connect probe. See docs/mobile-spec.
 import assert from "node:assert/strict";
-import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { base32Decode, hotp, totpCounter } from "../mobile/totp.mjs";
+import { startFakeClaudesk } from "./lib/fake-claudesk.mjs";
 
 process.env.CLAUDE_MOBILE_API_EMAIL = "smoke@example.com";
 process.env.CLAUDE_MOBILE_API_TOTP_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -15,71 +15,22 @@ process.env.CLAUDE_MOBILE_API_TOTP_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 process.env.CLAUDE_MOBILE_API_PASSWORD = "smoke-pass";
 process.env.CLAUDE_MOBILE_API_CODE = "123456";
 process.env.CLAUDE_MOBILE_TRUST_PROXY = "1";
+process.env.CLAUDE_MOBILE_CAPTURE = "1";
 process.env.CLAUDE_MOBILE_API_MAX_FAILURES = "5";
 process.env.CLAUDE_MOBILE_API_BASE_BAN_SECONDS = "60";
-process.env.CLAUDE_MOBILE_API_MAX_TOKENS = "256";
 
-// Stub Desktop bridge serving the system prompt template the way the real
-// /api/bootstrap/:org/system_prompts route does.
-const desktopTemplate = [
-  "<application_details>\nVM and Claude Code details.\n</application_details>",
-  "<claude_behavior>",
-  "<product_information>\nFile automation.\n</product_information>",
-  "<tone_and_formatting>\nSMOKE-TONE-SECTION\n</tone_and_formatting>",
-  "<computer_use>\nSMOKE-COMPUTER-USE\n</computer_use>",
-  "</claude_behavior>",
-  "<env>\nModel: {{modelName}}\n</env>\n{{modelIdentity}}",
-].join("\n").padEnd(600, " ");
-let desktopUp = true;
-const desktop = http.createServer((request, response) => {
-  if (desktopUp && /^\/api\/bootstrap\/[^/]+\/system_prompts$/.test(request.url)) {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ cowork_system_prompt: { value: { prompt: desktopTemplate } } }));
-    return;
-  }
-  response.writeHead(desktopUp ? 404 : 503);
-  response.end("{}");
-});
-await new Promise((resolve) => desktop.listen(0, "127.0.0.1", resolve));
-process.env.CLAUDE_MOBILE_DESKTOP_URL = `http://127.0.0.1:${desktop.address().port}`;
-process.env.CLAUDE_MOBILE_SYSTEM_PROMPT_TTL_MS = "1";
-
-let lastSystem;
-const stub = http.createServer(async (request, response) => {
-  if (request.method === "GET" && request.url === "/v1/models") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ object: "list", data: [{ id: "stub/chat" }] }));
-    return;
-  }
-  if (request.method === "POST" && request.url === "/v1/messages") {
-    let body = "";
-    for await (const chunk of request) body += chunk;
-    const parsed = JSON.parse(body);
-    assert.equal(typeof parsed.model, "string");
-    lastSystem = parsed.system;
-    assert.ok(Array.isArray(parsed.messages) && parsed.messages.length >= 1);
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    const send = (event, data) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    send("message_start", { type: "message_start", message: { id: "resp_stub", model: parsed.model, role: "assistant", content: [] } });
-    send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text" } });
-    send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello from " } });
-    send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "your backend" } });
-    send("content_block_stop", { type: "content_block_stop", index: 0 });
-    send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: {} });
-    send("message_stop", { type: "message_stop" });
-    response.end();
-    return;
-  }
-  response.writeHead(404);
-  response.end("{}");
-});
-await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
-const stubPort = stub.address().port;
-process.env.CLAUDE_MOBILE_GATEWAY_BASE_URL = `http://127.0.0.1:${stubPort}`;
-process.env.CLAUDE_MOBILE_GATEWAY_API_KEY = "stub-key";
-process.env.CLAUDE_MOBILE_GATEWAY_AUTH_SCHEME = "x-api-key";
+// The mobile facade talks to Claude Desktop only through the Claudesk bridge;
+// this fake keeps Desktop-shaped Chat sessions in memory.
+const claudesk = await startFakeClaudesk();
+process.env.CLAUDE_MOBILE_DESKTOP_URL = claudesk.url;
+// A Cowork session the phone must never see or write to.
+const coworkUuid = "55555555-5555-4555-8555-555555555555";
+claudesk.addSession({ sessionId: `local_${coworkUuid}`, sessionType: "cowork", title: "Cowork task" });
 
 const dataDir = await mkdtemp(join(tmpdir(), "claudesk-mobile-smoke-"));
+// Conversations from before the Claudesk backend are moved aside, not served.
+await mkdir(join(dataDir, "conversations"), { recursive: true });
+await writeFile(join(dataDir, "conversations", "old.json"), JSON.stringify({ uuid: "66666666-6666-4666-8666-666666666666", messages: [] }));
 process.env.CLAUDE_MOBILE_DATA_DIR = dataDir;
 process.env.CLAUDE_MOBILE_PORT = "18471";
 process.env.CLAUDE_MOBILE_HOST = "127.0.0.1";
@@ -184,94 +135,284 @@ try {
   const orgs = await (await call("/api/organizations")).json();
   assert.equal(orgs[0].uuid, org.uuid);
 
+  assert.deepEqual(await readdir(join(dataDir, "conversations")), [], "legacy conversations are moved out");
+  assert.deepEqual(await readdir(join(dataDir, "legacy-conversations")), ["old.json"]);
+
   const bootstrap = await (await call(
     `/api/bootstrap/${org.uuid}/app_start?growthbook_format=sdk&include_system_prompts=false`,
   )).json();
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
-  assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub/chat"));
+  assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
 
   const selected = await (await call(`/api/organizations/${org.uuid}/model_selector_state/chat`, {
     method: "PUT",
-    body: { model: "stub/chat" },
+    body: { model: "stub-haiku" },
   })).json();
-  assert.deepEqual(selected, { id: "chat", model: "stub/chat" });
+  assert.deepEqual(selected, { id: "chat", model: "stub-haiku" });
 
-  // New chats: the first completion carries a client UUID and
-  // create_conversation_params instead of a prior create call.
-  const freshUuid = "33333333-3333-4333-8333-333333333333";
-  const fresh = await call(
-    `/api/organizations/${org.uuid}/chat_conversations/${freshUuid}/completion`,
-    { method: "POST", body: { prompt: "Hi", create_conversation_params: { name: "", model: "stub/chat" } } },
-  );
-  assert.equal(fresh.status, 200);
-  assert.equal(parseSse(await fresh.text()).at(-1).event, "message_stop");
-  const freshReopened = await (await call(`/api/organizations/${org.uuid}/chat_conversations/${freshUuid}`)).json();
-  assert.equal(freshReopened.chat_messages.length, 2);
+  const waitFor = async (check, label, ms = 5000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const chatPath = (uuid, action = "") => `/api/organizations/${org.uuid}/chat_conversations/${uuid}${action}`;
+  const readConversation = async (uuid) => (await call(chatPath(uuid))).json();
+  const texts = (conversation) => conversation.chat_messages.map((message) => message.content.map((part) => part.text).join(""));
+  const send = async (uuid, body, action = "/completion") => {
+    const response = await call(chatPath(uuid, action), { method: "POST", body });
+    assert.equal(response.status, 200, await response.clone().text());
+    const records = parseSse(await response.text());
+    return {
+      records,
+      kinds: records.map((record) => record.event),
+      text: records.filter((record) => record.event === "content_block_delta").map((record) => record.data.delta.text).join(""),
+    };
+  };
+  const turn = (human, assistant) => ({ human_message_uuid: human, assistant_message_uuid: assistant });
+  const sessionOf = (uuid) => claudesk.sessions.get(`local_${uuid}`);
 
-  const created = await (await call(`/api/organizations/${org.uuid}/chat_conversations`, {
+  // ---- a new chat: the first completion creates the Desktop session ----
+  const convUuid = "33333333-3333-4333-8333-333333333333";
+  const human1 = "11111111-1111-4111-8111-111111111111";
+  const assistant1 = "22222222-2222-4222-8222-222222222222";
+  const first = await send(convUuid, {
+    prompt: "Hello",
+    create_conversation_params: { name: "", model: "stub-haiku" },
+    turn_message_uuids: turn(human1, assistant1),
+  });
+  assert.equal(first.records[0].event, "message_start");
+  assert.equal(first.records[0].data.message.uuid, assistant1, "the app's assistant uuid is honoured");
+  assert.equal(first.records[0].data.message.parent_uuid, human1);
+  assert.equal(first.kinds.at(-1), "message_stop");
+  assert.equal(first.text, "Echo: Hello");
+  const started = claudesk.ipcCalls("start");
+  assert.equal(started.length, 1);
+  assert.equal(started[0].args[0].sessionId, `local_${convUuid}`, "session id is derived from the conversation uuid");
+  assert.equal(started[0].args[0].messageUuid, human1, "the app's human uuid is passed to Desktop");
+  assert.equal(started[0].args[0].sessionType, "chat");
+  assert.equal(started[0].args[0].model, "stub-haiku");
+
+  let conversation = await readConversation(convUuid);
+  assert.deepEqual(conversation.chat_messages.map((message) => message.uuid), [human1, assistant1]);
+  assert.deepEqual(texts(conversation), ["Hello", "Echo: Hello"]);
+  assert.equal(conversation.chat_messages[1].parent_message_uuid, human1);
+  assert.equal(conversation.current_leaf_message_uuid, assistant1);
+  assert.equal(conversation.model, "stub-haiku");
+
+  // ---- follow-up on the same session ----
+  const human2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const assistant2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const second = await send(convUuid, { prompt: "Second", parent_message_uuid: assistant1, turn_message_uuids: turn(human2, assistant2) });
+  assert.equal(second.text, "Echo: Second");
+  assert.equal(claudesk.ipcCalls("start").length, 1, "later messages reuse the session");
+  assert.equal(claudesk.ipcCalls("rewind").length, 0, "a plain follow-up does not rewind");
+  assert.equal(claudesk.ipcCalls("sendMessage").at(-1).args[0], `local_${convUuid}`);
+  conversation = await readConversation(convUuid);
+  assert.deepEqual(texts(conversation), ["Hello", "Echo: Hello", "Second", "Echo: Second"]);
+  assert.equal(conversation.chat_messages[3].uuid, assistant2);
+  assert.equal(conversation.chat_messages[2].parent_message_uuid, assistant1);
+
+  // ---- a turn with thinking and a tool call: only the answer text reaches the phone ----
+  const human3 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const assistant3 = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const tool = await send(convUuid, { prompt: "[tool] third", parent_message_uuid: assistant2, turn_message_uuids: turn(human3, assistant3) });
+  assert.equal(tool.text, "Echo: third");
+  assert.equal(tool.kinds.filter((kind) => kind === "message_start").length, 1);
+  assert.deepEqual(tool.records.filter((record) => record.event === "content_block_start").map((record) => record.data.index), [0]);
+  assert.ok(tool.records.filter((record) => record.event === "content_block_start").every((record) => record.data.content_block.type === "text"));
+  conversation = await readConversation(convUuid);
+  assert.equal(conversation.chat_messages.length, 6, "tool results and thinking are not separate messages");
+  assert.equal(texts(conversation)[5], "Echo: third");
+
+  // ---- edit a message: Desktop rewinds to it and the new text is a fresh turn ----
+  const human2b = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const assistant2b = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  claudesk.resetCalls();
+  const edited = await send(convUuid, { prompt: "Second edited", parent_message_uuid: assistant1, turn_message_uuids: turn(human2b, assistant2b) });
+  assert.equal(edited.text, "Echo: Second edited");
+  assert.deepEqual(claudesk.ipcCalls("rewind").map((call) => call.args), [[`local_${convUuid}`, human2]], "the edited message is the rewind target");
+  conversation = await readConversation(convUuid);
+  assert.deepEqual(texts(conversation), ["Hello", "Echo: Hello", "Second edited", "Echo: Second edited"], "later turns are discarded, as in the web UI");
+  assert.deepEqual(conversation.chat_messages.map((message) => message.uuid), [human1, assistant1, human2b, assistant2b]);
+
+  // ---- retry regenerates the answer to the same human message ----
+  claudesk.resetCalls();
+  const retried = await send(convUuid, { turn_message_uuids: { assistant_message_uuid: assistant2b } }, "/retry_completion");
+  assert.equal(retried.text, "Echo: Second edited");
+  assert.deepEqual(claudesk.ipcCalls("rewind").map((call) => call.args), [[`local_${convUuid}`, human2b]]);
+  assert.equal(claudesk.ipcCalls("sendMessage").at(-1).args[1], "Second edited", "the removed prompt is resent");
+  assert.equal(claudesk.ipcCalls("sendMessage").at(-1).args[4], human2b, "retry keeps the human message uuid");
+  conversation = await readConversation(convUuid);
+  assert.deepEqual(conversation.chat_messages.map((message) => message.uuid), [human1, assistant1, human2b, assistant2b]);
+
+  // ---- a redelivered request does not send the message twice ----
+  claudesk.resetCalls();
+  const redelivered = await send(convUuid, { prompt: "Second edited", parent_message_uuid: assistant1, turn_message_uuids: turn(human2b, assistant2b) });
+  assert.equal(redelivered.text, "Echo: Second edited");
+  assert.equal(claudesk.ipcCalls("sendMessage").length + claudesk.ipcCalls("rewind").length, 0);
+  assert.equal((await readConversation(convUuid)).chat_messages.length, 4);
+
+  // ---- attachments: text files are uploaded and mentioned, images go inline ----
+  const upload = async (name, bytes, type) => {
+    const prepared = await (await call(`/api/organizations/${org.uuid}/files/prepare-upload`, { method: "POST", body: { files: [{ name }] } })).json();
+    const form = new FormData();
+    form.append("path", prepared.uploads[0].path);
+    form.append("file", new Blob([bytes], { type }), name);
+    const response = await fetch(`${base}/api/organizations/${org.uuid}/files`, { method: "POST", headers: { cookie }, body: form });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const notes = await upload("notes.txt", Buffer.from("The secret word is walrus.\n"), "text/plain");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==", "base64");
+  const picture = await upload("pic.png", png, "image/png");
+  claudesk.resetCalls();
+  const human4 = "12121212-1212-4212-8212-121212121212";
+  const assistant4 = "34343434-3434-4434-8434-343434343434";
+  const attached = await send(convUuid, {
+    prompt: "What are these?",
+    parent_message_uuid: assistant2b,
+    turn_message_uuids: turn(human4, assistant4),
+    attachments: [{ file_name: "notes.txt", file_size: notes.file_size, file_type: "text/plain" }],
+    files: [notes.file_uuid, picture.file_uuid],
+  });
+  assert.equal(attached.text, "Echo: What are these?");
+  assert.deepEqual(claudesk.calls.filter((call) => call.route === "upload").map((call) => call.names), [["notes.txt"]], "the text file is uploaded once");
+  assert.equal(claudesk.uploads.at(-1).bytes.toString(), "The secret word is walrus.\n");
+  const attachedCall = claudesk.ipcCalls("sendMessage").at(-1).args;
+  assert.match(attachedCall[1], /^@"\/workspace\/RemoteUploads\/[0-9a-f-]+\/notes\.txt"\nWhat are these\?$/);
+  assert.equal(attachedCall[2].length, 1);
+  assert.deepEqual(Object.keys(attachedCall[2][0]).sort(), ["base64", "mimeType", "name"]);
+  assert.equal(attachedCall[2][0].mimeType, "image/png");
+  assert.equal(Buffer.from(attachedCall[2][0].base64, "base64").length, png.length);
+  conversation = await readConversation(convUuid);
+  const attachedMessage = conversation.chat_messages.at(-2);
+  assert.equal(attachedMessage.content[0].text, "What are these?", "the mention is not shown as message text");
+  assert.equal(attachedMessage.attachments[0].file_name, "notes.txt");
+
+  // ---- stopping from the phone stops the Desktop session ----
+  const stopUuid = "56565656-5656-4656-8656-565656565656";
+  claudesk.resetCalls();
+  const controller = new AbortController();
+  const slow = await fetch(`${base}${chatPath(convUuid, "/completion")}`, {
     method: "POST",
-    body: { name: "New conversation", model: "stub/chat" },
-  })).json();
-  const convUuid = created.uuid;
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ prompt: "[slow] stop me", parent_message_uuid: assistant4, turn_message_uuids: turn(stopUuid, "78787878-7878-4878-8878-787878787878") }),
+    signal: controller.signal,
+  });
+  const reader = slow.body.getReader();
+  await reader.read();
+  controller.abort();
+  await reader.read().catch(() => {});
+  await waitFor(() => claudesk.ipcCalls("stop").length >= 1, "the stop request");
+  assert.deepEqual(claudesk.ipcCalls("stop")[0].args, [`local_${convUuid}`]);
+  await waitFor(() => !sessionOf(convUuid).isRunning, "the stopped turn to wind down");
 
-  const humanUuid = "11111111-1111-4111-8111-111111111111";
-  const assistantUuid = "22222222-2222-4222-8222-222222222222";
-  const completion = await call(
-    `/api/organizations/${org.uuid}/chat_conversations/${convUuid}/completion`,
-    { method: "POST", body: { prompt: "Hello", turn_message_uuids: { human_message_uuid: humanUuid, assistant_message_uuid: assistantUuid } } },
-  );
-  assert.equal(completion.status, 200);
-  const records = parseSse(await completion.text());
-  assert.equal(records[0].event, "message_start");
-  assert.equal(records[0].data.message.uuid, assistantUuid);
-  assert.equal(records.at(-1).event, "message_stop");
-  const text = records.filter((r) => r.event === "content_block_delta")
-    .map((r) => r.data.delta.text).join("");
-  assert.equal(text, "Hello from your backend");
-
-  // The Desktop Claude prompt reaches the gateway: behavior sections and the
-  // model identity are present, the VM/file/computer-use text is not.
-  assert.equal(typeof lastSystem, "string");
-  assert.match(lastSystem, /SMOKE-TONE-SECTION/);
-  assert.match(lastSystem, /Model: stub\/chat/);
-  assert.match(lastSystem, /You are powered by the model stub\/chat\./);
-  assert.doesNotMatch(lastSystem, /SMOKE-COMPUTER-USE|VM and Claude Code|File automation/);
-  assert.doesNotMatch(lastSystem, /\{\{/);
-
-  // A Desktop outage keeps serving the last good prompt (TTL is 1 ms here).
-  desktopUp = false;
-  const cached = await call(
-    `/api/organizations/${org.uuid}/chat_conversations/44444444-4444-4444-8444-444444444444/completion`,
-    { method: "POST", body: { prompt: "Again", create_conversation_params: { name: "", model: "stub/chat" } } },
-  );
-  assert.equal(cached.status, 200);
-  await cached.text();
-  assert.match(lastSystem, /SMOKE-TONE-SECTION/);
-  desktopUp = true;
-
-  const reopened = await (await call(`/api/organizations/${org.uuid}/chat_conversations/${convUuid}`)).json();
-  assert.equal(reopened.chat_messages.length, 2);
-  assert.equal(reopened.chat_messages[0].uuid, humanUuid);
-  assert.equal(reopened.chat_messages[1].content[0].text, text);
-  assert.equal(reopened.current_leaf_message_uuid, assistantUuid);
-
-  const listed = await (await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).json();
-  assert.ok(listed.data.some((entry) => entry.uuid === convUuid));
-
-  const patched = await (await call(`/api/organizations/${org.uuid}/chat_conversations/${convUuid}`, {
+  // ---- rename, star and model changes ----
+  const patched = await (await call(chatPath(convUuid), {
     method: "PATCH",
-    body: { name: "Renamed", is_starred: true },
+    body: { name: "Renamed", is_starred: true, model: "stub-sonnet" },
   })).json();
   assert.equal(patched.name, "Renamed");
+  assert.equal(sessionOf(convUuid).title, "Renamed", "the title is Desktop's");
+  assert.equal(sessionOf(convUuid).model, "stub-sonnet");
+  assert.equal(patched.model, "stub-sonnet");
+  assert.equal(patched.is_starred, true);
+
+  // ---- listing shows Chat sessions only, including ones started in Claudesk ----
+  const webUuid = "99999999-9999-4999-8999-999999999999";
+  claudesk.addSession({ sessionId: `local_${webUuid}`, title: "From the web UI", initialMessage: "hi from web" });
+  const listed = await (await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).json();
+  const listedIds = listed.data.map((entry) => entry.uuid);
+  assert.ok(listedIds.includes(convUuid) && listedIds.includes(webUuid), "chats from both surfaces are listed");
+  assert.ok(!listedIds.includes(coworkUuid), "Cowork sessions are not exposed");
+  assert.equal((await call(chatPath(coworkUuid))).status, 404);
+  assert.equal((await call(chatPath(coworkUuid), { method: "PATCH", body: { name: "x" } })).status, 404);
+  assert.equal((await call(chatPath(coworkUuid), { method: "DELETE" })).status, 404);
+  claudesk.resetCalls();
+  const hijack = await call(chatPath(coworkUuid, "/completion"), {
+    method: "POST",
+    body: { prompt: "hello", create_conversation_params: { name: "", model: "stub-haiku" } },
+  });
+  assert.ok(hijack.status >= 400 && hijack.status < 500, "a completion cannot adopt a Cowork session id");
+  assert.equal(claudesk.ipcCalls("start").length + claudesk.ipcCalls("sendMessage").length, 0);
+  assert.equal(claudesk.sessions.get(`local_${coworkUuid}`).transcript.length, 0);
 
   const recents = await (await call(`/api/organizations/${org.uuid}/chat_conversations?starred=true`)).json();
   assert.equal(recents.length, 1);
-
   const connectList = await (await call("/claudeai-rpc/anthropic.claudeai_chats.api.v1alpha.RecentsService/ListRecents", {
     method: "POST",
     body: {},
   })).json();
   assert.ok(connectList.data.some((item) => item.chat.uuid === convUuid));
+
+  // ---- the Connect surface sends too, with edit support via the parent id ----
+  const connectUuid = "abababab-abab-4bab-8bab-abababababab";
+  const draft = await (await call(`/api/organizations/${org.uuid}/chat_conversations`, {
+    method: "POST",
+    body: { name: "Drafted", model: "stub-haiku" },
+  })).json();
+  assert.equal(draft.name, "Drafted");
+  assert.equal((await readConversation(draft.uuid)).chat_messages.length, 0, "a draft has no messages");
+  assert.ok(!claudesk.sessions.has(`local_${draft.uuid}`), "a draft is not a Desktop session yet");
+  assert.equal((await call(chatPath(draft.uuid), { method: "DELETE" })).status, 200);
+  assert.equal((await call(chatPath(draft.uuid))).status, 404);
+
+  const connectConversation = connectUuid;
+  await call(chatPath(connectConversation), { method: "GET" });
+  const performAction = (action) => call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction", {
+    method: "POST",
+    body: { header: { conversationId: connectConversation, mutationId: { sessionId: "smoke", version: 1 } }, ...action },
+  });
+  await call(`/api/organizations/${org.uuid}/chat_conversations`, { method: "POST", body: { uuid: connectConversation, name: "", model: "stub-haiku" } });
+  const connectHuman = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc";
+  const connectAssistant = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  const sentOverConnect = await performAction({ sendMessage: { messageId: connectHuman, assistantMessageId: connectAssistant, text: "Via connect" } });
+  assert.equal(sentOverConnect.status, 200);
+  await waitFor(async () => {
+    const connectRead = await readConversation(connectConversation).catch(() => null);
+    return connectRead?.chat_messages?.length === 2 && connectRead.chat_messages[1].content[0].text === "Echo: Via connect";
+  }, "the Connect message to complete");
+  assert.equal((await readConversation(connectConversation)).chat_messages[1].uuid, connectAssistant);
+
+  // ---- deleting removes the Desktop session ----
+  claudesk.resetCalls();
+  assert.equal((await call(chatPath(convUuid), { method: "DELETE" })).status, 200);
+  assert.deepEqual(claudesk.ipcCalls("delete").map((call) => call.args), [[`local_${convUuid}`]]);
+  assert.ok(!claudesk.sessions.has(`local_${convUuid}`));
+  assert.equal((await call(chatPath(convUuid))).status, 404);
+
+  // ---- capture mode records what the app asks for that is not implemented ----
+  const unknown = await call(`/api/organizations/${org.uuid}/code/sessions?limit=5`, {
+    method: "POST",
+    body: { environment: "local", title: "x", token: "do-not-log", nested: { password: "nope", keep: "yes" } },
+  });
+  assert.equal(unknown.status, 404);
+  await waitFor(async () => (await readFile(join(dataDir, "capture.jsonl"), "utf8").catch(() => "")).includes("code/sessions"), "the capture log");
+  const captured = (await readFile(join(dataDir, "capture.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const unhandled = captured.find((entry) => entry.kind === "unhandled" && entry.path.endsWith("/code/sessions"));
+  assert.ok(unhandled, "the unimplemented route is captured");
+  assert.deepEqual(unhandled.query, ["limit"]);
+  assert.equal(unhandled.body.json.keep, undefined);
+  assert.equal(unhandled.body.json.nested.keep, "yes");
+  assert.equal(unhandled.body.json.token, "<redacted>");
+  assert.equal(unhandled.body.json.nested.password, "<redacted>");
+  assert.ok(captured.some((entry) => entry.kind === "request" && entry.status === 200 && entry.path === "/api/account"), "handled requests are logged with their status");
+  assert.ok(!JSON.stringify(captured).includes("do-not-log"), "secrets never reach the capture file");
+
+  // ---- a Claudesk outage surfaces as an error, not a crash ----
+  claudesk.state.down = true;
+  const outage = await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`);
+  assert.ok(outage.status >= 500, `expected a server error during an outage, got ${outage.status}`);
+  const outageSend = await call(chatPath("77777777-7777-4777-8777-777777777777", "/completion"), {
+    method: "POST",
+    body: { prompt: "hi", create_conversation_params: { name: "", model: "stub-haiku" } },
+  });
+  assert.ok(outageSend.status >= 500, `expected a server error sending during an outage, got ${outageSend.status}`);
+  claudesk.state.down = false;
+  assert.equal((await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).status, 200, "recovers when Claudesk is back");
 
   const anonymous = await fetch(`${base}/api/account`);
   assert.equal(anonymous.status, 401);
@@ -325,7 +466,6 @@ try {
   console.log("mobile-api-smoke: PASS");
 } finally {
   await rm(dataDir, { recursive: true, force: true });
-  stub.close();
-  desktop.close();
+  await claudesk.close();
 }
 process.exit(0);

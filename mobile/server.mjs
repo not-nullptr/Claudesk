@@ -13,22 +13,26 @@ import {
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
 import { createMobileStore } from "./store.mjs";
-import { createSystemPromptProvider } from "./system-prompt.mjs";
-import { configModelLabel } from "./gateway.mjs";
+import { createDesktopClient } from "./desktop-client.mjs";
+import { createCapture, describeBody } from "./capture.mjs";
 import { loadSchema, encodeProto, decodeProto } from "./proto.mjs";
 
 const host = process.env.CLAUDE_MOBILE_HOST || "0.0.0.0";
 const port = Number(process.env.CLAUDE_MOBILE_PORT || 8081);
 const dataDir = process.env.CLAUDE_MOBILE_DATA_DIR || "/config/mobile-api";
-const maxTokens = Number(process.env.CLAUDE_MOBILE_API_MAX_TOKENS || 64000);
 const schemaPath = process.env.CLAUDE_MOBILE_PROTO_SCHEMA
   || "/app/schema/Claude-Mobile-Proto-Schema-1.260925.19.json";
 
 const store = createMobileStore({ dataDir });
 const auth = createAuthService({ store });
-const systemPrompt = createSystemPromptProvider({ store, configModelLabel });
-const engine = createEngine({ store, maxTokens, systemPrompt });
+const desktop = createDesktopClient();
+const capture = createCapture({ dataDir });
 await store.ensureDirs();
+const archivedLegacy = await store.archiveLegacyConversations();
+if (archivedLegacy) {
+  console.log(`[mobile-api] moved ${archivedLegacy} pre-Claudesk conversation file(s) to legacy-conversations/`);
+}
+const engine = createEngine({ store, desktop });
 const identity = await engine.getIdentity();
 
 let schema = null;
@@ -666,7 +670,7 @@ async function handleCompletion(request, response, conversationId) {
     abort,
     assistantUuid: turn.assistantMessage?.uuid || turn.assistantUuid,
   });
-  request.on("close", () => {
+  response.on("close", () => {
     if (!response.writableEnded) abort.abort(new Error("client disconnected"));
   });
   const finish = async () => {
@@ -684,6 +688,7 @@ async function handleCompletion(request, response, conversationId) {
       assistantUuid: turn.assistantMessage?.uuid || turn.assistantUuid,
       model: turn.model,
       signal: abort.signal,
+      plan: turn.plan,
     })) {
       if (event.event === "content_block_delta" && event.data?.delta?.type === "text_delta") {
         accumulatedText += event.data.delta.text;
@@ -782,10 +787,10 @@ async function handleStreamRecents(request, response) {
     push(false).catch(() => clearInterval(timer));
   }, 5000);
   timer.unref?.();
-  request.on("close", () => clearInterval(timer));
+  response.on("close", () => clearInterval(timer));
   const end = encodeConnectFrame(Buffer.from(JSON.stringify({}), "utf8"), 0x02);
   // Keep the stream until disconnect; the end frame is sent on close.
-  request.on("close", () => {
+  response.on("close", () => {
     try { response.end(end); } catch { /* response already gone */ }
   });
 }
@@ -800,6 +805,7 @@ function encodeConnectFrame(payload, flags = 0) {
 async function handleConnectUnary(request, response, url, method) {
   const handler = connectMethods[method];
   if (!handler) {
+    await captureUnhandled(request, url, "connect");
     sendErrorEnvelope(response, 404, "not_found", `unknown connect method "${url.pathname}"`);
     return true;
   }
@@ -952,7 +958,7 @@ async function handleStreamTimeline(request, response, url) {
     writeHeartbeat();
   }, 20000);
   heartbeat.unref?.();
-  request.on("close", () => {
+  response.on("close", () => {
     clearInterval(heartbeat);
     unsubscribe();
     try { response.end(); } catch { /* already closed */ }
@@ -995,7 +1001,27 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  await captureUnhandled(request, url, "rest");
   sendErrorEnvelope(response, 404, "not_found", `unknown API route ${url.pathname}`);
+}
+
+// With CLAUDE_MOBILE_CAPTURE=1, remember what the app asked for that this
+// service does not implement, with a redacted body.
+async function captureUnhandled(request, url, surface) {
+  if (!capture.enabled) return;
+  try {
+    await capture.record({
+      kind: "unhandled",
+      surface,
+      method: request.method,
+      path: url.pathname,
+      query: [...url.searchParams.keys()],
+      contentType: request.headers["content-type"],
+      body: await describeBody(request),
+    });
+  } catch (error) {
+    console.error(`[mobile-capture] ${error.message}`);
+  }
 }
 
 async function currentSession(request) {
@@ -1011,6 +1037,18 @@ async function bearerSession(request) {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  if (capture.enabled) {
+    response.on("finish", () => {
+      void capture.record({
+        kind: "request",
+        method: request.method,
+        path: url.pathname,
+        query: [...url.searchParams.keys()],
+        status: response.statusCode,
+        contentType: request.headers["content-type"],
+      }).catch(() => {});
+    });
+  }
   try {
     if (url.pathname.startsWith("/claudeai-rpc/")
       || url.pathname.includes(`${BARD_SERVICE}/`)
@@ -1033,5 +1071,5 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`[mobile-api] listening on ${host}:${port}; data=${dataDir}; maxTokens=${maxTokens}`);
+  console.log(`[mobile-api] listening on ${host}:${port}; data=${dataDir}; claudesk=${desktop.baseUrl}`);
 });

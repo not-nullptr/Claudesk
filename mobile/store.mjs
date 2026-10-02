@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// Auth sessions, ban state, conversations and uploaded attachments are
+// Auth sessions, ban state, mobile-only chat metadata and uploaded attachments are
 // persisted as JSON files with tmp+rename atomic writes, matching the
 // zero-dependency style of the rest of this repo. Node 18 is used in the
 // container, so there is no node:sqlite.
@@ -15,7 +15,6 @@ export function createMobileStore({ dataDir }) {
 
   async function ensureDirs() {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
-    await mkdir(conversationsDir, { recursive: true, mode: 0o700 });
     await mkdir(filesDir, { recursive: true, mode: 0o700 });
   }
 
@@ -134,30 +133,17 @@ export function createMobileStore({ dataDir }) {
     await writeJson(bansFile, bans);
   }
 
-  async function recordConversation(conversation) {
-    await writeJson(join(conversationsDir, `${conversation.uuid}.json`), conversation);
-  }
-
-  async function readConversation(uuid) {
-    return readJson(join(conversationsDir, `${uuid}.json`), null);
-  }
-
-  async function listConversations() {
-    const names = await readdir(conversationsDir).catch(() => []);
-    const conversations = [];
-    for (const name of names) {
-      if (!name.endsWith(".json") || name.includes(".tmp")) continue;
-      const conversation = await readJson(join(conversationsDir, name), null);
-      if (conversation && typeof conversation.uuid === "string") {
-        conversations.push(conversation);
-      }
-    }
-    conversations.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    return conversations;
-  }
-
-  async function deleteConversation(uuid) {
-    await unlink(join(conversationsDir, `${uuid}.json`)).catch(() => {});
+  // Conversations used to be stored here when this service ran inference itself.
+  // They now live in Claude Desktop, so any left over are moved aside (kept, not
+  // served) instead of being deleted.
+  async function archiveLegacyConversations() {
+    const names = (await readdir(conversationsDir).catch(() => []))
+      .filter((name) => name.endsWith(".json") && !name.includes(".tmp"));
+    if (!names.length) return 0;
+    const archive = join(dataDir, "legacy-conversations");
+    await mkdir(archive, { recursive: true, mode: 0o700 });
+    for (const name of names) await rename(join(conversationsDir, name), join(archive, name));
+    return names.length;
   }
 
   async function saveUploadedFile(uuid, meta, bytes) {
@@ -197,10 +183,7 @@ export function createMobileStore({ dataDir }) {
     pruneSessions,
     loadBans,
     saveBans,
-    recordConversation,
-    readConversation,
-    listConversations,
-    deleteConversation,
+    archiveLegacyConversations,
     saveUploadedFile,
     readUploadedFile,
     findUpload,

@@ -137,8 +137,10 @@ const connectMethods = {
           conversationId,
           messageId: sendMessage.messageId ?? sendMessage.message_id,
           assistantMessageId: sendMessage.assistantMessageId ?? sendMessage.assistant_message_id,
+          parentMessageId: sendMessage.parentMessageId ?? sendMessage.parent_message_id,
           text: sendMessage.text ?? "",
           model: sendMessage.model?.identifier,
+          attachments: sendMessage.attachments ?? [],
         });
         return mutationAck(request, true);
       }

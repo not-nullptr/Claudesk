@@ -3,8 +3,10 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY mobile/server.mjs ./server.mjs
-COPY mobile/gateway.mjs ./gateway.mjs
-COPY mobile/system-prompt.mjs ./system-prompt.mjs
+COPY mobile/desktop-client.mjs ./desktop-client.mjs
+COPY mobile/transcript.mjs ./transcript.mjs
+COPY mobile/events.mjs ./events.mjs
+COPY mobile/capture.mjs ./capture.mjs
 COPY mobile/store.mjs ./store.mjs
 COPY mobile/auth.mjs ./auth.mjs
 COPY mobile/totp.mjs ./totp.mjs

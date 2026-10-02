@@ -21,6 +21,8 @@ node scripts/updater-smoke.mjs
 node scripts/workspace-folders-smoke.mjs
 node scripts/attachment-mentions-smoke.mjs
 node scripts/totp-smoke.mjs
+node scripts/desktop-translators-smoke.mjs
+node scripts/mobile-api-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
 node scripts/realtime-stream-smoke.mjs
@@ -60,6 +62,8 @@ if docker compose version >/dev/null 2>&1; then
     CLAUDE_GATEWAY_BASE_URL=https://gateway.example.invalid \
     CLAUDE_GATEWAY_API_KEY=validation-placeholder \
     CLAUDE_INFERENCE_MODELS_JSON='["claude-validation-model"]' \
+    CLAUDE_MOBILE_API_EMAIL=validation@example.invalid \
+    CLAUDE_MOBILE_API_TOTP_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ \
         docker compose config --quiet
 
     # Remove the temporary file before reporting success and disable the trap.
