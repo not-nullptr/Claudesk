@@ -187,7 +187,13 @@ try {
     `/v1/environment_providers/private/organizations/${org.uuid}/environments?limit=50`,
   );
   assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
-  assert.deepEqual(await environmentsLeg.json(), { environments: [], has_more: false, first_id: null, last_id: null });
+  // The paired Desktop is offered as a runner, so the phone can start a session
+  // on it. `bridge` is the enum's literal raw value, not a snake-cased key.
+  const environments = (await environmentsLeg.json()).environments;
+  assert.equal(environments.length, 1);
+  assert.equal(environments[0].environment_id, "anthropic-bridge-local");
+  assert.equal(environments[0].kind, "bridge");
+  assert.equal(environments[0].bridge_info.spawn_mode, "same-dir");
 
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");
@@ -746,6 +752,187 @@ try {
     headers: via("198.51.100.8", "forged-x"),
   });
   assert.equal(otherClient.status, 401, "another client must not be locked out");
+
+  // ---- the Code tab's session surface, end to end ----
+  //
+  // A Code session is a Desktop LocalSessions session; the facade addresses it
+  // as code_<desktopId>. Everything below drives the fake bridge's real
+  // LocalSessions handlers (scripts/lib/fake-claudesk.mjs), so a wrong argument
+  // order or a dropped field fails here rather than on the phone.
+  const codePath = (id, action = "") => `/v1/code/sessions/${id}${action}`;
+  const sseStream = async (path, { method = "GET", body } = {}) => {
+    const response = await call(path, { method, body });
+    assert.equal(response.status, 200, `${path} answered ${response.status}`);
+    return parseSse(await response.text());
+  };
+
+  // Create: the app posts a draft session and gets a SessionResource back.
+  const created = await call("/v1/code/sessions", { method: "POST", body: { title: "From the phone" } });
+  assert.equal(created.status, 201, "create answers 201");
+  const createdResource = await created.json();
+  assert.match(createdResource.id, /^code_[0-9a-f-]{36}$/, "a Code id is code_<desktopId>");
+  assert.equal(createdResource.session_status, "idle");
+  assert.equal(createdResource.environment_id, "anthropic-bridge-local");
+  assert.ok(Object.keys(createdResource).every((key) => key === key.toLowerCase()), "no camelCase keys on the wire");
+  const codeDesktopId = createdResource.id.slice("code_".length);
+
+  // Send the first message: it creates the Desktop session (start), and the SSE
+  // leg acks with the optimistic message id before the turn runs.
+  const sentUuid = "44444444-4444-4444-8444-444444444444";
+  const sendRecords = await sseStream(codePath(createdResource.id, "/messages/stream"), {
+    method: "POST",
+    body: { body: "Reply with exactly one word: pong", client_message_id: sentUuid },
+  });
+  const ack = sendRecords.find((record) => record.data?.type === "message_ack");
+  assert.ok(ack, "the send leg acknowledges first");
+  assert.equal(ack.data.message_id, sentUuid, "the app's optimistic uuid is honoured");
+  const startCall = claudesk.codeIpcCalls("start").at(-1);
+  assert.ok(startCall, "the first message uses start on LocalSessions");
+  assert.equal(startCall.args[0].sessionId, codeDesktopId, "the unprefixed Desktop id goes to Desktop");
+  assert.equal(startCall.args[0].sessionType, "code", "…and it is a Code session, not a chat");
+
+  await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
+
+  // History: ascending sequence numbers, one envelope per transcript entry,
+  // with the tool rendering built on blocks.mjs.
+  const history = await (await call(codePath(createdResource.id, "/events?limit=50"))).json();
+  assert.ok(history.data.length >= 3, "the turn's entries are in the history");
+  assert.deepEqual(
+    history.data.map((envelope) => envelope.sequence_num),
+    history.data.map((_, index) => index),
+    "sequence numbers are contiguous from 0",
+  );
+  assert.equal(history.data[0].event_type, "user_message");
+  assert.equal(history.data[0].payload.text, "Reply with exactly one word: pong");
+  assert.equal(history.data.at(-1).event_type, "assistant_text");
+  assert.equal(history.data.at(-1).payload.text, "Echo: Reply with exactly one word: pong");
+  assert.equal(history.newest_event_id, history.data.at(-1).event_id);
+
+  // Paging back from the newest envelope yields an older, gap-free window.
+  const olderPage = await (await call(codePath(createdResource.id, `/events?limit=2`))).json();
+  assert.equal(olderPage.data.length, 2);
+  assert.equal(olderPage.has_more, true, "one entry is still older than this window");
+  const oldest = await (await call(codePath(createdResource.id, `/events?cursor=${encodeURIComponent(olderPage.next_cursor)}`))).json();
+  assert.equal(oldest.data.at(-1).sequence_num, olderPage.data[0].sequence_num - 1, "the older window is contiguous");
+  assert.equal(oldest.has_more, false, "the oldest window ends the walk");
+
+  // A tool round: the Bash call is presented under the Chat surface's name, so
+  // both tabs draw the same row.
+  await sseStream(codePath(createdResource.id, "/messages/stream"), {
+    method: "POST",
+    body: { body: "List the files [tool]" },
+  });
+  await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the tool turn to finish");
+  const withTool = await (await call(codePath(createdResource.id, "/events?limit=50"))).json();
+  const toolEnvelope = withTool.data.find((envelope) => envelope.event_type === "tool_use");
+  assert.ok(toolEnvelope, "the tool call reaches the transcript");
+  assert.equal(toolEnvelope.payload.tool_call.display_name, "Bash", "blocks.mjs renders the Code tool row");
+  assert.equal(toolEnvelope.payload.tool_call.status, "complete");
+  assert.equal(toolEnvelope.payload.tool_call.input.command, "ls");
+  const toolResult = withTool.data.find((envelope) => envelope.event_type === "tool_result");
+  assert.equal(toolResult.payload.tool_use_id, toolEnvelope.payload.tool_call.id, "use and result pair up");
+
+  // The list leg now reports the session, with the app's enum values.
+  const codeListed = await (await call("/v1/code/sessions")).json();
+  assert.equal(codeListed.data.length, 1);
+  assert.equal(codeListed.data[0].id, createdResource.id);
+  assert.equal(codeListed.data[0].status, "idle");
+  assert.equal(codeListed.data[0].status_bucket, "completed");
+
+  // The watch leg pushes a frame per change; drive a turn and read one live.
+  const watchPromise = call(codePath(createdResource.id, "/watch"));
+  const watchRecordsPromise = watchPromise.then(async (response) => {
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const records = parseSse(buffer);
+        // The turn's own frames arrive after the hello record.
+        const upserted = records.find((record) => record.event === "upserted");
+        if (upserted) return upserted;
+      }
+      return null;
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await sseStream(codePath(createdResource.id, "/messages/stream"), {
+    method: "POST",
+    body: { body: "Watch this [tool]" },
+  });
+  const liveFrame = await watchRecordsPromise;
+  assert.ok(liveFrame, "the watch leg streams a frame for the live turn");
+  assert.equal(liveFrame.data.sequence_num >= 0, true);
+  assert.ok(liveFrame.data.event_id, "a live frame carries the entry id the app de-dupes on");
+
+  // Stop goes to LocalSessions.interrupt with the unprefixed id.
+  const stopped = await call(codePath(createdResource.id, "/interrupt"), { method: "POST", body: {} });
+  assert.equal(stopped.status, 200);
+  assert.equal(claudesk.codeIpcCalls("interrupt").at(-1).args[0], codeDesktopId);
+
+  // A permission prompt: the session goes to requires_action, the prompt is
+  // listed, and answering it resumes the turn.
+  const manualId = "99999999-9999-4999-8999-999999999999";
+  const manual = claudesk.addCodeSession({ sessionId: manualId, title: "Needs approval" });
+  manual.transcript.push({
+    uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    type: "user",
+    message: { role: "user", content: "Run something [permission]" },
+    origin: { kind: "human" },
+    turnOrigin: "human",
+    timestamp: new Date().toISOString(),
+    parentUuid: null,
+    isSidechain: false,
+  });
+  const manualCodeId = `code_${manualId}`;
+  await sseStream(codePath(manualCodeId, "/messages/stream"), {
+    method: "POST",
+    body: { body: "Run something [permission]" },
+  }).catch(() => []);
+  await waitFor(() => claudesk.codeIpcCalls("sendMessage").some((call) => call.args[0] === manualId), "the permission turn to dispatch");
+  // The prompt arrives on the events stream, so give the listener a moment.
+  await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length > 0,
+    "the permission prompt to be recorded");
+  const prompts = await (await call(codePath(manualCodeId, "/pending_prompts"))).json();
+  assert.equal(prompts.prompts[0].session_id, manualCodeId);
+  const blocked = await (await call(codePath(manualCodeId))).json();
+  assert.equal(blocked.session_status, "requires_action", "an open prompt blocks the session");
+  assert.equal(blocked.status_bucket, "blocked");
+  const answered = await call(
+    codePath(manualCodeId, `/permissions/${encodeURIComponent(prompts.prompts[0].request_id)}`),
+    { method: "POST", body: { behavior: "allow" } },
+  );
+  assert.equal(answered.status, 200);
+  assert.equal(claudesk.codeIpcCalls("respondToToolPermission").at(-1).args[1], prompts.prompts[0].request_id);
+  await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length === 0,
+    "the prompt to clear once answered");
+
+  // Detail, patch and delete round out the lifecycle.
+  const codePatched = await (await call(codePath(createdResource.id), { method: "PATCH", body: { title: "Renamed" } })).json();
+  assert.equal(codePatched.title, "Renamed");
+  assert.equal(claudesk.codeIpcCalls("updateSession").at(-1).args[1].title, "Renamed");
+  const codeDeleted = await call(codePath(manualCodeId), { method: "DELETE" });
+  assert.equal(codeDeleted.status, 200);
+  assert.ok(!claudesk.codeSessions.has(manualId), "delete removes the Desktop session");
+
+  // The out-of-scope legs answer 200 with empty envelopes, not 404s, so those
+  // screens render empty states instead of errors.
+  for (const leg of ["channels", "triggers", "webhook-triggers", "runners/self-hosted/pools"]) {
+    const response = await call(`/v1/code/${leg}`);
+    assert.equal(response.status, 200, `${leg} answers`);
+    assert.deepEqual(await response.json(), { data: [], next_cursor: null });
+  }
+  assert.equal((await call("/v1/code/shared-sessions")).status, 200);
+
+  // Code sessions must never leak into the Chat surface, and vice versa.
+  const chatsAfter = await (await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).json();
+  assert.ok(chatsAfter.data.every((item) => !String(item.uuid).startsWith("code_")), "Code sessions stay out of the chat list");
 
   console.log("mobile-api-smoke: PASS");
 } finally {

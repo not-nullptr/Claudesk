@@ -12,6 +12,9 @@ import {
 } from "./connect.mjs";
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
+import { createCodeEngine } from "./code-engine.mjs";
+import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment } from "./code-transcript.mjs";
+import { desktopSessionIdFor as codeSessionDesktopId } from "./code-ids.mjs";
 import { createMobileStore } from "./store.mjs";
 import { createDesktopClient } from "./desktop-client.mjs";
 import { createCapture, describeBody } from "./capture.mjs";
@@ -33,6 +36,9 @@ if (archivedLegacy) {
   console.log(`[mobile-api] moved ${archivedLegacy} pre-Claudesk conversation file(s) to legacy-conversations/`);
 }
 const engine = createEngine({ store, desktop });
+// Code (Claude Code / LocalSessions) is a parallel engine, not a mode of the
+// Chat one: same bridge, different Desktop surface and different DTOs.
+const codeEngine = createCodeEngine({ store, desktop });
 const identity = await engine.getIdentity();
 
 let schema = null;
@@ -632,24 +638,296 @@ async function handleOptionalEmptyRoutes(request, response, url) {
 // here is redacted.
 async function handleCodeRoutes(request, response, url) {
   const path = url.pathname;
-  if (path === "/v1/code/sessions" && request.method === "GET") {
-    // `statuses` repeats; `limit`, `cursor`, `tags`, `exclude_tags`,
-    // `include_trigger_sessions`, `trigger_id` are the accepted params. No
-    // sessions exist on a self-hosted account yet, so return the empty page
-    // with the envelope keys the app decodes.
-    sendJson(response, 200, { data: [], next_cursor: null, resume_token: null });
+  const method = request.method;
+
+  async function fail(error) {
+    const status = error?.status || 500;
+    sendErrorEnvelope(response, status, error?.type || "internal", error?.message || "internal error");
+  }
+
+  // --- sessions list / create -------------------------------------------------
+  if (path === "/v1/code/sessions" && method === "GET") {
+    try {
+      const statuses = url.searchParams.getAll("statuses").flatMap((value) => value.split(",")).filter(Boolean);
+      const tags = url.searchParams.getAll("tags").flatMap((value) => value.split(",")).filter(Boolean);
+      const data = await codeEngine.listSessions({ statuses, tags, limit: url.searchParams.get("limit") });
+      // `resume_token` is null: the app only uses it to resume a stream, which
+      // this surface resumes by sequence number instead.
+      sendJson(response, 200, { data, next_cursor: null, resume_token: null });
+    } catch (error) {
+      await fail(error);
+    }
     return true;
   }
+  if (path === "/v1/code/sessions" && method === "POST") {
+    try {
+      const body = await readJson(request).catch(() => ({}));
+      const resource = await codeEngine.createSession({
+        title: body.title ?? body.name ?? null,
+        model: body.model ?? body.config?.model ?? null,
+        permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
+        cwd: body.cwd ?? null,
+      });
+      sendJson(response, 201, resource);
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  // --- watch (SSE), before the {id} matchers so "watch" is not read as an id --
+  if (path === "/v1/code/sessions/watch" && method === "GET") {
+    await streamCodeWatch(request, response, url, null);
+    return true;
+  }
+  const watchMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/watch$/);
+  if (watchMatch && method === "GET") {
+    await streamCodeWatch(request, response, url, watchMatch[1]);
+    return true;
+  }
+
+  // --- per-session legs -------------------------------------------------------
+  const sessionMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/?$/);
+  if (sessionMatch && method === "GET") {
+    try {
+      const { resource } = await codeEngine.getSession(sessionMatch[1]);
+      sendJson(response, 200, resource);
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+  if (sessionMatch && method === "PATCH") {
+    try {
+      const body = await readJson(request).catch(() => ({}));
+      sendJson(response, 200, await codeEngine.updateSession(sessionMatch[1], body));
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+  if (sessionMatch && method === "DELETE") {
+    try {
+      await codeEngine.deleteSession(sessionMatch[1]);
+      sendJson(response, 200, {});
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  const eventsMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events$/);
+  if (eventsMatch && method === "GET") {
+    try {
+      const limit = Number(url.searchParams.get("limit")) || 50;
+      const page = await codeEngine.listEvents(eventsMatch[1], {
+        cursor: url.searchParams.get("cursor"),
+        limit,
+      });
+      // The client's own decoder names these; it reads either key set.
+      sendJson(response, 200, {
+        data: page.data,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+        max_sequence_num: page.max_sequence_num,
+        newest_event_id: page.newest_event_id,
+      });
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  const promptsMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/pending_prompts$/);
+  if (promptsMatch && method === "GET") {
+    try {
+      const prompts = codeEngine.permissionsFor(promptsMatch[1]);
+      sendJson(response, 200, { prompts, permission_suggestions: [] });
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  const permissionMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/permissions\/([^/]+)$/);
+  if (permissionMatch && method === "POST") {
+    try {
+      const body = await readJson(request).catch(() => ({}));
+      const behavior = body.behavior || body.decision || body.action || "allow";
+      await codeEngine.respondToPermission(permissionMatch[1], permissionMatch[2], behavior);
+      sendJson(response, 200, {});
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  const streamMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/messages\/stream$/);
+  if (streamMatch && method === "POST") {
+    await streamCodeMessage(request, response, url, streamMatch[1]);
+    return true;
+  }
+
+  const interruptMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/(interrupt|stop)$/);
+  if (interruptMatch && method === "POST") {
+    try {
+      await codeEngine.interrupt(interruptMatch[1]);
+      sendJson(response, 200, {});
+    } catch (error) {
+      await fail(error);
+    }
+    return true;
+  }
+
+  // --- environments: the paired Desktop offered as a runner -------------------
   const environmentMatch = path.match(
     /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i,
   );
-  if (environmentMatch && request.method === "GET") {
-    // Remote devices are environments of kind `bridge`; without a paired
-    // Desktop bridge there are none. first_id/last_id are the pagination window.
-    sendJson(response, 200, { environments: [], has_more: false, first_id: null, last_id: null });
+  if (environmentMatch && method === "GET") {
+    const online = await desktopReady();
+    sendJson(response, 200, {
+      environments: [bridgeEnvironment({ online, cliVersion: desktopVersion() })],
+      has_more: false,
+      first_id: BRIDGE_ENVIRONMENT_ID,
+      last_id: BRIDGE_ENVIRONMENT_ID,
+    });
+    return true;
+  }
+
+  // --- out-of-scope legs: real, clean empty states ----------------------------
+  // Routines, projects/channels, git/PR and self-hosted pools are a follow-up;
+  // an empty envelope (not a 404) keeps those screens from erroring.
+  if (/^\/v1\/code\/(channels|triggers|webhook-triggers)(\/.*)?$/.test(path) && method === "GET") {
+    sendJson(response, 200, { data: [], next_cursor: null });
+    return true;
+  }
+  if (/^\/v1\/code\/runners\/self-hosted\/pools/.test(path) && method === "GET") {
+    sendJson(response, 200, { data: [], next_cursor: null });
+    return true;
+  }
+  if (path === "/v1/code/repos/resync" && method === "POST") {
+    sendJson(response, 200, {});
+    return true;
+  }
+  if (path.startsWith("/v1/code/github/") && method === "GET") {
+    sendJson(response, 200, { data: [], next_cursor: null });
+    return true;
+  }
+  if (path === "/v1/code/shared-sessions" && method === "GET") {
+    sendJson(response, 200, { data: [], next_cursor: null });
+    return true;
+  }
+  if (/^\/api\/claude_code\/organizations\/[0-9a-f-]{36}\//i.test(path) && method === "GET") {
+    sendJson(response, 200, { data: [], next_cursor: null });
     return true;
   }
   return false;
+}
+
+// The bridge's own health decides whether the paired Desktop is offered as an
+// online runner. A failure here is reported, not thrown: the list must still
+// render.
+async function desktopReady() {
+  try {
+    return await desktop.health();
+  } catch {
+    return false;
+  }
+}
+
+function desktopVersion() {
+  return process.env.CLAUDE_DESKTOP_VERSION || null;
+}
+
+// GET /v1/code/sessions[/{id}]/watch — SSE, one SessionWatchFrame per change.
+// `sessionId` null watches every Code session (the list screen's subscription).
+async function streamCodeWatch(request, response, url, sessionId) {
+  const desktopId = sessionId ? codeSessionDesktopId(sessionId) : null;
+  if (sessionId && !desktopId) {
+    sendErrorEnvelope(response, 404, "not_found", "session not found");
+    return;
+  }
+  response.writeHead(200, SSE_HEADERS);
+  // Tell the client where to resume if it reconnects.
+  const fromSequence = sessionId ? codeEngine.resumeFrom(desktopId) : 0;
+  sendSseRecord(response, "hello", { from_sequence_num: fromSequence, session_id: sessionId });
+
+  // A single-session watch filters to that session; the list screen's watch
+  // (no id) takes every Code session's frames.
+  const emit = (id, record) => {
+    for (const frame of codeEngine.framesFor(id, record)) sendSseRecord(response, frame.event, frame.data);
+  };
+  const unsubscribe = desktopId
+    ? codeEngine.listen(desktopId, (record) => emit(desktopId, record))
+    : codeEngine.listenAll((record, id) => emit(id, record));
+
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
+  const done = () => {
+    clearInterval(keepalive);
+    unsubscribe?.();
+  };
+  request.on("close", done);
+  response.on("close", done);
+}
+
+// POST /v1/code/sessions/{id}/messages/stream — acknowledge the send, then
+// stream the turn. The app reads the ack for the optimistic message id and then
+// takes the turn from /watch; the SSE body here carries the same frames so a
+// client that only listens on this leg still sees the answer.
+async function streamCodeMessage(request, response, url, sessionId) {
+  let body;
+  try {
+    body = await readJson(request);
+  } catch {
+    sendErrorEnvelope(response, 400, "invalid_request", "expected a JSON body");
+    return;
+  }
+  const desktopId = codeSessionDesktopId(sessionId);
+  if (!desktopId) {
+    sendErrorEnvelope(response, 404, "not_found", "session not found");
+    return;
+  }
+  const text = body?.body ?? body?.text ?? body?.message ?? "";
+  if (!String(text).trim()) {
+    sendErrorEnvelope(response, 400, "invalid_request", "message body is required");
+    return;
+  }
+  response.writeHead(200, SSE_HEADERS);
+  let ack;
+  try {
+    ack = await codeEngine.sendMessage(sessionId, {
+      text: String(text),
+      clientMessageId: body?.client_message_id ?? null,
+      interrupt: Boolean(body?.interrupt),
+    });
+  } catch (error) {
+    sendSseRecord(response, "error", { type: "error", error: { type: error.type || "api_error", message: error.message } });
+    response.end();
+    return;
+  }
+  sendSseRecord(response, "message", {
+    type: "message_ack",
+    message_id: ack.messageId,
+    thread_root_id: ack.threadRootId,
+    created_at: ack.createdAt,
+  });
+
+  // The turn itself is rendered by the transcript stream; close this leg once
+  // the session goes idle so the composer's request completes.
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
+  const finished = () => {
+    clearInterval(keepalive);
+    if (!response.writableEnded) response.end();
+  };
+  request.on("close", () => clearInterval(keepalive));
+  const abort = new AbortController();
+  request.on("close", () => abort.abort());
+  await codeEngine.awaitTurn(desktopId, { signal: abort.signal }).catch(() => null);
+  finished();
 }
 
 async function handleConversationRoutes(request, response, url) {

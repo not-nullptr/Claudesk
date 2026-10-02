@@ -144,6 +144,20 @@ export function createDesktopClient({
     return { paths, root: batchRoot };
   }
 
+  // Is the bridge (and the Desktop behind it) reachable, and does it expose the
+  // Code surface? Used to mark the paired device online in the Code tab's
+  // environment list; a false answer is a normal state, not an error.
+  async function health() {
+    try {
+      const response = await fetchImpl(`${root}/api/health`, { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return false;
+      const payload = await response.json();
+      return Boolean(payload?.ok);
+    } catch {
+      return false;
+    }
+  }
+
   // A short title for a new chat, written by Desktop the same way it does for
   // the web UI (this runs a small model request). Empty when Desktop cannot.
   async function generateTitle({ message, model }) {
@@ -236,5 +250,5 @@ export function createDesktopClient({
     };
   }
 
-  return { ipc, upload, generateTitle, chatModels, subscribe, baseUrl: root };
+  return { ipc, upload, generateTitle, chatModels, health, subscribe, baseUrl: root };
 }

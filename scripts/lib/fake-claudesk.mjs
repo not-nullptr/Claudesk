@@ -48,8 +48,11 @@ export async function startFakeClaudesk() {
     return rest;
   }
 
-  function broadcast(payload) {
-    const data = JSON.stringify({ surface: "LocalAgentModeSessions", method: "onOnEvent", payload });
+  // The real bridge relays every Desktop record on every SSE connection
+  // regardless of the subscriber's mode, so the surface is what a consumer
+  // filters on — broadcast must be able to say which one it is.
+  function broadcast(payload, { surface = "LocalAgentModeSessions", method = "onOnEvent" } = {}) {
+    const data = JSON.stringify({ surface, method, payload });
     for (const response of clients) response.write(`event: desktop-ipc\ndata: ${data}\n\n`);
   }
 
@@ -160,6 +163,120 @@ export async function startFakeClaudesk() {
     broadcast({ ...base, message: { type: "result", subtype: "success", is_error: false, stop_reason: "end_turn" } });
   }
 
+  // ---------- Claude Code (LocalSessions) ----------
+  //
+  // A Code session's first message creates it (Desktop's `start`), and every
+  // transcript entry is broadcast as an `onOnEvent` record — the same
+  // events-are-the-transcript model the real surface has. Text steers it:
+  // "[tool]" runs a Bash tool round, "[permission]" asks for approval first.
+  const codeSessions = new Map();
+
+  function addCodeSession({ sessionId = randomUUID(), title = "Untitled", model = "stub-sonnet" } = {}) {
+    const now = Date.now();
+    const session = { sessionId, sessionType: "code", title, model, isArchived: false, isRunning: false, createdAt: now, lastActivityAt: now, transcript: [] };
+    codeSessions.set(sessionId, session);
+    return session;
+  }
+
+  function pushCodeEntry(session, entry) {
+    const parentUuid = session.transcript.at(-1)?.uuid ?? null;
+    const full = { parentUuid, isSidechain: false, timestamp: new Date().toISOString(), uuid: randomUUID(), sessionId: session.sessionId, ...entry };
+    session.transcript.push(full);
+    session.lastActivityAt = Date.now();
+    broadcast(full, { surface: "LocalSessions" });
+    return full;
+  }
+
+  async function runCodeTurn(session, { text, messageUuid, permission = false }) {
+    session.isRunning = true;
+    pushCodeEntry(session, {
+      uuid: messageUuid,
+      type: "user",
+      message: { role: "user", content: text },
+      origin: { kind: "human" },
+      turnOrigin: "human",
+    });
+    const answer = text.replace(/\n?"[^"\n]+"/g, "").replace(/\[(tool|permission|slow)\]/g, "").trim();
+    await sleep(state.chunkDelayMs);
+    if (permission) {
+      // Desktop asks, and the turn does not continue until it is answered.
+      const requestId = `req_${randomUUID()}`;
+      codeRequests.set(requestId, { sessionId: session.sessionId, toolName: "Bash", input: { command: "ls" } });
+      session.isRunning = false;
+      broadcast(
+        { sessionId: session.sessionId, requestId, toolName: "Bash", input: { command: "ls" } },
+        { surface: "LocalSessions", method: "onOnToolPermissionRequest" },
+      );
+      return;
+    }
+    if (/\[tool\]/.test(text)) {
+      pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "I should look.", signature: "s" }], stop_reason: "tool_use" } });
+      pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_code_1", name: "mcp__workspace__bash", input: { command: "ls" } }], stop_reason: "tool_use" } });
+      pushCodeEntry(session, { type: "user", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_code_1", content: "a.txt\nb.txt" }] } });
+    }
+    pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm", signature: "s" }], stop_reason: "end_turn" } });
+    pushCodeEntry(session, { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `Echo: ${answer}` }], stop_reason: "end_turn" } });
+    session.isRunning = false;
+  }
+
+  const codeRequests = new Map();
+
+  const codeHandlers = {
+    getAll: () => [...codeSessions.values()].map(summary),
+    getSession: ([id]) => (codeSessions.has(id) ? summary(codeSessions.get(id)) : undefined),
+    getTranscript: ([id]) => codeSessions.get(id)?.transcript ?? [],
+    start: ([info]) => {
+      const session = addCodeSession({ sessionId: info.sessionId, title: info.title, model: info.model });
+      void runCodeTurn(session, { text: info.message, messageUuid: info.messageUuid, permission: /\[permission\]/.test(info.message) });
+      return { sessionId: info.sessionId };
+    },
+    sendMessage: ([id, message, , , messageUuid]) => {
+      const session = codeSessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      void runCodeTurn(session, { text: message, messageUuid, permission: /\[permission\]/.test(message) });
+      return { dispatched: true };
+    },
+    interrupt: ([id]) => {
+      const session = codeSessions.get(id);
+      if (session) session.isRunning = false;
+    },
+    stop: ([id]) => {
+      const session = codeSessions.get(id);
+      if (session) session.isRunning = false;
+    },
+    respondToToolPermission: ([id, requestId, behavior]) => {
+      const request = codeRequests.get(requestId);
+      if (!request) throw new Error(`Permission "${requestId}" not found`);
+      codeRequests.delete(requestId);
+      const session = codeSessions.get(id);
+      if (session) void runCodeTurn(session, { text: `(approved:${behavior})`, messageUuid: randomUUID() });
+    },
+    delete: ([id]) => { codeSessions.delete(id); },
+    updateSession: ([id, options]) => {
+      const session = codeSessions.get(id);
+      if (session && options?.title) session.title = options.title;
+    },
+    setModel: ([id, model]) => {
+      const session = codeSessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      session.model = model;
+    },
+    setEffort: ([id, effort]) => {
+      const session = codeSessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      session.effort = effort;
+    },
+    setPermissionMode: ([id, mode]) => {
+      const session = codeSessions.get(id);
+      if (!session) throw new Error(`Session "${id}" not found`);
+      session.permissionMode = mode;
+    },
+    archive: ([id]) => {
+      const session = codeSessions.get(id);
+      if (session) session.isArchived = true;
+    },
+  };
+
   const handlers = {
     getAll: () => [...sessions.values()].map(summary),
     getSession: ([id]) => (sessions.has(id) ? summary(sessions.get(id)) : undefined),
@@ -264,7 +381,11 @@ export async function startFakeClaudesk() {
     if (request.method === "POST" && url.pathname === "/api/remote/ipc") {
       const args = decode(parsed.args) ?? [];
       calls.push({ route: "ipc", surface: parsed.surface, method: parsed.method, args });
-      const handler = parsed.surface === "LocalAgentModeSessions" ? handlers[parsed.method] : undefined;
+      const handler = parsed.surface === "LocalAgentModeSessions"
+        ? handlers[parsed.method]
+        : parsed.surface === "LocalSessions"
+          ? codeHandlers[parsed.method]
+          : undefined;
       if (!handler) return json(400, { ok: false, error: `${parsed.surface}.${parsed.method} is not allowed` });
       try {
         return json(200, { ok: true, value: await handler(args) });
@@ -284,7 +405,10 @@ export async function startFakeClaudesk() {
     state,
     models,
     addSession,
+    codeSessions,
+    addCodeSession,
     ipcCalls: (method) => calls.filter((call) => call.route === "ipc" && call.method === method),
+    codeIpcCalls: (method) => calls.filter((call) => call.route === "ipc" && call.surface === "LocalSessions" && call.method === method),
     resetCalls: () => { calls.length = 0; },
     async close() {
       state.down = true; // refuse the facade's reconnects while shutting down
