@@ -108,6 +108,47 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  claude-mobile:
+    build:
+      context: .
+      dockerfile: mobile/Dockerfile
+    image: local/claude-mobile-api:latest
+    container_name: claude-mobile-api
+    user: "${PUID:-1000}:${PGID:-1001}"
+    ports:
+      - "${CLAUDE_MOBILE_PORT:-8081}:8081"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      CLAUDE_MOBILE_HOST: "0.0.0.0"
+      CLAUDE_MOBILE_PORT: "8081"
+      CLAUDE_MOBILE_DATA_DIR: "/data"
+      CLAUDE_MOBILE_API_EMAIL: "${CLAUDE_MOBILE_API_EMAIL:?Set CLAUDE_MOBILE_API_EMAIL in .env}"
+      CLAUDE_MOBILE_API_PASSWORD: "${CLAUDE_MOBILE_API_PASSWORD:-}"
+      CLAUDE_MOBILE_API_CODE: "${CLAUDE_MOBILE_API_CODE:-}"
+      CLAUDE_MOBILE_API_MAX_FAILURES: "${CLAUDE_MOBILE_API_MAX_FAILURES:-5}"
+      CLAUDE_MOBILE_API_BASE_BAN_SECONDS: "${CLAUDE_MOBILE_API_BASE_BAN_SECONDS:-600}"
+      CLAUDE_MOBILE_API_MAX_TOKENS: "${CLAUDE_MOBILE_API_MAX_TOKENS:-64000}"
+      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:-}"
+    volumes:
+      # Applied 3P gateway config is read from here; never written.
+      - /vol2/1000/Docker/ClaudeDesktop/config:/config:ro
+      # Sessions, conversations and login lockout state.
+      - /vol2/1000/Docker/ClaudeDesktop/mobile-data:/data
+    mem_limit: "${CLAUDE_MOBILE_API_MEMORY_LIMIT:-256m}"
+    networks:
+      - gateway_net
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8081/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
 networks:
   gateway_net:
     external: true
