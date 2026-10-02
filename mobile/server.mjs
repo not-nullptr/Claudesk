@@ -118,6 +118,48 @@ async function selectedModel() {
   return typeof saved?.model === "string" ? saved.model : "";
 }
 
+// A thinking selection is { effort?, mode? }; anything else is dropped.
+function cleanThinking(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const pick = {};
+  if (typeof value.effort === "string" && value.effort) pick.effort = value.effort;
+  if (typeof value.mode === "string" && value.mode) pick.mode = value.mode;
+  return pick.effort || pick.mode ? pick : undefined;
+}
+
+// SurfaceState for the chat surface: the selected model plus the app's thinking
+// choice (`thinking`) and the choice remembered for each model (`thinking_by_model`).
+async function chatSelectorState(fallbackModel) {
+  const saved = await store.readJsonFile("model-selection.json", null);
+  const model = (typeof saved?.model === "string" && saved.model) || fallbackModel;
+  const byModel = saved?.thinking_by_model && typeof saved.thinking_by_model === "object" ? saved.thinking_by_model : {};
+  const thinking = cleanThinking(byModel[model]);
+  return {
+    id: "chat",
+    model,
+    ...(thinking ? { thinking } : {}),
+    ...(Object.keys(byModel).length ? { thinking_by_model: byModel } : {}),
+  };
+}
+
+async function saveChatSelection(body) {
+  const saved = (await store.readJsonFile("model-selection.json", null)) || {};
+  const next = { ...saved };
+  if (typeof body.model === "string" && body.model) next.model = body.model;
+  const byModel = { ...(saved.thinking_by_model || {}) };
+  for (const [id, value] of Object.entries(body.thinking_by_model || {})) {
+    const pick = cleanThinking(value);
+    if (pick) byModel[id] = pick;
+  }
+  const thinking = cleanThinking(body.thinking);
+  if (thinking) {
+    next.thinking = thinking;
+    if (next.model) byModel[next.model] = thinking;
+  }
+  if (Object.keys(byModel).length) next.thinking_by_model = byModel;
+  await store.writeJsonFile("model-selection.json", next);
+}
+
 function accountObject() {
   return {
     uuid: identity.accountUuid,
@@ -399,7 +441,7 @@ async function handleBootstrapRoute(request, response, url) {
       account_features: [],
       organization_permissions: [],
     },
-    model_selector_state: [{ id: "chat", model: defaultModel }],
+    model_selector_state: [await chatSelectorState(defaultModel)],
     model_selector_config: [
       { id: "chat", models },
     ],
@@ -538,15 +580,13 @@ async function handleConversationRoutes(request, response, url) {
 
   if (rest === "model_selector_state/chat") {
     if (request.method === "GET") {
-      sendJson(response, 200, { id: "chat", model: (await selectedModel()) || (await engine.defaultModel()) });
+      sendJson(response, 200, await chatSelectorState(await engine.defaultModel()));
       return true;
     }
     if (["PUT", "POST", "PATCH"].includes(request.method)) {
       const body = await readJson(request);
-      if (typeof body.model === "string" && body.model) {
-        await store.writeJsonFile("model-selection.json", { model: body.model });
-      }
-      sendJson(response, 200, { id: "chat", model: (await selectedModel()) || body.model });
+      await saveChatSelection(body);
+      sendJson(response, 200, await chatSelectorState(body.model));
       return true;
     }
   }
@@ -642,7 +682,7 @@ async function handleConversationRoutes(request, response, url) {
 // Streams one assistant turn over SSE in the mobile contract (§6.2), while
 // persisting canonical state so reopening or another surface sees the same IDs.
 async function handleCompletion(request, response, conversationId) {
-  const body = await readJson(request, 72 * 1024 * 1024);
+  let body = await readJson(request, 72 * 1024 * 1024);
   let conversation;
   try {
     conversation = await engine.getConversation(conversationId);
@@ -660,6 +700,11 @@ async function handleCompletion(request, response, conversationId) {
   }
   const isRetry = new URL(request.url, "http://localhost").pathname
     .endsWith("/retry_completion");
+  if (!body.effort && !body.thinking_mode) {
+    const saved = await store.readJsonFile("model-selection.json", null);
+    const pick = cleanThinking(saved?.thinking_by_model?.[body.model || conversation.model]);
+    if (pick) body = { ...body, effort: pick.effort, thinking_mode: pick.mode };
+  }
   const turn = await engine.prepareTurn({ conversation, body, retry: isRetry });
 
   response.writeHead(200, SSE_HEADERS);

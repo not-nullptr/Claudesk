@@ -494,6 +494,34 @@ try {
   });
   assert.equal(claudesk.ipcCalls("setEffort").length, 0, "a model without effort options ignores the pick");
 
+  // The picker's selection is stored on the selector state, per model, and used
+  // when a send does not carry its own.
+  const statePath = `/api/organizations/${org.uuid}/model_selector_state/chat`;
+  const savedState = await (await call(statePath, {
+    method: "PUT",
+    body: { model: "stub-sonnet", thinking: { effort: "xhigh", mode: "auto" } },
+  })).json();
+  assert.deepEqual(savedState.thinking, { effort: "xhigh", mode: "auto" });
+  assert.deepEqual(savedState.thinking_by_model, { "stub-sonnet": { effort: "xhigh", mode: "auto" } });
+  const bootState = (await (await call(
+    `/api/bootstrap/${org.uuid}/app_start?growthbook_format=sdk&include_system_prompts=false`,
+  )).json()).model_selector_state[0];
+  assert.equal(bootState.model, "stub-sonnet");
+  assert.deepEqual(bootState.thinking, { effort: "xhigh", mode: "auto" }, "bootstrap reports the selected effort");
+  assert.deepEqual((await (await call(statePath)).json()).thinking_by_model["stub-sonnet"], { effort: "xhigh", mode: "auto" });
+  await call(statePath, { method: "PUT", body: { model: "stub-haiku" } });
+  assert.equal((await (await call(statePath)).json()).thinking, undefined, "another model has no selection yet");
+  await call(statePath, { method: "PUT", body: { model: "stub-sonnet" } });
+
+  claudesk.resetCalls();
+  const savedPickUuid = "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1";
+  await send(savedPickUuid, {
+    prompt: "No explicit effort",
+    create_conversation_params: { name: "", model: "stub-sonnet" },
+    turn_message_uuids: turn("d2d2d2d2-d2d2-42d2-82d2-d2d2d2d2d2d2", "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3"),
+  });
+  assert.equal(sessionOf(savedPickUuid).effort, "xhigh", "the saved selection applies when the send carries none");
+
   // Connect carries the same picks as conversation-settings tokens.
   claudesk.resetCalls();
   const reasonConnect = "f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1";

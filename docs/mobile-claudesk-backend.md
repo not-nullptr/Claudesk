@@ -64,6 +64,12 @@ sessions are never listed, read or modified, and a completion cannot adopt their
   message the effort is applied right after the session is created and may only take
   hold from the second turn. Whether the iOS app reads the `thinking` block from this
   model list in the form the web UI does is not verified on a device.
+  Static analysis of the iOS app shows the options are read from
+  `model_selector_config[].models[].thinking` (`effort_options`, `mode_options`) and the
+  selection from `model_selector_state[]` (`thinking`: `{effort, mode}` and
+  `thinking_by_model`). The service stores the selection the app writes to
+  `model_selector_state/chat`, reports it in bootstrap, and uses it for sends that carry
+  no pick of their own. Feature flags that might gate the picker are unverified.
 - **Tool permission prompts** are not expected in Chat (the probe saw none while the
   model read files), but nothing on the phone could answer one. They are logged.
 - **Model errors are shown as the answer.** When the gateway rejects a call (for example
