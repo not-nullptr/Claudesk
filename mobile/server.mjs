@@ -195,15 +195,27 @@ function accountSettings() {
   };
 }
 
-// Upgraded plan + code/cowork capabilities so the mobile client unlocks the
-// Claude Code surface.
+// The plan the account claims to be on, using the field values claude.ai
+// itself reports. The app decides what to unlock (the Code tab, for one) from
+// these, so a free-looking account gets upsells instead of the feature.
+const PLANS = {
+  free: { capabilities: ["chat"], analytics: "free", display: "Free", tier: "default_claude_ai", billing: null },
+  pro: { capabilities: ["chat", "claude_pro"], analytics: "pro", display: "Pro", tier: "default_claude_pro", billing: "stripe_subscription" },
+  max_5x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_5x", billing: "stripe_subscription" },
+  max_20x: { capabilities: ["chat", "claude_max"], analytics: "max", display: "Max", tier: "default_claude_max_20x", billing: "stripe_subscription" },
+};
+const planName = process.env.CLAUDE_MOBILE_PLAN || "max_20x";
+const plan = PLANS[planName] || PLANS.max_20x;
+
 function organizationObject() {
   return {
     uuid: identity.orgUuid,
     name: "Self-hosted",
-    capabilities: ["chat", "claude_code"],
-    analytics_subscription_plan: "max",
-    plan_display_name: "Max",
+    capabilities: [...plan.capabilities, "claude_code"],
+    analytics_subscription_plan: plan.analytics,
+    plan_display_name: plan.display,
+    rate_limit_tier: plan.tier,
+    billing_type: plan.billing,
     settings: {},
   };
 }

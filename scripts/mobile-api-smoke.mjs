@@ -131,6 +131,9 @@ try {
   assert.equal(account.email_address, "smoke@example.com");
   const org = account.memberships[0].organization;
   assert.ok(org.capabilities.includes("claude_code"));
+  assert.ok(org.capabilities.includes("claude_max"));
+  assert.equal(org.rate_limit_tier, "default_claude_max_20x");
+  assert.equal(org.billing_type, "stripe_subscription");
 
   const orgs = await (await call("/api/organizations")).json();
   assert.equal(orgs[0].uuid, org.uuid);
