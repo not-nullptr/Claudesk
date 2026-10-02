@@ -1,7 +1,7 @@
 "use strict";
 
 const http = require("node:http");
-const { randomBytes } = require("node:crypto");
+const { randomBytes, createHash } = require("node:crypto");
 const { createReadStream, readFileSync } = require("node:fs");
 const { createConnection } = require("node:net");
 const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
@@ -550,14 +550,39 @@ const registeredRelayContentsIds = new Set();
 const relayedEventCopies = new Map();
 let relayedEventCopiesBytes = 0;
 
+function relayEventKey(value) {
+  return JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+    : item);
+}
+
+function traceRelayedEvent(value, sourceId, decision, key) {
+  if (process.env.CLAUDE_RELAY_TRACE !== "1") return;
+  const payload = value.payload || {};
+  const message = payload.message || {};
+  const frame = message.event || {};
+  console.info("[claudesk-relay] " + JSON.stringify({
+    sourceId, decision, surface: value.surface, method: value.method,
+    sessionId: payload.sessionId, type: payload.type, messageType: message.type,
+    messageId: message.message?.id || frame.message?.id,
+    messageUuid: message.uuid, eventType: frame.type, index: frame.index,
+    blockType: frame.content_block?.type, toolId: frame.content_block?.id,
+    toolName: frame.content_block?.name, deltaType: frame.delta?.type,
+    tools: Array.isArray(message.message?.content)
+      ? message.message.content.filter(block => block.type === "tool_use")
+        .map(block => ({ id: block.id, name: block.name })) : undefined,
+    fingerprint: createHash("sha256").update(key).digest("hex").slice(0, 16),
+  }));
+}
+
 function enqueueRelayedEvent(value, sourceId) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   if (!relayedListeners.get(value.surface)?.has(value.method)) return;
+  const key = relayEventKey(value);
   // Some IPC events are broadcast, others reach only one app view. Listen in
   // all views, but forward each cross-view copy only once. Per-view occurrence
   // counts preserve legitimate identical deltas (including repeated words).
   if (sourceId !== undefined) {
-    const key = JSON.stringify(value);
     if (key.length <= 32768) {
       const now = Date.now();
       let copies = relayedEventCopies.get(key);
@@ -568,7 +593,10 @@ function enqueueRelayedEvent(value, sourceId) {
       }
       const count = (copies.counts.get(sourceId) || 0) + 1;
       copies.counts.set(sourceId, count);
-      if (count <= copies.emitted) return;
+      if (count <= copies.emitted) {
+        traceRelayedEvent(value, sourceId, "duplicate", key);
+        return;
+      }
       copies.emitted = count;
       while (relayedEventCopies.size > 2000 || relayedEventCopiesBytes > 8 * 1024 * 1024) {
         const oldest = relayedEventCopies.keys().next().value;
@@ -577,6 +605,7 @@ function enqueueRelayedEvent(value, sourceId) {
       }
     }
   }
+  traceRelayedEvent(value, sourceId, "forwarded", key);
   relayedEventQueue.push(value);
   if (relayedEventQueue.length > 2000) {
     relayedEventQueue.splice(0, relayedEventQueue.length - 2000);

@@ -31,7 +31,8 @@ const relay = { relayedListeners: sandbox.relayedListeners, relayedEventQueue: r
   Date: { now: () => now } };
 let now = 10000;
 vm.createContext(relay);
-vm.runInContext(section('function enqueueRelayedEvent(', 'function attachRelayConsole('), relay);
+vm.runInContext(section('function relayEventKey(', 'function attachRelayConsole('),
+  vm.createContext(Object.assign(relay, {process:{env:{}}, console, createHash: (await import('node:crypto')).createHash})));
 vm.runInContext(section('function rendererCandidates()', 'async function evaluateInOfficialRenderer(')
   + section('async function ensureRelayedEventsRegistered()', 'async function drainRelayedEvents('), sandbox);
 await sandbox.ensureRelayedEventsRegistered();
@@ -45,6 +46,14 @@ assert.deepEqual(received.map(event => event.payload.message.text), ['turn one',
 const broadcast = {type:'message',sessionId:'session',message:{type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'thinking'}}}};
 for (const callback of callbacks.values()) callback(broadcast);
 assert.equal(received.length, 3, 'a block-start broadcast is delivered once across renderers');
+// JSON object property order is not event identity.
+const reversed = value => Array.isArray(value) ? value.map(reversed) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.entries(value).reverse().map(([key,item])=>[key,reversed(item)])) : value;
+const distinctOrder = {type:'message',sessionId:'ordered',message:{event:{type:'content_block_start',index:1,content_block:{type:'tool_use',id:'search',name:'WebSearch',input:{}}}}};
+const beforeOrder = received.length;
+callbacks.get(1)(distinctOrder); callbacks.get(2)(reversed(distinctOrder));
+assert.equal(received.length, beforeOrder+1, 'property reordering across views must still deduplicate');
+received.splice(beforeOrder);
 const repeated = {type:'message',sessionId:'session',message:{type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'ha'}}}};
 for(let occurrence=0;occurrence<3;occurrence++)for(const callback of callbacks.values())callback(repeated);
 assert.equal(received.length, 6, 'three identical deltas remain three, not one or six');
@@ -64,3 +73,15 @@ views[1].destroyed = true;
 await sandbox.ensureRelayedEventsRegistered();
 assert.equal(registered.has(2), false);
 console.log('renderer-relay-smoke: embedded views stream, shell and external origins are handled, subscriptions are not duplicated');
+const traceLines = [];
+relay.process.env.CLAUDE_RELAY_TRACE = '1';
+relay.console = {info(line){traceLines.push(line);}};
+const privateEvent={surface:'LocalAgentModeSessions',method:'onOnEvent',payload:{sessionId:'trace-session',type:'message',
+  message:{type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'call-trace',name:'WebSearch',input:{query:'PRIVATE_ARGUMENT'},signature:'PRIVATE_SIGNATURE',thinking:'PRIVATE_THINKING'}}}}};
+relay.enqueueRelayedEvent(privateEvent,1);
+relay.enqueueRelayedEvent(reversed(privateEvent),2);
+assert.equal(traceLines.length,2);
+assert.ok(traceLines[0].includes('forwarded'));
+assert.ok(traceLines[1].includes('duplicate'));
+assert.ok(traceLines[0].includes('call-trace'));
+for(const forbidden of ['PRIVATE_ARGUMENT','PRIVATE_SIGNATURE','PRIVATE_THINKING'])assert.ok(!traceLines.join('').includes(forbidden));
