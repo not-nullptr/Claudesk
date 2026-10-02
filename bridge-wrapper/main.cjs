@@ -2,7 +2,7 @@
 
 const http = require("node:http");
 const { randomBytes, createHash } = require("node:crypto");
-const { createReadStream, readFileSync } = require("node:fs");
+const { createReadStream, readFileSync, writeSync } = require("node:fs");
 const { createConnection } = require("node:net");
 const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
@@ -556,12 +556,22 @@ function relayEventKey(value) {
     : item);
 }
 
+function writeRelayTrace(line) {
+  // The official application can replace console methods with its file logger.
+  // Write directly to stderr so diagnostics reach the container supervisor.
+  try { writeSync(2, "[claudesk-relay] " + line + "\n"); } catch {}
+}
+
+if (process.env.CLAUDE_RELAY_TRACE === "1") {
+  writeRelayTrace(JSON.stringify({ type: "trace_enabled", version: 2 }));
+}
+
 function traceRelayedEvent(value, sourceId, decision, key) {
   if (process.env.CLAUDE_RELAY_TRACE !== "1") return;
   const payload = value.payload || {};
   const message = payload.message || {};
   const frame = message.event || {};
-  console.info("[claudesk-relay] " + JSON.stringify({
+  writeRelayTrace(JSON.stringify({
     sourceId, decision, surface: value.surface, method: value.method,
     sessionId: payload.sessionId, type: payload.type, messageType: message.type,
     messageId: message.message?.id || frame.message?.id,

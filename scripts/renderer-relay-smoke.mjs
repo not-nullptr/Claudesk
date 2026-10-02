@@ -32,7 +32,7 @@ const relay = { relayedListeners: sandbox.relayedListeners, relayedEventQueue: r
 let now = 10000;
 vm.createContext(relay);
 vm.runInContext(section('function relayEventKey(', 'function attachRelayConsole('),
-  vm.createContext(Object.assign(relay, {process:{env:{}}, console, createHash: (await import('node:crypto')).createHash})));
+  vm.createContext(Object.assign(relay, {process:{env:{}}, console, writeSync() { throw new Error('trace disabled'); }, createHash: (await import('node:crypto')).createHash})));
 vm.runInContext(section('function rendererCandidates()', 'async function evaluateInOfficialRenderer(')
   + section('async function ensureRelayedEventsRegistered()', 'async function drainRelayedEvents('), sandbox);
 await sandbox.ensureRelayedEventsRegistered();
@@ -75,7 +75,8 @@ assert.equal(registered.has(2), false);
 console.log('renderer-relay-smoke: embedded views stream, shell and external origins are handled, subscriptions are not duplicated');
 const traceLines = [];
 relay.process.env.CLAUDE_RELAY_TRACE = '1';
-relay.console = {info(line){traceLines.push(line);}};
+relay.console = {info(){throw new Error('official logger intercepted console');}};
+relay.writeSync = (fd, line) => { assert.equal(fd, 2); traceLines.push(line); };
 const privateEvent={surface:'LocalAgentModeSessions',method:'onOnEvent',payload:{sessionId:'trace-session',type:'message',
   message:{type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'call-trace',name:'WebSearch',input:{query:'PRIVATE_ARGUMENT'},signature:'PRIVATE_SIGNATURE',thinking:'PRIVATE_THINKING'}}}}};
 relay.enqueueRelayedEvent(privateEvent,1);
@@ -85,3 +86,12 @@ assert.ok(traceLines[0].includes('forwarded'));
 assert.ok(traceLines[1].includes('duplicate'));
 assert.ok(traceLines[0].includes('call-trace'));
 for(const forbidden of ['PRIVATE_ARGUMENT','PRIVATE_SIGNATURE','PRIVATE_THINKING'])assert.ok(!traceLines.join('').includes(forbidden));
+relay.writeSync = () => { throw new Error('closed stderr'); };
+assert.doesNotThrow(() => relay.enqueueRelayedEvent({...privateEvent,payload:{...privateEvent.payload,sessionId:'closed-stderr'}},1),
+  'diagnostic output failures must not interrupt the event relay');
+const startupLines = [];
+vm.runInNewContext(section('function writeRelayTrace(', 'function traceRelayedEvent('), {
+  process: {env: {CLAUDE_RELAY_TRACE:'1'}}, writeSync(fd,line) {assert.equal(fd,2);startupLines.push(line);}
+});
+assert.deepEqual(startupLines.map(line=>JSON.parse(line.slice('[claudesk-relay] '.length))),
+  [{type:'trace_enabled',version:2}], 'startup confirms that the running wrapper loaded tracing');
