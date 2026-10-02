@@ -159,14 +159,23 @@ be read from the binary). The facade is written **against the fake bridge** in
 `scripts/lib/fake-claudesk.mjs`, which implements the shapes below; each is
 isolated so a probe result only touches one place.
 
+The 2026-10 probe run (`/tmp/desktop-code-probe.json`, 18 live sessions) settled
+the first batch:
+
 | # | Question | Where the answer lives | Status |
 |---|---|---|---|
-| 1 | Arg order/shape of `getTranscript` vs `getTranscriptTail` | `code-engine.mjs` `ipcArgs.getTranscript` | open — assumes `[sessionId]` returning the full entry array |
-| 2 | Whether `sendMessage` returns a message id or only an ack | `code-engine.mjs` `sendMessage` return | open — the ack is synthesized from the `clientMessageId` the app sent |
+| 5 | Whether `getAll` mixes Chat/Cowork/Code rows | `code-engine.mjs` `listSessions` filter | **settled — it does not.** `LocalSessions.getAll` returned 18 sessions, all `local_…`, and **none carried a `sessionType`**. The surface *is* the discriminator, so the filter now keeps every row with an id. (The old `sessionType === "code"` test dropped all 18.) |
+| 6 | Whether the paired Desktop needs an `environment` before a session can start | `code-transcript.mjs` `bridgeEnvironment` | **settled — no.** Real Code sessions already exist and are addressable by `getSession` with a plain `local_…` id; the bridge device is offered as a runner, not provisioned before use. |
+| 7 | Which prefix Code session ids use | `code-ids.mjs` | **settled — `local_<uuid>`, the same prefix as Chat.** Collisions are avoided by surface, never by prefix: `code_` is a facade-level tag stripped before every IPC call, and the chat legs are backed by a different Desktop surface, so a `local_` id reaching the Code routes can only mean a Code session. |
+| 8 | What the `mode=code` event stream emits | `code-events.mjs` | **partly settled.** It opens with a `sessions` snapshot `{chat, cowork, observedAt}` — but note those buckets come from `bridge/realtime.mjs`'s `pollState`, which reads `LocalAgentModeSessions.getAll`, i.e. the *Chat* surface. Per-session `LocalSessions.onOnEvent` frames still need a live turn to observe. |
+| 9 | The real create path | `code-engine.mjs` `ipcArgs.start` | **open, and now the only blocker.** All four first-round shapes were rejected with `Argument "info" at position 0 to method "start" ... failed to pass validation`, which names the argument but not its contents. The probe now leads with `info`-object shapes and, if all fail, tries `createSession`/`warmSession` and records which the surface accepts. |
+| 1 | Arg order/shape of `getTranscript` vs `getTranscriptTail` | `code-engine.mjs` `ipcArgs.getTranscript` | open — the first probe run never got a session to read; assumes `[sessionId]` → full entry array |
+| 2 | Whether `sendMessage` returns a message id or only an ack | `code-engine.mjs` `sendMessage` return | open — ack synthesized from the `clientMessageId` the app sent |
 | 3 | Which `onOnEvent` payloads are `upserted` vs `deleted` | `code-events.mjs` `frameFromPayload` | open — assumes one entry per record, `removed`/`deleted` marks a removal |
 | 4 | Tool-call payload → `ToolCall` field mapping | `code-transcript.mjs` `toolCallFromUse` | open — reuses `blocks.mjs`, so a Code and a Chat tool row look the same |
-| 5 | Whether `getAll` mixes Chat/Cowork/Code rows | `code-engine.mjs` `listSessions` filter | open — filters on `sessionType === "code"` |
-| 6 | Whether the paired Desktop needs an `environment` before a session can start | `code-transcript.mjs` `bridgeEnvironment` | open — assumes not; sessions are created by the first `start` |
+
+Questions 1-4 are now reachable: they only need a session to exist, which the
+create-path fix unblocks.
 
 Run it (it spends a few inference calls on the configured gateway and always
 deletes the session it created):

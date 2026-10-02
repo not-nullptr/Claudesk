@@ -288,15 +288,17 @@ export function createCodeEngine({
       throw asCodeError(error);
     }
     const state = await loadMeta();
-    // Desktop's getAll may include Chat/Cowork rows; a Code row is the one
-    // whose sessionType says so. Rows recorded before the field existed are
-    // kept only if they are not a known Chat/Cowork type.
+    // The surface is the discriminator, not a field: `LocalSessions.getAll`
+    // returns Claude Code sessions and *only* those, and its rows carry no
+    // `sessionType` at all (probe, 2026-10: 18 rows, all `local_…`, no
+    // sessionType). So keep everything this surface returns; a row without an
+    // id is the only thing worth dropping.
     const codes = sessions.filter((session) => {
-      const type = session?.sessionType;
-      return type ? type === "code" : false;
+      const id = session?.sessionId ?? session?.id;
+      return typeof id === "string" && id.length > 0;
     });
     let rows = codes.map((session) => {
-      const desktopId = String(session.sessionId ?? "");
+      const desktopId = String(session.sessionId ?? session.id ?? "");
       return sessionResponse(session, {
         meta: state.sessions[desktopId] || {},
         pendingApproval: hasPendingPermission(desktopId),

@@ -173,7 +173,10 @@ export async function startFakeClaudesk() {
 
   function addCodeSession({ sessionId = randomUUID(), title = "Untitled", model = "stub-sonnet" } = {}) {
     const now = Date.now();
-    const session = { sessionId, sessionType: "code", title, model, isArchived: false, isRunning: false, createdAt: now, lastActivityAt: now, transcript: [] };
+    // No `sessionType`: the real `LocalSessions.getAll` rows carry none — the
+    // surface is what makes them Code sessions. Mirroring that keeps the fake
+    // from hiding a filter that would drop every real session.
+    const session = { sessionId, title, model, isArchived: false, isRunning: false, createdAt: now, lastActivityAt: now, transcript: [] };
     codeSessions.set(sessionId, session);
     return session;
   }

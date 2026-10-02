@@ -12,8 +12,13 @@
 // deletes the session it created.
 //
 //   CLAUDE_REMOTE_CODE_ACTIONS=1 \
-//   CLAUDE_MOBILE_DESKTOP_URL=http://127.0.0.1:8080 \
+//   CLAUDE_MOBILE_DESKTOP_URL=http://127.0.0.1:15821 \
 //     node scripts/code-session-probe.mjs [--tools] [--out code-probe.json]
+//
+// The URL matters: inside the compose network the bridge is on :8080, but from
+// the host it is published on ${COWORK_WEB_PORT:-15821} (compose.yaml). Pointing
+// this at :8080 from the box gives "Claudesk bridge unreachable", which reads
+// like a down service and is not.
 //
 // --tools also asks for a shell command, which provokes a tool permission
 // prompt so `respondToToolPermission` can be recorded.
@@ -83,7 +88,13 @@ const subscription = client.subscribe({
   onReconnect: () => record.events.push({ atMs: Date.now() - startedAt, event: "__reconnect__" }),
 });
 
-const sessionId = `code_probe_${randomUUID()}`;
+// Real Code sessions use `local_<uuid>` — the prefix the Chat surface uses too,
+// because the two are told apart by surface, not by id. The probe follows the
+// real scheme so a create path that validates the id shape is not spuriously
+// rejected. Cleanup is the `delete` in the finally block either way; the title
+// only helps a person who has to tidy up by hand.
+const sessionId = `local_${randomUUID()}`;
+const probeTitle = "Claudesk code probe (safe to delete)";
 let desktopSessionId = sessionId;
 
 async function session() {
@@ -122,13 +133,33 @@ try {
   note("getAll", { count: Array.isArray(all) ? all.length : null });
 
   // 2. start — the create shape. The phone's CreateSessionRequest maps onto this.
+  //    The first round rejected every candidate with `Argument "info" at
+  //    position 0 ... failed to pass validation`, so the shapes below lead with
+  //    `info`-named objects (bare and nested), then fall back to the flat forms
+  //    the Chat surface accepts and to the other plausible create entry points.
+  const pong = "Reply with exactly one word: pong";
   const started = await tryShapes("start", "start", [
-    [{ sessionId, message: "Reply with exactly one word: pong", messageUuid: randomUUID() }],
-    [{ sessionId, message: "Reply with exactly one word: pong", messageUuid: randomUUID(), sessionType: "code" }],
-    [{ sessionId, prompt: "Reply with exactly one word: pong" }],
-    [desktopSessionId, "Reply with exactly one word: pong"],
+    [{ info: { sessionId, message: pong, messageUuid: randomUUID(), title: probeTitle } }],
+    [{ info: { sessionId, message: pong, messageUuid: randomUUID(), sessionType: "code", title: probeTitle } }],
+    [{ sessionId, message: pong, messageUuid: randomUUID(), title: probeTitle }],
+    [{ sessionId, message: pong, messageUuid: randomUUID(), sessionType: "code", title: probeTitle }],
+    [{ info: { sessionId } }, pong],
+    [{ info: { sessionId, message: pong, messageUuid: randomUUID(), title: probeTitle }, sessionType: "code" }],
+    [{ sessionId, prompt: pong }],
+    [desktopSessionId, pong],
   ]);
   if (started === undefined) {
+    // `start` may not be this surface's create path at all. The Code UI may
+    // create through one of these instead, so record which the surface accepts
+    // rather than guessing: a rejected call still tells us the real arg name.
+    for (const method of ["createSession", "warmSession", "sendMessage", "getSessionsForScheduledTask"]) {
+      const args = method === "sendMessage"
+        ? [[{ info: { sessionId, message: pong, messageUuid: randomUUID(), title: probeTitle } }]]
+        : method === "getSessionsForScheduledTask"
+          ? [[], []]
+          : [[{ sessionId, message: pong, messageUuid: randomUUID(), title: probeTitle }], [{ info: { sessionId } }]];
+      await tryShapes(`create-fallback: ${method}`, method, args).catch(() => {});
+    }
     throw new Error("start was rejected in every shape; the rest of the probe would only record a session that does not exist");
   }
   const afterStart = await waitIdle("start");
