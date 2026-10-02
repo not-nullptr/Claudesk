@@ -823,6 +823,11 @@ async function handleCodeRoutes(request, response, url) {
         limit: Number(url.searchParams.get("limit")) || 50,
         sortOrder: url.searchParams.get("sort_order") || "desc",
       });
+      // Temporary deep trace: the exact row the app is handed, so a shape
+      // mismatch is visible in the log rather than inferred.
+      if (process.env.MOBILE_CODE_DEEP_TRACE === "1" && page.rows?.length) {
+        console.log(`[mobile-code]   row[0]=${JSON.stringify(page.rows[0]).slice(0, 1200)}`);
+      }
       sendJson(response, 200, page);
     } catch (error) {
       await fail(error);
@@ -859,7 +864,11 @@ async function handleCodeRoutes(request, response, url) {
   // upstream for them on this facade — Desktop owns the transcript — so accept
   // and discard rather than 404, which is what made the detail screen error.
   if (/^\/v1\/code\/sessions\/[^/]+\/events$/.test(path) && method === "POST") {
-    await readJson(request).catch(() => ({}));
+    const posted = await readJson(request).catch(() => ({}));
+    // The app pushes its own events here (presence, the "I loaded these"
+    // ack, attestation) — and, on a bad decode, an error report. Logging the
+    // body is how we see the app's own complaint when the screen stays blank.
+    console.log(`[mobile-code]   posted=${JSON.stringify(posted).slice(0, 1500)}`);
     sendJson(response, 200, {});
     return true;
   }
@@ -1047,6 +1056,9 @@ async function streamCodeEvents(request, response, url, sessionId) {
     // One line per frame: the app's decoder is silent on the wire, so the only
     // way to see what it was handed (and whether it read it) is to log the
     // frame we actually wrote. `sent` counts only the frames past the floor.
+    if (sent === 1 && process.env.MOBILE_CODE_DEEP_TRACE === "1") {
+      console.log(`[mobile-code]   frame[0]=${JSON.stringify({ event: frame.event, data: frame.data }).slice(0, 1200)}`);
+    }
     if (sent <= 5 || sent % 25 === 0) {
       console.log(`[mobile-code]   frame#${index} ${frame.event} sdk_message=${describeSdkMessage(frame.data)}`);
     }
