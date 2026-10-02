@@ -47,9 +47,16 @@ async function readJsonIfPresent(filePath) {
 // Display labels: the 3P config's labelOverride wins over the gateway's own
 // display_name; callers fall back to the model id.
 const modelLabels = new Map();
+// Only the 3P config's labelOverride, which Desktop also puts in the model
+// identity text of its system prompt; gateway display names are not included.
+const configLabels = new Map();
 
 export function modelLabel(id) {
   return modelLabels.get(id) || "";
+}
+
+export function configModelLabel(id) {
+  return configLabels.get(id) || "";
 }
 
 function rememberConfigLabels(models) {
@@ -58,6 +65,7 @@ function rememberConfigLabels(models) {
     if (model && typeof model === "object" && typeof model.name === "string"
       && typeof model.labelOverride === "string" && model.labelOverride) {
       modelLabels.set(model.name, model.labelOverride);
+      configLabels.set(model.name, model.labelOverride);
     }
   }
 }
@@ -184,7 +192,7 @@ function upstreamMessages(messages) {
 // upstream Response. The body is an Anthropic SSE stream; callers translate
 // it event by event. Non-2xx responses are shaped into an upstream error so
 // REST and streaming callers can surface a matching status to the client.
-export async function startUpstreamCompletion({ model, messages, maxTokens, signal }) {
+export async function startUpstreamCompletion({ model, messages, system, maxTokens, signal }) {
   const config = await getGatewayConfig();
   const response = await fetch(`${config.baseUrl}/v1/messages`, {
     method: "POST",
@@ -198,6 +206,7 @@ export async function startUpstreamCompletion({ model, messages, maxTokens, sign
       model,
       max_tokens: maxTokens,
       stream: true,
+      ...(typeof system === "string" && system ? { system } : {}),
       messages: upstreamMessages(messages),
     }),
     signal: signal ?? AbortSignal.timeout(600000),

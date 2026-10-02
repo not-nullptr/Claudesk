@@ -13,6 +13,8 @@ import {
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
 import { createMobileStore } from "./store.mjs";
+import { createSystemPromptProvider } from "./system-prompt.mjs";
+import { configModelLabel } from "./gateway.mjs";
 import { loadSchema, encodeProto, decodeProto } from "./proto.mjs";
 
 const host = process.env.CLAUDE_MOBILE_HOST || "0.0.0.0";
@@ -24,7 +26,8 @@ const schemaPath = process.env.CLAUDE_MOBILE_PROTO_SCHEMA
 
 const store = createMobileStore({ dataDir });
 const auth = createAuthService({ store });
-const engine = createEngine({ store, maxTokens });
+const systemPrompt = createSystemPromptProvider({ store, configModelLabel });
+const engine = createEngine({ store, maxTokens, systemPrompt });
 await store.ensureDirs();
 const identity = await engine.getIdentity();
 

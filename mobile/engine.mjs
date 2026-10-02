@@ -48,7 +48,7 @@ export class CompletionError extends Error {
   }
 }
 
-export function createEngine({ store, maxTokens, log = console }) {
+export function createEngine({ store, maxTokens, systemPrompt, log = console }) {
   let identity = null;
   const activeTurns = new Map(); // conversationUuid -> { abort, assistantUuid }
   const revisionWatchers = new Map(); // conversationUuid -> Set<callback>
@@ -222,9 +222,11 @@ export function createEngine({ store, maxTokens, log = console }) {
 
     let upstream;
     try {
+      const effectiveModel = model || conversation.model;
       upstream = await startUpstreamCompletion({
-        model: model || conversation.model,
+        model: effectiveModel,
         messages: upstreamMessages,
+        system: await systemPrompt?.build({ modelId: effectiveModel }),
         maxTokens,
         signal,
       });
@@ -506,9 +508,11 @@ export function createEngine({ store, maxTokens, log = console }) {
     notifyBardWatchers(conversation);
     (async () => {
       try {
+        const effectiveModel = model || conversation.model;
         const upstream = await startUpstreamCompletion({
-          model,
+          model: effectiveModel,
           messages: upstreamMessages,
+          system: await systemPrompt?.build({ modelId: effectiveModel }),
           maxTokens,
           signal: abort.signal,
         });

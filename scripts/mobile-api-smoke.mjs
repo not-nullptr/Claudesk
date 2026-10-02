@@ -15,6 +15,32 @@ process.env.CLAUDE_MOBILE_API_MAX_FAILURES = "3";
 process.env.CLAUDE_MOBILE_API_BASE_BAN_SECONDS = "60";
 process.env.CLAUDE_MOBILE_API_MAX_TOKENS = "256";
 
+// Stub Desktop bridge serving the system prompt template the way the real
+// /api/bootstrap/:org/system_prompts route does.
+const desktopTemplate = [
+  "<application_details>\nVM and Claude Code details.\n</application_details>",
+  "<claude_behavior>",
+  "<product_information>\nFile automation.\n</product_information>",
+  "<tone_and_formatting>\nSMOKE-TONE-SECTION\n</tone_and_formatting>",
+  "<computer_use>\nSMOKE-COMPUTER-USE\n</computer_use>",
+  "</claude_behavior>",
+  "<env>\nModel: {{modelName}}\n</env>\n{{modelIdentity}}",
+].join("\n").padEnd(600, " ");
+let desktopUp = true;
+const desktop = http.createServer((request, response) => {
+  if (desktopUp && /^\/api\/bootstrap\/[^/]+\/system_prompts$/.test(request.url)) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ cowork_system_prompt: { value: { prompt: desktopTemplate } } }));
+    return;
+  }
+  response.writeHead(desktopUp ? 404 : 503);
+  response.end("{}");
+});
+await new Promise((resolve) => desktop.listen(0, "127.0.0.1", resolve));
+process.env.CLAUDE_MOBILE_DESKTOP_URL = `http://127.0.0.1:${desktop.address().port}`;
+process.env.CLAUDE_MOBILE_SYSTEM_PROMPT_TTL_MS = "1";
+
+let lastSystem;
 const stub = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/v1/models") {
     response.writeHead(200, { "content-type": "application/json" });
@@ -26,6 +52,7 @@ const stub = http.createServer(async (request, response) => {
     for await (const chunk of request) body += chunk;
     const parsed = JSON.parse(body);
     assert.equal(typeof parsed.model, "string");
+    lastSystem = parsed.system;
     assert.ok(Array.isArray(parsed.messages) && parsed.messages.length >= 1);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const send = (event, data) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -165,6 +192,26 @@ try {
     .map((r) => r.data.delta.text).join("");
   assert.equal(text, "Hello from your backend");
 
+  // The Desktop Claude prompt reaches the gateway: behavior sections and the
+  // model identity are present, the VM/file/computer-use text is not.
+  assert.equal(typeof lastSystem, "string");
+  assert.match(lastSystem, /SMOKE-TONE-SECTION/);
+  assert.match(lastSystem, /Model: stub\/chat/);
+  assert.match(lastSystem, /You are powered by the model stub\/chat\./);
+  assert.doesNotMatch(lastSystem, /SMOKE-COMPUTER-USE|VM and Claude Code|File automation/);
+  assert.doesNotMatch(lastSystem, /\{\{/);
+
+  // A Desktop outage keeps serving the last good prompt (TTL is 1 ms here).
+  desktopUp = false;
+  const cached = await call(
+    `/api/organizations/${org.uuid}/chat_conversations/44444444-4444-4444-8444-444444444444/completion`,
+    { method: "POST", body: { prompt: "Again", create_conversation_params: { name: "", model: "stub/chat" } } },
+  );
+  assert.equal(cached.status, 200);
+  await cached.text();
+  assert.match(lastSystem, /SMOKE-TONE-SECTION/);
+  desktopUp = true;
+
   const reopened = await (await call(`/api/organizations/${org.uuid}/chat_conversations/${convUuid}`)).json();
   assert.equal(reopened.chat_messages.length, 2);
   assert.equal(reopened.chat_messages[0].uuid, humanUuid);
@@ -212,5 +259,6 @@ try {
 } finally {
   await rm(dataDir, { recursive: true, force: true });
   stub.close();
+  desktop.close();
 }
 process.exit(0);

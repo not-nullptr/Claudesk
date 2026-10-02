@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY mobile/server.mjs ./server.mjs
 COPY mobile/gateway.mjs ./gateway.mjs
+COPY mobile/system-prompt.mjs ./system-prompt.mjs
 COPY mobile/store.mjs ./store.mjs
 COPY mobile/auth.mjs ./auth.mjs
 COPY mobile/engine.mjs ./engine.mjs
