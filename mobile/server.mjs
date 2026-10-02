@@ -170,7 +170,6 @@ function accountObject() {
     updated_at: identity.createdAt,
     is_verified: true,
     is_anonymous: false,
-    capabilities: [...plan.capabilities],
     settings: accountSettings(),
     memberships: [{
       role: "owner",

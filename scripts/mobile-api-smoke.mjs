@@ -134,8 +134,7 @@ try {
   assert.equal(account.email_address, "smoke@example.com");
   const org = account.memberships[0].organization;
   assert.deepEqual(org.capabilities, ["chat", "claude_max"]);
-  assert.deepEqual(account.capabilities, ["chat", "claude_max"]);
-  assert.deepEqual(bootstrap0.account.capabilities, ["chat", "claude_max"]);
+  assert.equal(account.capabilities, undefined, "capabilities live on the organization only");
   assert.deepEqual(bootstrap0.account.memberships[0].organization.capabilities, ["chat", "claude_max"]);
   assert.ok(org.capabilities.includes("claude_max"));
   assert.equal(org.rate_limit_tier, "default_claude_max_20x");
