@@ -1211,6 +1211,15 @@ async function handleApi(request, response, url) {
           surfaces?.LocalAgentModeSessions?.includes("start")
           && surfaces?.LocalAgentModeSessions?.includes("sendMessage")
         ),
+        // The Claude Code (LocalSessions) surface is only present when the
+        // Desktop build exposes it and CLAUDE_REMOTE_CODE_ACTIONS allows it.
+        // The mobile facade's Code tab needs all four of these.
+        codeReady: Boolean(
+          codeActionsEnabled
+          && surfaces?.LocalSessions?.includes("getAll")
+          && surfaces?.LocalSessions?.includes("getSession")
+          && surfaces?.LocalSessions?.includes("sendMessage")
+        ),
         configuredModels,
         codeActionsEnabled,
         infrastructureActionsEnabled,

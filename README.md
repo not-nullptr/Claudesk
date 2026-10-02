@@ -173,7 +173,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `CLAUDE_REMOTE_GATEWAY_SETTINGS` | `0` | 官方第三方推理配置编辑器与 Developer 菜单入口 |
 | `CLAUDE_REMOTE_DEVELOPER_ACTIONS` | `0` | MCP/Skill/Plugin 管理、日志/配置查看、调试与 trace/heap 下载等 allowlist 操作 |
 | `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` | `0` | Projects/Spaces、Artifacts、Memory、Scheduled Tasks 等官方 mutation IPC |
-| `CLAUDE_REMOTE_CODE_ACTIONS` | `0` | Code/LocalSessions、终端、权限、MCP 与 `/workspace` 文件操作 |
+| `CLAUDE_REMOTE_CODE_ACTIONS` | `1` | Code/LocalSessions、终端、权限、MCP 与 `/workspace` 文件操作 |
 
 Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/workspace`，不会在访问页面的手机或电脑上执行。即使启用高权限开关，Bridge 也不公开远程控制、SSH、云端 teleport、PR mutation 或自动 commit/stash/discard 等方法。
 
