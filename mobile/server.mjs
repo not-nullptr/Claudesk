@@ -823,10 +823,16 @@ async function handleCodeRoutes(request, response, url) {
         limit: Number(url.searchParams.get("limit")) || 50,
         sortOrder: url.searchParams.get("sort_order") || "desc",
       });
-      // Temporary deep trace: the exact row the app is handed, so a shape
-      // mismatch is visible in the log rather than inferred.
-      if (process.env.MOBILE_CODE_DEEP_TRACE === "1" && page.rows?.length) {
+      // Deep trace: the exact row the app is handed, so a shape mismatch is
+      // visible in the log rather than inferred. Unconditional (it is one line
+      // per page) because a wrong shape here is what leaves the transcript
+      // blank, and we need it on the very next capture without an env change.
+      if (page.rows?.length) {
+        console.log(`[mobile-code]   events page: ${page.rows.length} rows has_more=${page.has_more}`);
         console.log(`[mobile-code]   row[0]=${JSON.stringify(page.rows[0]).slice(0, 1200)}`);
+        console.log(`[mobile-code]   row[last]=${JSON.stringify(page.rows.at(-1)).slice(0, 600)}`);
+      } else {
+        console.log(`[mobile-code]   events page: EMPTY (has_more=${page.has_more})`);
       }
       sendJson(response, 200, page);
     } catch (error) {
@@ -1056,7 +1062,7 @@ async function streamCodeEvents(request, response, url, sessionId) {
     // One line per frame: the app's decoder is silent on the wire, so the only
     // way to see what it was handed (and whether it read it) is to log the
     // frame we actually wrote. `sent` counts only the frames past the floor.
-    if (sent === 1 && process.env.MOBILE_CODE_DEEP_TRACE === "1") {
+    if (sent === 1) {
       console.log(`[mobile-code]   frame[0]=${JSON.stringify({ event: frame.event, data: frame.data }).slice(0, 1200)}`);
     }
     if (sent <= 5 || sent % 25 === 0) {

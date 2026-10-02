@@ -150,8 +150,8 @@ it, so a session with no live activity still draws.
 ```
 GET    /v1/code/sessions/{id}/events          list_client_events_v2
 ClientEventsPage       rows, maxSequenceNum, newestEventId, nextCursor, hasMore
-ClientEventsPage.Row   sequenceNum, message        ← message is a StdoutMessage
-ListClientEventsResponse  data, nextCursor
+ClientEventsPage.Row   sequenceNum, message        ← message is a SdkMessage
+ListClientEventsResponse  data, nextCursor         (data: [ClientEventsPage.Row])
 UsageResponse          limits, spend, extraUsage
 MessageLimit           status, resetsAt, remaining, overageInUse, notice,
                        perModelLimit, overageStatus, overageResetsAt,
@@ -172,14 +172,14 @@ resumable `from_sequence_num`. The pager type confirms the algorithm:
 and pages **older** on demand, and tolerates a truncated catch-up.
 
 Settled on device (2026-10-03): the detail screen opens **both** `…/events?
-sort_order=desc&limit=200` and `…/events/stream?from_sequence_num=0`, and both
-carry a `StdoutMessage` — a row is `{sequence_num, message}` where `message` is
-the same type the stream's `client_event` wraps (`ClientEventsPage.Row.message`
-and `StdoutMessage.sdkMessage` share a field-descriptor type slot). So a row's
-`message` — not a `payload` — carries the turn; the envelope type
-(`SessionEventEnvelope`: `event_id, sequence_num, event_type, source, payload`)
-is what the facade *used* to answer with, and it is why the transcript drew
-blank.
+sort_order=desc&limit=200` and `…/events/stream?from_sequence_num=0`. A row is
+`{sequence_num, message}` where `message` is an `SdkMessage` (`Row.message`'s
+field-type pointer lands on the `SdkMessage` descriptor @0x4ae7088 — i.e. the
+*paged* row carries the inner enum directly, while the stream wraps the same
+thing inside `StdoutMessage.sdkMessage`). So a row's `message` — not a
+`payload` — carries the turn; the envelope type (`SessionEventEnvelope`:
+`event_id, sequence_num, event_type, source, payload`) is what the facade *used*
+to answer with, and it is why the transcript drew blank.
 
 The rendering types are `ToolCall` (@0x4b050fc, 22 fields: `id name displayName
 status input output outputImages subagentToolCalls gitOperation fileMetadata

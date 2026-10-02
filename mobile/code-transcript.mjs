@@ -438,7 +438,10 @@ function invalidCursor() {
  */
 export function pageEvents(envelopes, { cursor = null, limit = 50 } = {}) {
   const rows = Array.isArray(envelopes) ? envelopes : [];
-  const size = Math.max(1, Math.min(Number(limit) || 50, 200));
+  // The app pages with `limit=500` on the older-cursor reads (seen on device);
+  // capping at 200 made it walk five pages where one was asked for. Cap at a
+  // generous ceiling that still bounds one response.
+  const size = Math.max(1, Math.min(Number(limit) || 50, 1000));
   let upper = rows.length; // exclusive index of the newest included envelope
   if (cursor) {
     const parsed = parseCursor(cursor);

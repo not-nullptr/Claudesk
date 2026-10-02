@@ -153,11 +153,29 @@ reads `…offendingSequenceNum context underlyingTypeName missing data clientEve
 ephemeralEvent deliveryUpdate sessionUpdate catchUpTruncated decodeFailure
 fromSequenceNum…` (so `data` is the response, and the frame cases follow).
 
-FACT: a row's `message` **is** a `StdoutMessage`. In the field descriptors,
-`ClientEventsPage.Row.message`'s type slot holds the bytes `01 29 f9 51` —
-**byte-identical** to `StdoutMessage.sdkMessage`'s slot (both resolve to the
-same `__LINKEDIT` symbol). So the paged read and the SSE stream deliver the same
-type, and a row is `{sequence_num, message: {<case>: …}}`, not an envelope.
+FACT: a row's `message` **is** a `SdkMessage` (@0x4ae7088). Following
+`ClientEventsPage.Row`'s `message` field-type relative pointer (@0x4ae917c,
+field 1) lands on the descriptor named `SdkMessage` — NOT `StdoutMessage`
+(@0x4ae70e8). So the paged read's row is `{sequence_num, message:
+{user|assistant|result|system|…}}` — the *inner* `SdkMessage` enum, **without**
+the `sdk_message`/`client_event` wrapper the SSE leg adds. (The earlier note
+that the two share a type slot was wrong: the slot for the paged row is
+`01 29 f9 51` → `SdkMessage`; `StdoutMessage.sdkMessage`'s slot is the one that
+matches `01 29 f9 51` too, but `StdoutMessage` wraps `SdkMessage`, so a row is
+the inner type directly.)
+
+The two response envelopes are **distinct types** and the facade emits the union:
+
+```
+ClientEventsPage          @0x4ae9160  rows, maxSequenceNum, newestEventId, nextCursor, hasMore
+ListClientEventsResponse  @0x4ae9214  data, nextCursor            (data: [Row])
+```
+
+`APIUserMessage` (@0x4ae6d80) is `{content, role}` where `content` is the enum
+`APIUserMessageContent` (@0x4ae6d64 = `string | blocks | unknown`) — so a user
+turn's `content` may be a bare string OR an array of blocks.
+`APIAssistantMessage` (@0x4ae6d9c) is `{id, role, model, content, stopReason,
+stopSequence, usage, type}` with `content` an array.
 
 Emitting our own `SessionEventEnvelope` (`{event_id, sequence_num, event_type,
 source, payload}`) on this leg is what left the transcript blank: the app
