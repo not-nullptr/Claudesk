@@ -199,6 +199,47 @@ Still open: which model Bool the picker selects on, and what leaves it in the
 un-populated state. Resolving it needs the observation key-path descriptor at
 `0x104338888` (relative-pointer metadata), which was not decoded here.
 
+### The request is organization-scoped three ways; the response shape is confirmed
+(2026-10-03, latest)
+
+The CodingKeys tables were recovered this session, which settles the *response*
+side of Endpoint 2 beyond doubt. `EnvironmentResource`'s CodingKeys
+(fileoff 0x4aead70) are exactly `kind | environmentId | name | createdAt | state
+| config | bridgeInfo`, and each configuration's are
+`environmentType` alone (`unknown`), `environmentType, machineName, directory,
+branch, gitRepoUrl` (`paired`), `environmentType, cwd, taskSetupScript` (`byoc`),
+and `environmentType, cwd, initScript, environment, languages, networkConfig`
+(`anthropic`). `EnvironmentListResponse`'s are `environments | hasMore | firstId
+| lastId`. Those match the facade's emission one-for-one, so a decode failure is
+no longer a live hypothesis.
+
+The request side is where the remaining suspicion now sits. The URL builder at
+`0x101f2f048` assembles `/v1/environment_providers/private/organizations/` (VA
+`0x1047e91d0`) with:
+
+* the **organization id in the path**, and
+* a query item **`included_worker_types`** (`0x101f2f208`), whose value is built
+  from a list on the request (a `.joined(separator:)` loop at `0x101f2f218`),
+* and the transport layer adds an **`X-Organization-Uuid`** header (string at
+  fileoff 0x47e9358, beside `Anthropic-Version` and the `ccr-byoc-2025-07-29` /
+  `ccr-triggers-2026-01-30` betas).
+
+So the app scopes the read to its organization id in three independent places
+(path, header, and the worker-type filter). If the facade answers a path org that
+differs from the header org, the HTTP leg still returns 200 and both records,
+while the app can drop rows after decode — which is exactly what an empty picker
+with clean logs looks like. The facade issues a single `identity.orgUuid` from
+`/api/organizations`, so the two should agree, but that is now printed on every
+read (`mobile/server.mjs`, `path_org=` / `header_org=` / `worker_types=`) so one
+picker open on device reveals whether the app is asking with something else.
+
+`included_worker_types` is the other lead: it filters the list by worker type
+before the app ever splits rows by `kind`. A bridge/cloud record whose worker
+type is not in the app's requested set would be filtered out at the source, not
+in the picker. The facade currently ignores that query parameter, so it cannot
+narrow anything today — but if the app sends a non-empty filter and then drops
+rows itself, returning the full set is not enough.
+
 ## Endpoint 3 — `GET /api/organizations/<uuid>/experiences`
 
 Base string `experiences` (VA 0x1047bc2e1); tracking paths `/experiences/track`
