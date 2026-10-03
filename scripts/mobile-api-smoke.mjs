@@ -186,6 +186,11 @@ try {
 
   const environmentsLeg = await call(
     `/v1/environment_providers/private/organizations/${org.uuid}/environments?limit=50`,
+    // The app scopes the read to its organization with `X-Organization-Uuid`
+    // (and can narrow it with `included_worker_types`). Both must leave the full
+    // set on the wire: the response is what fills the picker, and a filter the
+    // facade cannot satisfy would empty it silently.
+    { headers: { "x-organization-uuid": org.uuid, "anthropic-version": "ccr-byoc-2025-07-29" } },
   );
   assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
   // Two records back the same Desktop: the `anthropic_cloud` row the picker's

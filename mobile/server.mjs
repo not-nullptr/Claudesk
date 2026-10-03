@@ -914,12 +914,21 @@ async function handleCodeRoutes(request, response, url) {
     // the one the facade issues at `/api/organizations`, the app may drop rows
     // after decode while the HTTP leg still looks fine — which matches the empty
     // picker. Printed on every read so one picker open on device settles it.
+    const pathOrg = environmentsMatch[1].toLowerCase();
+    const headerOrg = String(request.headers["x-organization-uuid"] || "").toLowerCase();
+    const orgMismatch = [
+      pathOrg !== identity.orgUuid.toLowerCase() ? `path!=issued` : null,
+      headerOrg && headerOrg !== identity.orgUuid.toLowerCase() ? `header!=issued` : null,
+      headerOrg && headerOrg !== pathOrg ? `header!=path` : null,
+    ].filter(Boolean);
     console.log(
       `[mobile-code]   environments(mode=${mode})` +
-      ` path_org=${environmentsMatch[1].toLowerCase()}` +
-      ` header_org=${String(request.headers["x-organization-uuid"] || "-").toLowerCase()}` +
+      ` issued_org=${identity.orgUuid.toLowerCase()}` +
+      ` path_org=${pathOrg}` +
+      ` header_org=${headerOrg || "-"}` +
       ` worker_types=${url.searchParams.get("included_worker_types") || "-"}` +
-      ` query=${url.search || "-"}`,
+      ` query=${url.search || "-"}` +
+      (orgMismatch.length ? ` MISMATCH=${orgMismatch.join(",")}` : ""),
     );
     console.log(`[mobile-code]   environments(mode=${mode})=${JSON.stringify(advertised).slice(0, 4000)}`);
     sendJson(response, 200, {
