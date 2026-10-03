@@ -247,11 +247,29 @@ CAUTION: `.convertFromSnakeCase` rewrites **dictionary keys only**, never
 string-raw **enum values**. Enum values must be the literal raw values the app
 declares (`requires_action`, `review_ready`, `provision_failed`, `same-dir`, …).
 
-FACT: `EnvironmentResource.config` is a **flat** object whose `environmentType`
-is `"anthropic" | "byoc" | "paired"`, but discrimination is on the **sibling
-`kind`** field, not on `environmentType` — `kind` is `"anthropic" | "byoc" |
-"bridge" | "unknown"`. `BridgeSpawnMode` wire values are `"single-session" |
-"worktree" | "same-dir"` (not the Swift case spellings).
+CORRECTED (2026-10-03): `EnvironmentResource.config` is **not** flat. It is the
+`EnvironmentConfiguration` enum — a Swift enum with **associated values**
+(`__swift5_fieldmd` flags `kind = 3`; cases `anthropic | byoc | paired |
+unknown`) — so its synthesised Codable is a keyed container holding exactly ONE
+key, the case name, whose value is the case's payload:
+
+```
+"config": { "anthropic": { "environment_type": "anthropic", "cwd": …, … } }
+"config": { "paired":    { "environment_type": "paired", "machine_name": …, … } }
+```
+
+The flat reading below was an inference from seeing the *inner* struct's keys
+(`environment_type`, `init_script`, …) and assuming they sit at `config`'s top
+level — the same mistake this section already warns about. A flat `config` does
+not decode, which fails the whole `EnvironmentResource`, which drops **every**
+row of the picker: the app is handed both records (confirmed in the server log)
+and still shows the `environments_empty_state` onboarding state. Discrimination
+between the cases is therefore by the **single nested key**, not by a sibling
+`environmentType`; the sibling `kind` field (`"anthropic_cloud" | "byoc" |
+"bridge" | "unknown"`) remains the section split. `BridgeSpawnMode` wire values
+are `"single-session" | "worktree" | "same-dir"` (not the Swift spellings).
+`environmentType` inside a payload is still the case's own literal
+(`"anthropic"` / `"paired"`).
 NOTE: the earlier claim that BYOC's `cwd`/`taskSetupScript` thunk (0x101f32310)
 proved explicit camelCase keys was wrong — those literals are the *case names*
 of a synthesised `CodingKeys` enum (a raw value defaults to the case name), not

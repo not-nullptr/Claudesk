@@ -50,12 +50,21 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
     name,
     created_at: null,
     state: online ? "active" : "unknown",
+    // `config` is `EnvironmentConfiguration`, a Swift enum with ASSOCIATED
+    // values (`anthropic | byoc | paired | unknown`). The synthesised Codable
+    // for such an enum is a keyed container holding exactly ONE key — the case
+    // name — whose value is the case's payload. So the payload is nested under
+    // the case name, and a flat `{environment_type: …}` at `config`'s top level
+    // does not decode (which drops the whole EnvironmentResource, and with it
+    // every row of the picker — the empty state on device).
     config: {
-      environment_type: "paired",
-      machine_name: name,
-      directory: "/workspace",
-      branch: null,
-      git_repo_url: null,
+      paired: {
+        environment_type: "paired",
+        machine_name: name,
+        directory: "/workspace",
+        branch: null,
+        git_repo_url: null,
+      },
     },
     bridge_info: {
       max_sessions: 1,
@@ -71,12 +80,12 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
 }
 
 // The anthropicCloud record that fills the picker's "Cloud environments"
-// section. Its `config` is the `AnthropicEnvironmentConfiguration` case, whose
-// `environment_type` literal is "anthropic" (the enum case names are the raw
-// values — see the "Wire casing" note above). `bridgeInfo` is omitted: the app
-// only reads it for `kind == bridge`. The `state`/`online` axis is the same
-// Desktop health the bridge record uses, so a Desktop that is down is shown as
-// unknown here too rather than as a usable cloud.
+// section. Its `config` is the `EnvironmentConfiguration.anthropic` case, so —
+// like the bridge record — the payload nests under the case name and the inner
+// `environment_type` literal is "anthropic". `bridgeInfo` is null: the app only
+// reads it for `kind == bridge`. The `state`/`online` axis is the same Desktop
+// health the bridge record uses, so a Desktop that is down is shown as unknown
+// here too rather than as a usable cloud.
 export function cloudEnvironment({ name = "Claudesk Desktop", online = true } = {}) {
   return {
     kind: ENVIRONMENT_KIND.anthropicCloud,
@@ -85,12 +94,14 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true } = 
     created_at: null,
     state: online ? "active" : "unknown",
     config: {
-      environment_type: "anthropic",
-      cwd: "/workspace",
-      init_script: null,
-      environment: {},
-      languages: [],
-      network_config: null,
+      anthropic: {
+        environment_type: "anthropic",
+        cwd: "/workspace",
+        init_script: null,
+        environment: {},
+        languages: [],
+        network_config: null,
+      },
     },
     bridge_info: null,
   };

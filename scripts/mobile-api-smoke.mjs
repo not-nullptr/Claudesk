@@ -200,9 +200,12 @@ try {
   const bridge = environments.find((e) => e.kind === "bridge");
   assert.ok(cloud, "the cloud environment the picker requires is offered");
   assert.equal(cloud.environment_id, "anthropic-cloud-local");
-  assert.equal(cloud.config.environment_type, "anthropic");
+  // `config` is an enum with associated values, so the payload nests under the
+  // case name rather than sitting flat.
+  assert.equal(cloud.config.anthropic.environment_type, "anthropic");
   assert.ok(bridge, "the paired Desktop is offered as a runner");
   assert.equal(bridge.environment_id, "anthropic-bridge-local");
+  assert.equal(bridge.config.paired.environment_type, "paired");
   assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);

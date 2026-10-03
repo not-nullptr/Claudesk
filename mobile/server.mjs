@@ -897,14 +897,22 @@ async function handleCodeRoutes(request, response, url) {
       bridgeEnvironment({ online, cliVersion: desktopVersion() }),
     ];
     // The picker's cloud section stays empty on device even though this list is
-    // answered. Print the body verbatim so the next tap shows whether the app is
-    // receiving two records and dropping one, or never getting them at all.
-    console.log(`[mobile-code]   environments=${JSON.stringify(environments).slice(0, 4000)}`);
+    // answered and the app demonstrably receives both records (it resolves the
+    // bridge out of it). Which side is dropping the cloud row is unsettled, so
+    // the advertised set is selectable for a one-shot experiment: with
+    // CLAUDE_MOBILE_ENVIRONMENT_MODE=cloud-only the bridge is withheld, which
+    // tells apart "the picker auto-selects the bridge and never offers the cloud
+    // row" from "cloud rows are suppressed outright".
+    const mode = process.env.CLAUDE_MOBILE_ENVIRONMENT_MODE || "both";
+    const advertised = mode === "cloud-only" ? environments.slice(0, 1)
+      : mode === "bridge-only" ? environments.slice(1)
+      : environments;
+    console.log(`[mobile-code]   environments(mode=${mode})=${JSON.stringify(advertised).slice(0, 4000)}`);
     sendJson(response, 200, {
-      environments,
+      environments: advertised,
       has_more: false,
-      first_id: environments[0].environment_id,
-      last_id: environments[environments.length - 1].environment_id,
+      first_id: advertised[0].environment_id,
+      last_id: advertised[advertised.length - 1].environment_id,
     });
     return true;
   }

@@ -194,6 +194,10 @@ const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2
 assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(environment.bridge_info.spawn_mode, "same-dir");
+// `config` is a Swift enum with associated values, so its payload nests under
+// the case name — a flat `config` at this level fails to decode the resource.
+assert.deepEqual(Object.keys(environment.config), ["paired"]);
+assert.equal(environment.config.paired.environment_type, "paired");
 assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 
 // ---- the cloud environment offered as the picker's "Cloud environments" row --
@@ -204,7 +208,8 @@ assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 const cloud = cloudEnvironment({ name: "Claudesk Desktop" });
 assert.equal(cloud.kind, "anthropic_cloud");
 assert.equal(cloud.environment_id, CLOUD_ENVIRONMENT_ID);
-assert.equal(cloud.config.environment_type, "anthropic");
+assert.deepEqual(Object.keys(cloud.config), ["anthropic"], "the case name is the only key");
+assert.equal(cloud.config.anthropic.environment_type, "anthropic");
 assert.equal(cloud.bridge_info, null, "bridgeInfo is only read for kind == bridge");
 assert.equal(cloud.state, "active");
 assert.equal(cloudEnvironment({ online: false }).state, "unknown");
