@@ -10,3 +10,5 @@ node_modules/
 coverage/
 dist/
 tmp/
+gpu-embed.zip
+documents.jsonl.gz
