@@ -141,6 +141,13 @@ services:
       CLAUDE_MOBILE_THINKING: "${CLAUDE_MOBILE_THINKING:-1}"
       CLAUDE_MOBILE_TITLES: "${CLAUDE_MOBILE_TITLES:-1}"
       CLAUDE_MOBILE_PLAN: "${CLAUDE_MOBILE_PLAN:-max_20x}"
+      # One-shot experiment switch for the new-session environment picker:
+      # "both" (default) advertises the cloud record and the bridge record;
+      # "cloud-only" withholds the bridge so the picker has only the cloud row
+      # to offer. Lets one picker open on device tell apart "the picker never
+      # surfaces the cloud row" from "it surfaces and then auto-selects/drops
+      # it". Unset in normal operation.
+      CLAUDE_MOBILE_ENVIRONMENT_MODE: "${CLAUDE_MOBILE_ENVIRONMENT_MODE:-both}"
     depends_on:
       cowork-bridge:
         condition: service_healthy

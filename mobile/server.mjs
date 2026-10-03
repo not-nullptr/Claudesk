@@ -962,6 +962,11 @@ async function handleCodeRoutes(request, response, url) {
   if (environmentByIdMatch && method === "GET") {
     const id = decodeURIComponent(environmentByIdMatch[1]);
     const online = await desktopReady();
+    // Which ids the app asks for by id is the sharpest signal about the picker:
+    // a row it decoded but dropped is never resolved back, while a row it
+    // offered (or auto-selected) is. Logged so the advertised set can be
+    // compared against what the app actually reaches for.
+    console.log(`[mobile-code]   environments/by-id ${id}`);
     if (id === BRIDGE_ENVIRONMENT_ID) {
       sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
       return true;
