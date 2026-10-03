@@ -1,0 +1,5 @@
+.venv/
+vectors/
+vectors-sample/
+documents.jsonl
+__pycache__/

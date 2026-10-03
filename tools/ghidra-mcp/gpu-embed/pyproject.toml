@@ -1,0 +1,28 @@
+[project]
+name = "claude-index-embed"
+version = "0.1.0"
+description = "GPU embedding pass for the pyghidra-mcp code index"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "tqdm>=4.66",
+    "sentence-transformers>=3.0.1",
+    "torch>=2.4",
+]
+
+# Scripts only -- there is no package to build.
+[tool.uv]
+package = false
+
+# torch is pinned to PyTorch's CUDA 12.4 wheel index so `uv sync` gets the
+# CUDA build on every platform. (PyPI's own linux torch wheel happens to bundle
+# CUDA, but the Windows one is CPU-only, which would silently fall back to the
+# CPU here.) sentence-transformers pulls torch as a transitive dependency, so
+# the override has to be declared as a source rather than a direct dep.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }

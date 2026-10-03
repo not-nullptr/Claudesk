@@ -1,0 +1,188 @@
+diff --git a/src/pyghidra_mcp/context.py b/src/pyghidra_mcp/context.py
+index 829d5e0..dfdaa7a 100644
+--- a/src/pyghidra_mcp/context.py
++++ b/src/pyghidra_mcp/context.py
+@@ -3,6 +3,7 @@ import hashlib
+ import json
+ import logging
+ import multiprocessing
++import os
+ import threading
+ import time
+ from dataclasses import dataclass
+@@ -1001,6 +1002,14 @@ class PyGhidraContext(IndexingMixin):
+ 
+     def _create_decompiler_pool(self, program: "Program") -> DecompilerPool:
+         pool_size = 2 if self.threaded else 1
++        if self.threaded:
++            # Index workers decompile concurrently and each holds a slot for the
++            # whole function, so the pool must cover that fan-out plus ordinary
++            # tool calls (see PYGHIDRA_INDEX_WORKERS in indexing_mixin).
++            try:
++                pool_size = max(pool_size, int(os.environ["PYGHIDRA_DECOMPILER_POOL"]))
++            except (KeyError, ValueError):
++                pass
+         return DecompilerPool(lambda: self.setup_decompiler(program), size=pool_size)
+ 
+     @staticmethod
+diff --git a/src/pyghidra_mcp/indexing_mixin.py b/src/pyghidra_mcp/indexing_mixin.py
+index 4ab1018..4c60b9a 100644
+--- a/src/pyghidra_mcp/indexing_mixin.py
++++ b/src/pyghidra_mcp/indexing_mixin.py
+@@ -1,8 +1,10 @@
+ import concurrent.futures
+ import logging
++import os
+ import re
+ import threading
+ import time
++from collections import deque
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -19,6 +21,14 @@ logger = logging.getLogger(__name__)
+ COLLECTION_COMPLETE_KEY = "pyghidra_index_complete"
+ 
+ 
++def _env_int(name: str, default: int) -> int:
++    """Read a positive integer knob from the environment, ignoring junk."""
++    try:
++        return max(1, int(os.environ[name]))
++    except (KeyError, ValueError):
++        return default
++
++
+ class IndexingMixin:
+     """Shared MCP-side indexing behavior for headless and GUI contexts."""
+ 
+@@ -187,28 +197,9 @@ class IndexingMixin:
+         logger.info("Creating new code collection '%s'", program_info.name)
+         tools = GhidraTools(program_info)
+         functions = tools.get_all_functions()
+-        decompiles = []
+-        ids = []
+-        metadatas = []
+-
+-        for i, func in enumerate(functions):
+-            func: Function
+-            try:
+-                if i % 10 == 0:
+-                    logger.debug("Decompiling %s/%s", i, len(functions))
+-                decompiled = tools.decompile_function(
+-                    func, timeout=DEFAULT_DECOMPILE_TIMEOUT_SECONDS
+-                )
+-                decompiles.append(decompiled.code)
+-                ids.append(decompiled.name)
+-                metadatas.append(
+-                    {
+-                        "function_name": decompiled.name,
+-                        "entry_point": str(func.getEntryPoint()),
+-                    }
+-                )
+-            except Exception as e:
+-                logger.error("Failed to decompile %s: %s", func.getSymbol().getName(True), e)
++        total = len(functions)
++        workers = _env_int("PYGHIDRA_INDEX_WORKERS", 1)
++        batch_size = _env_int("PYGHIDRA_INDEX_BATCH", 256)
+ 
+         # Created with the completion marker off; an interruption before the
+         # marker is flipped below leaves a collection that reads as incomplete
+@@ -218,17 +209,88 @@ class IndexingMixin:
+             name=self._normalize_collection_name(program_info.name),
+             metadata={COLLECTION_COMPLETE_KEY: False},
+         )
+-        batch_size = 5000
+-        for i in range(0, len(decompiles), batch_size):
+-            end = min(i + batch_size, len(decompiles))
+-            collection.add(
+-                documents=decompiles[i:end],
+-                metadatas=metadatas[i:end],
+-                ids=ids[i:end],
+-            )
+ 
+-        self._mark_collection_complete(collection, len(ids))
+-        logger.info("Code analysis complete for collection '%s'", program_info.name)
++        # Bodies are streamed to Chroma in batches rather than accumulated for
++        # the whole binary. Retaining every decompiled body makes peak RSS scale
++        # with the binary -- hundreds of thousands of functions on a large
++        # Mach-O -- which exhausts small containers before the first add.
++        docs: list[str] = []
++        ids: list[str] = []
++        metadatas: list[dict] = []
++        indexed = 0
++
++        def flush() -> None:
++            nonlocal indexed
++            if not docs:
++                return
++            collection.add(documents=docs, metadatas=metadatas, ids=ids)
++            indexed += len(docs)
++            docs.clear()
++            ids.clear()
++            metadatas.clear()
++
++        def decompile(func: Function) -> tuple[Any, Exception | None]:
++            try:
++                return (
++                    tools.decompile_function(
++                        func, timeout=DEFAULT_DECOMPILE_TIMEOUT_SECONDS
++                    ),
++                    None,
++                )
++            except Exception as e:
++                return None, e
++
++        def consume(func: Function, decompiled: Any, error: Exception | None) -> None:
++            if error is not None:
++                logger.error(
++                    "Failed to decompile %s: %s", func.getSymbol().getName(True), error
++                )
++                return
++            docs.append(decompiled.code)
++            ids.append(decompiled.name)
++            metadatas.append(
++                {"function_name": decompiled.name, "entry_point": str(func.getEntryPoint())}
++            )
++            if len(docs) >= batch_size:
++                flush()
++
++        if workers > 1:
++            # Bound the in-flight window: submitting every function up front
++            # would itself hold a Future per function in memory.
++            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
++                window = deque()
++                remaining = iter(functions)
++                for _ in range(workers * 2):
++                    nxt = next(remaining, None)
++                    if nxt is None:
++                        break
++                    window.append((nxt, pool.submit(decompile, nxt)))
++                done = 0
++                while window:
++                    func, future = window.popleft()
++                    decompiled, error = future.result()
++                    done += 1
++                    if done % 100 == 0:
++                        logger.debug("Decompiling %s/%s", done, total)
++                    consume(func, decompiled, error)
++                    nxt = next(remaining, None)
++                    if nxt is not None:
++                        window.append((nxt, pool.submit(decompile, nxt)))
++        else:
++            for i, func in enumerate(functions):
++                if i % 10 == 0:
++                    logger.debug("Decompiling %s/%s", i, total)
++                decompiled, error = decompile(func)
++                consume(func, decompiled, error)
++
++        flush()
++        self._mark_collection_complete(collection, indexed)
++        logger.info(
++            "Code analysis complete for collection '%s' (%s/%s functions)",
++            program_info.name,
++            indexed,
++            total,
++        )
+         program_info.code_collection = collection
+ 
+     def _init_strings_for_program(self, program_info: Any) -> None:
