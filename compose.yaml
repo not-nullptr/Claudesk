@@ -148,6 +148,11 @@ services:
       # surfaces the cloud row" from "it surfaces and then auto-selects/drops
       # it". Unset in normal operation.
       CLAUDE_MOBILE_ENVIRONMENT_MODE: "${CLAUDE_MOBILE_ENVIRONMENT_MODE:-both}"
+      # Second half of the same experiment: with the bridge withheld from the
+      # list the app still resolves it by id (state persisted on the phone), so
+      # setting this to 1 also 404s that by-id read. If the picker then offers
+      # the cloud row, the saved bridge id was pinning it.
+      CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID: "${CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID:-0}"
     depends_on:
       cowork-bridge:
         condition: service_healthy

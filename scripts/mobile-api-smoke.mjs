@@ -20,6 +20,11 @@ process.env.CLAUDE_MOBILE_TRUST_PROXY = "1";
 process.env.CLAUDE_MOBILE_CAPTURE = "1";
 process.env.CLAUDE_MOBILE_API_MAX_FAILURES = "5";
 process.env.CLAUDE_MOBILE_API_BASE_BAN_SECONDS = "60";
+// Pin the experiment switches so a value left in the calling shell cannot change
+// what this suite asserts. "both" is the shipped default: the cloud record and
+// the bridge record, with the bridge still resolvable by id.
+process.env.CLAUDE_MOBILE_ENVIRONMENT_MODE = "both";
+delete process.env.CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID;
 
 // The mobile facade talks to Claude Desktop only through the Claudesk bridge;
 // this fake keeps Desktop-shaped Chat sessions in memory.

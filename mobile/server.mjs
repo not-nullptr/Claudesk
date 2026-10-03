@@ -966,8 +966,21 @@ async function handleCodeRoutes(request, response, url) {
     // a row it decoded but dropped is never resolved back, while a row it
     // offered (or auto-selected) is. Logged so the advertised set can be
     // compared against what the app actually reaches for.
-    console.log(`[mobile-code]   environments/by-id ${id}`);
+    const mode = process.env.CLAUDE_MOBILE_ENVIRONMENT_MODE || "both";
+    console.log(`[mobile-code]   environments/by-id ${id} (mode=${mode})`);
+    // In the cloud-only experiment mode the bridge record is withheld from the
+    // list, yet the app still resolved this id — so the id it is asking for is
+    // not coming from the list but from state the phone persisted itself. With
+    // CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID=1 the facade also stops
+    // answering it, which makes that stored selection unresolvable and tells
+    // apart "the saved bridge id pins the picker" from "the cloud row is
+    // suppressed regardless".
+    const hideBridgeById = process.env.CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID === "1";
     if (id === BRIDGE_ENVIRONMENT_ID) {
+      if (hideBridgeById) {
+        sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
+        return true;
+      }
       sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
       return true;
     }
