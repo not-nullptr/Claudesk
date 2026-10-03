@@ -8,6 +8,7 @@ active_asar="$resources_dir/app.asar"
 state_dir=/var/lib/claude-cowork-bridge
 patched_sha_file="$state_dir/patched.sha256"
 patched_mode_file="$state_dir/patched.mode"
+patched_injection_file="$state_dir/patched.injection"
 asar_cli=/opt/claude-cowork-bridge/asar/node_modules/@electron/asar/bin/asar.js
 injection_dir=/opt/claude-cowork-bridge/injection/bridge-wrapper
 package_patcher=/opt/claude-cowork-bridge/patch-package.mjs
@@ -32,11 +33,19 @@ patched_sha=""
 [ ! -f "$patched_sha_file" ] || patched_sha="$(cat "$patched_sha_file")"
 patched_mode=""
 [ ! -f "$patched_mode_file" ] || patched_mode="$(cat "$patched_mode_file")"
+patched_injection=""
+[ ! -f "$patched_injection_file" ] || patched_injection="$(cat "$patched_injection_file")"
+# The skip below must also depend on what gets injected. A patched app.asar can
+# survive on a writable layer (or any preserved resources dir) even though the
+# image was rebuilt with a new bridge-wrapper; its sha still matches patched.sha256,
+# so keying on the archive alone would silently keep serving the previous wrapper.
+injection_sha="$(find "$injection_dir" "$package_patcher" -type f \
+    | LC_ALL=C sort | xargs -r sha256sum | sha256sum | awk '{ print $1 }')"
 
 if [ "${COWORK_BRIDGE_ENABLED:-0}" != "1" ]; then
     if [ -n "$patched_sha" ] && [ "$active_sha" = "$patched_sha" ] && [ -f "$official_asar" ]; then
         mv -f "$official_asar" "$active_asar"
-        rm -f "$patched_sha_file" "$patched_mode_file"
+        rm -f "$patched_sha_file" "$patched_mode_file" "$patched_injection_file"
         printf '[cowork-wrapper] disabled; restored official app.asar\n'
     else
         printf '[cowork-wrapper] disabled; official app.asar already active\n'
@@ -45,14 +54,15 @@ if [ "${COWORK_BRIDGE_ENABLED:-0}" != "1" ]; then
 fi
 
 if [ -n "$patched_sha" ] && [ "$active_sha" = "$patched_sha" ]; then
-    if [ "$patched_mode" = "$requested_mode" ]; then
+    if [ "$patched_mode" = "$requested_mode" ] && [ "$patched_injection" = "$injection_sha" ]; then
         prepare_renderer
-        printf '[cowork-wrapper] enabled; patched official app.asar already active (%s)\n' "$requested_mode"
+        printf '[cowork-wrapper] enabled; patched official app.asar already active (%s, injection %s)\n' \
+            "$requested_mode" "$injection_sha"
         exit 0
     fi
     test -f "$official_asar"
     mv -f "$official_asar" "$active_asar"
-    rm -f "$patched_sha_file" "$patched_mode_file"
+    rm -f "$patched_sha_file" "$patched_mode_file" "$patched_injection_file"
     active_sha="$(sha256sum "$active_asar" | awk '{ print $1 }')"
 fi
 
@@ -62,6 +72,9 @@ extract_dir="$tmp_dir/app"
 patched_asar="$tmp_dir/app.asar"
 
 /usr/bin/node "$asar_cli" extract "$active_asar" "$extract_dir"
+# The archive above is the restored official one, so this should not exist; drop
+# it anyway so a stale wrapper can never end up nested inside the new one.
+rm -rf "$extract_dir/bridge-wrapper"
 cp -a "$injection_dir" "$extract_dir/bridge-wrapper"
 /usr/bin/node "$package_patcher" "$extract_dir/package.json"
 /usr/bin/node "$asar_cli" pack "$extract_dir" "$patched_asar" --unpack '**/*.node'
@@ -73,4 +86,6 @@ cp -f "$active_asar" "$official_asar"
 mv -f "$patched_asar" "$active_asar"
 sha256sum "$active_asar" | awk '{ print $1 }' > "$patched_sha_file"
 printf '%s\n' "$requested_mode" > "$patched_mode_file"
-printf '[cowork-wrapper] enabled; official app.asar patched with Cowork IPC entry (%s)\n' "$requested_mode"
+printf '%s\n' "$injection_sha" > "$patched_injection_file"
+printf '[cowork-wrapper] enabled; official app.asar patched with Cowork IPC entry (%s, injection %s)\n' \
+    "$requested_mode" "$injection_sha"
