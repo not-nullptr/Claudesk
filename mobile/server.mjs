@@ -1021,8 +1021,13 @@ async function streamCodeEvents(request, response, url, sessionId) {
   };
   response.on("close", done);
   let envelopes;
+  let connectionStatus;
   try {
-    envelopes = await codeEngine.sessionEventEnvelopes(sessionId);
+    const { resource, loaded } = await codeEngine.getSession(sessionId);
+    envelopes = loaded.envelopes;
+    // StreamSessionUpdate uses the two-case ConnectionStatus, not the
+    // four-case SessionConnectionStatus used by the session resource.
+    connectionStatus = resource.connection_status === "connected" ? "connected" : "disconnected";
   } catch (error) {
     done();
     if (!response.destroyed) sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
@@ -1032,6 +1037,10 @@ async function streamCodeEvents(request, response, url, sessionId) {
   if (closed) return;
   response.writeHead(200, SSE_HEADERS);
   response.flushHeaders();
+  // Always start the response body, even when from_sequence_num is already
+  // at the history tail. This is a supported SessionStreamWire control frame;
+  // it has no event ID/sequence and must not advance the transcript cursor.
+  sendSseRecord(response, "session_update", { connection_status: connectionStatus });
   for (const envelope of envelopes) {
     if (Number(envelope.sequence_num) > from) sendSseRecord(response, "client_event", envelope);
   }
@@ -1047,7 +1056,7 @@ async function streamCodeEvents(request, response, url, sessionId) {
       }
     }
   }
-  console.log(`[mobile-code] events/stream ${sessionId}: ${envelopes.length} events, after ${from}`);
+  console.log(`[mobile-code] events/stream ${sessionId}: ${envelopes.length} events, after ${from}, initial session_update=${connectionStatus}`);
   keepalive = setInterval(() => {
     if (!response.writableEnded) response.write(": keepalive\n\n");
   }, 15000);

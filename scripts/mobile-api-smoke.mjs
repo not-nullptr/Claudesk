@@ -823,7 +823,7 @@ try {
   assert.equal(toolUse.input.command, "ls");
   assert.equal(toolResult.tool_use_id, toolUse.id);
 
-  async function readClientEvents(reader, count) {
+  async function readStreamRecords(reader, count, event) {
     const decoder = new TextDecoder();
     let buffer = "";
     let records = [];
@@ -833,14 +833,21 @@ try {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        records = parseSse(buffer).filter((record) => record.event === "client_event");
+        // A network chunk need not end at an SSE record boundary.
+        const boundary = buffer.lastIndexOf("\n\n");
+        const complete = boundary < 0 ? "" : buffer.slice(0, boundary + 2);
+        records = parseSse(complete).filter((record) => !event || record.event === event);
       }
       assert.ok(records.length >= count, "the stream produced the expected events before timeout");
-      records.forEach((record) => decodeClientEvent(record.data));
       return records;
     } finally {
       clearTimeout(timeout);
     }
+  }
+  async function readClientEvents(reader, count) {
+    const records = await readStreamRecords(reader, count, "client_event");
+    records.forEach((record) => decodeClientEvent(record.data));
+    return records;
   }
   const streamResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=0"));
   assert.equal(streamResponse.status, 200);
@@ -864,6 +871,11 @@ try {
   const followResponse = await call(codePath(createdResource.id, `/events/stream?from_sequence_num=${lastSequence}`));
   const followReader = followResponse.body.getReader();
   try {
+    // Regression: the phone resumes at the history tail and cannot send until
+    // connected. Require a real initial frame BEFORE generating a new turn.
+    // A 200 response alone (or the 15-second comment heartbeat) is insufficient.
+    const initial = await readStreamRecords(followReader, 1);
+    assert.deepEqual(initial, [{ event: "session_update", data: { connection_status: "connected" } }]);
     const following = readClientEvents(followReader, 3);
     const liveSend = await sseStream(codePath(createdResource.id, "/messages/stream"), {
       method: "POST", body: { body: "Live after history" },
@@ -875,6 +887,23 @@ try {
     const finalHistory = await (await call(codePath(createdResource.id, "/events?limit=3"))).json();
     assert.deepEqual([...finalHistory.data].reverse(), followed.map((record) => record.data));
   } finally { await followReader.cancel(); }
+
+  // The same initial frame is needed when a Desktop session has no history.
+  const emptyCode = claudesk.addCodeSession();
+  const emptyCodeId = `code_${emptyCode.sessionId}`;
+  const emptyResponse = await call(codePath(emptyCodeId, "/events/stream?from_sequence_num=0"));
+  assert.equal(emptyResponse.status, 200);
+  const emptyReader = emptyResponse.body.getReader();
+  try {
+    assert.deepEqual(await readStreamRecords(emptyReader, 1), [
+      { event: "session_update", data: { connection_status: "connected" } },
+    ]);
+    const emptyHistory = await (await call(codePath(emptyCodeId, "/events"))).json();
+    assert.deepEqual(emptyHistory.data, [], "opening a stream must not invent transcript events");
+  } finally {
+    await emptyReader.cancel();
+    await call(codePath(emptyCodeId), { method: "DELETE" });
+  }
 
   // The list leg now reports the session, with the app's enum values.
   const codeListed = await (await call("/v1/code/sessions")).json();
