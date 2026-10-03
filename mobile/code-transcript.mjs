@@ -9,12 +9,11 @@
 //   - enum *values* are literal strings, because the key strategy never
 //     touches them.
 //
-// The tool rendering deliberately reuses blocks.mjs: Desktop's Code tool names
-// (Bash/Read/Write/Edit/Glob/Grep/WebSearch/...) are the same catalog the Chat
-// surface already maps, so tool rows look identical on both tabs.
+// Code transcript payloads retain SDK tool names and content blocks. The tool
+// display helpers below remain available to callers needing Chat-style labels.
 
 import { describeTool, resultText, trimInput } from "./blocks.mjs";
-import { isHumanEntry, splitMentions } from "./transcript.mjs";
+import { isHumanEntry } from "./transcript.mjs";
 import {
   BRIDGE_SPAWN_MODE,
   ENVIRONMENT_KIND,
@@ -185,217 +184,76 @@ export function toolResultOutput(content) {
   return resultText(content).text;
 }
 
-// ---- transcript entries -> SessionEventEnvelope[] ---------------------------
+// ---- Code event wire format -------------------------------------------------
+// Both GET /events (data[]) and SSE event: client_event carry this envelope.
+// ClientEventsPage.Row and SessionSseFrame are *decoded app models*, not JSON
+// wrappers. See docs/mobile-code-wire-correction.md for decoder addresses.
 
-const MAX_PAYLOAD_TEXT = 100000;
-
-function clampText(text) {
-  const value = String(text ?? "");
-  return value.length > MAX_PAYLOAD_TEXT ? `${value.slice(0, MAX_PAYLOAD_TEXT)}…` : value;
-}
-
-function contentBlocks(entry) {
-  const content = entry?.message?.content;
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return Array.isArray(content) ? content : [];
-}
-
-// One Desktop transcript entry becomes one SessionEventEnvelope. The payload
-// carries the same block shapes the REST stream uses, so the app's transcript
-// pane renders a Code turn exactly like a Chat one.
-export function eventEnvelopeForEntry(entry, sequenceNum) {
-  const base = {
-    event_id: entry?.uuid ?? null,
-    sequence_num: sequenceNum,
-    event_type: "unknown",
-    source: isHumanEntry(entry) ? "human" : "assistant",
-    payload: {},
-    created_at: entry?.timestamp ?? null,
-  };
-  if (isHumanEntry(entry)) {
-    const { text, files } = splitMentions(contentBlocks(entry).map((block) => block?.text ?? "").join("\n"));
-    return {
-      ...base,
-      event_type: "user_message",
-      payload: { type: "user_message", text: clampText(text), files, client_message_id: entry?.uuid ?? null },
-    };
-  }
-  const blocks = contentBlocks(entry);
-  const toolResult = blocks.find((block) => block?.type === "tool_result");
-  const toolUse = blocks.find((block) => block?.type === "tool_use");
-  const thinking = blocks.find((block) => block?.type === "thinking" && block.thinking);
-  const text = blocks.filter((block) => block?.type === "text").map((block) => block.text).join("\n");
-  if (toolUse) {
-    return { ...base, event_type: "tool_use", payload: { type: "tool_use", tool_call: toolCallFromUse(toolUse) } };
-  }
-  if (toolResult) {
-    return {
-      ...base,
-      event_type: "tool_result",
-      payload: {
-        type: "tool_result",
-        tool_use_id: toolResult.tool_use_id ?? null,
-        text: clampText(toolResultOutput(toolResult.content)),
-        is_error: Boolean(toolResult.is_error),
-      },
-    };
-  }
-  if (text) {
-    return { ...base, event_type: "assistant_text", payload: { type: "assistant_text", text: clampText(text) } };
-  }
-  if (thinking) {
-    return { ...base, event_type: "thinking", payload: { type: "thinking", thinking: clampText(thinking.thinking) } };
-  }
-  // A result-bearing entry closes the turn.
-  if (entry?.message?.stop_reason) {
-    return {
-      ...base,
-      event_type: "result",
-      payload: { type: "result", stop_reason: entry.message.stop_reason },
-    };
-  }
-  return base;
-}
-
-// ---- transcript entries -> SessionSseFrame (the LIVE leg) -------------------
-//
-// The paged history read above answers with `SessionEventEnvelope`s, but the
-// leg the session detail screen actually opens (GET …/events/stream) speaks a
-// DIFFERENT protocol: `SessionStreamWire` -> `SessionSseFrame`, a 6-case Swift
-// enum decoded from each SSE record's JSON body with a single-key envelope:
-//
-//   {"client_event": {"sdk_message": <SdkMessage>}}
-//
-// The app's decoder runs `.convertFromSnakeCase`, so the camelCase `CodingKeys`
-// (`clientEvent`, `sdkMessage`) are what it looks for as `client_event` /
-// `sdk_message` on the wire (recovered from the binary: the CodingKeys cluster
-// at reflstr 0x4ba37f0 and the `client_event`/`ephemeral_event` small-strings
-// the SSE dispatcher compares the `event:` name against). The payload is a real
-// Claude Code stream-json message, not a bespoke shape.
-
-// One Desktop transcript entry -> the `SdkMessage` case that carries it. The
-// Desktop entry already IS the stream-json message for user/assistant turns
-// (`{parentUuid, isSidechain, type, message, uuid, timestamp, origin}`), so
-// this is a rename-and-pick, not a translation: the app's Sdk*Message structs
-// declare the same fields.
+// Desktop already supplies type-discriminated SDK stream-json. Keep the flat
+// object and all content blocks; wrapping it in {user: ...} or translating it
+// into assistant_text/tool_use destroys the SDK decoder's `type` discriminator.
 export function streamJsonFor(entry) {
-  const type = entry?.type;
-  const messageType = entry?.message?.type;
-  if (type === "user") return { user: pick(entry, SDK_USER_FIELDS) };
-  if (type === "assistant") return { assistant: pick(entry, SDK_ASSISTANT_FIELDS) };
-  if (type === "system") return { system: pick(entry, SDK_SYSTEM_FIELDS) };
-  if (messageType === "result" || entry?.subtype) {
-    return { result: pick(entry.message ?? entry, SDK_RESULT_FIELDS) };
-  }
-  // Anything Desktop relays that the app has no case for still travels as
-  // `unknown` rather than being dropped, so a transcript never loses a row.
-  return { unknown: entry ?? null };
-}
-
-// A whole entry -> the SSE record the transcript leg emits.
-// @returns {{ event: "client_event", data: { client_event: object } }}
-export function sseFrameForEntry(entry) {
-  return { event: "client_event", data: { client_event: { sdk_message: streamJsonFor(entry) } } };
-}
-
-// Copy only the declared fields. An absent field is omitted rather than
-// nulled, so a key the app declares as optional is simply not present (the
-// Swift decoder treats a missing key and an explicit `null` differently, and an
-// omitted optional is the safe one).
-function pick(source, fields) {
-  const out = {};
-  for (const field of fields) {
-    const value = source?.[field];
-    if (value !== undefined) out[field] = value;
+  if (!entry || typeof entry !== "object") return null;
+  const source = entry.message?.type === "result"
+    ? { ...entry.message, uuid: entry.message.uuid ?? entry.uuid,
+        timestamp: entry.message.timestamp ?? entry.timestamp }
+    : entry;
+  const out = { ...source };
+  // Only normalize declared SDK fields. Never rewrite arbitrary tool inputs,
+  // tool results or other user-provided dictionaries recursively.
+  for (const field of SDK_CAMEL_FIELDS) {
+    if (source[field] === undefined) continue;
+    const wire = field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+    if (out[wire] === undefined) out[wire] = source[field];
+    delete out[field];
   }
   return out;
 }
 
-// Field names as the Sdk*Message structs declare them (from the type
-// descriptors); the decoder's key strategy accepts them verbatim.
-const SDK_USER_FIELDS = [
-  "type", "uuid", "message", "parentToolUseId", "isMeta", "isSynthetic",
-  "isVisibleInTranscriptOnly", "toolUseResult", "fileAttachments", "timestamp",
-  "createdAt", "isReplay", "origin",
-];
-const SDK_ASSISTANT_FIELDS = [
-  "type", "uuid", "message", "parentToolUseId", "isMeta", "isSynthetic", "error",
-  "isReplay", "isApiErrorMessage", "apiError", "contextUsage", "usageReport",
-  "localCommandSource", "toolUseMeta", "narrationBlockIndexes", "timestamp", "createdAt",
-];
-const SDK_SYSTEM_FIELDS = ["type", "uuid", "subtype", "apiKeySource", "cwd", "timestamp"];
-const SDK_RESULT_FIELDS = [
-  "type", "uuid", "subtype", "durationMs", "durationApiMs", "isError", "numTurns",
-  "totalCostUsd", "usage", "permissionDenials", "result", "isReplay",
-  "userMessageUuid", "queuedTurnCount",
+const SDK_CAMEL_FIELDS = [
+  "parentToolUseId", "isMeta", "isSynthetic", "isVisibleInTranscriptOnly",
+  "toolUseResult", "fileAttachments", "createdAt", "isReplay", "seededKind",
+  "isApiErrorMessage", "apiError", "contextUsage", "usageReport",
+  "localCommandSource", "toolUseMeta", "narrationBlockIndexes", "apiKeySource",
+  "durationMs", "durationApiMs", "isError", "numTurns", "totalCostUsd",
+  "permissionDenials", "userMessageUuid", "queuedTurnCount",
 ];
 
-// Apply the SAME sequence number to every envelope produced from one entry, so
-// the app's pager (a floor of sequence numbers) sees them atomically. Envelopes
-// are returned ascending in transcript order.
-export function eventEnvelopes(entries, { startSequence = 0 } = {}) {
-  const out = [];
-  let sequence = startSequence;
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    const envelope = eventEnvelopeForEntry(entry, sequence);
-    // Skip entries that carry nothing to render (e.g. a bare system entry),
-    // WITHOUT advancing the counter — so `sequence_num` is a dense index both
-    // this paged read and the transcript stream agree on.
-    if (!isRenderableEnvelope(envelope)) continue;
-    out.push(envelope);
-    sequence += 1;
+export function eventEnvelopeForEntry(entry, sequenceNum) {
+  if (!Number.isSafeInteger(sequenceNum) || sequenceNum < 1) {
+    throw new RangeError("Code event sequence numbers must be positive integers");
   }
-  return out;
-}
-
-// Whether an envelope carries something to render. A bare system/stub entry
-// does not. Both legs share this rule so `from_sequence_num` means one thing.
-export function isRenderableEnvelope(envelope) {
-  return envelope.event_type !== "unknown" || Boolean(envelope.event_id);
-}
-
-// The same rule, applied to a raw entry, for a caller that streams entries
-// directly (the transcript leg) rather than pre-built envelopes.
-export function isRenderableEntry(entry) {
-  return isRenderableEnvelope(eventEnvelopeForEntry(entry, 0));
-}
-
-// ---- paged history rows (GET …/events) -------------------------------------
-//
-// The paged read is the OTHER half of the transcript and it speaks the SAME
-// payload type as the live leg. `ClientEventsPage.Row` (type descriptor
-// 0x4ae917c) is `{sequenceNum, message}` and its `message` field's type slot is
-// byte-identical to `StdoutMessage.sdkMessage` (`01 29 f9 51`, resolving to the
-// same symbol) — i.e. a row's `message` IS a `StdoutMessage`, the exact type the
-// SSE `client_event` wraps. Emitting our own `SessionEventEnvelope`
-// (`{event_id, sequence_num, event_type, source, payload}`) here is why the app
-// decoded the page, found no `message` on any row, and drew a blank transcript.
-//
-// `ClientEventsPage` itself is `{rows, maxSequenceNum, newestEventId,
-// nextCursor, hasMore}` — the coding-key cluster at reflstr 0x4ba374f reads
-// `…connectionStatus desc asc rows maxSequenceNum newestEventId nextCursor
-// hasMore message`. So the response body is `{rows: […]}` (or
-// `ListClientEventsResponse`'s `{data: […], nextCursor}`, same element type).
-export function pageRowForEntry(entry, sequenceNum) {
-  return { sequence_num: sequenceNum, message: streamJsonFor(entry) };
-}
-
-// The paged envelope the app reads: newest-first rows plus the cursor and the
-// counters. `data` and `rows` are both emitted because the app reads either key
-// set across its two response shapes (see above).
-export function clientEventsPage(rows, { nextCursor = null, hasMore = false, maxSequenceNum = null, newestEventId = null } = {}) {
+  const payload = streamJsonFor(entry);
   return {
-    data: rows,
-    rows,
-    next_cursor: nextCursor,
-    nextCursor,
-    has_more: hasMore,
-    hasMore,
-    max_sequence_num: maxSequenceNum,
-    maxSequenceNum,
-    newest_event_id: newestEventId,
-    newestEventId,
+    event_id: payload?.uuid ?? null,
+    sequence_num: String(sequenceNum),
+    event_type: payload?.type ?? "unknown",
+    source: isHumanEntry(entry) ? "human" : "assistant",
+    payload: payload ?? {},
+    created_at: payload?.created_at ?? payload?.timestamp ?? null,
   };
+}
+
+export function sseFrameForEntry(entry, sequenceNum) {
+  return { event: "client_event", data: eventEnvelopeForEntry(entry, sequenceNum) };
+}
+
+export function isRenderableEntry(entry) {
+  return typeof entry?.uuid === "string" && entry.uuid.length > 0
+    && typeof (entry?.type ?? entry?.message?.type) === "string";
+}
+
+export function eventEnvelopes(entries, { startSequence = 1 } = {}) {
+  const out = [];
+  const seen = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!isRenderableEntry(entry)) continue;
+    // Desktop can replay/update a UUID. It retains its original position.
+    const index = seen.get(entry.uuid) ?? out.length;
+    seen.set(entry.uuid, index);
+    out[index] = eventEnvelopeForEntry(entry, startSequence + index);
+  }
+  return out;
 }
 
 // ---- paging ----------------------------------------------------------------
@@ -441,13 +299,13 @@ export function pageEvents(envelopes, { cursor = null, limit = 50 } = {}) {
   // The app pages with `limit=500` on the older-cursor reads (seen on device);
   // capping at 200 made it walk five pages where one was asked for. Cap at a
   // generous ceiling that still bounds one response.
-  const size = Math.max(1, Math.min(Number(limit) || 50, 1000));
+  const size = Math.max(1, Math.min(Math.floor(Number(limit)) || 50, 1000));
   let upper = rows.length; // exclusive index of the newest included envelope
   if (cursor) {
     const parsed = parseCursor(cursor);
     if (!parsed) throw invalidCursor();
     // The cursor names the first sequence NOT to include.
-    const index = rows.findIndex((row) => row.sequence_num >= parsed.seq);
+    const index = rows.findIndex((row) => Number(row.sequence_num) >= parsed.seq);
     upper = index < 0 ? rows.length : index;
   }
   const lower = Math.max(0, upper - size);
@@ -455,7 +313,7 @@ export function pageEvents(envelopes, { cursor = null, limit = 50 } = {}) {
   const hasMore = lower > 0;
   return {
     data,
-    next_cursor: hasMore ? olderCursorFor(data[0]?.sequence_num ?? 0) : null,
+    next_cursor: hasMore ? olderCursorFor(Number(data[0]?.sequence_num ?? 0)) : null,
     has_more: hasMore,
   };
 }

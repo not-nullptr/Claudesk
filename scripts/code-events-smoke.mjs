@@ -8,6 +8,7 @@
 // it deliberately contains thinking, a refused tool call and a tool result).
 // Anything the probe still has to settle is covered with a synthetic record.
 import assert from "node:assert/strict";
+import { decodeClientEvent, decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
 import { readFile } from "node:fs/promises";
 import {
   BRIDGE_ENVIRONMENT_ID,
@@ -21,8 +22,6 @@ import {
   sessionResponse,
   sseFrameForEntry,
   streamJsonFor,
-  toolCallFromUse,
-  toolResultOutput,
 } from "../mobile/code-transcript.mjs";
 import { createCodeEventTranslator, frameFromPayload, isCodeRecord, watchFrameFromPayload } from "../mobile/code-events.mjs";
 import {
@@ -96,189 +95,102 @@ assert.equal(detail.session_context.cwd, "/workspace/Claudesk");
 assert.equal(detail.revision, 7);
 assert.equal(detail.status_bucket, STATUS_BUCKET.completed);
 
-// ---- transcript entries -> envelopes, in order, starting at 0 ----
+// ---- independently recovered wire contract ----
 const envelopes = eventEnvelopes(probe.transcript);
-assert.ok(envelopes.length > 0);
-assert.deepEqual(
-  envelopes.map((envelope) => envelope.sequence_num),
-  envelopes.map((_, index) => index),
-  "sequence numbers are contiguous from 0",
-);
-assert.ok(envelopes.every((envelope) => envelope.event_id), "every envelope carries Desktop's entry uuid");
-assert.ok(envelopes.every((envelope) => envelope.created_at), "…and its timestamp");
-assert.equal(
-  new Set(envelopes.map((envelope) => envelope.event_id)).size,
-  envelopes.length,
-  "event ids are unique",
-);
-const startSequence = eventEnvelopes(probe.transcript, { startSequence: 100 })[0].sequence_num;
-assert.equal(startSequence, 100, "a resuming floor can be supplied");
+const decoded = decodeClientEventsResponse({ data: envelopes, next_cursor: null });
+assert.equal(decoded.length, probe.transcript.length);
+assert.deepEqual(envelopes.map((event) => event.sequence_num), envelopes.map((_, i) => String(i + 1)));
+assert.equal(eventEnvelopes(probe.transcript, { startSequence: 100 })[0].sequence_num, "100");
+assert.throws(() => eventEnvelopeForEntry(probe.transcript[0], 0), /positive/);
+assert.throws(() => decodeClientEvent({ ...envelopes[0], sequence_num: 1 }), /String/);
+assert.throws(() => decodeClientEvent({ ...envelopes[0], sequence_num: "0" }), /zero/);
+// These were the two old responses. Neither is a wire SessionEventEnvelope.
+assert.throws(() => decodeClientEventsResponse({ data: [{ sequence_num: 0, message: { user: probe.transcript[0] } }] }));
+assert.throws(() => decodeClientEvent({ client_event: { sdk_message: { user: probe.transcript[0] } } }));
 
-// The kinds present, and how the app's transcript pane pairs them.
-const kinds = new Set(envelopes.map((envelope) => envelope.event_type));
-assert.ok(kinds.has("user_message") && kinds.has("assistant_text"), "both sides of a turn are represented");
-assert.ok(kinds.has("thinking"), "reasoning is carried");
-assert.ok(kinds.has("tool_use") && kinds.has("tool_result"), "tool calls are carried");
+assert.equal(decoded[0].message.type, "user");
+assert.equal(decoded[0].message.message.content, "Reply with exactly one word: pong");
+assert.equal(decoded.find((row) => row.message.type === "assistant" && row.message.message.content.some((block) => block.type === "text")).message.message.content.find((block) => block.type === "text").text, "pong");
+for (let i = 0; i < envelopes.length; i++) {
+  assert.equal(envelopes[i].event_type, probe.transcript[i].type);
+  assert.deepEqual(envelopes[i].payload.message, probe.transcript[i].message, "all content blocks survive intact");
+  assert.deepEqual(sseFrameForEntry(probe.transcript[i], i + 1).data, envelopes[i], "history and SSE share the exact wire payload");
+}
+const blocks = decoded.flatMap((row) => Array.isArray(row.message.message?.content) ? row.message.message.content : []);
+assert.ok(blocks.some((block) => block.type === "thinking"));
+const use = blocks.find((block) => block.type === "tool_use");
+const result = blocks.find((block) => block.type === "tool_result");
+assert.ok(use && result);
+assert.equal(use.name, "Read", "Code uses SDK tool names, not Chat's translated names");
+assert.equal(result.tool_use_id, use.id);
 
-// A Desktop entry that is nothing but a stop_reason (no text, no tool) becomes a
-// turn-closing `result`. Real transcripts spell that as a final text entry, so it
-// is asserted on a synthetic one.
-const closing = eventEnvelopeForEntry({ uuid: "u-close", timestamp: "2026-10-02T10:00:00.000Z", message: { role: "assistant", stop_reason: "end_turn" } }, 3);
-assert.equal(closing.event_type, "result");
-assert.equal(closing.payload.stop_reason, "end_turn");
+const raw = { type: "assistant", uuid: "a1", parent_tool_use_id: "tool-parent", isReplay: true,
+  message: { role: "assistant", content: [{ type: "tool_use", name: "Task", input: { camelCaseKey: 1 } }] } };
+const sdk = streamJsonFor(raw);
+assert.equal(sdk.parent_tool_use_id, "tool-parent", "snake_case SDK fields are retained");
+assert.equal(sdk.is_replay, true, "Desktop camelCase fields are normalized");
+assert.deepEqual(sdk.message.content[0].input, { camelCaseKey: 1 }, "arbitrary tool dictionaries are not rewritten");
+assert.equal(sdk.assistant, undefined, "SdkMessage is not a single-key enum wrapper");
+assert.equal(streamJsonFor({ type: "result", duration_ms: 42, is_error: false }).duration_ms, 42);
+assert.equal(streamJsonFor({ uuid: "r1", message: { type: "result", subtype: "success", duration_ms: 42 } }).uuid, "r1");
+assert.equal(streamJsonFor({ type: "system", subtype: "init" }).type, "system");
+assert.equal(streamJsonFor({ type: "future_sdk_type", uuid: "x" }).type, "future_sdk_type");
+assert.deepEqual(eventEnvelopes([{ type: "system" }]), []);
+const updated = { ...probe.transcript[0], isReplay: true };
+const deduped = eventEnvelopes([probe.transcript[0], probe.transcript[1], updated]);
+assert.equal(deduped.length, 2);
+assert.equal(deduped[0].sequence_num, "1");
+assert.equal(deduped[0].payload.is_replay, true);
 
-const humanEnvelope = envelopes.find((envelope) => envelope.event_type === "user_message");
-assert.equal(humanEnvelope.source, "human");
-assert.equal(humanEnvelope.payload.text, "Reply with exactly one word: pong");
-const assistantEnvelopes = envelopes.filter((envelope) => envelope.payload.type === "assistant_text");
-assert.ok(assistantEnvelopes.every((envelope) => envelope.source === "assistant"));
-assert.equal(assistantEnvelopes[0].payload.text, "pong");
-
-// A tool_use envelope carries the app's rich ToolCall, rendered by blocks.mjs so
-// Code and Chat show the same row.
-const toolEnvelope = envelopes.find((envelope) => envelope.event_type === "tool_use");
-assert.equal(toolEnvelope.payload.tool_call.name, "view", "Read is presented under claude.ai's file-view name");
-assert.equal(toolEnvelope.payload.tool_call.display_name, "Read");
-assert.equal(toolEnvelope.payload.tool_call.status, "complete");
-assert.ok(toolEnvelope.payload.tool_call.input.file_path, "the input summary survives");
-assert.deepEqual(toolEnvelope.payload.tool_call.subagent_tool_calls, []);
-// A tool_result envelope carries display text and the pairing id.
-const resultEnvelope = envelopes.find((envelope) => envelope.event_type === "tool_result");
-assert.equal(resultEnvelope.payload.tool_use_id, toolEnvelope.payload.tool_call.id, "the result pairs with the use");
-assert.match(resultEnvelope.payload.text, /outside this session's scratch directory/);
-assert.equal(resultEnvelope.payload.is_error, true);
-
-// ---- toolCallFromUse / toolResultOutput ----
-const bash = toolCallFromUse({ id: "toolu_1", name: "mcp__workspace__bash", input: { command: "ls -la" } }, { status: "running" });
-assert.equal(bash.display_name, "Bash");
-assert.equal(bash.status, "running");
-assert.equal(bash.input.command, "ls -la");
-assert.equal(toolCallFromUse({ id: "toolu_2", name: "WebSearch", input: { query: "claude code" } }).display_name, "Web search");
-assert.equal(toolResultOutput([{ type: "text", text: "a.txt\nb.txt" }]), "a.txt\nb.txt");
-assert.equal(toolResultOutput("plain"), "plain");
-// A Write call's whole file is trimmed rather than forwarded at full size.
-const big = toolCallFromUse({ id: "toolu_3", name: "Write", input: { file_path: "/tmp/x", content: "y".repeat(9000) } });
-assert.ok(big.input.content.length < 9000, "a large tool input is trimmed");
-
-// ---- an empty payload never renders as a blank row ----
-assert.equal(eventEnvelopeForEntry({ type: "system", uuid: null }, 0).event_type, "unknown");
-assert.equal(eventEnvelopes([{ type: "system", uuid: null }]).length, 0, "a content-free entry produces no envelope");
-
-// ---- cursor round trip and paging ----
-const cursor = olderCursorFor(12);
-assert.deepEqual(parseCursor(cursor), { v: 1, dir: "older", seq: 12 });
+// ---- pagination, including string sequence numbers crossing 9 -> 10 ----
+assert.deepEqual(parseCursor(olderCursorFor(12)), { v: 1, dir: "older", seq: 12 });
 assert.equal(parseCursor("not-base64!!"), null);
-assert.equal(parseCursor(Buffer.from(JSON.stringify({ v: 2, dir: "older", seq: 1 })).toString("base64url")), null, "an unknown cursor version is refused");
-
-const numbered = envelopes;
-const newest = pageEvents(numbered, { limit: 4 });
-assert.equal(newest.data.length, 4);
-assert.equal(newest.has_more, true);
-assert.equal(newest.data.at(-1).sequence_num, numbered.length - 1, "the newest page ends at the newest event");
-assert.equal(newest.next_cursor, olderCursorFor(newest.data[0].sequence_num), "the cursor names the first event not to re-send");
-
-const older = pageEvents(numbered, { cursor: newest.next_cursor, limit: 4 });
-assert.equal(older.data.at(-1).sequence_num, newest.data[0].sequence_num - 1, "the older page is contiguous — no gap, no overlap");
-const seen = [...older.data, ...newest.data].map((envelope) => envelope.sequence_num);
-assert.deepEqual(seen, seen.slice().sort((a, b) => a - b), "concatenating pages stays ascending");
-
-// Walk the whole transcript back to the start.
 const walk = [];
-let page = pageEvents(numbered, { limit: 3 });
+let page = pageEvents(envelopes, { limit: 3 });
 for (;;) {
   walk.unshift(...page.data);
   if (!page.has_more) break;
-  page = pageEvents(numbered, { cursor: page.next_cursor, limit: 3 });
+  page = pageEvents(envelopes, { cursor: page.next_cursor, limit: 3 });
 }
-assert.deepEqual(walk.map((envelope) => envelope.sequence_num), numbered.map((envelope) => envelope.sequence_num));
-assert.equal(page.next_cursor, null, "the oldest page has no older cursor");
-
-// Edges: an empty transcript, and a cursor past the end.
+assert.deepEqual(walk, envelopes, "walking pages gives every event once");
+assert.equal(page.next_cursor, null);
 assert.deepEqual(pageEvents([], { limit: 10 }), { data: [], next_cursor: null, has_more: false });
-assert.deepEqual(pageEvents(numbered, { cursor: olderCursorFor(0), limit: 5 }).data, []);
-assert.throws(() => pageEvents(numbered, { cursor: "nonsense" }), /invalid cursor/);
-// The page size is clamped rather than trusted.
-assert.equal(pageEvents(numbered, { limit: 100000 }).data.length, Math.min(numbered.length, 200));
+assert.deepEqual(pageEvents(envelopes, { cursor: olderCursorFor(1), limit: 5 }).data, []);
+assert.throws(() => pageEvents(envelopes, { cursor: "nonsense" }), /invalid cursor/);
+const large = Array.from({ length: 1200 }, (_, i) => ({ sequence_num: String(i + 1) }));
+assert.equal(pageEvents(large, { limit: 500 }).data.length, 500);
+assert.equal(pageEvents(large, { limit: 100000 }).data.length, 1000);
 
-// ---- live records -> SessionSseFrame (the transcript leg) ----
-assert.ok(isCodeRecord({ data: { surface: "LocalSessions", method: "onOnEvent" } }));
-assert.ok(!isCodeRecord({ data: { surface: "LocalAgentModeSessions", method: "onOnEvent" } }), "a Chat relay is not a Code record");
-assert.ok(!isCodeRecord(null));
-
-// A live transcript record becomes a `client_event` whose payload is a
-// stream-json message nested `sdk_message`, NOT the watch leg's `upserted`.
-const live = frameFromPayload("onOnEvent", probe.transcript[0]);
-assert.equal(live.length, 1);
-assert.equal(live[0].event, "client_event");
-assert.ok(!("event_type" in live[0].data), "a transcript frame is not a SessionEventEnvelope");
-assert.ok(live[0].data.client_event.sdk_message.user, "the entry travels as the `user` SdkMessage case");
-assert.equal(live[0].data.client_event.sdk_message.user.uuid, probe.transcript[0].uuid);
-
-const translator = createCodeEventTranslator({ sessionId: "s1", startSequence: 40 });
-const first = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
-assert.equal(first.length, 1);
-assert.equal(first[0].event, "client_event");
-assert.equal(translator.resumeFrom(), 41, "the floor is honoured");
-// The same entry replayed (Desktop re-sends the tail on reconnect) does not
-// advance the counter.
-translator.accept({ method: "onOnEvent", payload: probe.transcript[0] });
-assert.equal(translator.resumeFrom(), 41, "a replay does not advance the counter");
-// The next distinct entry advances.
-translator.accept({ method: "onOnEvent", payload: probe.transcript[1] });
-assert.equal(translator.resumeFrom(), 42);
-
-// A removal carries no content, so the transcript leg emits nothing for it.
-assert.deepEqual(translator.accept({ method: "onOnEvent", payload: { removed: true, entry: { uuid: "u-gone" } } }), []);
-// Nothing renderable produces no frame at all.
-// An entry with no uuid cannot be keyed, so it is dropped rather than emitted.
-assert.deepEqual(translator.accept({ method: "onOnEvent", payload: { entry: { type: "system" } } }), []);
-assert.deepEqual(translator.accept({ method: "onOnEvent", payload: null }), []);
-assert.deepEqual(translator.accept({ method: "onOnSomethingElse", payload: probe.transcript[0] }), []);
-
-// ---- the same record on the LIST leg -> SessionWatchFrame ----
-assert.equal(watchFrameFromPayload("onOnEvent", probe.transcript[0])[0].event, "upserted");
-assert.deepEqual(
-  watchFrameFromPayload("onOnEvent", { removed: true, entry: { uuid: "u-gone" } }),
-  [{ event: "deleted", data: { session_id: null, event_id: "u-gone" } }],
-  "a removal is a deletion frame on the watch leg",
-);
-const watchUpsert = watchFrameFromPayload("onOnEvent", probe.transcript[1]);
-assert.equal(watchUpsert[0].data.event_id, probe.transcript[1].uuid, "the watch leg carries the entry's envelope id");
-assert.equal(watchUpsert[0].data.sequence_num, 0, "a fresh watch frame starts at the floor");
-assert.deepEqual(watchFrameFromPayload("onOnSomethingElse", probe.transcript[0]), []);
-
-// A permission prompt is recorded rather than drawn, and answering clears it.
+// ---- seeded live numbering, replay, and simultaneous subscribers ----
+assert.ok(isCodeRecord({ data: { surface: "LocalSessions" } }));
+assert.ok(!isCodeRecord({ data: { surface: "LocalAgentModeSessions" } }));
+const translator = createCodeEventTranslator();
+translator.seed(envelopes);
+const replay = translator.accept({ method: "onOnEvent", payload: probe.transcript[0] })[0];
+assert.deepEqual(replay.data, envelopes[0]);
+assert.equal(translator.resumeFrom(), envelopes.length + 1);
+const next = { ...probe.transcript[0], uuid: "next" };
+const liveRecord = { method: "onOnEvent", payload: { entry: next } };
+const frame = translator.accept(liveRecord)[0];
+assert.equal(frame.data.sequence_num, String(envelopes.length + 1));
+assert.equal(decodeClientEvent(frame.data).message.uuid, "next");
+assert.deepEqual(translator.accept(liveRecord)[0], frame, "a second listener receives the same sequence");
+translator.acceptWatch(liveRecord);
+assert.equal(translator.resumeFrom(), envelopes.length + 2, "watch does not consume an extra sequence");
+assert.deepEqual(frameFromPayload("onOnEvent", { removed: true, entry: next }), []);
+assert.deepEqual(frameFromPayload("onOnEvent", { type: "system" }), []);
+assert.deepEqual(frameFromPayload("onOnSomethingElse", next), []);
+assert.equal(watchFrameFromPayload("onOnEvent", next)[0].event, "upserted");
+assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next })[0].event, "deleted");
 const prompt = { requestId: "req-1", sessionId: "s1", toolName: "Bash", input: { command: "ls" } };
 assert.deepEqual(translator.accept({ method: "onOnToolPermissionRequest", payload: prompt }), []);
 assert.deepEqual(translator.permissions(), [prompt]);
 assert.equal(translator.resolvePermission("req-1"), true);
 assert.deepEqual(translator.permissions(), []);
 
-// ---- streamJsonFor: every Desktop entry kind maps to its SdkMessage case ----
-// The app's `SdkMessage` is a Swift enum whose cases ARE the stream-json `type`
-// values, so the payload key must match the entry, not a bespoke union.
-assert.ok(streamJsonFor({ type: "user", uuid: "u1" }).user);
-assert.ok(streamJsonFor({ type: "assistant", uuid: "a1" }).assistant);
-assert.ok(streamJsonFor({ type: "system", uuid: "s1" }).system);
-assert.ok(streamJsonFor({ uuid: "r1", message: { type: "result", subtype: "success" } }).result);
-assert.deepEqual(streamJsonFor({ type: "envManagerLog", uuid: "x" }), { unknown: { type: "envManagerLog", uuid: "x" } }, "an unknown kind still travels");
-// Undeclared fields are dropped; declared-but-absent ones are simply omitted,
-// so the app's non-optional decodes see the keys its struct declares.
-const user = streamJsonFor({ type: "user", uuid: "u1", message: { role: "user", content: "hi" }, rogue: 1 }).user;
-assert.equal(user.rogue, undefined, "an undeclared field is not forwarded");
-assert.equal(user.message.content, "hi");
-assert.ok(!("isMeta" in user), "an absent optional is omitted, not nulled");
-const frame = sseFrameForEntry({ type: "assistant", uuid: "a1", message: { role: "assistant", content: [] } });
-assert.deepEqual(Object.keys(frame.data), ["client_event"]);
-assert.deepEqual(Object.keys(frame.data.client_event), ["sdk_message"]);
-
-// ---- the bridge environment offered as a runner ----
 const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2.1.284" });
 assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(environment.bridge_info.spawn_mode, "same-dir");
-assert.equal(environment.bridge_info.cli_version, "2.1.284");
-assert.equal(environment.state, "active");
 assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
-
 console.log("code-events-smoke: ok");

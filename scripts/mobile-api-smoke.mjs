@@ -3,6 +3,7 @@
 // inference gateway, runs the facade in-process, and drives the
 // device-confirmed sequence plus a Connect probe. See docs/mobile-spec.
 import assert from "node:assert/strict";
+import { decodeClientEvent, decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -779,152 +780,101 @@ try {
   // Send the first message: it creates the Desktop session (start), and the SSE
   // leg streams the turn as `client_event` frames (the same protocol the
   // transcript leg speaks — there is no separate ack record; the app decodes
-  // every record on this leg as a `SessionSseFrame`).
+  // the wire envelope into an internal `SessionSseFrame`).
   const sentUuid = "44444444-4444-4444-8444-444444444444";
   const sendRecords = await sseStream(codePath(createdResource.id, "/messages/stream"), {
     method: "POST",
     body: { body: "Reply with exactly one word: pong", client_message_id: sentUuid },
   });
-  assert.ok(
-    sendRecords.some((record) => record.event === "client_event" && record.data?.client_event?.sdk_message),
-    "the send leg streams the turn as client_event frames",
-  );
-  const sendUser = sendRecords.find((record) => record.data?.client_event?.sdk_message?.user);
-  assert.equal(sendUser.data.client_event.sdk_message.user.uuid, sentUuid, "the app's optimistic uuid is honoured");
-  assert.ok(
-    !sendRecords.some((record) => record.data?.type === "message_ack"),
-    "there is no message_ack record — the app has no such case",
-  );
+  const sent = sendRecords.filter((record) => record.event === "client_event").map((record) => decodeClientEvent(record.data));
+  assert.ok(sent.length);
+  assert.equal(sent.find((row) => row.message.type === "user").message.uuid, sentUuid);
   const startCall = claudesk.codeIpcCalls("start").at(-1);
-  assert.ok(startCall, "the first message uses start on LocalSessions");
-  assert.equal(startCall.args[0].sessionId, codeDesktopId, "the unprefixed Desktop id goes to Desktop");
-  // `cwd` is required by Desktop's `info` validator; without it every start
-  // shape fails. `sessionType` is NOT a field on this surface's rows.
-  assert.equal(typeof startCall.args[0].cwd, "string", "start carries the required cwd");
-  assert.equal(startCall.args[0].sessionType, undefined, "…and no sessionType, which this surface does not use");
-
+  assert.equal(startCall.args[0].sessionId, codeDesktopId);
+  assert.equal(typeof startCall.args[0].cwd, "string");
+  assert.equal(startCall.args[0].sessionType, undefined);
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
 
-  // History: the app reads `ClientEventsPage` — `rows` of `{sequence_num,
-  // message}` where `message` is the SAME `StdoutMessage` the live
-  // `client_event` frame wraps. It asks with `sort_order=desc`, so the newest
-  // row comes first.
+  // HTTP data[] and SSE data: are the same SessionEventEnvelope DTO.
   const history = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=50"))).json();
-  assert.ok(history.rows.length >= 3, "the turn's rows are in the history");
-  assert.ok(history.data, "the response carries `data` as well as `rows`");
-  const ascending = [...history.rows].reverse();
-  assert.deepEqual(
-    ascending.map((row) => row.sequence_num),
-    ascending.map((_, index) => index),
-    "sequence numbers are contiguous from 0 (read oldest-first)",
-  );
-  assert.equal(history.rows.at(-1).message.user.type, "user", "the oldest row is the user's message");
-  assert.equal(history.rows.at(-1).message.user.uuid, sentUuid, "the user row carries the app's uuid");
-  const lastRow = history.rows[0];
-  assert.equal(lastRow.message.assistant.type, "assistant", "the newest row is the assistant's reply");
-  assert.equal(lastRow.message.assistant.message.content[0].text, "Echo: Reply with exactly one word: pong");
-  // A row must NOT carry our internal envelope fields — that shape is what made
-  // the app decode a page of rows it could not draw.
-  assert.ok(!("event_type" in lastRow) && !("payload" in lastRow), "a row is {sequence_num, message}, not an envelope");
-  assert.equal(history.newest_event_id, lastRow.message.assistant.uuid, "newest_event_id is the newest message's uuid");
-
-  // Paging back from the newest row yields an older, gap-free window.
-  const olderPage = await (await call(codePath(createdResource.id, `/events?sort_order=desc&limit=2`))).json();
-  assert.equal(olderPage.rows.length, 2, "the window is the requested size");
-  assert.equal(olderPage.has_more, true, "one entry is still older than this window");
+  const historyDecoded = decodeClientEventsResponse(history);
+  assert.ok(historyDecoded.length >= 3);
+  assert.deepEqual([...history.data].reverse().map((event) => event.sequence_num), history.data.map((_, i) => String(i + 1)));
+  assert.equal(historyDecoded.at(-1).message.uuid, sentUuid);
+  assert.equal(historyDecoded[0].message.message.content[0].text, "Echo: Reply with exactly one word: pong");
+  assert.equal(history.rows, undefined, "ClientEventsPage.rows is an internal app model");
+  const olderPage = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=2"))).json();
+  assert.equal(olderPage.data.length, 2);
+  assert.ok(olderPage.next_cursor);
   const oldest = await (await call(codePath(createdResource.id, `/events?sort_order=desc&cursor=${encodeURIComponent(olderPage.next_cursor)}`))).json();
-  assert.equal(oldest.rows.at(-1).sequence_num, olderPage.rows.at(-1).sequence_num - 1, "the older window is contiguous");
-  assert.equal(oldest.has_more, false, "the oldest window ends the walk");
+  assert.equal(Number(oldest.data[0].sequence_num), Number(olderPage.data.at(-1).sequence_num) - 1);
+  assert.equal(oldest.next_cursor, null);
 
-  // A tool round: the Bash call is presented under the Chat surface's name, so
-  // both tabs draw the same row.
   await sseStream(codePath(createdResource.id, "/messages/stream"), {
-    method: "POST",
-    body: { body: "List the files [tool]" },
+    method: "POST", body: { body: "List the files [tool]" },
   });
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the tool turn to finish");
   const withTool = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=50"))).json();
-  // The tool round is encoded in the assistant/user stream-json messages: the
-  // assistant emits a `tool_use` content block, the user a `tool_result` one.
-  const toolUse = withTool.rows
-    .flatMap((row) => Object.values(row.message ?? {}))
-    .flatMap((msg) => (Array.isArray(msg?.message?.content) ? msg.message.content : []))
-    .find((block) => block?.type === "tool_use");
-  assert.ok(toolUse, "the tool call reaches the transcript");
-  assert.equal(toolUse.name, "mcp__workspace__bash", "the raw stream-json tool name is passed through");
+  const withToolDecoded = decodeClientEventsResponse(withTool);
+  const toolBlocks = withToolDecoded.flatMap(({ message }) => Array.isArray(message.message?.content) ? message.message.content : []);
+  const toolUse = toolBlocks.find((block) => block.type === "tool_use");
+  const toolResult = toolBlocks.find((block) => block.type === "tool_result");
+  assert.equal(toolUse.name, "mcp__workspace__bash");
   assert.equal(toolUse.input.command, "ls");
-  const toolResult = withTool.rows
-    .flatMap((row) => Object.values(row.message ?? {}))
-    .flatMap((msg) => (Array.isArray(msg?.message?.content) ? msg.message.content : []))
-    .find((block) => block?.type === "tool_result");
-  assert.equal(toolResult.tool_use_id, toolUse.id, "use and result pair up");
+  assert.equal(toolResult.tool_use_id, toolUse.id);
 
-  // The transcript *stream* leg: the app opens this for a session it is
-  // showing, so the history must arrive as `client_event` SSE frames before any
-  // live one. It stays open, so read a bounded prefix rather than to EOF.
-  const streamResponse = await call(codePath(createdResource.id, "/events/stream"));
-  assert.equal(streamResponse.status, 200, "the events stream leg answers");
-  const streamReader = streamResponse.body.getReader();
-  const streamDecoder = new TextDecoder();
-  let streamBuffer = "";
-  let streamed = [];
-  try {
-    while (streamed.length < withTool.data.length) {
-      const { value, done } = await streamReader.read();
-      if (done) break;
-      streamBuffer += streamDecoder.decode(value, { stream: true });
-      streamed = parseSse(streamBuffer).filter((record) => record.event === "client_event");
+  async function readClientEvents(reader, count) {
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let records = [];
+    const timeout = setTimeout(() => reader.cancel().catch(() => {}), 5000);
+    try {
+      while (records.length < count) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        records = parseSse(buffer).filter((record) => record.event === "client_event");
+      }
+      assert.ok(records.length >= count, "the stream produced the expected events before timeout");
+      records.forEach((record) => decodeClientEvent(record.data));
+      return records;
+    } finally {
+      clearTimeout(timeout);
     }
-  } finally {
-    streamReader.cancel().catch(() => {});
   }
-  assert.equal(streamed.length, withTool.data.length, "the stream replays the whole transcript");
-  // The detail screen decodes `SessionSseFrame`, whose `client_event` payload is
-  // a stream-json message — NOT the list leg's `upserted` SessionEventEnvelope.
-  assert.ok(
-    streamed.every((record) => record.data?.client_event?.sdk_message),
-    "every transcript frame nests a stream-json sdk_message",
-  );
-  const streamedUser = streamed.find((record) => record.data.client_event.sdk_message.user);
-  assert.ok(streamedUser, "the user turn arrives as the `user` case");
-  const streamedAssistant = streamed.find((record) => record.data.client_event.sdk_message.assistant);
-  assert.ok(streamedAssistant, "the assistant turn arrives as the `assistant` case");
-  assert.ok(
-    !streamed.some((record) => "event_type" in (record.data ?? {})),
-    "a transcript frame is not a SessionEventEnvelope",
-  );
-  // The stream numbering must agree with the paged read's, or `from_sequence_num`
-  // means two different things on the two legs.
-  const streamedUuids = streamed.map((record) => {
-    const nested = record.data.client_event.sdk_message;
-    return (nested.user ?? nested.assistant ?? nested.system ?? nested.result ?? nested.unknown)?.uuid;
-  });
-  // Both legs carry the same `StdoutMessage` — the stream oldest-first, the
-  // paged read newest-first — so they must agree message-for-message once the
-  // page is reversed. That is the whole point of one payload type.
-  const pagedUuids = [...withTool.rows].reverse().map((row) => {
-    const nested = row.message ?? {};
-    return (nested.user ?? nested.assistant ?? nested.system ?? nested.result ?? nested.unknown)?.uuid;
-  });
-  assert.deepEqual(streamedUuids, pagedUuids, "the streamed entries line up 1:1 with the paged read");
+  const streamResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=0"));
+  assert.equal(streamResponse.status, 200);
+  const streamReader = streamResponse.body.getReader();
+  try {
+    const streamed = await readClientEvents(streamReader, withTool.data.length);
+    assert.deepEqual(streamed.map((record) => record.data), [...withTool.data].reverse(), "history and SSE agree byte-for-byte");
+  } finally { await streamReader.cancel(); }
 
-  // A resumed stream skips what the client already has (the frame for the
-  // second entry, at index 1).
   const resumedResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=1"));
   const resumedReader = resumedResponse.body.getReader();
-  let resumedBuffer = "";
-  let resumed = [];
   try {
-    while (resumed.length < 1) {
-      const { value, done } = await resumedReader.read();
-      if (done) break;
-      resumedBuffer += new TextDecoder().decode(value, { stream: true });
-      resumed = parseSse(resumedBuffer).filter((record) => record.event === "client_event");
-    }
-  } finally {
-    resumedReader.cancel().catch(() => {});
-  }
-  assert.ok(resumed[0]?.data?.client_event?.sdk_message, "from_sequence_num skips the frames already rendered");
+    const resumed = await readClientEvents(resumedReader, withTool.data.length - 1);
+    assert.equal(resumed[0].data.sequence_num, "2", "from_sequence_num is exclusive");
+    assert.deepEqual(resumed.map((record) => record.data), [...withTool.data].reverse().slice(1));
+  } finally { await resumedReader.cancel(); }
+
+  // Opening an existing session and then sending must continue after its
+  // history, including when GET and POST streams subscribe simultaneously.
+  const lastSequence = Number(withTool.data[0].sequence_num);
+  const followResponse = await call(codePath(createdResource.id, `/events/stream?from_sequence_num=${lastSequence}`));
+  const followReader = followResponse.body.getReader();
+  try {
+    const following = readClientEvents(followReader, 3);
+    const liveSend = await sseStream(codePath(createdResource.id, "/messages/stream"), {
+      method: "POST", body: { body: "Live after history" },
+    });
+    const followed = await following;
+    const liveSent = liveSend.filter((record) => record.event === "client_event");
+    assert.deepEqual(followed.map((record) => record.data), liveSent.map((record) => record.data));
+    assert.deepEqual(followed.map((record) => record.data.sequence_num), [1, 2, 3].map((n) => String(lastSequence + n)));
+    const finalHistory = await (await call(codePath(createdResource.id, "/events?limit=3"))).json();
+    assert.deepEqual([...finalHistory.data].reverse(), followed.map((record) => record.data));
+  } finally { await followReader.cancel(); }
 
   // The list leg now reports the session, with the app's enum values.
   const codeListed = await (await call("/v1/code/sessions")).json();

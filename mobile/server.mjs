@@ -13,7 +13,7 @@ import {
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
 import { createCodeEngine } from "./code-engine.mjs";
-import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment, isRenderableEntry, sseFrameForEntry } from "./code-transcript.mjs";
+import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment } from "./code-transcript.mjs";
 import { desktopSessionIdFor as codeSessionDesktopId } from "./code-ids.mjs";
 import { createMobileStore } from "./store.mjs";
 import { createDesktopClient } from "./desktop-client.mjs";
@@ -114,23 +114,9 @@ function sendSseRecord(response, event, data) {
   response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-// A one-line summary of a `SessionSseFrame`'s payload for the trace above, so a
-// log reader can see which sdk_message case went out (and its ids) without
-// printing whole transcripts. Never throws — it runs inside request handling.
+// Log event metadata without printing transcript contents.
 function describeSdkMessage(data) {
-  try {
-    const inner = data?.client_event ?? data;
-    const sdk = inner?.sdk_message;
-    if (!sdk || typeof sdk !== "object") return "(none)";
-    const kind = Object.keys(sdk)[0] ?? "(empty)";
-    const msg = sdk[kind];
-    const uuid = msg?.uuid ? String(msg.uuid).slice(0, 8) : "-";
-    const subtype = msg?.subtype ? ` subtype=${msg.subtype}` : "";
-    const stop = msg?.message?.stop_reason ? ` stop=${msg.message.stop_reason}` : "";
-    return `${kind} uuid=${uuid}${subtype}${stop}`;
-  } catch {
-    return "(unreadable)";
-  }
+  return `${data?.event_type ?? "unknown"} sequence=${data?.sequence_num ?? "-"} uuid=${String(data?.event_id ?? "-").slice(0, 8)}`;
 }
 
 function orgUuidFromPath(pathname) {
@@ -803,8 +789,8 @@ async function handleCodeRoutes(request, response, url) {
 
   // The transcript's streaming read. The app opens an event *stream* for a
   // session it is showing (the detail screen), separate from the paged `events`
-  // read below: history arrives as the same SessionWatchFrame records the live
-  // turn uses, so one code path renders both. It must match before the paged
+  // read below. Both transcript legs carry SessionEventEnvelope records.
+  // It must match before the paged
   // matcher below, which is anchored and would otherwise miss it.
   const eventsStreamMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events\/stream$/);
   if (eventsStreamMatch && method === "GET") {
@@ -815,25 +801,12 @@ async function handleCodeRoutes(request, response, url) {
   const eventsMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events$/);
   if (eventsMatch && method === "GET") {
     try {
-      // `sort_order=desc` is what the app sends (newest page first); the engine
-      // honours it and the response already carries both key sets the app reads
-      // (`rows`/`data`, `nextCursor`/`next_cursor`, …).
       const page = await codeEngine.listEvents(eventsMatch[1], {
         cursor: url.searchParams.get("cursor"),
         limit: Number(url.searchParams.get("limit")) || 50,
         sortOrder: url.searchParams.get("sort_order") || "desc",
       });
-      // Deep trace: the exact row the app is handed, so a shape mismatch is
-      // visible in the log rather than inferred. Unconditional (it is one line
-      // per page) because a wrong shape here is what leaves the transcript
-      // blank, and we need it on the very next capture without an env change.
-      if (page.rows?.length) {
-        console.log(`[mobile-code]   events page: ${page.rows.length} rows has_more=${page.has_more}`);
-        console.log(`[mobile-code]   row[0]=${JSON.stringify(page.rows[0]).slice(0, 1200)}`);
-        console.log(`[mobile-code]   row[last]=${JSON.stringify(page.rows.at(-1)).slice(0, 600)}`);
-      } else {
-        console.log(`[mobile-code]   events page: EMPTY (has_more=${page.has_more})`);
-      }
+      console.log(`[mobile-code] events page: ${page.data.length} events has_more=${Boolean(page.next_cursor)}`);
       sendJson(response, 200, page);
     } catch (error) {
       await fail(error);
@@ -1014,81 +987,70 @@ async function streamCodeWatch(request, response, url, sessionId) {
   response.on("close", done);
 }
 
-// GET /v1/code/sessions/{id}/events/stream — the transcript as SSE. This is the
-// leg the session DETAIL screen opens, and it speaks `SessionStreamWire`, whose
-// frames are `SessionSseFrame`s — NOT the `upserted`/`deleted` frames of the
-// list screen's `watch` leg. Each record is a `client_event` whose payload is a
-// stream-json message:
-//
-//   event: client_event
-//   data: {"client_event":{"sdk_message":<SdkMessage>}}
-//
-// It replays the stored history first (so a client that only listens here still
-// draws the whole conversation), then follows live records. `from_sequence_num`
-// lets a reconnecting client skip what it has already rendered.
+// Both history and event: client_event carry SessionEventEnvelope. Sequence
+// numbers are positive decimal strings; from_sequence_num is the last seen
+// sequence (exclusive), with 0 meaning the beginning.
 async function streamCodeEvents(request, response, url, sessionId) {
   const desktopId = codeSessionDesktopId(sessionId);
   if (!desktopId) {
     sendErrorEnvelope(response, 404, "not_found", "session not found");
     return;
   }
-  let entries;
+  const floor = Number(url.searchParams.get("from_sequence_num"));
+  const from = Number.isSafeInteger(floor) && floor >= 0 ? floor : 0;
+  let pending = [];
+  const emit = (record) => {
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      if (Number(frame.data.sequence_num) <= from) continue;
+      sendSseRecord(response, frame.event, frame.data);
+      console.log(`[mobile-code] live ${describeSdkMessage(frame.data)}`);
+    }
+  };
+  // Subscribe before the asynchronous snapshot, buffering until history has
+  // seeded the translator. Otherwise an event between read and listen is lost.
+  const unsubscribe = codeEngine.listen(desktopId, (record) => {
+    if (pending) pending.push(record);
+    else emit(record);
+  });
+  let keepalive;
+  let closed = false;
+  const done = () => {
+    closed = true;
+    clearInterval(keepalive);
+    unsubscribe();
+  };
+  response.on("close", done);
+  let envelopes;
   try {
-    entries = await codeEngine.sessionTranscript(sessionId);
+    envelopes = await codeEngine.sessionEventEnvelopes(sessionId);
   } catch (error) {
-    sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
+    done();
+    if (!response.destroyed) sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
       error?.message || "could not read the transcript");
     return;
   }
-
+  if (closed) return;
   response.writeHead(200, SSE_HEADERS);
-  const floor = Number(url.searchParams.get("from_sequence_num"));
-  const from = Number.isFinite(floor) ? floor : 0;
-  // `from_sequence_num` indexes the SAME positions the paged read numbers, so
-  // the two legs agree on what "sequence 3" means. `eventEnvelopes` numbers the
-  // entries it keeps and skips the ones with nothing to render (without
-  // advancing the counter), so number them the same way here instead of over
-  // every raw entry.
-  let sequence = 0;
-  let sent = 0;
-  for (const entry of entries) {
-    if (!isRenderableEntry(entry)) continue;
-    const index = sequence;
-    sequence += 1;
-    if (index < from) continue;
-    const frame = sseFrameForEntry(entry);
-    sendSseRecord(response, frame.event, frame.data);
-    sent += 1;
-    // One line per frame: the app's decoder is silent on the wire, so the only
-    // way to see what it was handed (and whether it read it) is to log the
-    // frame we actually wrote. `sent` counts only the frames past the floor.
-    if (sent === 1) {
-      console.log(`[mobile-code]   frame[0]=${JSON.stringify({ event: frame.event, data: frame.data }).slice(0, 1200)}`);
-    }
-    if (sent <= 5 || sent % 25 === 0) {
-      console.log(`[mobile-code]   frame#${index} ${frame.event} sdk_message=${describeSdkMessage(frame.data)}`);
+  response.flushHeaders();
+  for (const envelope of envelopes) {
+    if (Number(envelope.sequence_num) > from) sendSseRecord(response, "client_event", envelope);
+  }
+  // Buffered records may already be in the snapshot; do not replay them twice.
+  const snapshot = new Map(envelopes.map((event) => [event.event_id, JSON.stringify(event)]));
+  const buffered = pending;
+  pending = null;
+  for (const record of buffered) {
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      if (Number(frame.data.sequence_num) <= from) continue;
+      if (snapshot.get(frame.data.event_id) !== JSON.stringify(frame.data)) {
+        sendSseRecord(response, frame.event, frame.data);
+      }
     }
   }
-  console.log(`[mobile-code] events/stream ${sessionId}: ${entries.length} entries, ${sent} frames from ${from}`);
-
-  const emit = (id, record) => {
-    if (id !== desktopId) return;
-    for (const frame of codeEngine.framesFor(desktopId, record)) {
-      sendSseRecord(response, frame.event, frame.data);
-      console.log(`[mobile-code]   live ${frame.event} sdk_message=${describeSdkMessage(frame.data)}`);
-    }
-  };
-  const unsubscribe = codeEngine.listen(desktopId, (record) => emit(desktopId, record));
-
-  const keepalive = setInterval(() => {
+  console.log(`[mobile-code] events/stream ${sessionId}: ${envelopes.length} events, after ${from}`);
+  keepalive = setInterval(() => {
     if (!response.writableEnded) response.write(": keepalive\n\n");
   }, 15000);
-  const done = () => {
-    clearInterval(keepalive);
-    unsubscribe?.();
-  };
-  request.on("close", done);
-  response.on("close", done);
 }
 
 // POST /v1/code/sessions/{id}/messages/stream — send a turn. This leg is also

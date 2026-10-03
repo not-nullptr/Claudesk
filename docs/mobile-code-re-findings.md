@@ -76,112 +76,17 @@ statusBucket, revision, connectorDomainsWithheld`.
 Watch stream (`GET /v1/code/sessions/watch`, SSE): `SessionWatchEvent` (@0x4aea6d8)
 = `upserted | deleted`; the request carries `include_trigger_sessions`.
 
-## The two Code SSE protocols (settled from the binary)
+## Transcript wire correction (2026-10-03)
 
-`/watch` and `/{id}/events/stream` are **different wire protocols**; emitting
-the watch shape on the transcript leg is what made a session open to "the
-messages failed to load".
+The earlier transcript claims in this document were incorrect. Direct tracing
+of the supplied IPA's Decodable witnesses establishes that both HTTP history
+`data[]` and SSE `event: client_event` carry `SessionEventEnvelope` objects.
+`ClientEventsPage.Row` and `SessionSseFrame` are internal models. SDK messages
+are flat objects discriminated by `type`, and sequence numbers are positive
+**strings**, starting at `"1"`.
 
-- **`SessionWatchWire`** (`GET /v1/code/sessions/watch`): `SessionWatchFrame`
-  (@0x4ae9b30) with a single field `event` of type `SessionWatchEvent`
-  (@0x4aea6d8 = `upserted | deleted`).
-- **`SessionStreamWire`** (`GET …/events/stream`, `POST …/messages/stream`):
-  `SessionSseFrame` (@0x4ae9230), a 6-case enum —
-  `clientEvent | ephemeralEvent | deliveryUpdate | sessionUpdate |
-  catchUpTruncated | decodeFailure` — with the payload structs
-  `StreamDeliveryUpdate` (@0x4ae9100), `StreamSessionUpdate` (@0x4ae9128),
-  `StreamCatchUpTruncated` (@0x4ae92ac), and the two error types
-  `SessionStreamDecodeError` (@0x4ae91c0 = `context, eventId, eventType,
-  underlyingTypeName`) and `SessionStreamContractViolationError` (@0x4ae91dc =
-  `context, missing`).
-
-Evidence for the wire casing:
-
-- `SessionSseFrame`'s `CodingKeys` field descriptor is the **only** cluster
-  holding its case names, contiguous at `__swift5_reflstr` **0x4ba37f0**:
-  `clientEvent ephemeralEvent deliveryUpdate sessionUpdate catchUpTruncated
-  decodeFailure`. Swift synthesizes enum `Codable` as a single-key object, and
-  the app's `JSONDecoder` runs `.convertFromSnakeCase` (keys only), so the wire
-  keys are `client_event`, `ephemeral_event`, … .
-- The SSE dispatcher (fn @0x101eb7b00) compares the SSE **`event:` name**
-  against exactly two inline Swift small-strings: `client_event` (built at
-  0x101eb7b34) and `ephemeral_event` (at 0x101eb7c2c).
-- The JSON body is decoded with `JSONDecoder.decode(_:from:)` at 0x101f08e08;
-  the failure paths build the two error types above.
-- `SessionSseFrame.clientEvent` carries `StdoutMessage` (@0x4ae70e8), whose
-  `CodingKeys` cluster (reflstr ~0x4ba1e08) is `controlRequest controlResponse
-  controlCancelRequest streamEvent sourcesChanged sdkMessage`; its
-  `sdkMessage` case is `SdkMessage` (@0x4ae7088), whose cases are the
-  stream-json `type` values (`assistant user result system envManagerLog
-  toolUseSummary rateLimitEvent promptSuggestion conversationReset
-  composerNotice composerNoticeDismissed controlRequest controlResponse
-  controlCancelRequest unknown`).
-
-So a transcript frame is
-`event: client_event` / `data: {"client_event":{"sdk_message":<SdkMessage>}}`,
-and `<SdkMessage>` is essentially the Desktop transcript entry
-(`{type, uuid, message, parentUuid, timestamp, origin, …}`) — see
-`mobile/code-transcript.mjs#streamJsonFor`.
-
-### The paged read is the same payload type (settled on device, 2026-10-03)
-
-The session detail screen does **two** reads, and both carry the same message:
-
-```
-GET /v1/code/sessions/{id}/events?sort_order=desc&limit=200   the page
-GET /v1/code/sessions/{id}/events/stream?from_sequence_num=0  the live follow
-POST /v1/code/sessions/{id}/events   (x2)                     the app's ack
-```
-
-Both paths appear only in the app's own request log — they are composed from the
-`v1/code/sessions/` base, so neither is a whole-string literal in the binary.
-`SessionsApi+Events.swift` owns the `list_client_events_v2` page; the stream
-leg is built alongside it.
-
-`ClientEventsPage` (type descriptor @0x4ae917c has its nested `Row`) is
-
-```
-ClientEventsPage        rows, maxSequenceNum, newestEventId, nextCursor, hasMore
-ClientEventsPage.Row    sequenceNum, message
-ListClientEventsResponse data, nextCursor
-```
-
-Evidence for the keys: the coding-key cluster at `__swift5_reflstr` **0x4ba374f**
-reads `…connectionStatus desc asc rows maxSequenceNum newestEventId nextCursor
-hasMore message`, and the `ListClientEventsResponse` cluster at **0x4ba37c0**
-reads `…offendingSequenceNum context underlyingTypeName missing data clientEvent
-ephemeralEvent deliveryUpdate sessionUpdate catchUpTruncated decodeFailure
-fromSequenceNum…` (so `data` is the response, and the frame cases follow).
-
-FACT: a row's `message` **is** a `SdkMessage` (@0x4ae7088). Following
-`ClientEventsPage.Row`'s `message` field-type relative pointer (@0x4ae917c,
-field 1) lands on the descriptor named `SdkMessage` — NOT `StdoutMessage`
-(@0x4ae70e8). So the paged read's row is `{sequence_num, message:
-{user|assistant|result|system|…}}` — the *inner* `SdkMessage` enum, **without**
-the `sdk_message`/`client_event` wrapper the SSE leg adds. (The earlier note
-that the two share a type slot was wrong: the slot for the paged row is
-`01 29 f9 51` → `SdkMessage`; `StdoutMessage.sdkMessage`'s slot is the one that
-matches `01 29 f9 51` too, but `StdoutMessage` wraps `SdkMessage`, so a row is
-the inner type directly.)
-
-The two response envelopes are **distinct types** and the facade emits the union:
-
-```
-ClientEventsPage          @0x4ae9160  rows, maxSequenceNum, newestEventId, nextCursor, hasMore
-ListClientEventsResponse  @0x4ae9214  data, nextCursor            (data: [Row])
-```
-
-`APIUserMessage` (@0x4ae6d80) is `{content, role}` where `content` is the enum
-`APIUserMessageContent` (@0x4ae6d64 = `string | blocks | unknown`) — so a user
-turn's `content` may be a bare string OR an array of blocks.
-`APIAssistantMessage` (@0x4ae6d9c) is `{id, role, model, content, stopReason,
-stopSequence, usage, type}` with `content` an array.
-
-Emitting our own `SessionEventEnvelope` (`{event_id, sequence_num, event_type,
-source, payload}`) on this leg is what left the transcript blank: the app
-decoded a page whose rows had no `message`, so it had nothing to draw, while
-`…/events/stream` was answering 200 with perfectly good frames the screen never
-consulted for history.
+See [the correction, binary addresses, and reproduction script](mobile-code-wire-correction.md).
+This supersedes the previous synthesized-enum-wrapper and paged-row claims.
 
 ## Endpoint 2 — `GET /v1/environment_providers/private/organizations/<uuid>/environments`
 

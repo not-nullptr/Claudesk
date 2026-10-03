@@ -76,117 +76,28 @@ facade, because neither is a plain literal in the binary:
   resolve a session's runner; it asks for the same `anthropic-bridge-local`
   record the list advertises.
 
-Paging everywhere is `{data|rows, next_cursor, has_more}` (snake_case).
+Transcript history paging is `{data: [SessionEventEnvelope], next_cursor}`;
+other endpoints have their own DTOs.
 
-## 3. Event / transcript model (this is what the transcript pane renders)
+## 3. Event / transcript model — corrected 2026-10-03
 
-**There are two distinct SSE protocols under `/v1/code/…`, and they do not
-share a frame shape.** Feeding one the other's envelope is what made the
-session detail screen open to "the messages failed to load" (the app's
-`SessionSseFrame` decoder rejects an `upserted` envelope and renders nothing).
+The earlier wire-format claims here confused internal app enums/rows with
+network DTOs. See [mobile-code-wire-correction.md](mobile-code-wire-correction.md)
+for the verified envelope, exact decoder addresses, and validation limits.
 
-### 3a. The list leg — `SessionWatchWire`
+- HTTP history: `{data: [SessionEventEnvelope], next_cursor}`.
+- Transcript SSE: `event: client_event`, with a `SessionEventEnvelope` directly
+  in `data:`. `SessionSseFrame` is the result of the app's parsing, not JSON.
+- An envelope has `event_id`, `sequence_num`, `event_type`, `source`, `payload`,
+  and `created_at`. The sequence is a positive decimal string.
+- `payload` is flat SDK stream-json (`{type, uuid, message, ...}`). Neither
+  `StdoutMessage` nor `SdkMessage` uses synthesized case-name wrapper keys.
+- The app builds `ClientEventsPage.Row {sequenceNum, message: SdkMessage}`
+  after parsing those wire envelopes.
 
-```
-GET /v1/code/sessions/watch        (and /v1/code/sessions/{id}/watch)
-SessionWatchFrame   event          (the ONLY field — no payload)
-SessionWatchEvent   upserted | deleted
-```
-
-The list screen subscribes here to keep its rows current. The facade emits one
-`upserted`/`deleted` frame per Desktop `onOnEvent` record, carrying the entry's
-`SessionEventEnvelope` as the record payload.
-
-### 3b. The transcript leg — `SessionStreamWire`
-
-```
-GET  /v1/code/sessions/{id}/events/stream     the detail screen's transcript
-POST /v1/code/sessions/{id}/messages/stream   the send leg (same protocol)
-```
-
-Each SSE record's **`event:` name** is one of `client_event` or
-`ephemeral_event` (the only two the app's dispatcher compares against), and the
-**`data:`** is `SessionSseFrame`, a 6-case Swift enum:
-
-```
-SessionSseFrame   clientEvent | ephemeralEvent | deliveryUpdate | sessionUpdate
-                  | catchUpTruncated | decodeFailure
-StreamDeliveryUpdate      eventId, status, timestamp
-StreamSessionUpdate       connectionStatus
-StreamCatchUpTruncated    fromSequenceNum, atSequenceNum
-SessionStreamDecodeError              context, eventId, eventType, underlyingTypeName
-SessionStreamContractViolationError   context, missing
-```
-
-Swift synthesizes enum `Codable` as a **single-key object**, and the app's
-shared `JSONDecoder` runs `.convertFromSnakeCase` over the keys, so the wire is:
-
-```
-event: client_event
-data: {"client_event":{"sdk_message":<SdkMessage>}}
-```
-
-`clientEvent` carries a **`StdoutMessage`**, itself a synthesized enum keyed
-`sdk_message | control_request | control_response | control_cancel_request |
-stream_event | sources_changed | unknown`. Its `sdk_message` case is a
-**`SdkMessage`**, whose cases are the stream-json `type` values:
-
-```
-assistant | user | result | system | env_manager_log | tool_use_summary
-| rate_limit_event | prompt_suggestion | conversation_reset
-| composer_notice | composer_notice_dismissed | control_request
-| control_response | control_cancel_request | unknown
-```
-
-`SdkUserMessage` / `SdkAssistantMessage` / `SdkResultMessage` are **structs**
-declaring the stream-json fields (`type, uuid, message, parentToolUseId,
-timestamp, origin, …`) — i.e. the Desktop transcript entry passes through
-almost verbatim. `mobile/code-transcript.mjs#streamJsonFor` does that mapping;
-`#sseFrameForEntry` wraps it into the frame. History and live records both use
-it, so a session with no live activity still draws.
-
-### The paged history read (neither leg)
-
-```
-GET    /v1/code/sessions/{id}/events          list_client_events_v2
-ClientEventsPage       rows, maxSequenceNum, newestEventId, nextCursor, hasMore
-ClientEventsPage.Row   sequenceNum, message        ← message is a SdkMessage
-ListClientEventsResponse  data, nextCursor         (data: [ClientEventsPage.Row])
-UsageResponse          limits, spend, extraUsage
-MessageLimit           status, resetsAt, remaining, overageInUse, notice,
-                       perModelLimit, overageStatus, overageResetsAt,
-                       windows, model     (windows: [MessageLimitWindow])
-MessageLimitWindow     status, resetsAt, utilization, surpassedThreshold,
-                       period, limitScope, groupUuid
-```
-
-The usage card's window `period` values are `five_hour | seven_day |
-seven_day_opus | seven_day_sonnet | overage`; an unmetered self-hosted
-deployment reports every one at `utilization: 0`.
-
-So history = paged `ClientEventsPage` seeded by walking **down** from the newest
-`sequenceNum` until `hasMore == false`; live = the `…/events/stream` follow,
-resumable `from_sequence_num`. The pager type confirms the algorithm:
-`SessionTranscriptPager` (@0x4b063bc) with `olderCursor`, `lastSequenceNum`,
-`readsGapAscending`, `initialEventsLimit` — it reads **ascending above** a floor
-and pages **older** on demand, and tolerates a truncated catch-up.
-
-Settled on device (2026-10-03): the detail screen opens **both** `…/events?
-sort_order=desc&limit=200` and `…/events/stream?from_sequence_num=0`. A row is
-`{sequence_num, message}` where `message` is an `SdkMessage` (`Row.message`'s
-field-type pointer lands on the `SdkMessage` descriptor @0x4ae7088 — i.e. the
-*paged* row carries the inner enum directly, while the stream wraps the same
-thing inside `StdoutMessage.sdkMessage`). So a row's `message` — not a
-`payload` — carries the turn; the envelope type (`SessionEventEnvelope`:
-`event_id, sequence_num, event_type, source, payload`) is what the facade *used*
-to answer with, and it is why the transcript drew blank.
-
-The rendering types are `ToolCall` (@0x4b050fc, 22 fields: `id name displayName
-status input output outputImages subagentToolCalls gitOperation fileMetadata
-artifactId …`) and the transcript block union (`SessionTranscriptEntry` /
-`DisplayBlock*` / `AssistantTextBlockView`, `CodeThinkingView`,
-`CollapsedToolCallList`); they are built app-side from the `message`'s
-stream-json content blocks.
+The list's `watch` protocol is separate; its complete contract is not established
+by this transcript correction. The broader endpoint inventory below is not a
+claim that all Code features have been verified on a device.
 
 ## 4. Sending a message
 
