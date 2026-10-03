@@ -150,6 +150,55 @@ was created with (`meta.environment_id`), and the by-id read resolves it.
 config`) is what the "Create environment" button sends; answering it with the
 cloud record (rather than `404`) keeps the create sheet from sticking.
 
+### The wire shape is now VERIFIED against the binary; the block is elsewhere
+(2026-10-03, later)
+
+The facade's environment payload was checked byte-for-byte against the app's own
+field-name tables, and it is **correct** — so the nested-config change (commit
+`22b7366`) is right and stays, and the empty picker is *not* a payload-shape
+problem. Evidence, all from `claude.bin`:
+
+* `EnvironmentKind`'s cases are `anthropicCloud | byoc | bridge | unknown`
+  (NUL-separated string block, fileoff 0x4b5c93x) — so the wire value
+  `anthropic_cloud` is correct.
+* The `EnvironmentConfiguration` payload case names are `anthropic | byoc |
+  paired`, and the DTO cluster reads contiguously as
+  `…environmentType | initScript | environment | languages | networkConfig |
+  taskSetupScript | anthropic | byoc | paired | config | bridgeInfo |
+  environments | firstId | poolId` (fileoff 0x4ba46c0–0x4ba47fe). That is exactly
+  what `bridgeEnvironment`/`cloudEnvironment` emit: `config` nests the payload
+  under the case name.
+* `EnvironmentStore`'s field list (fileoff 0x4bb4b0x) is
+  `isSelfHostedRunnersEnabled | offersHostedEnvironments |
+  isSendEnvironmentSetupEnabled | … | _cloudEnvironments | _soleCloudEnvironment`.
+
+**Correction to the section above.** The picker's empty state is *not* selected
+by a count of cloud rows. `EnvironmentPicker.swift:82` computes a **Bool** and
+stores it as the `_ConditionalContent` selector; SwiftUI runs the populated-list
+arm when it is true and the `environments_empty_state` arm when it is false
+(`0x1027fabf0` stores the Bool at `[x19,#57]`, the closure pair at `[x19,#64]`).
+The three `cbz`-on-array checks for `cloud_environments` /
+`paired_environments` / `self_hosted_environments` are **inside** the populated
+arm and only hide individual sections — they do not choose the empty state.
+
+The picker model's own fields (fileoff 0x4bb1400 block) include
+`… | listed | remembered | devices | hidden | loading | empty | …`, so the
+selector is one of the model's display-state Bools. The predicate
+(`0x1025d9514` / `0x1025d9adc`) is a **string `==`** test, not an `isEmpty` —
+it compares a model field against a stored value. That points at the app waiting
+for a display state it never reaches (the load never "applies" its rows), rather
+than at the row contents.
+
+Also ruled out: `hostedEnvironmentsOff` / "Hosted environments turned off by the
+organization" is a case of the **continue-on-cloud (CCR) error** enum
+(`network | notFound | forbidden | hostedEnvironmentsOff | repoAccessDenied |
+… | sessionNotActive | gitHubNotConnected`, dispatched by the byte switch at
+`0x1025bdc70`), a different feature — not the picker's gate.
+
+Still open: which model Bool the picker selects on, and what leaves it in the
+un-populated state. Resolving it needs the observation key-path descriptor at
+`0x104338888` (relative-pointer metadata), which was not decoded here.
+
 ## Endpoint 3 — `GET /api/organizations/<uuid>/experiences`
 
 Base string `experiences` (VA 0x1047bc2e1); tracking paths `/experiences/track`

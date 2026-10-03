@@ -889,8 +889,9 @@ async function handleCodeRoutes(request, response, url) {
   // The list is newest-first by convention elsewhere, but order is not
   // significant here; `first_id`/`last_id` bracket whatever order is returned.
   const environmentsBase =
-    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i;
-  if (environmentsBase.test(path) && method === "GET") {
+    /^\/v1\/environment_providers\/private\/organizations\/([0-9a-f-]{36})\/environments\/?$/i;
+  const environmentsMatch = path.match(environmentsBase);
+  if (environmentsMatch && method === "GET") {
     const online = await desktopReady();
     const environments = [
       cloudEnvironment({ online }),
@@ -907,6 +908,19 @@ async function handleCodeRoutes(request, response, url) {
     const advertised = mode === "cloud-only" ? environments.slice(0, 1)
       : mode === "bridge-only" ? environments.slice(1)
       : environments;
+    // The app scopes this read to an organization id BOTH in the path and in the
+    // `X-Organization-Uuid` header, and can narrow the result with
+    // `included_worker_types`. If either the path org or the header org is not
+    // the one the facade issues at `/api/organizations`, the app may drop rows
+    // after decode while the HTTP leg still looks fine — which matches the empty
+    // picker. Printed on every read so one picker open on device settles it.
+    console.log(
+      `[mobile-code]   environments(mode=${mode})` +
+      ` path_org=${environmentsMatch[1].toLowerCase()}` +
+      ` header_org=${String(request.headers["x-organization-uuid"] || "-").toLowerCase()}` +
+      ` worker_types=${url.searchParams.get("included_worker_types") || "-"}` +
+      ` query=${url.search || "-"}`,
+    );
     console.log(`[mobile-code]   environments(mode=${mode})=${JSON.stringify(advertised).slice(0, 4000)}`);
     sendJson(response, 200, {
       environments: advertised,
