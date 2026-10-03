@@ -28,6 +28,21 @@ import {
 // The app lists it under Devices and lets a session be created against it.
 export const BRIDGE_ENVIRONMENT_ID = "anthropic-bridge-local";
 
+// The environment a "cloud" session runs in. A self-hosted Desktop has no
+// Anthropic-hosted cloud, but the app's new-session picker splits the list by
+// `kind` into TWO sections — "Cloud environments" (anthropicCloud) and "Remote
+// control" (bridge) — and with no anthropicCloud row the cloud section renders
+// its onboarding empty state ("Create a cloud environment to get started",
+// Localizable key `environments_empty_state`), which is what blocks starting a
+// session at all. Advertising the SAME Desktop as an anthropicCloud record puts
+// a selectable row in that section; a session created against it runs on the
+// Desktop exactly like a bridge one, because the facade ignores the runner kind
+// when it starts the turn (see code-engine.createSession).
+//
+// The id is the app's own deviceless-cloud label; it is stable so a session's
+// `environment_id` keeps resolving after a restart.
+export const CLOUD_ENVIRONMENT_ID = "anthropic-cloud-local";
+
 export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
   return {
     kind: ENVIRONMENT_KIND.bridge,
@@ -55,6 +70,32 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
   };
 }
 
+// The anthropicCloud record that fills the picker's "Cloud environments"
+// section. Its `config` is the `AnthropicEnvironmentConfiguration` case, whose
+// `environment_type` literal is "anthropic" (the enum case names are the raw
+// values — see the "Wire casing" note above). `bridgeInfo` is omitted: the app
+// only reads it for `kind == bridge`. The `state`/`online` axis is the same
+// Desktop health the bridge record uses, so a Desktop that is down is shown as
+// unknown here too rather than as a usable cloud.
+export function cloudEnvironment({ name = "Claudesk Desktop", online = true } = {}) {
+  return {
+    kind: ENVIRONMENT_KIND.anthropicCloud,
+    environment_id: CLOUD_ENVIRONMENT_ID,
+    name,
+    created_at: null,
+    state: online ? "active" : "unknown",
+    config: {
+      environment_type: "anthropic",
+      cwd: "/workspace",
+      init_script: null,
+      environment: {},
+      languages: [],
+      network_config: null,
+    },
+    bridge_info: null,
+  };
+}
+
 function iso(value) {
   const ms = Number(value);
   return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null;
@@ -64,15 +105,26 @@ function desktopIdOf(record) {
   return record?.sessionId ?? record?.session_id ?? record?.id ?? null;
 }
 
+// The environment a session reports. Every session runs on the same Desktop, so
+// the id is whichever record the picker created it against (meta.environment_id)
+// and defaults to the bridge record — the kind follows the id, because the
+// detail screen resolves the id back through the environments by-id read.
+export function environmentForSession(meta = {}) {
+  return meta.environment_id === CLOUD_ENVIRONMENT_ID
+    ? { id: CLOUD_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.anthropicCloud }
+    : { id: BRIDGE_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.bridge };
+}
+
 // The list row (ListSessionsResponse.data[]). `SessionResponse` is 23 fields;
 // the ones a self-hosted Desktop does not have are emitted as null/[] so the
 // app's non-optional decodes still succeed.
 export function sessionResponse(record, { meta = {}, pendingApproval = false } = {}) {
   const status = sessionStatusOf(record, { pendingApproval });
+  const environment = environmentForSession(meta);
   return {
     id: codeIdFor(desktopIdOf(record)),
-    environment_id: BRIDGE_ENVIRONMENT_ID,
-    environment_kind: ENVIRONMENT_KIND.bridge,
+    environment_id: environment.id,
+    environment_kind: environment.kind,
     title: record?.title || record?.name || "Untitled session",
     status,
     tags: Array.isArray(meta.tags) ? meta.tags : [],
@@ -108,12 +160,13 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
 // context, permission mode, spawn path and a revision counter.
 export function sessionResource(record, { meta = {}, revision = 0, pendingApproval = false } = {}) {
   const status = sessionStatusOf(record, { pendingApproval });
+  const environment = environmentForSession(meta);
   return {
     id: codeIdFor(desktopIdOf(record)),
     title: record?.title || record?.name || "Untitled session",
     session_status: status,
-    environment_id: BRIDGE_ENVIRONMENT_ID,
-    environment_kind: ENVIRONMENT_KIND.bridge,
+    environment_id: environment.id,
+    environment_kind: environment.kind,
     created_at: iso(record?.createdAt),
     updated_at: iso(record?.lastActivityAt ?? record?.createdAt),
     session_context: {

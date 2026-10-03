@@ -188,13 +188,32 @@ try {
     `/v1/environment_providers/private/organizations/${org.uuid}/environments?limit=50`,
   );
   assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
-  // The paired Desktop is offered as a runner, so the phone can start a session
-  // on it. `bridge` is the enum's literal raw value, not a snake-cased key.
-  const environments = (await environmentsLeg.json()).environments;
-  assert.equal(environments.length, 1);
-  assert.equal(environments[0].environment_id, "anthropic-bridge-local");
-  assert.equal(environments[0].kind, "bridge");
-  assert.equal(environments[0].bridge_info.spawn_mode, "same-dir");
+  // Two records back the same Desktop: the `anthropic_cloud` row the picker's
+  // "Cloud environments" section needs (without it that section shows the
+  // "Create a cloud environment to get started" onboarding state and a new
+  // session cannot be started), and the paired `bridge` device. `anthropic_cloud`
+  // and `bridge` are the enums' literal raw values, not snake-cased keys.
+  const environmentList = await environmentsLeg.json();
+  const environments = environmentList.environments;
+  assert.equal(environments.length, 2);
+  const cloud = environments.find((e) => e.kind === "anthropic_cloud");
+  const bridge = environments.find((e) => e.kind === "bridge");
+  assert.ok(cloud, "the cloud environment the picker requires is offered");
+  assert.equal(cloud.environment_id, "anthropic-cloud-local");
+  assert.equal(cloud.config.environment_type, "anthropic");
+  assert.ok(bridge, "the paired Desktop is offered as a runner");
+  assert.equal(bridge.environment_id, "anthropic-bridge-local");
+  assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
+  // `first_id`/`last_id` bracket the returned order.
+  assert.equal(environmentList.first_id, environments[0].environment_id);
+  assert.equal(environmentList.last_id, environments.at(-1).environment_id);
+
+  // The by-id read resolves each advertised record.
+  const cloudById = await call(
+    `/v1/environment_providers/private/organizations/${org.uuid}/environments/anthropic-cloud-local`,
+  );
+  assert.equal(cloudById.status, 200);
+  assert.equal((await cloudById.json()).kind, "anthropic_cloud");
 
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");

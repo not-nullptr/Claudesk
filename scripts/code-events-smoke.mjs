@@ -12,7 +12,9 @@ import { decodeClientEvent, decodeClientEventsResponse } from "./lib/code-wire-c
 import { readFile } from "node:fs/promises";
 import {
   BRIDGE_ENVIRONMENT_ID,
+  CLOUD_ENVIRONMENT_ID,
   bridgeEnvironment,
+  cloudEnvironment,
   eventEnvelopeForEntry,
   eventEnvelopes,
   olderCursorFor,
@@ -193,4 +195,31 @@ assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(environment.bridge_info.spawn_mode, "same-dir");
 assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
+
+// ---- the cloud environment offered as the picker's "Cloud environments" row --
+// The picker splits the list by kind into "Cloud environments" (anthropicCloud)
+// and "Remote control" (bridge). A bridge-only list leaves the cloud section
+// empty, which is the "Create a cloud environment to get started" onboarding
+// state that blocks starting a session.
+const cloud = cloudEnvironment({ name: "Claudesk Desktop" });
+assert.equal(cloud.kind, "anthropic_cloud");
+assert.equal(cloud.environment_id, CLOUD_ENVIRONMENT_ID);
+assert.equal(cloud.config.environment_type, "anthropic");
+assert.equal(cloud.bridge_info, null, "bridgeInfo is only read for kind == bridge");
+assert.equal(cloud.state, "active");
+assert.equal(cloudEnvironment({ online: false }).state, "unknown");
+// The two advertised records are distinct ids, so a session can name either.
+assert.notEqual(CLOUD_ENVIRONMENT_ID, BRIDGE_ENVIRONMENT_ID);
+
+// A session created against the cloud row reports the cloud environment and
+// kind; one with no recorded environment keeps the bridge default.
+const cloudSession = sessionResource({ sessionId: "s1", title: "t" }, {
+  meta: { environment_id: CLOUD_ENVIRONMENT_ID },
+});
+assert.equal(cloudSession.environment_id, CLOUD_ENVIRONMENT_ID);
+assert.equal(cloudSession.environment_kind, "anthropic_cloud");
+const bridgeSession = sessionResponse({ sessionId: "s2" }, { meta: {} });
+assert.equal(bridgeSession.environment_id, BRIDGE_ENVIRONMENT_ID);
+assert.equal(bridgeSession.environment_kind, "bridge");
+
 console.log("code-events-smoke: ok");

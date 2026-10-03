@@ -110,6 +110,46 @@ firstId, lastId`. Element: **`EnvironmentResource`** (@0x4aea504):
 A remote device is an `EnvironmentResource` with `kind = bridge` and a
 `bridgeInfo` describing the machine; the Devices section of the tab lists these.
 
+### The list is split by `kind`, and the split is what blocks a new session
+(settled on device, 2026-10-03)
+
+With the facade advertising one `kind = bridge` record, the new-session picker
+read "Choose environment" and its cloud section showed the onboarding empty
+state — **"Create a cloud environment to get started"**, the localization key
+`environments_empty_state` (`ClaudePackage_ClaudeCode.bundle`), with the button
+`create_default_cloud_environment` ("Create your default cloud environment").
+That state is reached when there is no environment to offer, and it blocks
+starting a session outright (the device capture shows every leg `200`).
+
+The picker sections come from `EnvironmentStore` (struct @0x4b0325c), whose
+fields separate the list by kind:
+
+```
+_cloudEnvironments          [EnvironmentResource]   the "Cloud environments" rows
+_soleCloudEnvironment       EnvironmentResource?    the auto-selected one
+_resolvedBridgeEnvironments [EnvironmentResource]   the paired devices
+_connectedDevices           …                       the "Remote control" rows
+_savedEnvironment           …                       the remembered pick
+offersHostedEnvironments    Bool (getter)           whether the cloud section is offered
+```
+
+The section titles are the keys `cloud_environments` ("Cloud environments") and
+`paired_environments` ("Remote control"); a `bridge` record lands in the latter,
+so a bridge-only list never fills the cloud section and the empty state stays.
+`CloudEnvironmentRow` (@0x4b0720c) = `environment, isIncompatible, isSelected,
+onTap, onEdit` — a row's `environment` is the `EnvironmentResource` above, so a
+cloud row is simply an `EnvironmentResource` with `kind = anthropic_cloud` and
+the `anthropic` configuration case (`environment_type = "anthropic"`).
+
+So the facade must advertise **both**: an `anthropic_cloud` record for the cloud
+section the picker needs, and the `bridge` record for the paired device. Both
+run on the same self-hosted Desktop — the facade ignores the runner kind when it
+starts a turn — so a session created against either reports the environment id it
+was created with (`meta.environment_id`), and the by-id read resolves it.
+`POST …/environments` (`EnvironmentCreateRequest` = `name, kind, description,
+config`) is what the "Create environment" button sends; answering it with the
+cloud record (rather than `404`) keeps the create sheet from sticking.
+
 ## Endpoint 3 — `GET /api/organizations/<uuid>/experiences`
 
 Base string `experiences` (VA 0x1047bc2e1); tracking paths `/experiences/track`

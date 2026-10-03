@@ -393,7 +393,7 @@ export function createCodeEngine({
     };
   }
 
-  async function createSession({ title = null, model = null, permissionMode = null, cwd = null } = {}) {
+  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, environmentId = null } = {}) {
     const desktopId = randomUUID();
     try {
       const session = await fetchSession(desktopId).catch(() => null);
@@ -408,9 +408,14 @@ export function createCodeEngine({
     // it (see sendMessage below). `updateSession` is deliberately NOT called:
     // Desktop rejects it for a session that does not exist, so the old code's
     // "prepare the session" step only ever logged an error.
+    // Which advertised environment the caller picked. Stored even when null so
+    // the row's environment is stable across reads (sessionResource reports the
+    // bridge default for an unset one — see environmentForSession).
+    const environment_id = typeof environmentId === "string" && environmentId ? environmentId : null;
     await updateMeta(desktopId, (entry) => {
       entry.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
       entry.cwd = cwd || entry.cwd || null;
+      if (environment_id) entry.environment_id = environment_id;
       if (title) entry.title = String(title).slice(0, 200);
     });
     const record = {
@@ -422,7 +427,10 @@ export function createCodeEngine({
       lastActivityAt: Date.now(),
       isRunning: false,
     };
-    return sessionResource(record, { meta: { draft: true }, revision: revisionFor(desktopId) });
+    return sessionResource(record, {
+      meta: { draft: true, environment_id },
+      revision: revisionFor(desktopId),
+    });
   }
 
   async function deleteSession(id) {

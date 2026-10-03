@@ -13,7 +13,14 @@ import {
 import { createAuthService, AuthError } from "./auth.mjs";
 import { createEngine, CompletionError } from "./engine.mjs";
 import { createCodeEngine } from "./code-engine.mjs";
-import { BRIDGE_ENVIRONMENT_ID, bridgeEnvironment } from "./code-transcript.mjs";
+import {
+  BRIDGE_ENVIRONMENT_ID,
+  CLOUD_ENVIRONMENT_ID,
+  bridgeEnvironment,
+  cloudEnvironment,
+  isRenderableEntry,
+  sseFrameForEntry,
+} from "./code-transcript.mjs";
 import { desktopSessionIdFor as codeSessionDesktopId } from "./code-ids.mjs";
 import { createMobileStore } from "./store.mjs";
 import { createDesktopClient } from "./desktop-client.mjs";
@@ -738,6 +745,10 @@ async function handleCodeRoutes(request, response, url) {
         model: body.model ?? body.config?.model ?? null,
         permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
         cwd: body.cwd ?? null,
+        // Which environment the picker chose. Both ids the facade advertises
+        // run on the same Desktop; the session records it so its detail screen's
+        // by-id environment read finds the record it was created against.
+        environmentId: body.environment_id ?? body.environmentId ?? null,
       });
       sendJson(response, 201, resource);
     } catch (error) {
@@ -870,33 +881,61 @@ async function handleCodeRoutes(request, response, url) {
   }
 
   // --- environments: the paired Desktop offered as a runner -------------------
+  // Two records, both backed by the same self-hosted Desktop:
+  //   * `anthropic_cloud` — the row the new-session picker needs in its "Cloud
+  //     environments" section. Without it that section shows the onboarding
+  //     empty state and a new session cannot be started.
+  //   * `bridge` — the same Desktop as a paired device ("Remote control").
+  // The list is newest-first by convention elsewhere, but order is not
+  // significant here; `first_id`/`last_id` bracket whatever order is returned.
   const environmentsBase =
     /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/?$/i;
   if (environmentsBase.test(path) && method === "GET") {
     const online = await desktopReady();
+    const environments = [
+      cloudEnvironment({ online }),
+      bridgeEnvironment({ online, cliVersion: desktopVersion() }),
+    ];
     sendJson(response, 200, {
-      environments: [bridgeEnvironment({ online, cliVersion: desktopVersion() })],
+      environments,
       has_more: false,
-      first_id: BRIDGE_ENVIRONMENT_ID,
-      last_id: BRIDGE_ENVIRONMENT_ID,
+      first_id: environments[0].environment_id,
+      last_id: environments[environments.length - 1].environment_id,
     });
     return true;
   }
 
+  // Creating an environment. The picker's "Create environment" button does not
+  // need a real upstream — the Desktop the facade runs against IS the
+  // environment — so answer with the cloud record the list already advertises
+  // rather than 404ing, which would leave the create sheet stuck. A caller that
+  // names its own environment gets that name echoed back on the same record.
+  if (environmentsBase.test(path) && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const online = await desktopReady();
+    const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : undefined;
+    sendJson(response, 201, cloudEnvironment({ online, ...(name ? { name } : {}) }));
+    return true;
+  }
+
   // The by-id read the detail screen makes to resolve the session's runner. It
-  // asks for `anthropic-bridge-local` (BRIDGE_ENVIRONMENT_ID) — the one record
-  // the list above advertises — and gets that single resource back.
+  // asks for whichever id the session carries — the cloud or the bridge record
+  // above — and gets that single resource back.
   const environmentByIdMatch = path.match(
     /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments\/([^/]+)$/i,
   );
   if (environmentByIdMatch && method === "GET") {
     const id = decodeURIComponent(environmentByIdMatch[1]);
-    if (id !== BRIDGE_ENVIRONMENT_ID) {
-      sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
+    const online = await desktopReady();
+    if (id === BRIDGE_ENVIRONMENT_ID) {
+      sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
       return true;
     }
-    const online = await desktopReady();
-    sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
+    if (id === CLOUD_ENVIRONMENT_ID) {
+      sendJson(response, 200, cloudEnvironment({ online }));
+      return true;
+    }
+    sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
     return true;
   }
 
