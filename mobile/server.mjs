@@ -896,6 +896,10 @@ async function handleCodeRoutes(request, response, url) {
       cloudEnvironment({ online }),
       bridgeEnvironment({ online, cliVersion: desktopVersion() }),
     ];
+    // The picker's cloud section stays empty on device even though this list is
+    // answered. Print the body verbatim so the next tap shows whether the app is
+    // receiving two records and dropping one, or never getting them at all.
+    console.log(`[mobile-code]   environments=${JSON.stringify(environments).slice(0, 4000)}`);
     sendJson(response, 200, {
       environments,
       has_more: false,
