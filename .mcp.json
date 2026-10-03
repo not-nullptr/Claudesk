@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "pyghidra": {
+      "type": "stdio",
+      "command": "/config/xdg/bin/uvx",
+      "args": [
+        "--from",
+        "/workspace/tools/pyghidra-mcp",
+        "pyghidra-mcp",
+        "--transport",
+        "stdio",
+        "--project-path",
+        "/workspace/ghidra-projects",
+        "--project-name",
+        "claude-ipa",
+        "--program-options",
+        "/workspace/Claudesk/tools/ghidra-mcp/ios-analyzer-options.json",
+        "/workspace/ipa-work/extracted/Payload/Claude.app/Claude"
+      ],
+      "env": {
+        "HOME": "/config",
+        "GHIDRA_INSTALL_DIR": "/workspace/tools/ghidra",
+        "JAVA_HOME": "/workspace/tools/jdk21",
+        "JAVA_HOME_OVERRIDE": "/workspace/tools/jdk21",
+        "PATH": "/workspace/tools/jdk21/bin:/config/xdg/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

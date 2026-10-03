@@ -1,0 +1,12 @@
+{
+  "program_options": {
+    "Analyzers": {
+      "Decompiler Parameter ID": true,
+      "Swift Demangler": true,
+      "Objective-C 2.0": true,
+      "Objective-C 2 Message": true,
+      "Objective-C Message": true,
+      "DWARF": true
+    }
+  }
+}
