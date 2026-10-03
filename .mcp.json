@@ -12,10 +12,7 @@
         "--project-path",
         "/workspace/ghidra-projects",
         "--project-name",
-        "claude-ipa",
-        "--program-options",
-        "/workspace/Claudesk/tools/ghidra-mcp/ios-analyzer-options.json",
-        "/workspace/ipa-work/extracted/Payload/Claude.app/Claude"
+        "claude-ipa"
       ],
       "env": {
         "HOME": "/config",
