@@ -191,6 +191,7 @@ Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/
 - `POST /api/remote/store`：读写经过字段过滤的 Desktop store。
 - `POST /api/remote/settings`：Gateway 编辑器桥接（需显式打开）。
 - `GET|PUT /api/account_profile`：受限的账户资料/指令设置。
+- `PATCH /api/account/settings`：仅接受 `code_default_transcript_view`（`normal|thinking|verbose`），用于 Code 选项里的“Default transcript view”。
 - `/api/bootstrap` 及选定的组织协议路由：转发官方启动请求。
 
 ### 服务器工作目录选择

@@ -491,6 +491,7 @@ const protocolRules = [
   { methods: new Set(["GET"]), path: /^\/edge-api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
+  { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+\/(?:feature_settings|cowork_settings|office_settings)$/i },
   { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
@@ -797,6 +798,37 @@ function validateAccountProfileUpdate(method, pathname, body) {
   }
 }
 
+// The official renderer persists account-scoped Claude Code settings with a
+// PATCH to /api/account/settings. The one such setting in the current bundle is
+// the Code tab's "Default transcript view" (`code_default_transcript_view`),
+// which the client writes on its own after the segmented control changes. The
+// bridge previously dropped that path, so the optimistic write rolled back and
+// the control snapped back to Normal.
+const allowedAccountSettings = new Map([
+  ["code_default_transcript_view", new Set(["normal", "thinking", "verbose"])],
+]);
+
+function validateAccountSettingsUpdate(method, pathname, body) {
+  if (method !== "PATCH" || pathname !== "/api/account/settings") return;
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    throw new ApiError(400, "Account setting update must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ApiError(400, "Account setting update must be an object");
+  }
+  const keys = Object.keys(parsed);
+  if (!keys.length) throw new ApiError(400, "Account setting update is empty");
+  for (const key of keys) {
+    const values = allowedAccountSettings.get(key);
+    if (!values || !values.has(parsed[key])) {
+      throw new ApiError(400, "Account setting is not allowed");
+    }
+  }
+}
+
 function sanitizeStoreValue(surface, store, value) {
   if (surface === "LocalAgentModeSessions" && store === "sessionsBridgeStatusStore") {
     return { remoteToolsDeviceName: value?.remoteToolsDeviceName ?? null };
@@ -830,6 +862,7 @@ async function forwardOfficialProtocol(request, response, url) {
     ? Buffer.alloc(0)
     : await readRequestBuffer(request);
   validateAccountProfileUpdate(method, url.pathname, body);
+  validateAccountSettingsUpdate(method, url.pathname, body);
   const result = await desktop.protocol({
     method,
     pathname: url.pathname,

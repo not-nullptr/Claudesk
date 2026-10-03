@@ -14,6 +14,7 @@ find rootfs scripts -type f -name '*.sh' -exec sh -n {} \;
 
 node scripts/security-smoke.mjs
 node scripts/bridge-parity-smoke.mjs
+node scripts/account-settings-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/renderer-patches-smoke.mjs
 node scripts/renderer-runtime-smoke.mjs
