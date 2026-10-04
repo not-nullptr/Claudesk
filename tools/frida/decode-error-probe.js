@@ -151,60 +151,117 @@ const CANDIDATES = {
 // a negative number (it throws, which the catch would swallow into a silent "no
 // name" — indistinguishable from a wrong layout). So the negative case is
 // applied with `sub()`, which only ever sees a positive magnitude.
-function relativeName(descriptor) {
-  // Masking happens here, not only at the caller: on arm64e the descriptor is
-  // itself a signed pointer (a metadata's `Description` field is a
-  // `TargetSignedPointer`), so a pointer that arrives looking clean can still
-  // carry signature bits. Masking at every hop is what makes one mask suffice
-  // for a walk of any depth.
-  for (const candidate of variants(descriptor)) {
-    try {
-      const field = candidate.add(8);
-      const relative = field.readS32();
-      const address = relative < 0 ? field.sub(-relative) : field.add(relative);
-      const name = address.readUtf8String(128);
-      if (name && NAME_SHAPE.test(name)) return name;
-    } catch (error) { /* try the next variant */ }
-  }
-  return null;
-}
-
-// arm64e pointers are signed: the address lives in bits 0-47 and bits 48-63
-// hold the signature. A box word therefore reads as 0x01_000001f6e05c51 where
-// the mapped address is 0x1f6e05c51, and a live run showed exactly that — x1 and
-// box+0 sharing `0x1f6e05c51` under different top bytes. Dereferencing the signed
-// form lands on an unmapped address, throws, and is swallowed as "no name",
-// which is indistinguishable from a wrong layout. So every candidate is tried
-// both as-read and masked down to its address bits.
+// Masking happens at every hop, not only at the caller: on arm64e the descriptor
+// is itself a signed pointer (a metadata's `Description` field is a
+// `TargetSignedPointer`), so a pointer that arrives looking clean can still
+// carry signature bits — and a pointer that arrives signed dereferences to an
+// unmapped page. Masking in one place is enough only if it is the place every
+// read goes through, which is why `variants` is used for both the pointer and
+// the descriptor it yields.
+//
+// arm64e pointers are signed: the address lives in bits 0-47 and bits 48-63 hold
+// the signature. A word therefore reads as 0x01_000001f6e05c51 where the mapped
+// address is 0x1f6e05c51, and a live run showed exactly that — x1 and box+0
+// sharing `0x1f6e05c51` under different top bytes.
 const POINTER_MASKS = ['0x0000ffffffffffff', '0x00ffffffffffffff'];
+
+// A word read out of an image that dyld has not rewritten — a section of a
+// binary read from disk, or a `__DATA_CONST` slot whose fixups were not applied
+// — is a chained-fixup rebase rather than an address: bit 63 clear, the target
+// image-relative in the low 43 bits. Undoing that costs one mask and one add,
+// and it is offered as one more candidate so such a word is not lost. The base
+// is this app's preferred base, which is the only build this probe is for.
+const FIXUP_TARGET_MASK = '0x7ffffffffff';
+const FIXUP_BASE = '0x100000000';
 
 function variants(pointer) {
   if (!pointer) return [];
   const out = [pointer];
-  for (const mask of POINTER_MASKS) {
+  const push = (candidate) => {
     try {
-      const masked = pointer.and(ptr(mask));
-      if (!masked.isNull() && !masked.equals(pointer)) out.push(masked);
+      if (candidate && !candidate.isNull() && !out.some((seen) => seen.equals(candidate))) out.push(candidate);
     } catch (error) { /* keep what we have */ }
+  };
+  for (const mask of POINTER_MASKS) {
+    try { push(pointer.and(ptr(mask))); } catch (error) { /* keep what we have */ }
   }
+  try {
+    if (pointer.and(ptr('0x8000000000000000')).isNull()) push(pointer.and(ptr(FIXUP_TARGET_MASK)).add(ptr(FIXUP_BASE)));
+  } catch (error) { /* not a fixup */ }
   return out;
+}
+
+// Name the type reachable from `pointer` by `mode`: `direct` when the pointer is
+// already the descriptor, otherwise the pointer at `pointer + mode` is the
+// descriptor, whose name sits at `descriptor + 8` through a signed relative
+// offset. Each shape of the base (as-read, masked, fixup) is tried in turn, and
+// when `trail` is given every failed hop leaves a note. Attempts used to fail
+// into the same silent `null` — which is why several runs could report
+// `names: []` without saying where the walk stopped; with a trail a blind run
+// carries the reason with it.
+function nameStep(pointer, mode, trail) {
+  // The base the deref starts from is itself masked: a word read out of a box is
+  // a signed pointer too (x1 and box+0 shared `0x1f6e05c51` under different top
+  // bytes in the live run), and a signed base reads an unmapped page. This is
+  // the bug the previous revision fixed, so it must survive every refactor.
+  for (const base of variants(pointer)) {
+    const baseTag = base.equals(pointer) ? '' : '+masked';
+    let descriptor = null;
+    try {
+      descriptor = mode === 'direct' ? ptrOrNull(base) : ptrOrNull(base.add(mode).readPointer());
+    } catch (error) {
+      if (trail) trail.push(`${mode}${baseTag}: deref failed (${error.message})`);
+      continue;
+    }
+    if (!descriptor) { if (trail) trail.push(`${mode}${baseTag}: null`); continue; }
+    const name = nameFromDescriptor(descriptor, `${mode}${baseTag}`, trail);
+    if (name) return name;
+  }
+  return null;
+}
+
+function nameFromDescriptor(descriptor, at, trail) {
+  for (const candidate of variants(descriptor)) {
+    const tag = candidate.equals(descriptor) ? '' : '+fixed';
+    const field = candidate.add(8);
+    let relative = null;
+    try { relative = field.readS32(); } catch (error) {
+      if (trail) trail.push(`${at}@${candidate}${tag}: no s32 (${error.message})`);
+      continue;
+    }
+    let address = null;
+    try { address = relative < 0 ? field.sub(-relative) : field.add(relative); } catch (error) {
+      if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} failed (${error.message})`);
+      continue;
+    }
+    // A short read first: a name this probe cares about is short, and a long
+    // read that runs into an unmapped page would throw and lose a name that was
+    // right there.
+    for (const length of [64, 128]) {
+      try {
+        const name = address.readUtf8String(length);
+        if (name && NAME_SHAPE.test(name)) return name;
+        if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} = ${JSON.stringify((name || '').slice(0, 32))}`);
+        break;
+      } catch (error) {
+        if (trail && length === 128) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} unreadable (${error.message})`);
+      }
+    }
+  }
+  return null;
+}
+
+// Direct walk from a descriptor, with no register/word in front of it. The probe
+// itself reaches names through `nameStep`; this is the entry point the offline
+// harness (`/tmp/nametest.mjs`) calls to check the walk against the real binary.
+function relativeName(descriptor) {
+  return nameStep(descriptor, 'direct', null);
 }
 
 function attemptName(candidates, index, mode) {
   const candidate = candidates[index];
   if (!candidate) return null;
-  for (const pointer of variants(candidate)) {
-    if (mode === 'direct') {
-      const name = relativeName(pointer);
-      if (name) return name;
-      continue;
-    }
-    try {
-      const name = relativeName(pointer.add(mode).readPointer());
-      if (name) return name;
-    } catch (error) { /* try the next variant */ }
-  }
-  return null;
+  return nameStep(candidate, mode, null);
 }
 
 const votes = new Map();  // "source|index|mode" -> consecutive agreements
@@ -224,18 +281,16 @@ function reportLayout(context, source) {
   layoutSent = true;
   const words = [];
   const names = [];
+  const trail = [];
+  // nameStep masks the base itself and reports which shape won, so this only
+  // has to hand it each register/word and keep the names and the reasons apart.
   const inspect = (pointer, at) => {
     if (!pointer) return;
-    for (const candidate of variants(pointer)) {
-      const tag = candidate.equals(pointer) ? '' : '+masked';
-      for (const mode of DEREF_MODES) {
-        let name = null;
-        if (mode === 'direct') name = relativeName(candidate);
-        else {
-          try { name = relativeName(candidate.add(mode).readPointer()); } catch (error) { /* not a pointer */ }
-        }
-        if (name) names.push({ at: at + tag, via: String(mode), name });
-      }
+    for (const mode of DEREF_MODES) {
+      const steps = [];
+      const name = nameStep(pointer, mode, steps);
+      if (name) names.push({ at, via: String(mode), name });
+      else for (const step of steps) trail.push(`${at} ${step}`);
     }
   };
   // The registers themselves first, then the words they point at: for an
@@ -253,6 +308,9 @@ function reportLayout(context, source) {
     x1: ptrOrNull(context.x1) ? context.x1.toString() : null,
     words,
     names,
+    // Why the walk stopped where it did, per candidate and shape. Empty when
+    // every candidate named a type, which is the case that needs no reading.
+    why: names.length ? [] : trail.slice(0, 24),
   });
 }
 

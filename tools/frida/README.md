@@ -155,11 +155,20 @@ remembered and used alone from then on. The search is bounded and stops the
 moment it locks, so a healthy run pays it only for its first few throws. It
 announces the answer once as `calibrated {source, candidate, mode, why}`.
 
-Every candidate is also tried **masked to its address bits**. arm64e pointers are
-signed — the address is bits 0-47, bits 48-63 are the signature — so a box word
-reads as `0x01_000001f6e05c51` where the mapped address is `0x1f6e05c51`, and
-dereferencing the signed form lands on an unmapped page. A live run showed
-exactly that: `x1` and `box+0` sharing the low 47 bits under different top bytes.
+Every candidate is also tried **masked to its address bits**, at every hop. arm64e
+pointers are signed — the address is bits 0-47, bits 48-63 are the signature — so
+a box word reads as `0x01_000001f6e05c51` where the mapped address is
+`0x1f6e05c51`, and dereferencing the signed form lands on an unmapped page. A live
+run showed exactly that: `x1` and `box+0` sharing the low 47 bits under different
+top bytes. The masking is inside the walk, not only at its caller, because the
+descriptor a metadata points at is *itself* a signed pointer, so a hop that looks
+clean can still carry signature bits.
+
+A third shape is tried: the **chained-fixup** form. A word in `__DATA_CONST` that
+dyld has not rewritten yet is not an address but `2^52 + target`, with the target
+image-relative (`0x10000004b28eac` is `0x104b28eac`). Reading such a word is what
+a section read ahead of dyld, or a stale mapping, yields; undoing it costs one
+mask and one add, and without it that word walks nowhere.
 
 Alongside that, `throw-types {names:[…], unresolved, calibrated}` goes out 15 s
 after boot (or as soon as 12 distinct types have been seen): the first distinct
@@ -169,11 +178,14 @@ even when it is not the one asked for, so that count is free. Setting
 `TYPE_FILTER = null` at the top still reports every throw instead of filtering,
 for when a full census is wanted.
 
-A one-shot `layout {words:[…], names:[…]}` is emitted on the first allocation:
-the argument registers' words, and which of them actually names a type
-(`{at, via, name}`, `at` like `x0+8`, `via` `direct` or `deref8`). That report is
-the whole answer to "where does the metadata live on this build" — a run that
-stays blind carries the evidence instead of only the count.
+A one-shot `layout {words:[…], names:[…], why:[…]}` is emitted on the first
+allocation: the argument registers' words, which of them actually names a type
+(`{at, via, name}`, `at` like `x0+8`, `via` `direct` or `deref8`), and — when
+`names` is empty — `why`, the per-hop reason the walk stopped (the value read,
+the offset applied, the string that failed `NAME_SHAPE`). `why` is what makes a
+blind run conclusive: `deref8@x0: null` is a null word, `… unreadable (…)` is a
+bad pointer, and `… = "…"` is a reachable string that is not a type name. Rebuild
+with a code_signing-disabled gadget to get `why` — see the risks note.
 
 ## How the gadget runs `probe.js` in script mode
 
@@ -396,10 +408,14 @@ app *debuggable*, and still nothing has attached.
   probe could not name the type. Read the one-shot `layout` report: if any entry
   in `names` exists, the layout *is* findable and the search simply did not reach
   it — move the winning `at`/`via` to the front of `CANDIDATES`. If `names` is
-  empty, `swift_allocError`'s first argument is not the type on this build after
-  all, and the next thing to try is `swift_getTypeName` on x0 (safe only once x0
-  is known to be a real pointer) or disassembling a known throw site. A
-  non-empty `names` with `unresolved` near zero means naming is fine and a quiet
+  empty, read `why` — it is the per-hop reason, so the failure names itself:
+  `… deref failed (…)` is an unmapped pointer, `… rel 0 -> …x = ""` is a word that
+  pointed at zeros, `… = "SomeString"` is a word that reached a real string that
+  is not a type name. Only when `why` shows every hop reaching plausible memory
+  is `swift_allocError`'s first argument genuinely not the type on this build,
+  and the next thing to try is `swift_getTypeName` on x0 (safe only once x0 is
+  known to be a real pointer) or disassembling a known throw site. A non-empty
+  `names` with `unresolved` near zero means naming is fine and a quiet
   `model-decoding-error` log is the real answer. (The relative name offset is
   signed and negative as often as positive; it is applied with `sub()` for the
   negative case, because Frida's `add()` throwing on a negative number would be
