@@ -28,9 +28,13 @@ import {
 import { createCodeEventTranslator, frameFromPayload, isCodeRecord, watchFrameFromPayload } from "../mobile/code-events.mjs";
 import {
   CODE_ID_PREFIX,
+  SESSION_LIFECYCLE_STATUS,
   SESSION_STATUS,
+  SESSION_WORKER_STATUS,
   STATUS_BUCKET,
+  WORKER_STATUS,
   codeIdFor,
+  resourceWorkerStatusOf,
   desktopSessionIdFor,
   isCodeId,
   sessionStatusOf,
@@ -81,7 +85,10 @@ assert.equal(row.id, "code_d1f2e3a4-0000-1111-2222-333344445555");
 assert.equal(desktopSessionIdFor(row.id), record.sessionId, "the desktop id survives the round trip");
 assert.equal(row.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(row.environment_kind, "bridge", "enum values are literal, never snake-cased keys");
-assert.equal(row.status, SESSION_STATUS.idle);
+// The row's `status` is the lifecycle axis, not the rich SessionStatus the
+// detail record reports.
+assert.equal(row.status, SESSION_LIFECYCLE_STATUS.active);
+assert.equal(sessionResponse({ ...record, isArchived: true }).status, SESSION_LIFECYCLE_STATUS.archived);
 assert.equal(row.status_bucket, STATUS_BUCKET.completed);
 assert.equal(row.created_at, "2026-10-02T10:00:00.000Z");
 // Keys are snake_case for the app's .convertFromSnakeCase decoder.
@@ -96,6 +103,22 @@ assert.equal(detail.permission_mode, "acceptEdits");
 assert.equal(detail.session_context.cwd, "/workspace/Claudesk");
 assert.equal(detail.revision, 7);
 assert.equal(detail.status_bucket, STATUS_BUCKET.completed);
+// The detail record's worker axis is WorkerStatus (processing | idle) — a
+// running turn is `processing`, and `running` is not a case it has. The row
+// keeps the richer SessionWorkerStatus.
+assert.equal(detail.worker_status, WORKER_STATUS.idle);
+assert.equal(row.worker_status, SESSION_WORKER_STATUS.idle);
+const runningRecord = { ...record, isRunning: true, turnRunning: true };
+assert.equal(sessionResource(runningRecord).worker_status, WORKER_STATUS.processing);
+assert.equal(sessionResponse(runningRecord).worker_status, SESSION_WORKER_STATUS.running);
+assert.equal(
+  sessionResource(record, { pendingApproval: true }).worker_status,
+  WORKER_STATUS.processing,
+  "an open prompt is processing on the detail axis",
+);
+assert.equal(resourceWorkerStatusOf({}, { pendingApproval: true }), WORKER_STATUS.processing);
+// SessionResource.connectionStatus has no unspecified/unknown case.
+assert.equal(sessionResource({ ...record, connectionStatus: "unknown" }).connection_status, "connected");
 
 // ---- independently recovered wire contract ----
 const envelopes = eventEnvelopes(probe.transcript);

@@ -138,8 +138,12 @@ SessionStatus           requires_action | running | idle | archived | pending | 
 SessionStatusBucket     blocked | unknown | review_ready | working | completed | failed
 SessionConnectionStatus connected | disconnected | unspecified | unknown
 SessionWorkerStatus     running | idle | requires_action | unspecified | unknown
+SessionLifecycleStatus  active | archived | paused | failed | unspecified | unknown
+ConnectionStatus        connected | disconnected
+WorkerStatus            processing | idle
 EnvironmentKind         anthropic_cloud | byoc | bridge | unknown
 BridgeSpawnMode         single-session | worktree | same-dir
+SdkPermissionMode       default | acceptEdits | bypassPermissions | dontAsk | plan | auto | unknown
 SessionWatchEvent       upserted | deleted
 ```
 
@@ -148,6 +152,49 @@ Wildcard values are 0x1047e59e0 `provision_failed`, 0x1047e901c `review_ready`,
 `same-dir`, 0x104ba4984 `upserted`. Note the **enum-value casing rule**: the key
 strategy never rewrites these, only dictionary keys, so the wire values are the
 literals above even though the Swift cases are camelCase.
+
+Three same-named-looking axes are **different types on different records**, and
+each record declares its own — read the field's mangled type, not the JSON key:
+
+| JSON key | List row (`SessionResponse`) | Detail record (`SessionResource`) |
+| --- | --- | --- |
+| `status` | `SessionLifecycleStatus` (required) | — |
+| `session_status` | — | `SessionStatus` (required) |
+| `worker_status` | `SessionWorkerStatus?` | `WorkerStatus?` |
+| `connection_status` | `SessionConnectionStatus?` | `ConnectionStatus?` |
+| `config.permission_mode` | `SdkPermissionMode?` | `permission_mode: SdkPermissionMode?` |
+
+`WorkerStatus` has only `processing | idle`, so a running turn (or an open
+approval prompt) must not be reported there as `running`/`requires_action`;
+`ConnectionStatus` has no `unspecified`/`unknown`. Both records carry
+`status_bucket`, which is `SessionStatusBucket` on each.
+
+`SdkPermissionMode` is the one enum whose raw values are **camelCase**, because
+it mirrors the Claude Code SDK's own strings — Desktop's `permissionMode` goes
+through unchanged. Its literals sit with `dontAsk`/`userSettings` in the pool
+(0x1047e6e64); the snake `accept_edits` strings in the pool are localization
+keys (`accept_edits_mode_title`), not enum values.
+
+## 5b. The model selector's `ThinkingOptions`
+
+`ModelEntry.thinking` is `ThinkingOptions?`, not Desktop's catalog entry:
+
+```
+ThinkingOptions { description: String?, effortOptions: [EffortOption], modeOptions: [ModeOption] }
+EffortOption    { id: ThinkingEffort, name: String, description: String?, recommended: Bool, badge: Badge?, tooltip: Tooltip? }
+ModeOption      { id: ThinkingMode,   name: String, description: String?,                   badge: Badge?, tooltip: Tooltip? }
+```
+
+Both option arrays are **non-optional**, so a model that offers only one of them
+(a Code model offers effort, a mode-only model offers no effort) fails the
+decode of the whole `IdentifiedArray<ModelEntry>` — one such model empties the
+picker for every surface, and `SurfaceState.model` still labels the composer
+with the previously used model. `EffortOption.recommended` is likewise
+non-optional, and Desktop's catalog marks at most one option and usually omits
+the key entirely. `badge` is dropped: `Badge.variant` is another enum whose
+payload-less wire form is unproven and the field is optional. `ThinkingEffort`
+and `ThinkingMode` are `struct { rawValue: String }` (bare strings), so ids pass
+through; `tooltip` is `{ content: String }`.
 
 ## 6. Mapping onto Claudesk (the real Desktop IPC)
 

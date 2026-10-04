@@ -563,20 +563,69 @@ export function createEngine({
     return (await chatModels()).defaultModel || undefined;
   }
 
-  async function listModels() {
-    const { models } = await chatModels();
-    return models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      short_name: model.name.length > 16 ? `${model.name.slice(0, 15)}…` : model.name,
-      section: "main",
-      disabled: false,
-      capabilities: {},
-      // The same effort/mode options the web UI offers; the app builds its
-      // effort picker from them.
-      ...(model.thinking ? { thinking: model.thinking } : {}),
-      ...(model.supports1mContext ? { supports_1m_context: true } : {}),
-    }));
+  // The app's own `ThinkingOptions`: `effortOptions` and `modeOptions` are BOTH
+  // non-optional `IdentifiedArray`s, and an effort option's `recommended` is a
+  // non-optional `Bool`. Desktop's catalog is shaped liberally by comparison —
+  // a Code model offers effort only, a mode-only model offers no effort at all,
+  // and only the one recommended effort carries the flag. Passed through
+  // verbatim, whichever model disagrees with the app fails the decode of the
+  // whole `IdentifiedArray<ModelEntry>`, and every model goes with it: the
+  // composer keeps whatever label it had and the picker opens on nothing.
+  // `badge` is dropped because its `Variant` enum's wire form is unproven and
+  // the field is optional anyway.
+  function thinkingOptions(thinking) {
+    if (!thinking || typeof thinking !== "object") return null;
+    const usable = (raw) => (raw && typeof raw.id === "string" && typeof raw.name === "string" ? raw : null);
+    const shared = (raw) => ({
+      ...(typeof raw.description === "string" && raw.description ? { description: raw.description } : {}),
+      ...(raw.tooltip && typeof raw.tooltip.content === "string" && raw.tooltip.content
+        ? { tooltip: { content: raw.tooltip.content } }
+        : {}),
+    });
+    const options = (list) => (Array.isArray(list) ? list : []).map(usable).filter(Boolean);
+    return {
+      ...(typeof thinking.description === "string" && thinking.description
+        ? { description: thinking.description }
+        : {}),
+      effort_options: options(thinking.effort_options).map((raw) => ({
+        id: raw.id,
+        name: raw.name,
+        ...shared(raw),
+        // `recommended` is always present; Desktop marks at most one option.
+        recommended: raw.recommended === true,
+      })),
+      mode_options: options(thinking.mode_options).map((raw) => ({
+        id: raw.id,
+        name: raw.name,
+        ...shared(raw),
+      })),
+    };
+  }
+
+  // Desktop's own catalog for one surface. The Chat composer reads the `chat`
+  // list, the Code composer the `code` one — they are not interchangeable:
+  // Code's models offer effort without the thinking-mode switch, and a picker
+  // built from the wrong list offers options the surface cannot run. A surface
+  // Desktop does not publish falls back to the chat list.
+  async function listModels(surface = "chat") {
+    const catalog = await chatModels();
+    const entry = catalog.surfaces?.[surface] || catalog;
+    return (entry.models || []).map((model) => {
+      const thinking = thinkingOptions(model.thinking);
+      return {
+        id: model.id,
+        name: model.name,
+        short_name: model.name.length > 16 ? `${model.name.slice(0, 15)}…` : model.name,
+        section: "main",
+        disabled: false,
+        capabilities: {},
+        ...(model.description ? { description: model.description } : {}),
+        // The same effort/mode options the web UI offers; the app builds its
+        // effort picker from them.
+        ...(thinking ? { thinking } : {}),
+        ...(model.supports1mContext ? { supports_1m_context: true } : {}),
+      };
+    });
   }
 
   // What the app picked for reasoning, limited to what the model offers. Desktop

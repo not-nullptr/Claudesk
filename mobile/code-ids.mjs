@@ -51,12 +51,31 @@ export const CONNECTION_STATUS = Object.freeze({
   unknown: "unknown",
 });
 
+// WorkerStatus — the two-case axis `SessionResource.workerStatus` decodes
+// (`processing | idle`). The list row's `workerStatus` is the richer
+// SessionWorkerStatus below; the two types share only `idle`.
 export const WORKER_STATUS = Object.freeze({
+  processing: "processing",
+  idle: "idle",
+});
+
+// SessionWorkerStatus — the list row's `workerStatus`.
+export const SESSION_WORKER_STATUS = Object.freeze({
   running: "running",
   idle: "idle",
   requiresAction: "requires_action",
   unspecified: "unspecified",
   unknown: "unknown",
+});
+
+// SessionLifecycleStatus — the list row's `status` axis (a deployment
+// lifecycle), which is a DIFFERENT axis from the `sessionStatus` the detail
+// record and the status bucket report. Only the two states a self-hosted
+// Desktop can be in are needed; both are non-optional strings, because
+// `SessionResponse.status` is not optional.
+export const SESSION_LIFECYCLE_STATUS = Object.freeze({
+  active: "active",
+  archived: "archived",
 });
 
 export const ENVIRONMENT_KIND = Object.freeze({
@@ -89,6 +108,15 @@ export function sessionStatusOf(record, { pendingApproval = false } = {}) {
   return SESSION_STATUS.idle;
 }
 
+// The list row's `status` is SessionLifecycleStatus (active | archived |
+// paused | failed | unspecified | unknown), NOT the `sessionStatus` above: the
+// row reports the deployment lifecycle, and the rich per-turn axis reached the
+// app only through the detail record. A session on this Desktop is `active`
+// until it is archived; nothing here is paused or failed.
+export function sessionLifecycleStatusOf(record) {
+  return record?.isArchived ? SESSION_LIFECYCLE_STATUS.archived : SESSION_LIFECYCLE_STATUS.active;
+}
+
 export function statusBucketOf(status) {
   switch (status) {
     case SESSION_STATUS.requiresAction:
@@ -114,10 +142,34 @@ export function connectionStatusOf(record) {
   return CONNECTION_STATUS.connected;
 }
 
+// The list row's `workerStatus` (SessionWorkerStatus: running | idle |
+// requires_action | …). A pending approval is Desktop waiting on the user.
 export function workerStatusOf(record, { pendingApproval = false } = {}) {
-  if (pendingApproval) return WORKER_STATUS.requiresAction;
-  if (record?.workerStatus && Object.values(WORKER_STATUS).includes(record.workerStatus)) {
+  if (pendingApproval) return SESSION_WORKER_STATUS.requiresAction;
+  if (record?.workerStatus && Object.values(SESSION_WORKER_STATUS).includes(record.workerStatus)) {
     return record.workerStatus;
   }
-  return record?.isRunning ? WORKER_STATUS.running : WORKER_STATUS.idle;
+  return record?.isRunning ? SESSION_WORKER_STATUS.running : SESSION_WORKER_STATUS.idle;
+}
+
+// The detail record's `workerStatus` (WorkerStatus: processing | idle) — the
+// same question asked in a two-case vocabulary. `processing` is the only value
+// for a turn that is in flight or waiting on an approval; a still-unknown
+// status is idle, not a third state the enum does not have.
+export function resourceWorkerStatusOf(record, { pendingApproval = false } = {}) {
+  const status = workerStatusOf(record, { pendingApproval });
+  return status === SESSION_WORKER_STATUS.idle
+    || status === SESSION_WORKER_STATUS.unspecified
+    || status === SESSION_WORKER_STATUS.unknown
+    ? WORKER_STATUS.idle
+    : WORKER_STATUS.processing;
+}
+
+// `SessionResource.connectionStatus` (ConnectionStatus: connected |
+// disconnected) has no `unspecified`/`unknown` case, so the list row's wider
+// vocabulary is narrowed here rather than passed through.
+export function resourceConnectionStatusOf(record) {
+  return connectionStatusOf(record) === CONNECTION_STATUS.disconnected
+    ? CONNECTION_STATUS.disconnected
+    : CONNECTION_STATUS.connected;
 }

@@ -592,6 +592,39 @@ export function createCodeEngine({
     }
   }
 
+  // A branch name derived from the title, in the shape the real generator
+  // produces (`lower-kebab`). The facade does not manage git branches; the
+  // app only needs a non-empty name back so its new-session flow can continue.
+  function branchNameFor(title) {
+    const slug = String(title || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48)
+      .replace(/-+$/, "");
+    return slug || "claude-session";
+  }
+
+  // Code's new-session flow POSTs the first message and expects a title and a
+  // branch name back *before* it creates the session (the app fires
+  // `mobile_code_generate_title_and_branch_failure` when this leg fails). The
+  // title comes from the same dust call Chat uses — gated by the titles flag so
+  // a disabled generator costs no model request — and the branch is a slug of
+  // it. An empty/short message still yields a usable pair.
+  async function suggestTitleAndBranch(text) {
+    const message = typeof text === "string" ? text.trim() : "";
+    let title = "";
+    if (message && titles) {
+      try {
+        title = (await desktop.generateTitle({ message })).replace(/\s+/g, " ").trim().slice(0, 200);
+      } catch (error) {
+        log.error(`[mobile-code] cannot generate a title: ${error.message}`);
+      }
+    }
+    if (!title && message) title = message.replace(/\s+/g, " ").trim().slice(0, 60);
+    return { title, branchName: branchNameFor(title) };
+  }
+
   async function interrupt(id) {
     const desktopId = desktopSessionIdFor(id);
     if (!desktopId) throw notFound();
@@ -682,6 +715,7 @@ export function createCodeEngine({
     sessionEventEnvelopes,
     sessionTranscript,
     sendMessage,
+    suggestTitleAndBranch,
     interrupt,
     permissionsFor,
     respondToPermission,

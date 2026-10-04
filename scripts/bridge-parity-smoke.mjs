@@ -21,7 +21,10 @@ function section(source, start, end) {
 }
 
 function evaluate(code, resultExpression, context = {}) {
-  const sandbox = { ...context };
+  // The sections under test are Node code (bridge/server.mjs reads
+  // `process.env` for its trace switch); the sandbox has to look like Node for
+  // them to evaluate at all.
+  const sandbox = { process: { env: {} }, ...context };
   vm.runInNewContext(`${code}\nresult = ${resultExpression};`, sandbox);
   return JSON.parse(JSON.stringify(sandbox.result));
 }

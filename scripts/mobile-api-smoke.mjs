@@ -554,6 +554,34 @@ try {
     ["low", "medium", "high", "xhigh", "max"],
     "the model list keeps Claudesk's effort options so the app can show its picker",
   );
+  // ModelEntry.thinking is ThinkingOptions, whose effortOptions and modeOptions
+  // are BOTH non-optional and whose EffortOption.recommended is a non-optional
+  // Bool. Desktop's catalog supplies neither guarantee — this stub carries no
+  // `recommended` at all and is the shape that emptied the picker — so the
+  // facade must normalise every entry and never pass a `badge` through (its
+  // `Variant` enum's wire form is unproven and the field is optional).
+  for (const surface of bootstrap.model_selector_config) {
+    for (const model of surface.models) {
+      if (!model.thinking) continue;
+      assert.ok(Array.isArray(model.thinking.effort_options), `effort_options on ${model.id}`);
+      assert.ok(Array.isArray(model.thinking.mode_options), `mode_options on ${model.id}`);
+      assert.equal("badge" in model.thinking, false, `no thinking badge on ${model.id}`);
+      for (const option of model.thinking.effort_options) {
+        assert.equal(typeof option.recommended, "boolean", `recommended on ${model.id}/${option.id}`);
+        assert.equal("badge" in option, false, `no effort badge on ${model.id}/${option.id}`);
+      }
+    }
+  }
+  assert.deepEqual(
+    modelEntry("stub-sonnet").thinking.mode_options.map((option) => option.id),
+    ["auto", "off"],
+    "the mode options survive the normalisation",
+  );
+  assert.equal(
+    modelEntry("stub-sonnet").thinking.effort_options.every((option) => option.recommended === false),
+    true,
+    "an effort option Desktop does not mark is not recommended, not absent",
+  );
   assert.equal(modelEntry("stub-haiku").thinking, undefined, "a model without reasoning options has no picker");
 
   claudesk.resetCalls();
@@ -828,6 +856,10 @@ try {
   const createdResource = await created.json();
   assert.match(createdResource.id, /^code_[0-9a-f-]{36}$/, "a Code id is code_<desktopId>");
   assert.equal(createdResource.session_status, "idle");
+  // WorkerStatus (processing | idle) is what the detail record decodes; a new
+  // session's turn is not in flight yet.
+  assert.equal(createdResource.worker_status, "idle");
+  assert.equal(createdResource.connection_status, "connected");
   assert.equal(createdResource.environment_id, "anthropic-bridge-local");
   assert.ok(Object.keys(createdResource).every((key) => key === key.toLowerCase()), "no camelCase keys on the wire");
   const codeDesktopId = createdResource.id.slice("code_".length);
@@ -964,7 +996,10 @@ try {
   const codeListed = await (await call("/v1/code/sessions")).json();
   assert.equal(codeListed.data.length, 1);
   assert.equal(codeListed.data[0].id, createdResource.id);
-  assert.equal(codeListed.data[0].status, "idle");
+  // The row's `status` is SessionLifecycleStatus (active | archived | …), a
+  // different axis from the detail record's `session_status` and from the
+  // `status_bucket` the list groups by.
+  assert.equal(codeListed.data[0].status, "active");
   assert.equal(codeListed.data[0].status_bucket, "completed");
 
   // The app's list filter vocabulary (`active|paused|archived`) is a different

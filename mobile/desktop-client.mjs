@@ -169,8 +169,12 @@ export function createDesktopClient({
     return typeof payload?.title === "string" ? payload.title.trim() : "";
   }
 
-  // Chat models exactly as the web UI offers them (Desktop's own model
-  // selector), plus the surface default.
+  // Models exactly as the web UI offers them (Desktop's own model selector),
+  // kept per surface. Desktop publishes one entry per surface — `chat`,
+  // `cowork`, `code` — and they are NOT the same list: a Code entry offers
+  // effort without a thinking mode, a Chat entry offers both. The surface ids
+  // are Desktop's own and match the app's `ModelSurface` raw values, so an
+  // entry can be handed to the phone under the id it already has.
   async function chatModels() {
     const response = await fetchImpl(`${root}/edge-api/bootstrap/${bootstrapOrg}/app_start`, {
       signal: AbortSignal.timeout(30000),
@@ -179,22 +183,34 @@ export function createDesktopClient({
     });
     if (!response.ok) throw new DesktopError(`bootstrap returned HTTP ${response.status}`, 502);
     const bootstrap = await response.json();
-    const surfaces = Array.isArray(bootstrap?.model_selector_config) ? bootstrap.model_selector_config : [];
-    const surface = surfaces.find((item) => item?.id === "chat") || surfaces[0];
-    const models = (surface?.models || [])
-      .filter((model) => model && typeof model.id === "string")
-      .map((model) => ({
-        id: model.id,
-        name: model.name || model.id,
-        description: model.description || "",
-        // Effort levels and thinking modes the model offers (the web UI builds its
-        // effort picker from this); absent for models that cannot reason.
-        thinking: model.thinking && typeof model.thinking === "object" ? model.thinking : undefined,
-        supports1mContext: model.supports_1m_context === true,
-      }));
-    const state = (bootstrap?.model_selector_state || []).find((item) => item?.id === "chat");
-    const defaultModel = models.find((model) => model.id === state?.model)?.id || models[0]?.id || null;
-    return { models, defaultModel };
+    const configs = Array.isArray(bootstrap?.model_selector_config) ? bootstrap.model_selector_config : [];
+    const states = Array.isArray(bootstrap?.model_selector_state) ? bootstrap.model_selector_state : [];
+    const normalize = (entry) => {
+      const models = (entry?.models || [])
+        .filter((model) => model && typeof model.id === "string")
+        .map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          description: model.description || "",
+          // Effort levels and thinking modes the model offers (the web UI builds
+          // its effort picker from this); absent for models that cannot reason.
+          thinking: model.thinking && typeof model.thinking === "object" ? model.thinking : undefined,
+          supports1mContext: model.supports_1m_context === true,
+        }));
+      const state = states.find((item) => item?.id === entry?.id);
+      return {
+        models,
+        defaultModel: models.find((model) => model.id === state?.model)?.id || models[0]?.id || null,
+      };
+    };
+    const surfaces = {};
+    for (const entry of configs) {
+      if (entry && typeof entry.id === "string" && !surfaces[entry.id]) surfaces[entry.id] = normalize(entry);
+    }
+    // Chat is the surface the web UI has always used; it (or whatever Desktop
+    // published first) is also the fallback for a surface with no entry.
+    const chat = surfaces.chat || surfaces[configs.find((item) => item?.id)?.id] || { models: [], defaultModel: null };
+    return { models: chat.models, defaultModel: chat.defaultModel, surfaces };
   }
 
   // Follows GET /api/events (Server-Sent Events) and reconnects with backoff.

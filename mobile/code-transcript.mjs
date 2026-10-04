@@ -19,6 +19,9 @@ import {
   ENVIRONMENT_KIND,
   codeIdFor,
   connectionStatusOf,
+  resourceConnectionStatusOf,
+  resourceWorkerStatusOf,
+  sessionLifecycleStatusOf,
   sessionStatusOf,
   statusBucketOf,
   workerStatusOf,
@@ -156,14 +159,16 @@ export function environmentForSession(meta = {}) {
 // the ones a self-hosted Desktop does not have are emitted as null/[] so the
 // app's non-optional decodes still succeed.
 export function sessionResponse(record, { meta = {}, pendingApproval = false } = {}) {
-  const status = sessionStatusOf(record, { pendingApproval });
+  // Only the bucket is derived from this axis on the row; the row's own
+  // `status` is the lifecycle one below.
+  const sessionStatus = sessionStatusOf(record, { pendingApproval });
   const environment = environmentForSession(meta);
   return {
     id: codeIdFor(desktopIdOf(record)),
     environment_id: environment.id,
     environment_kind: environment.kind,
     title: record?.title || record?.name || "Untitled session",
-    status,
+    status: sessionLifecycleStatusOf(record),
     tags: Array.isArray(meta.tags) ? meta.tags : [],
     config: {
       sources: [],
@@ -188,7 +193,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
     agent_id: null,
     trigger_id: null,
     bound_device: null,
-    status_bucket: statusBucketOf(status),
+    status_bucket: statusBucketOf(sessionStatus),
     connector_domains_withheld: [],
   };
 }
@@ -196,12 +201,12 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
 // The detail record (GET /v1/code/sessions/{id}). `SessionResource` adds the
 // context, permission mode, spawn path and a revision counter.
 export function sessionResource(record, { meta = {}, revision = 0, pendingApproval = false } = {}) {
-  const status = sessionStatusOf(record, { pendingApproval });
+  const sessionStatus = sessionStatusOf(record, { pendingApproval });
   const environment = environmentForSession(meta);
   return {
     id: codeIdFor(desktopIdOf(record)),
     title: record?.title || record?.name || "Untitled session",
-    session_status: status,
+    session_status: sessionStatus,
     environment_id: environment.id,
     environment_kind: environment.kind,
     created_at: iso(record?.createdAt),
@@ -218,8 +223,10 @@ export function sessionResource(record, { meta = {}, revision = 0, pendingApprov
     },
     permission_mode: record?.permissionMode ?? "default",
     bridge_spawn_path: record?.spawnMode ?? BRIDGE_SPAWN_MODE.sameDir,
-    connection_status: connectionStatusOf(record),
-    worker_status: workerStatusOf(record, { pendingApproval }),
+    // The detail record decodes the two-case ConnectionStatus/WorkerStatus, not
+    // the row's wider Session* vocabulary.
+    connection_status: resourceConnectionStatusOf(record),
+    worker_status: resourceWorkerStatusOf(record, { pendingApproval }),
     post_turn_summary: null,
     external_metadata: null,
     unread: Boolean(meta.unread),
@@ -231,7 +238,7 @@ export function sessionResource(record, { meta = {}, revision = 0, pendingApprov
     trigger_id: null,
     origin: null,
     bound_device: null,
-    status_bucket: statusBucketOf(status),
+    status_bucket: statusBucketOf(sessionStatus),
     revision,
     connector_domains_withheld: [],
   };

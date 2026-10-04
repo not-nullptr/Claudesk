@@ -140,13 +140,17 @@ async function selectedModel() {
   return typeof saved?.model === "string" ? saved.model : "";
 }
 
-// A thinking selection is { effort?, mode? }; anything else is dropped.
+// The app both writes this field and reads it back, so the bytes it sent are
+// the bytes it knows how to decode — echo them and never re-shape them. That
+// matters because `ThinkingState` is a hand-written Codable (`effortAndMode`
+// exists only in the reflection section, so it is a case name, not a coding
+// key), which means its wire form is whatever the app's own `init(from:)` /
+// `encode(to:)` pair chose. Both a flat `{effort, mode}` and a re-derived
+// `type` tag are guesses at that, and a wrong guess fails the decode of the
+// whole model selector.
 function cleanThinking(value) {
-  if (!value || typeof value !== "object") return undefined;
-  const pick = {};
-  if (typeof value.effort === "string" && value.effort) pick.effort = value.effort;
-  if (typeof value.mode === "string" && value.mode) pick.mode = value.mode;
-  return pick.effort || pick.mode ? pick : undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return { ...value };
 }
 
 // The model selector is per-surface: the Chat composer reads the `chat` entry,
@@ -662,15 +666,22 @@ async function handleAccountRoutes(request, response, url) {
 async function handleBootstrapRoute(request, response, url) {
   const match = url.pathname.match(/^\/api\/bootstrap\/([0-9a-f-]{36})\/app_start$/i);
   if (!match || request.method !== "GET") return false;
-  const models = await engine.listModels();
+  const models = await engine.listModels("chat");
   const chosen = await selectedModel();
   const defaultModel = models.some((model) => model.id === chosen) ? chosen : models[0]?.id;
+  // Each surface gets Desktop's own catalog for it, not the chat list copied
+  // three ways: a Code entry offers effort without a thinking mode, and the
+  // composer builds its picker from whatever its own surface advertises.
+  const configs = await Promise.all(MODEL_SURFACES.map(async (surface) => ({
+    id: surface,
+    models: await engine.listModels(surface).catch(() => []),
+  })));
   sendJson(response, 200, {
     account: accountObject(),
     org_growthbook: orgGrowthbook(),
     current_user_access: userAccess(),
     model_selector_state: await Promise.all(MODEL_SURFACES.map((surface) => surfaceSelectorState(surface, defaultModel))),
-    model_selector_config: MODEL_SURFACES.map((surface) => ({ id: surface, models })),
+    model_selector_config: configs,
   });
   return true;
 }
@@ -807,6 +818,25 @@ async function handleCodeRoutes(request, response, url) {
   async function fail(error) {
     const status = error?.status || 500;
     sendErrorEnvelope(response, status, error?.type || "internal", error?.message || "internal error");
+  }
+
+  // --- title / branch generation ----------------------------------------------
+  // The new-session flow asks for a title and a branch name before it creates
+  // the session; a 404 here is what the phone reports as
+  // `mobile_code_generate_title_and_branch_failure`. `title` is the only field
+  // of `GenerateSessionTitleResponse`; `GenerateTitleAndBranchResponse` carries
+  // `branchName`, but the type has a hand-written decoder whose wire key is not
+  // recoverable from the binary, so answer both spellings — Codable ignores the
+  // one it does not want.
+  const dustMatch = path.match(/^\/api\/organizations\/[0-9a-f-]{36}\/dust\/(generate_title_and_branch|generate_session_title)$/i);
+  if (dustMatch && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const message = typeof body?.first_session_message === "string" ? body.first_session_message
+      : typeof body?.firstSessionMessage === "string" ? body.firstSessionMessage
+        : "";
+    const { title, branchName } = await codeEngine.suggestTitleAndBranch(message).catch(() => ({ title: "", branchName: "claude-session" }));
+    sendJson(response, 200, { title, branch_name: branchName, branchName });
+    return true;
   }
 
   // --- sessions list / create -------------------------------------------------
