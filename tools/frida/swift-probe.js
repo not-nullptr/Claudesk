@@ -22,20 +22,21 @@
 const log = (...parts) => console.log(parts.join(' '));
 
 // ---------------------------------------------------------------- A: resolver
-// Frida 17.21 moved the Swift resolver from functions-only to nominal types,
-// protocols and conformances. Glob syntax is `kind:[module!]pattern`; `*` is
-// the module wildcard, `!` separates module from name. The set below is
-// smallest-first so the log stays readable; widen the patterns to taste.
+// Frida 17.21 added `types:` (nominal type descriptors), `protocols:` and
+// `conformances:<Type>!<Protocol>` to the Swift resolver, alongside the
+// functions-only queries it started with. `*` is the glob wildcard and `!`
+// separates the two halves of a query. The set below is smallest-first so the
+// log stays readable; widen the patterns to taste.
 const CONFORMANCE_QUERIES = [
   'conformances:*!Swift.Decodable',
 ];
-const NOMINAL_QUERIES = [
-  'nominal:*!*EnvironmentResource*',
-  'nominal:*!*EnvironmentList*',
-  'nominal:*!*CodeProject*',
-  'nominal:*!*Channel*',
-  'nominal:*!*SessionResource*',
-  'nominal:*!*SessionWatch*',
+const TYPE_QUERIES = [
+  'types:*!*EnvironmentResource*',
+  'types:*!*EnvironmentList*',
+  'types:*!*CodeProject*',
+  'types:*!*Channel*',
+  'types:*!*SessionResource*',
+  'types:*!*SessionWatch*',
 ];
 const FUNCTION_QUERIES = [
   // The generic decode entry points, so we can see what a hook would target.
@@ -72,7 +73,7 @@ function dumpMatches(label, api, query) {
 const api = resolver();
 if (api) {
   for (const query of CONFORMANCE_QUERIES) dumpMatches('conformance', api, query);
-  for (const query of NOMINAL_QUERIES) dumpMatches('nominal', api, query);
+  for (const query of TYPE_QUERIES) dumpMatches('types', api, query);
   for (const query of FUNCTION_QUERIES) dumpMatches('function', api, query);
 }
 

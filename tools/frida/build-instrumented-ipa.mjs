@@ -243,14 +243,21 @@ const frameworks = join(stagedApp, "Frameworks");
 mkdirSync(frameworks, { recursive: true });
 writeFileSync(join(frameworks, GADGET_NAME), gadget);
 const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.js"));
-writeFileSync(join(frameworks, "probe.js"), probe);
 // The config is discovered by matching the gadget's filename with a `.config`
 // suffix; the script path stays relative so it resolves beside the gadget
-// wherever the bundle lands (we cannot know the on-device UUID path).
-writeFileSync(join(frameworks, "FridaGadget.config"), JSON.stringify({
+// wherever the bundle lands (we cannot know the on-device UUID path). On iOS
+// Frida additionally looks for the config in the *parent* of a `Frameworks`
+// directory, and resolves a relative script against whichever directory it
+// found the config in — so both files go in both places rather than betting on
+// one resolution order.
+const config = JSON.stringify({
   interaction: { type: "script", path: "probe.js", on_change: "ignore", parameters: { reportUrl, token } },
   teardown: "minimal",
-}, null, 2));
+}, null, 2);
+for (const dir of [frameworks, stagedApp]) {
+  writeFileSync(join(dir, "probe.js"), probe);
+  writeFileSync(join(dir, "FridaGadget.config"), config);
+}
 
 const binaryPath = join(stagedApp, "Claude");
 writeFileSync(binaryPath, addLoadCommand(readFileSync(binaryPath)));

@@ -5,10 +5,16 @@
 // same log the phone's traffic already reaches. That is the whole point of the
 // no-host setup — there is no Mac, no USB and no frida-server in this loop.
 //
-// The gadget hands us its `parameters` object from FridaGadget.config via the
-// `init()` entry point below. Two of them matter:
+// How the gadget runs this file, which is easy to get wrong:
+//   The gadget evaluates the script and then calls rpc.exports.init(stage,
+//   parameters) AUTOMATICALLY, and **blocks the app's entrypoint until it
+//   returns**. So init must do nothing but stash the parameters and hand off to
+//   a timer; any real work (ObjC, NSURLSession, the Swift resolver) happens
+//   after the app is actually up. It is NOT a global function called `init`.
+//
+// The two parameters that matter (from FridaGadget.config):
 //   reportUrl — the Claudesk base URL the app already talks to (e.g.
-//               https://claude.ai), POSTed to `<reportUrl>/__diag`.
+//               https://mobile.example.com), POSTed to `<reportUrl>/__diag`.
 //   token     — the shared secret the server's diag route checks
 //               (CLAUDE_MOBILE_FRIDA_TOKEN). Without it the route 404s.
 //
@@ -27,6 +33,7 @@ let reportUrl = null;
 let token = null;
 let seq = 0;
 let sent = 0;
+let started = false;
 
 function describe(value) {
   try {
@@ -84,21 +91,39 @@ function report(kind, payload) {
 }
 
 // ------------------------------------------------------------------- A: types
-// The query kinds Frida 17.21 added are guessed at here — `conformances` is
-// taken straight from the release example, the singular forms may or may not
-// exist. Every query is attempted and its outcome reported, so a single run
-// tells us which spellings the resolver in *this* build actually accepts
-// instead of us guessing again.
+// Frida 17.21's Swift resolver takes three query kinds — `types:` (nominal type
+// descriptors), `protocols:`, and `conformances:<Type>!<Protocol>` — each with
+// `*` globs. `conformances:*!Swift.Decodable` is the money query: it enumerates
+// every Decodable type the app registers, which is a superset of the DTOs the
+// Code tab has to decode.
+// Both the `module!name` and bare-name spellings of the `types:` glob are
+// attempted: the resolver answers with an `error` for any spelling it does not
+// accept, so one run pins the syntax down instead of another round of guessing.
 const QUERIES = [
   'conformances:*!Swift.Decodable',
-  'conformance:*!Swift.Decodable',
-  'nominal:*!*EnvironmentResource*',
-  'nominal:*!*EnvironmentList*',
-  'nominal:*!*CodeProject*',
-  'nominal:*!*Channel*',
-  'nominal:*!*SessionResource*',
-  'nominal:*!*SessionWatch*',
+  'conformances:*!Swift.Encodable',
+  'conformances:*!Swift.Codable',
+  'types:*Environment*',
+  'types:*!*Environment*',
+  'types:*CodeProject*',
+  'types:*!*CodeProject*',
+  'types:*Channel*',
+  'types:*Session*',
+  'protocols:*Decodable*',
+  'protocols:*!*Decodable*',
 ];
+
+// The server logs each finding as one line, truncated, so a query that matches
+// thousands of types has to be paged instead of dumped into a single payload.
+const INLINE_CAP = 60; // matches echoed inline in the `types` summary
+const CHUNK = 120; // names per follow-up `names` message
+
+function chunked(kind, query, names) {
+  const total = Math.ceil(names.length / CHUNK);
+  for (let i = 0; i < total; i += 1) {
+    post(kind, { query, chunk: i + 1, of: total, names: names.slice(i * CHUNK, (i + 1) * CHUNK) });
+  }
+}
 
 function dumpTypes(reason) {
   let resolver;
@@ -112,11 +137,12 @@ function dumpTypes(reason) {
   for (const query of QUERIES) {
     try {
       const matches = resolver.enumerateMatches(query);
-      results.push({
-        query,
-        count: matches.length,
-        matches: matches.slice(0, 400).map((m) => `${m.address} ${m.name}`),
-      });
+      const names = matches.map((m) => m.name);
+      results.push({ query, count: matches.length, sample: names.slice(0, INLINE_CAP) });
+      // Page the full list for the queries whose whole point is the census.
+      if (matches.length > INLINE_CAP && /Decodable/.test(query)) {
+        chunked('names', query, names);
+      }
     } catch (error) {
       results.push({ query, error: error.message });
     }
@@ -129,42 +155,105 @@ function dumpTypes(reason) {
 // (stripped) symbols. We read the registers and backtrace but deliberately do
 // NOT interpret the error value — calling the wrong runtime entry on a bad
 // pointer crashes the app, and the backtrace's `Claude+0x…` frame is what names
-// the throwing call site when fed to Ghidra against the same binary.
+// the throwing call site when fed to Ghidra against the same binary. The frames
+// *above* the Foundation internals are the app's own `init(from:)`.
 const THROW_LIMIT = 120;
 let thrown = 0;
 
-function hookThrows() {
-  const target = Module.findGlobalExportByName('swift_willThrow');
-  if (target === null) {
-    report('throw-hook-missing', { note: 'swift_willThrow not exported' });
-    return;
+function frameOf(address) {
+  try {
+    const symbol = DebugSymbol.fromAddress(address);
+    const offset = symbol.moduleBase ? address.sub(symbol.moduleBase) : null;
+    return `${symbol.moduleName || '?'}+${offset}` + (symbol.name ? ` ${symbol.name}` : '');
+  } catch (error) {
+    return `?+${address}`;
   }
-  Interceptor.attach(target, {
-    onEnter(args) {
-      if (thrown >= THROW_LIMIT) return;
-      thrown += 1;
-      const frames = Thread.backtrace(this.context, Backtracer.ACCURATE)
-        .slice(0, 14)
-        .map((address) => {
-          const symbol = DebugSymbol.fromAddress(address);
-          const offset = symbol.moduleBase ? address.sub(symbol.moduleBase) : null;
-          return `${symbol.moduleName || '?'}+${offset}` + (symbol.name ? ` ${symbol.name}` : '');
-        });
-      report('throw', {
-        n: thrown,
-        x0: String(args[0]),
-        x1: String(args[1]),
-        x2: String(args[2]),
-        frames,
-      });
-    },
+}
+
+function frames(context) {
+  let stack = [];
+  try {
+    stack = Thread.backtrace(context, Backtracer.ACCURATE);
+  } catch (error) {
+    // arm64 frame-pointer unwinding can come up short; the fuzzy walker still
+    // usually finds the caller chain when the accurate one cannot.
+  }
+  if (stack.length < 4) {
+    try {
+      stack = Thread.backtrace(context, Backtracer.FUZZY);
+    } catch (error) {
+      /* keep the accurate result */
+    }
+  }
+  return stack.slice(0, 24).map(frameOf);
+}
+
+function reportThrow(context, where) {
+  if (thrown >= THROW_LIMIT) return;
+  thrown += 1;
+  report('throw', {
+    n: thrown,
+    where,
+    x0: String(context.x0),
+    x1: String(context.x1),
+    x2: String(context.x2),
+    frames: frames(context),
   });
 }
 
+// swift_willThrow is the untyped-throws path; swift_willThrowTypedImpl is its
+// typed-throws sibling (Swift 6). Hook whichever exists, whichever way the app
+// was compiled.
+const THROW_EXPORTS = [
+  ['swift_willThrow', 'willThrow'],
+  ['swift_willThrowTypedImpl', 'willThrowTypedImpl'],
+];
+const installed = new Set();
+
+function installOne(name, where) {
+  if (installed.has(name)) return true;
+  let target = null;
+  try {
+    target = Module.findGlobalExportByName(name);
+  } catch (error) {
+    return false;
+  }
+  if (target === null) return false;
+  try {
+    Interceptor.attach(target, {
+      onEnter() {
+        reportThrow(this.context, where);
+      },
+    });
+  } catch (error) {
+    return false;
+  }
+  installed.add(name);
+  return true;
+}
+
+// libswiftCore may not be mapped at the instant init() runs (it is called
+// before the app's entrypoint), so keep trying for a few seconds rather than
+// installing the hook once and silently missing every throw.
+const HOOK_TRIES = 40;
+let hookTimer = null;
+let hookTries = 0;
+function hookThrows() {
+  const done = THROW_EXPORTS.every(([name, where]) => installOne(name, where));
+  hookTries += 1;
+  if (done || hookTries > HOOK_TRIES) {
+    if (hookTimer) clearInterval(hookTimer);
+    hookTimer = null;
+    report('hook', { installed: [...installed], tries: hookTries });
+  }
+}
+
 // -------------------------------------------------------------------- wiring
-function init(parameters) {
-  reportUrl = parameters && parameters.reportUrl ? String(parameters.reportUrl) : null;
-  token = parameters && parameters.token ? String(parameters.token) : null;
+// Everything real is deferred: init() runs before the app's entrypoint, so the
+// ObjC runtime, Foundation and the app's Swift metadata are all still cold.
+function boot() {
+  if (started) return;
+  started = true;
   report('hello', {
     reportUrl,
     hasToken: Boolean(token),
@@ -173,19 +262,39 @@ function init(parameters) {
     bundle: bundleValue((bundle) => bundle.bundleIdentifier()),
     version: bundleValue((bundle) => bundle.objectForInfoDictionaryKey_('CFBundleShortVersionString')),
   });
+  hookTimer = setInterval(hookThrows, 250);
   hookThrows();
   // The app's own Swift types register as they load, so a first pass now and a
   // second once the UI is up catch both the pre-registered and the lazy ones.
   dumpTypes('load');
   setTimeout(() => dumpTypes('settled'), 8000);
+  // A third pass much later, since the Code tab's DTOs may only be pulled in
+  // when that surface is first reached.
+  setTimeout(() => dumpTypes('late'), 30000);
 }
 
-// In script mode Frida calls init() with the config's `parameters`. If a loader
-// runs this without them, still do the half that needs no destination: the
-// throw hook and the type dump (which will simply have nowhere to report, and
-// say so in the app's own console).
+rpc.exports = {
+  // Called by the gadget (and awaited — it gates the app's entrypoint), so this
+  // must return immediately. Never throw out of here: a throwing init would
+  // leave the app half-started.
+  init(stage, parameters) {
+    try {
+      reportUrl = parameters && parameters.reportUrl ? String(parameters.reportUrl) : null;
+      token = parameters && parameters.token ? String(parameters.token) : null;
+    } catch (error) {
+      console.log(`${TAG}: init failed: ${error.message}`);
+    }
+    console.log(`${TAG}: init stage=${stage} reportUrl=${reportUrl}`);
+    setTimeout(boot, 500);
+    return { ok: true, reportUrl };
+  },
+};
+
+// If something loads this file without gadget parameters (e.g. `frida -l` by
+// hand), still do the half that needs no destination: the throw hook and the
+// type dump, which will say in the app's own console that they had nowhere to
+// report.
 setTimeout(() => {
-  if (reportUrl) return;
-  hookThrows();
-  dumpTypes('no-parameters');
+  if (started) return;
+  boot();
 }, 3000);

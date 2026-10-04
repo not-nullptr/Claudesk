@@ -153,6 +153,11 @@ services:
       # setting this to 1 also 404s that by-id read. If the picker then offers
       # the cloud row, the saved bridge id was pinning it.
       CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID: "${CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID:-0}"
+      # Shared secret for the on-device Frida probe's findings sink
+      # (POST /__diag, see tools/frida/). The route does not exist unless this
+      # is set, and it is reached before the login gate so a sideloaded build
+      # can report without a session.
+      CLAUDE_MOBILE_FRIDA_TOKEN: "${CLAUDE_MOBILE_FRIDA_TOKEN:-}"
     depends_on:
       cowork-bridge:
         condition: service_healthy
