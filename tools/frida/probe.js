@@ -138,10 +138,15 @@ const QUERIES = [
 const INLINE_CAP = 60; // matches echoed inline in the `types` summary
 const CHUNK = 120; // names per follow-up `names` message
 
+// Through report(), not post(): in the mode we actually run in — a host-attached
+// session, no gadget config to carry parameters — reportUrl is null, so post()
+// is a no-op and these pages would never leave the device. The inline `sample`
+// in the `types` summary caps at 60 names, so that is the difference between a
+// census and a footnote.
 function chunked(kind, query, names) {
   const total = Math.ceil(names.length / CHUNK);
   for (let i = 0; i < total; i += 1) {
-    post(kind, { query, chunk: i + 1, of: total, names: names.slice(i * CHUNK, (i + 1) * CHUNK) });
+    report(kind, { query, chunk: i + 1, of: total, names: names.slice(i * CHUNK, (i + 1) * CHUNK) });
   }
 }
 

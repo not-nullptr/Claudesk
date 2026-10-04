@@ -37,6 +37,15 @@ works and the `throw` backtraces come back. It needs Developer Mode on the
 phone, a mounted developer disk image, and the phone on USB. When it works it
 deletes every moving part below, so reach for it before rebuilding anything.
 
+It needs one file on the *host* too: the jailed spawn injects the gadget into
+the app it just started, so Frida looks for a gadget dylib in the user cache dir
+(`%LOCALAPPDATA%\Microsoft\Windows\INetCache\frida\gadget-ios.dylib` on Windows,
+`~/.cache/frida/gadget-ios.dylib` on macOS) and fails with "need Gadget to
+attach on jailed iOS" when it is missing. The release asset ships `.xz`; unpack
+the 17.21.0 `ios-universal` one there under the name `gadget-ios.dylib`. And
+install the *plain* app for this — a bundle that already carries a gadget would
+get two agents in one process.
+
 **Listen mode is the one to iterate in.** Install once, then:
 
 ```sh
