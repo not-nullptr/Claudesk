@@ -27,20 +27,20 @@
 //   token     — the shared secret the server's diag route checks
 //               (CLAUDE_MOBILE_FRIDA_TOKEN). Without it the route 404s.
 //
-// What it collects:
+// What it collects — C is on by default, A and B are opt-in (see CONFIG below):
 //   A. the Swift type/conformance inventory (Frida 17.21's Swift ApiResolver),
 //      which is how we stop reconstructing DTO shapes from __swift5_fieldmd;
 //   B. every Swift error thrown in-process, with a backtrace — the decode
-//      failure the app hides behind "Something went wrong". Repetition is
-//      capped per call site, not just globally: launch throws the same handful
-//      of benign errors hundreds of times and would otherwise spend the whole
-//      budget before the app is even up. Because this hook is in the path of
-//      every throw in the process, the throttle reads `lr` and does nothing
-//      else — the backtrace, which is the expensive part, is built only for a
-//      throw that has earned a report;
+//      failure the app hides behind "Something went wrong". This one is off by
+//      default: it hooks the path out of *every* `try` in the process, `try?`
+//      included, and a hook that fires often enough to slow the app is a hook
+//      that reports nothing. Repetition is additionally capped per call site,
+//      keyed on `lr` so the decision costs a register read;
 //   C. the DecodingError itself, caught at DecodingError.Context.init: its
 //      message and coding path, which name the offending DTO field. A backtrace
 //      alone says "something in the JSON decoder threw"; this says what about.
+//      This is built once per real decode failure rather than per `try?`, so it
+//      is the cheap instrument that answers the question — hence the default.
 //
 // It is deliberately defensive: nothing here may crash the host app, so every
 // step is wrapped and any failure is reported rather than thrown.
@@ -52,6 +52,40 @@ let token = null;
 let seq = 0;
 let sent = 0;
 let started = false;
+
+// ------------------------------------------------------------------ config
+// Frida's Interceptor docs are explicit that a callback "executes
+// synchronously and block[s] the target thread", that the base overhead is a
+// few microseconds per call *before* any JavaScript runs, and that one should
+// not intercept "functions that are called a bazillion times per second". Two
+// of the three instruments below break that rule; they stay off unless asked
+// for, because an instrument that parks the app on its splash screen reports
+// nothing at all, which is worse than reporting less.
+//
+//   CAPTURE_DECODE_ERRORS — on. `DecodingError.Context.init` is built once per
+//     *actual* decode failure, which is a handful per launch (13 in the first
+//     30 s of a real run) rather than per `try?`. It is also the instrument
+//     that answers the question: the Context carries the message and the
+//     coding path, which name the offending field.
+//
+//   CAPTURE_THROWS — off. `swift_willThrow` is the untyped-throws path out of
+//     every `try` in the process, `try?` included, so it fires for every
+//     element of every speculative decode. Its value is a backtrace at a site
+//     the decode-error hook already names, and the first run showed what it
+//     costs: 94 of 120 captures were one decoder walking its `try?` ladder.
+//
+//   CAPTURE_TYPES — off. The census answers "which Decodable types exist",
+//     which was needed once and is now answered (see
+//     docs/mobile-code-re-findings.md); each pass is 18k matches and ~150
+//     sends of 8 KB, and `send()` is documented as asynchronous but "not
+//     optimized for high frequencies". It is kept because a new build or a new
+//     Frida version makes it worth re-running, but it is not worth the log
+//     every time.
+//
+// Flip one here and re-run: nothing below needs to change.
+const CAPTURE_DECODE_ERRORS = true;
+const CAPTURE_THROWS = false;
+const CAPTURE_TYPES = false;
 
 function describe(value) {
   try {
@@ -443,7 +477,9 @@ const HOOK_TRIES = 40;
 let hookTimer = null;
 let hookTries = 0;
 function hookThrows() {
-  const done = THROW_EXPORTS.every(([name, where]) => installOne(name, where)) && installContextHook();
+  const done =
+    (CAPTURE_THROWS ? THROW_EXPORTS.every(([name, where]) => installOne(name, where)) : true) &&
+    (CAPTURE_DECODE_ERRORS ? installContextHook() : true);
   hookTries += 1;
   if (done || hookTries > HOOK_TRIES) {
     if (hookTimer) clearInterval(hookTimer);
@@ -455,10 +491,12 @@ function hookThrows() {
       // code_signing "required" (the default here, the only way a jailed app
       // survives launch without a debugger) cannot patch code at all, so
       // Interceptor is unavailable and there are no backtraces to be had. The
-      // type census in part A needs no hooking, so it still works.
-      note: installed.size === 0
+      // type census needs no hooking, so it still works. And an empty list is
+      // not a failure at all when nothing was asked for.
+      note: installed.size === 0 && (CAPTURE_DECODE_ERRORS || CAPTURE_THROWS)
         ? 'no hooks installed — Interceptor unavailable (gadget code_signing "required"?), or libswiftCore not yet mapped'
         : undefined,
+      wanted: { decodeErrors: CAPTURE_DECODE_ERRORS, throws: CAPTURE_THROWS },
     });
   }
 }
@@ -546,21 +584,28 @@ function boot() {
     process: Process.arch + ' ' + Process.platform,
     bundle: bundleValue((bundle) => bundle.bundleIdentifier()),
     version: bundleValue((bundle) => bundle.objectForInfoDictionaryKey_('CFBundleShortVersionString')),
+    // Which instruments are live, so a short log is legible as "only the quiet
+    // one was on" rather than "the probe found nothing".
+    capturing: { decodeErrors: CAPTURE_DECODE_ERRORS, throws: CAPTURE_THROWS, types: CAPTURE_TYPES },
   });
-  hookTimer = setInterval(hookThrows, 250);
-  hookThrows();
-  // The app's own Swift types register as they load, so a first pass now and a
-  // second once the UI is up catch both the pre-registered and the lazy ones.
-  dumpTypes('load');
-  setTimeout(() => dumpTypes('settled'), 8000);
-  // A third pass much later, since the Code tab's DTOs may only be pulled in
-  // when that surface is first reached.
-  setTimeout(() => {
-    dumpTypes('late');
+  if (CAPTURE_DECODE_ERRORS || CAPTURE_THROWS) {
+    hookTimer = setInterval(hookThrows, 250);
+    hookThrows();
+  }
+  if (CAPTURE_TYPES) {
+    // The app's own Swift types register as they load, so a first pass now and a
+    // second once the UI is up catch both the pre-registered and the lazy ones.
+    dumpTypes('load');
+    setTimeout(() => dumpTypes('settled'), 8000);
+    // A third pass much later, since the Code tab's DTOs may only be pulled in
+    // when that surface is first reached.
+    setTimeout(() => dumpTypes('late'), 30000);
+  }
+  if (CAPTURE_THROWS) {
     // Last, so it counts everything the run saw — a log that hit a cap should
     // say which site was loudest rather than just stop mid-stream.
-    reportThrowSummary();
-  }, 30000);
+    setTimeout(reportThrowSummary, 30000);
+  }
 }
 
 let sawInit = false;

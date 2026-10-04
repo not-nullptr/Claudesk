@@ -57,6 +57,37 @@ The gadget presents itself as the process **`Gadget`**. `on_load` is set to
 `resume` so the app boots normally instead of hanging at its entrypoint until
 you connect — the Code tab flow happens on a tap, long after you attach.
 
+## Instruments, and why two of them are off
+
+Frida's Interceptor docs are blunt about the cost: a callback "executes
+synchronously and block[s] the target thread", the base overhead is a few
+microseconds per call *before* any JavaScript runs, and one should not
+"intercept calls to functions that are called a bazillion times per second".
+With callbacks from every app thread serialized through one JS runtime, a hook
+on a hot function is a convoy, not an observation. So `probe.js` opens with
+three switches and only the cheap one is on:
+
+| switch | default | fires | cost |
+| --- | --- | --- | --- |
+| `CAPTURE_DECODE_ERRORS` | **on** | once per real decode failure | ~13 per launch |
+| `CAPTURE_THROWS` | off | once per failed `try`, `try?` included | thousands per launch |
+| `CAPTURE_TYPES` | off | twice per run | 18k matches, ~150 sends of 8 KB |
+
+The decode-error hook is the one that answers the question — a `Context` carries
+the message and the coding path, which together name the offending field — and
+it is built once per actual failure rather than once per speculative attempt.
+The throw hook adds a backtrace at a site that hook already names, in exchange
+for being in the path of every `try?` in the process. The census was needed once
+(its answer is in `docs/mobile-code-re-findings.md`); each pass is 18k matches
+and ~150 sends, and `send()` is documented as asynchronous but "not optimized
+for high frequencies".
+
+An earlier revision had all three on and drove the app onto its splash screen
+for as long as it was attached. `hello` now reports the live set as `capturing`,
+so a short log reads as "the quiet instrument was the only one on" rather than
+"the probe found nothing". Flip a switch in the file and re-run; nothing else
+needs to change.
+
 ## Pieces
 
 | file | role |
@@ -208,8 +239,12 @@ app *debuggable*, and still nothing has attached.
 
 ## What to expect
 
-- `hello {…}` — the script is alive, with Frida version and bundle id.
-- `hook {installed:[…]}` — which throw hooks took.
+- `hello {…}` — the script is alive, with Frida version and bundle id, and the
+  live instrument set as `capturing`. A run whose log is four lines long is a
+  run where only the decode-error hook was on.
+- `hook {installed:[…], wanted:{…}}` — which hooks took, against which were
+  asked for. With `throws` off, `installed` holding only
+  `DecodingError.Context.init` is the expected answer.
 - `types {…}` — the resolver's answer to each query. If a query spelling is
   wrong for this Frida build, its entry carries an `error` instead of a `sample`,
   which is what tells us the correct syntax.
@@ -252,6 +287,11 @@ app *debuggable*, and still nothing has attached.
 
 ## Risks / if it does not work
 
+- **The app sits on its splash screen while attached.** The probe is slowing it
+  down, not crashing it, and the culprit is always a hook on a hot function —
+  see *Instruments* above. Turn the instruments off one at a time; if it still
+  hangs with all three off, the probe is not the cause and the next thing to
+  check is whether the app gets past splash *without* Frida at all.
 - **App will not launch after installing.** Check `code_signing` first: with
   `optional` on a jailed device the kernel kills the app at launch (above), and
   the fix is a rebuild, not a re-sign. If it is already `required`, the gadget's
