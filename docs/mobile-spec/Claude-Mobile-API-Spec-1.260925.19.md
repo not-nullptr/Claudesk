@@ -1507,8 +1507,22 @@ reflections/settings
 
 ```json
 sync/auth/status
-{"connected":false}
+{"github":false}
 ```
+
+The body is decoded whole into `FirstPartyAuthStatus`, a struct whose only
+stored property is `github: Bool` (`OrganizationStore._firstPartyAuth`). A body
+without `github` throws `No value associated with key CodingKeys(stringValue:
+"github"…)` from the synthesized `FirstPartyAuthStatus.init(from:)` at
+`Claude+0x10b5770` — observed on-device. `{"connected":false}` is **not**
+decodable; the field name `connected` belongs to other DTOs, not this one.
+
+```json
+sync/github/auth
+{"github":false,"ghe_connections":[]}
+```
+
+`CodeGitHubAuthStatus` (`gheConnections: [GHEConnectionStatus]`).
 
 ```json
 notification/preferences
