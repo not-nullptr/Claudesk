@@ -157,7 +157,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `COWORK_BRIDGE_INTERNAL_PORT` | `9222` | Desktop 内部 Cowork adapter 端口，仅 loopback |
 | `COWORK_UPLOAD_MAX_BYTES` | `1073741824` | Web UI 单次上传（附件、拖入文件夹）的总大小上限，字节数，可带 `K`/`M`/`G` 后缀；文件以原始二进制流式写入 `/workspace/RemoteUploads`，不占内存 |
 | `COWORK_REMOTE_READ_ROOTS` | —（仅 `/workspace`） | 已认证的远程下载路由（`GET /api/remote/files/download`）额外可读的根目录，冒号或逗号分隔；`/workspace` 始终允许。路径在 cowork-bridge 容器内解析，宿主机目录还需 bind mount 进容器才可见。列出的路径即可被远程读取，务必配合已认证的 HTTPS 入口 |
-| `COWORK_REMOTE_SESSION_FILE_MAX_BYTES` | `10485760` | 文件面板回退读取的大小上限：Desktop 自身的会话读取器对会话目录之外或超过 10 MiB 的文件返回 null（面板显示“Couldn't read this file”），Bridge 改为从上面的可读根目录重新读取；此值即该回退的上限。可写纯字节数或 `K`/`M`/`G` 后缀（如 `100M`）。默认与 Desktop 一致 |
+| `COWORK_REMOTE_SESSION_FILE_MAX_BYTES` | `10485760` | 文件面板回退读取的大小上限：Desktop 自身的会话读取器对会话目录之外或超过 10 MiB 的文件返回 null（面板显示“Couldn't read this file”），Bridge 改为从上面的可读根目录重新读取；此值即该回退的上限。可写纯字节数或 `K`/`M`/`G` 后缀（如 `100M`）。响应组装期间文件会被同时持有数份，因此 Bridge 另按容器内存上限的八分之一、最多 32 MiB 收紧；超过有效上限的文件在面板中显示为“Preview isn't available”。要真正提高上限也需同时提高 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`。默认与 Desktop 一致 |
 | `CLAUDE_DESKTOP_VERSION` | `2.9939.4` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |

@@ -8,6 +8,7 @@ import {
   createDownloadHandler,
   readContainedFile,
   resolveContainedPath,
+  sessionFileReadLimit,
 } from "./downloads.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
@@ -41,10 +42,35 @@ const downloadRoots = [...new Set([workspaceRoot, ...extraDownloadRoots])];
 // through the IPC route. Raise it to open larger text files in the file pane.
 // Accepts a plain byte count or a K/M/G suffix, like COWORK_UPLOAD_MAX_BYTES;
 // a bare suffix-less parseInt would silently read "100M" as 100 bytes.
-const sessionFileMaxBytes = parseUploadLimit(
+const sessionFileCapBytes = parseUploadLimit(
   process.env.COWORK_REMOTE_SESSION_FILE_MAX_BYTES,
   10 * 1024 * 1024,
 );
+// Handing a file to the session reader means holding it several times over at
+// once, so the container's own limit is what actually bounds the size that can
+// be served: an 80 MB file under a 256 MB limit killed the process mid response
+// and "restart: unless-stopped" looped it. sessionFileReadLimit() also clamps
+// COWORK_REMOTE_SESSION_FILE_MAX_BYTES to an eighth of that limit, so raising
+// the configured cap asks for a bigger preview but cannot take the bridge down.
+function cgroupMemoryLimitBytes() {
+  for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    try {
+      const raw = readFileSync(path, "utf8").trim();
+      if (raw && raw !== "max") {
+        const limit = Number(raw);
+        if (Number.isFinite(limit) && limit > 0) return limit;
+      }
+    } catch {
+      // Not in a cgroup-scoped container, or unreadable: fall through.
+    }
+  }
+  return null;
+}
+const sessionFileMemoryLimitBytes = cgroupMemoryLimitBytes();
+const sessionFileMaxBytes = sessionFileReadLimit({
+  requestedBytes: sessionFileCapBytes,
+  memoryLimitBytes: sessionFileMemoryLimitBytes,
+});
 const artifactsRoot = resolve(
   process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
 );
@@ -377,6 +403,7 @@ if (codeActionsEnabled) {
     "promoteQueuedMessage",
     "readFileAtCwd",
     "readSessionFile",
+    "readSessionFileWithStatus",
     "readSessionImageAsDataUrl",
     "readSessionMediaAsDataUrl",
     "readSessionPanelMediaAsDataUrl",
@@ -978,6 +1005,69 @@ async function supplementSessionFileRead(body, value) {
   return value;
 }
 
+// Desktop's status-bearing reader (status: ok | notFound | tooLarge | readError,
+// plus a file on ok), answered by the bridge rather than forwarded. The official
+// file pane prefers this method whenever the surface advertises it, and it is
+// the only way a refusal reaches the pane as a reason: readSessionFile's bare
+// null becomes a generic "Couldn't read this file", while tooLarge becomes
+// "Preview isn't available for this file" with the size. Desktop still answers
+// first for the files it can see; we only fill in what it refuses.
+async function bridgeSessionFileWithStatus(args, argsEncoding) {
+  let described = null;
+  try {
+    described = await desktop.invoke(
+      "LocalSessions",
+      "readSessionFileWithStatus",
+      args,
+      argsEncoding,
+    );
+  } catch {
+    // The inner surface may not expose it; the roots below are the fallback.
+  }
+  if (described?.status === "ok" && described.file) return described;
+  const requested = args?.[1];
+  if (typeof requested !== "string" || !requested) {
+    return described ?? { status: "readError" };
+  }
+  const read = await readContainedFile(downloadRoots, requested, {
+    maxBytes: sessionFileMaxBytes,
+    allowRoot: false,
+    missingMessage: "session file was not found",
+    outsideMessage: "session file path is outside the allowed read roots",
+  });
+  if (read.file) {
+    console.log(
+      `[cowork-bridge] session-file readSessionFileWithStatus served ${requested} (${read.file.fileSize} bytes)`,
+    );
+    return { status: "ok", file: read.file };
+  }
+  if (read.failure === "too_large") {
+    console.log(
+      `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: too_large`
+        + ` (${read.fileSize} bytes, cap ${sessionFileMaxBytes})`,
+    );
+    return { status: "tooLarge" };
+  }
+  if (read.failure === "not_found") {
+    console.log(
+      `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: not_found`,
+    );
+    // Desktop saw a file too big to read where we find nothing.
+    return described?.status === "tooLarge" ? described : { status: "notFound" };
+  }
+  if (described) return described;
+  try {
+    const file = await desktop.invoke("LocalSessions", "readSessionFile", args, argsEncoding);
+    if (file) return { status: "ok", file };
+  } catch {
+    // Fall through to readError below.
+  }
+  console.log(
+    `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: ${read.failure}`,
+  );
+  return { status: "readError" };
+}
+
 function validateCodePreference(method, args) {
   if (method === "getPreferences" && args.length === 0) return;
   const [key, value] = args;
@@ -1116,21 +1206,35 @@ async function handleApi(request, response, url) {
     validateInvocation(body.surface, body.method, body.args ?? []);
     const startedAt = Date.now();
     try {
-      let value = await desktop.invoke(
-        body.surface,
-        body.method,
-        body.args ?? [],
-        body.argsEncoding,
-      );
+      let value;
       if (
         body.surface === "LocalSessions"
-        && (
-          body.method === "readSessionFile"
-          || body.method === "readFileAtCwd"
-          || body.method === "resolveSessionFile"
-        )
+        && body.method === "readSessionFileWithStatus"
       ) {
-        value = await supplementSessionFileRead(body, value);
+        // Answered in the bridge: it needs to merge Desktop's view with the
+        // roots this container serves, and it must never hand the pane a bare
+        // null where a reason is available.
+        value = await bridgeSessionFileWithStatus(
+          body.args ?? [],
+          body.argsEncoding,
+        );
+      } else {
+        value = await desktop.invoke(
+          body.surface,
+          body.method,
+          body.args ?? [],
+          body.argsEncoding,
+        );
+        if (
+          body.surface === "LocalSessions"
+          && (
+            body.method === "readSessionFile"
+            || body.method === "readFileAtCwd"
+            || body.method === "resolveSessionFile"
+          )
+        ) {
+          value = await supplementSessionFileRead(body, value);
+        }
       }
       if (
         body.surface === "LocalAgentModeSessions"
@@ -1718,7 +1822,8 @@ server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
   console.log(`[cowork-bridge] download roots: ${downloadRoots.join(", ")}`);
   console.log(
-    `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`,
+    `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`
+      + ` (requested ${sessionFileCapBytes}, memory limit ${sessionFileMemoryLimitBytes ?? "unknown"})`,
   );
 });
 

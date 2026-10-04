@@ -127,6 +127,34 @@ export async function resolveContainedPath(roots, target, options = {}) {
   }
 }
 
+const SESSION_FILE_DEFAULT_BYTES = 10 * 1024 * 1024;
+const SESSION_FILE_CEILING_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Largest file the session reader will inline, given what the operator asked
+ * for and the memory the container actually allows. The DTO is held several
+ * times over while the response is built (read Buffer, decoded JS string, JSON
+ * text, encoded response), so a limit taken from configuration alone can still
+ * kill the process: an 80 MB file under a 256 MB limit OOM-looped the bridge.
+ * Cap the request at an eighth of the cgroup limit, with a floor for tiny
+ * containers and an absolute ceiling so one response stays sane for the
+ * browser. Files past the result are reported too-large instead of read.
+ */
+export function sessionFileReadLimit({ requestedBytes, memoryLimitBytes } = {}) {
+  // No readable limit (not containerised, or an unreadable cgroup) means there
+  // is nothing to clamp against; honour the request rather than inventing one.
+  const ceiling = Number.isFinite(memoryLimitBytes) && memoryLimitBytes > 0
+    ? Math.min(
+      SESSION_FILE_CEILING_BYTES,
+      Math.max(2 * 1024 * 1024, Math.floor(memoryLimitBytes / 8)),
+    )
+    : Infinity;
+  const requested = Number.isFinite(requestedBytes) && requestedBytes > 0
+    ? requestedBytes
+    : SESSION_FILE_DEFAULT_BYTES;
+  return Math.min(requested, ceiling);
+}
+
 export function createDownloadHandler({
   ApiError,
   artifactsRoot,

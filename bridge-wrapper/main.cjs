@@ -419,6 +419,7 @@ if (codeActionsEnabled) {
     "promoteQueuedMessage",
     "readFileAtCwd",
     "readSessionFile",
+    "readSessionFileWithStatus",
     "readSessionImageAsDataUrl",
     "readSessionMediaAsDataUrl",
     "readSessionPanelMediaAsDataUrl",
