@@ -16,7 +16,11 @@ import { createCodeEngine } from "./code-engine.mjs";
 import {
   BRIDGE_ENVIRONMENT_ID,
   CLOUD_ENVIRONMENT_ID,
+  CHANNEL_MESSAGE_EVENT,
   bridgeEnvironment,
+  channelEmptyPage,
+  channelMessageForEnvelope,
+  channelResource,
   cloudEnvironment,
   isRenderableEntry,
   sseFrameForEntry,
@@ -1108,10 +1112,56 @@ async function handleCodeRoutes(request, response, url) {
     return true;
   }
 
+  // --- channels: the thread/composer surface ----------------------------------
+  // Newer clients read and write a Code conversation as a claude.ai "channel" —
+  // /v1/code/channels/{channelId}/… — where channelId is the same
+  // code_<desktopId> the session carries (ChannelMessagesApi.swift is the
+  // binary's only builder of these paths). The JSON reads answer empty pages;
+  // the message stream must speak SSE, because a JSON envelope there is a body
+  // the thread screen cannot decode. Every leg is logged: a channel leg the
+  // phone reaches but the facade answers wrongly is exactly what the filtered
+  // [mobile-code] log would otherwise hide.
+  const channelByIdMatch = path.match(/^\/v1\/code\/channels\/([^/]+)$/);
+  if (channelByIdMatch && method === "GET") {
+    const id = decodeURIComponent(channelByIdMatch[1]);
+    console.log(`[mobile-code]   channel by-id id=${id}`);
+    sendJson(response, 200, channelResource(id));
+    return true;
+  }
+  const channelSubMatch = path.match(/^\/v1\/code\/channels\/([^/]+)\/(.+)$/);
+  if (channelSubMatch) {
+    const id = decodeURIComponent(channelSubMatch[1]);
+    const rest = channelSubMatch[2];
+    console.log(`[mobile-code]   channel ${method} ${rest} id=${id}${url.search || ""}`);
+    if (rest === "messages/stream") {
+      if (method === "POST") await streamChannelMessage(request, response, url, id);
+      else await streamChannelTimeline(request, response, url, id);
+      return true;
+    }
+    if (method === "GET") {
+      sendJson(response, 200, /^messages(\/|$)/.test(rest)
+        ? await channelTimelinePage(id)
+        : channelEmptyPage(rest));
+      return true;
+    }
+    if (method === "POST") {
+      await readJson(request).catch(() => ({}));
+      sendJson(response, 200, {});
+      return true;
+    }
+    return true;
+  }
+  if (path === "/v1/code/channels" && (method === "GET" || method === "POST")) {
+    if (method === "POST") await readJson(request).catch(() => ({}));
+    console.log(`[mobile-code]   channels collection ${method}`);
+    sendJson(response, 200, { data: [], next_cursor: null });
+    return true;
+  }
+
   // --- out-of-scope legs: real, clean empty states ----------------------------
-  // Routines, projects/channels, git/PR and self-hosted pools are a follow-up;
-  // an empty envelope (not a 404) keeps those screens from erroring.
-  if (/^\/v1\/code\/(channels|triggers|webhook-triggers)(\/.*)?$/.test(path) && method === "GET") {
+  // Routines, git/PR and self-hosted pools are a follow-up; an empty envelope
+  // (not a 404) keeps those screens from erroring.
+  if (/^\/v1\/code\/(triggers|webhook-triggers)(\/.*)?$/.test(path) && method === "GET") {
     sendJson(response, 200, { data: [], next_cursor: null });
     return true;
   }
@@ -1334,6 +1384,132 @@ async function streamCodeMessage(request, response, url, sessionId) {
   request.on("close", () => abort.abort());
   await codeEngine.awaitTurn(desktopId, { signal: abort.signal }).catch(() => null);
   finished();
+}
+
+// The channel id is the session id (code_<desktopId>); a bare Desktop id is
+// tolerated too, so the leg answers whichever form the client built.
+function codeChannelSessionId(id) {
+  if (codeSessionDesktopId(id)) return id;
+  return typeof id === "string" && id ? `code_${id}` : null;
+}
+
+// The timeline read: the same transcript the session leg serves, as
+// ChannelTimelineResponse. An empty list is a valid page.
+async function channelTimelinePage(channelId) {
+  const sessionId = codeChannelSessionId(channelId);
+  const desktopId = sessionId ? codeSessionDesktopId(sessionId) : null;
+  if (!desktopId) return { data: [], next_cursor: null };
+  try {
+    const { loaded } = await codeEngine.getSession(sessionId);
+    const data = loaded.envelopes
+      .map((envelope) => channelMessageForEnvelope(envelope, { channelId: sessionId }))
+      .filter(Boolean);
+    return { data, next_cursor: null };
+  } catch {
+    return { data: [], next_cursor: null };
+  }
+}
+
+// GET /v1/code/channels/{id}/messages/stream?scope=timeline|thread — the channel
+// transcript as SSE. The client ignores channel event names it does not know, so
+// every frame here is a message it does recognize (`channel_message_updated`).
+async function streamChannelTimeline(request, response, url, channelId) {
+  const sessionId = codeChannelSessionId(channelId);
+  const desktopId = sessionId ? codeSessionDesktopId(sessionId) : null;
+  if (!desktopId) {
+    sendErrorEnvelope(response, 404, "not_found", "channel not found");
+    return;
+  }
+  let envelopes = [];
+  try {
+    envelopes = (await codeEngine.getSession(sessionId)).loaded.envelopes;
+  } catch (error) {
+    sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
+      error?.message || "could not read the transcript");
+    return;
+  }
+  response.writeHead(200, SSE_HEADERS);
+  response.flushHeaders();
+  for (const envelope of envelopes) {
+    const message = channelMessageForEnvelope(envelope, { channelId: sessionId });
+    if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
+  }
+  const emit = (record) => {
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      const message = channelMessageForEnvelope(frame.data, { channelId: sessionId });
+      if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
+    }
+  };
+  const unsubscribe = codeEngine.listen(desktopId, emit);
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
+  const done = () => {
+    clearInterval(keepalive);
+    unsubscribe?.();
+  };
+  request.on("close", done);
+  response.on("close", done);
+  console.log(`[mobile-code] channel timeline ${sessionId}: ${envelopes.length} events`);
+}
+
+// POST /v1/code/channels/{id}/messages/stream — send a turn on the channel leg,
+// the same protocol as the session leg: SSE `channel_message_updated` frames for
+// the optimistic user message and then the reply, closing once the session goes
+// idle.
+async function streamChannelMessage(request, response, url, channelId) {
+  let body;
+  try {
+    body = await readJson(request);
+  } catch {
+    sendErrorEnvelope(response, 400, "invalid_request", "expected a JSON body");
+    return;
+  }
+  console.log(`[mobile-code]   channel send body=${JSON.stringify(body).slice(0, 1500)}`);
+  const sessionId = codeChannelSessionId(channelId);
+  const desktopId = sessionId ? codeSessionDesktopId(sessionId) : null;
+  if (!desktopId) {
+    sendErrorEnvelope(response, 404, "not_found", "channel not found");
+    return;
+  }
+  const text = body?.body ?? body?.text ?? body?.message ?? "";
+  if (!String(text).trim()) {
+    sendErrorEnvelope(response, 400, "invalid_request", "message body is required");
+    return;
+  }
+  response.writeHead(200, SSE_HEADERS);
+  const emit = (record) => {
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      const message = channelMessageForEnvelope(frame.data, { channelId: sessionId });
+      if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
+    }
+  };
+  const unsubscribe = codeEngine.listen(desktopId, emit);
+  try {
+    await codeEngine.sendMessage(sessionId, {
+      text: String(text),
+      clientMessageId: body?.client_message_id ?? null,
+      interrupt: Boolean(body?.interrupt),
+    });
+  } catch (error) {
+    unsubscribe?.();
+    sendSseRecord(response, "error", { type: "error", error: { type: error.type || "api_error", message: error.message } });
+    response.end();
+    return;
+  }
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
+  const abort = new AbortController();
+  request.on("close", () => {
+    clearInterval(keepalive);
+    unsubscribe?.();
+    abort.abort();
+  });
+  await codeEngine.awaitTurn(desktopId, { signal: abort.signal }).catch(() => null);
+  clearInterval(keepalive);
+  unsubscribe?.();
+  if (!response.writableEnded) response.end();
 }
 
 async function handleConversationRoutes(request, response, url) {

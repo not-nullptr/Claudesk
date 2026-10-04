@@ -231,7 +231,10 @@ try {
   assert.equal(cloud.config.anthropic.environment_type, "anthropic");
   assert.ok(bridge, "the paired Desktop is offered as a runner");
   assert.equal(bridge.environment_id, "anthropic-bridge-local");
-  assert.equal(bridge.config.paired.environment_type, "paired");
+  // `ConfigType` (the inner `environment_type`) has no `paired` member — the
+  // case is `paired` but its payload reports the same `bridge` axis its `kind`
+  // does; a literal "paired" would fail the whole EnvironmentConfiguration.
+  assert.equal(bridge.config.paired.environment_type, "bridge");
   assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);
@@ -1041,8 +1044,10 @@ try {
   });
   const liveFrame = await watchRecordsPromise;
   assert.ok(liveFrame, "the watch leg streams a frame for the live turn");
-  assert.equal(liveFrame.data.sequence_num >= 0, true);
-  assert.ok(liveFrame.data.event_id, "a live frame carries the entry id the app de-dupes on");
+  // An `upserted` frame carries the whole SessionResource for that session (the
+  // list screen replaces its row by id); it is not a transcript envelope, so it
+  // has no sequence number or entry id.
+  assert.equal(liveFrame.data.id, createdResource.id, "a live frame upserts the session it names");
 
   // Stop goes to LocalSessions.interrupt with the unprefixed id.
   const stopped = await call(codePath(createdResource.id, "/interrupt"), { method: "POST", body: {} });
@@ -1179,6 +1184,51 @@ try {
   // Code sessions must never leak into the Chat surface, and vice versa.
   const chatsAfter = await (await call(`/api/organizations/${org.uuid}/chat_conversations_v2?limit=50&offset=0`)).json();
   assert.ok(chatsAfter.data.every((item) => !String(item.uuid).startsWith("code_")), "Code sessions stay out of the chat list");
+
+  // ---- channels: the same conversation addressed as a claude.ai channel ----
+  // A newer client reads a Code conversation as a channel whose id is the
+  // session id (ChannelMessagesApi.swift). Every channel read must carry the
+  // keys its response type declares non-optional, and the message stream must
+  // be SSE — a JSON body there is a shape the thread screen cannot decode.
+  const channelSession = await (await call("/v1/code/sessions", { method: "POST", body: { title: "Channel" } })).json();
+  const channelPath = (action = "") => `/v1/code/channels/${channelSession.id}${action}`;
+
+  const channel = await (await call(channelPath())).json();
+  assert.ok("storage" in channel && "name" in channel, "Channel carries its non-optional storage and name");
+  assert.deepEqual((await (await call(channelPath("/threads"))).json()).sections, []);
+  const channelPrs = await (await call(channelPath("/pull_requests"))).json();
+  for (const key of ["data", "next_cursor", "total", "truncated", "source"]) {
+    assert.ok(key in channelPrs, `ChannelPullRequestsPage carries ${key}`);
+  }
+  const channelArtifacts = await (await call(channelPath("/artifacts"))).json();
+  assert.ok("total" in channelArtifacts && "truncated" in channelArtifacts);
+  assert.deepEqual((await (await call(channelPath("/files"))).json()).entries, []);
+
+  // The send leg speaks SSE end to end; the turn arrives as channel messages.
+  const channelSend = await sseStream(channelPath("/messages/stream?scope=timeline"), {
+    method: "POST",
+    body: { body: "Reply with exactly one word: pong" },
+  });
+  const channelFrames = channelSend
+    .filter((record) => record.event === "channel_message_updated")
+    .map((record) => record.data);
+  assert.ok(channelFrames.length, "the channel stream carries the turn");
+  for (const frame of channelFrames) {
+    assert.ok(typeof frame.id === "string" && frame.id.length > 0, "ChannelMessage.id");
+    assert.equal(typeof frame.in_timeline, "boolean");
+    assert.equal(typeof frame.server_notice, "boolean");
+    assert.ok(Array.isArray(frame.attachments) && Array.isArray(frame.participant_account_ids));
+  }
+  assert.ok(channelFrames.some((frame) => frame.body === "Reply with exactly one word: pong"),
+    "the user message body is carried on the channel stream");
+  const channelDesktopId = channelSession.id.slice("code_".length);
+  await waitFor(() => claudesk.codeSessions.get(channelDesktopId)?.isRunning === false, "the channel turn to finish");
+
+  // The timeline read returns the same transcript the session leg serves.
+  const channelTimeline = await (await call(channelPath("/messages?scope=timeline"))).json();
+  assert.ok(Array.isArray(channelTimeline.data) && channelTimeline.data.length >= 2,
+    "the channel timeline returns the transcript as ChannelMessage[]");
+  assert.ok(channelTimeline.data.some((message) => message.body === "Reply with exactly one word: pong"));
 
   console.log("mobile-api-smoke: PASS");
 } finally {

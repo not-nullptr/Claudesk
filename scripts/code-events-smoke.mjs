@@ -14,6 +14,9 @@ import {
   BRIDGE_ENVIRONMENT_ID,
   CLOUD_ENVIRONMENT_ID,
   bridgeEnvironment,
+  channelEmptyPage,
+  channelMessageForEnvelope,
+  channelResource,
   cloudEnvironment,
   eventEnvelopeForEntry,
   eventEnvelopes,
@@ -279,5 +282,39 @@ assert.equal(cloudSession.environment_kind, "anthropic_cloud");
 const bridgeSession = sessionResponse({ sessionId: "s2" }, { meta: {} });
 assert.equal(bridgeSession.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(bridgeSession.environment_kind, "bridge");
+
+// ---- channels: the conversation addressed as a claude.ai channel ----
+// A ChannelMessage must carry every field its decoder declares non-optional
+// (id, in_timeline, server_notice, attachments, participant_account_ids). The
+// channel pages must likewise carry the non-optional keys of each response type,
+// or an empty state still fails to decode on device.
+const channelEnvelope = eventEnvelopeForEntry({
+  uuid: "u-1", type: "assistant",
+  message: { role: "assistant", content: [{ type: "text", text: "hello there" }] },
+}, 1);
+const channelMessage = channelMessageForEnvelope(channelEnvelope, { channelId: codeIdFor("d1") });
+assert.ok(channelMessage, "a text turn maps to a ChannelMessage");
+assert.equal(channelMessage.id, "u-1");
+assert.equal(channelMessage.body, "hello there");
+assert.equal(channelMessage.in_timeline, true);
+assert.equal(channelMessage.server_notice, false);
+assert.deepEqual(channelMessage.attachments, []);
+assert.deepEqual(channelMessage.participant_account_ids, []);
+assert.ok(Number.isFinite(Date.parse(channelMessage.created_at)), "createdAt is an ISO date");
+// A tool-only turn has no display text and is not a timeline message.
+assert.equal(channelMessageForEnvelope(eventEnvelopeForEntry({
+  uuid: "u-2", type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Bash", input: {} }] },
+}, 2)), null);
+// Every channel read answers the keys its response type declares non-optional.
+const pageKeys = (page, keys) => keys.every((key) => key in page);
+assert.ok(pageKeys(channelEmptyPage("threads"), ["sections"]));
+assert.ok(pageKeys(channelEmptyPage("pull_requests"), ["data", "next_cursor", "total", "truncated", "source"]));
+assert.ok(pageKeys(channelEmptyPage("artifacts"), ["data", "next_cursor", "total", "truncated"]));
+assert.ok(pageKeys(channelEmptyPage("files"), ["entries", "next_cursor"]));
+assert.ok(pageKeys(channelEmptyPage("messages"), ["data", "next_cursor"]));
+assert.equal(channelEmptyPage("pull_requests").source, "unspecified");
+// Channel = {storage, name}; both non-optional.
+const channel = channelResource("code_d1");
+assert.ok("storage" in channel && "name" in channel);
 
 console.log("code-events-smoke: ok");

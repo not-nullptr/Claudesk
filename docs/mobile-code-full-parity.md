@@ -48,7 +48,9 @@ GET    /v1/code/sessions/{id}/events/stream    SSE — the transcript read the
                                                requests against the facade.
 GET    /v1/code/sessions/watch                 SSE      (SessionWatchFrame)
 GET    /v1/code/shared-sessions/{id}/events    shared_session_events_v2
-GET    /v1/code/channels[/{id}]                channel (project/thread) list
+GET    /v1/code/channels[/{id}]                channel (project/thread) read
+GET    /v1/code/channels/{id}/messages/stream  SSE   (ChannelStreamEvent)  §4
+POST   /v1/code/channels/{id}/messages/stream  send a turn                §4
 GET    /v1/code/triggers[/{id}]                routines
 GET    /v1/code/webhook-triggers
 GET    /v1/code/runners/self-hosted/pools
@@ -130,6 +132,30 @@ SendChannelMessageResponse  messageId, threadRootId, createdAt   (all optional)
 So the session-path send leg is exercised only because the facade accepts it; if
 the app's Code composer in fact sends somewhere else, the `[mobile-api]
 unmatched` line the facade now logs on every 404 is what will name the leg.
+
+**Both legs are now served.** The channel id is the session id
+(`code_<desktopId>`), so `channels/{id}/…` resolves to the same session the
+`/v1/code/sessions/{id}/…` legs use (a bare Desktop id is tolerated too). The
+facade answers:
+
+```
+GET  /v1/code/channels/{id}                     Channel {storage,name}
+GET  /v1/code/channels/{id}/threads             ChannelThreadsResponse {sections}
+GET  /v1/code/channels/{id}/pull_requests       ChannelPullRequestsPage {data,nextCursor,total,truncated,source}
+GET  /v1/code/channels/{id}/artifacts           ChannelArtifactsPage {data,nextCursor,total,truncated}
+GET  /v1/code/channels/{id}/files               ChannelFilesPage {entries,nextCursor}
+GET  /v1/code/channels/{id}/messages            ChannelTimelineResponse {data,nextCursor}
+GET  /v1/code/channels/{id}/messages/stream     SSE: channel_message_updated per turn
+POST /v1/code/channels/{id}/messages/stream     send a turn; SSE frames as above
+```
+
+Every channel leg logs `[mobile-code]   channel <method> <rest> id=<id>` so a
+run that reaches this surface is unambiguous. The stream is the one leg that
+cannot be JSON: the client decodes `text/event-stream`, and only the event names
+in its table (`channel_message_updated`, `channel_message_reactions`,
+`session_activity`, `thread_session_bound`, `session_requires_action`) mean
+anything — unknown names are ignored, which is why the stream may safely carry
+only `channel_message_updated` frames.
 
 ## 5. Enums (raw values recovered from the string pool)
 

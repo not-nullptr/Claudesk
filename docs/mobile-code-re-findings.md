@@ -503,6 +503,41 @@ the server should report `claude_code_web` as `available` there.
 With these four returning 200, the tab's load legs all settle and it renders the
 (empty) session list instead of erroring.
 
+## Channels: the conversation addressed as a claude.ai channel
+
+The binary's `ClaudeCodeApi/ChannelMessagesApi.swift` addresses a Code
+conversation as a *channel*. The channel id is the session id; the message
+stream is `/v1/code/channels/{id}/messages/stream` with `scope=timeline|thread`.
+Types and their non-optional fields (`dec.mjs` over the descriptors at
+`0x104ae4xxx`, raw enum values from `__cstring`):
+
+```
+Channel                  storage, name
+ChannelMessage           id, inTimeline, serverNotice, attachments,
+                         participantAccountIds  (all else optional)
+ChannelMessageTag        (AnthropicTagged<ChannelMessageTag,String> — bare string on the wire)
+ChannelTimelineResponse  data: [ChannelMessage], nextCursor: String?
+ChannelThreadsResponse   sections: [ChannelThreadSection]
+ChannelThreadSection     status: ThreadStatus, data: [ChannelMessage], nextCursor: String?
+ChannelPullRequestsPage  data, nextCursor?, total: Int, truncated: Bool, source: ChannelPullRequestsSource
+ChannelArtifactsPage     data, nextCursor?, total: Int, truncated: Bool
+ChannelFilesPage         entries, nextCursor: String?
+ChannelStreamStart       after: ChannelMessageId | tail
+ChannelStreamEvent       message | messageUpdated | reactionsReplaced | sessionActivity |
+                         threadSessionBound | threadResolved | threadDeleted |
+                         sessionModel | sessionRequiresAction
+ChannelPullRequestsSource live | no_github_token | github_unavailable | unspecified | unknown
+```
+
+The channel the client streams by name uses the SSE event names in the string
+pool at `0x1047e67a8`: `channel_message_updated`, `channel_message_reactions`,
+`session_activity`, `thread_session_bound`, `session_requires_action` (plus
+`thread_roots_only`). A `channel_message_created` event name does not exist —
+new messages arrive as `channel_message_updated`. The reader logs and skips any
+event name it does not know ("ignoring unknown channel stream event type:
+%{public}s"), so a minimal stream that carries only `channel_message_updated` is
+tolerated.
+
 ## Tooling left in the repo
 
 `/workspace/ipa-work/` holds the RE scripts: `swifttypes.py` (Swift type +

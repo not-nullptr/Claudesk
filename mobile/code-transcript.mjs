@@ -379,6 +379,95 @@ export function eventEnvelopes(entries, { startSequence = 1 } = {}) {
   return out;
 }
 
+// ---- channels: the same conversation, addressed as a claude.ai "channel" ----
+// A Code conversation is readable two ways: as a session
+// (/v1/code/sessions/{id}/…) and, by newer clients, as a *channel*
+// (/v1/code/channels/{id}/…). The channel id is the same `code_<desktopId>` the
+// session carries; ClaudeCodeApi/ChannelMessagesApi.swift is the binary's only
+// builder of these paths. A transcript entry maps to one ChannelMessage, whose
+// body is the message text and whose id is the event id. `ChannelMessage`'s only
+// non-optional fields are id, inTimeline, serverNotice, attachments and
+// participantAccountIds, so those are always emitted.
+export const CHANNEL_MESSAGE_EVENT = "channel_message_updated";
+
+export function channelMessageForEnvelope(envelope, { channelId = null, accountId = null } = {}) {
+  const payload = envelope?.payload ?? {};
+  const message = payload.message && typeof payload.message === "object" ? payload.message : payload;
+  const body = messageText(message);
+  if (body == null) return null;
+  const human = envelope?.source === "human";
+  return {
+    id: envelope?.event_id ?? `msg_${envelope?.sequence_num ?? 0}`,
+    thread_root_id: null,
+    in_timeline: true,
+    author_account_id: human ? accountId : null,
+    author_session_id: human ? null : channelId,
+    server_notice: false,
+    composed: null,
+    body,
+    attachments: [],
+    created_at: envelope?.created_at ?? new Date().toISOString(),
+    edited: null,
+    reply_count: 0,
+    last_reply_at: null,
+    has_unread: false,
+    thread_status: null,
+    thread_preview: null,
+    participant_account_ids: [],
+    participant_count: 1,
+  };
+}
+
+// A channel read the facade has no upstream for still has to decode. Each
+// channel response type is answered with the keys it declares as non-optional:
+//   ChannelThreadsResponse  {sections}
+//   ChannelPullRequestsPage {data,nextCursor,total,truncated,source}
+//   ChannelArtifactsPage    {data,nextCursor,total,truncated}
+//   ChannelFilesPage        {entries,nextCursor}
+//   ChannelTimelineResponse {data,nextCursor}   (the default below)
+export function channelEmptyPage(rest) {
+  if (/^threads(\/|$)/.test(rest)) return { sections: [] };
+  if (/^pull_requests(\/|$)/.test(rest)) {
+    return { data: [], next_cursor: null, total: 0, truncated: false, source: "unspecified" };
+  }
+  if (/^artifacts(\/|$)/.test(rest)) return { data: [], next_cursor: null, total: 0, truncated: false };
+  if (/^files(\/|$)/.test(rest)) return { entries: [], next_cursor: null };
+  return { data: [], next_cursor: null };
+}
+
+// Channel = {storage, name}. `storage` describes where a channel's content
+// lives; the Desktop this facade fronts is the only one, so an empty object
+// stands in for it.
+export function channelResource(id) {
+  return {
+    id,
+    name: "",
+    storage: {},
+    member: null,
+    members: [],
+    members_truncated: false,
+    has_working_session: false,
+    disabled_by_plan: false,
+    context_sources: [],
+  };
+}
+
+// The display text of an SDK message: a bare string, a single text block, or the
+// concatenation of its text blocks. Tool-only turns carry no text and are not
+// timeline messages, so they map to null.
+function messageText(message) {
+  const content = message?.content ?? message?.message?.content;
+  if (typeof content === "string") return content || null;
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("");
+    return text || null;
+  }
+  return null;
+}
+
 // ---- paging ----------------------------------------------------------------
 
 // The app reads events ASCENDING above a floor and pages OLDER on demand, so a
