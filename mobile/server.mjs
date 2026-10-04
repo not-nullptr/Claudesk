@@ -1149,7 +1149,7 @@ async function handleCodeRoutes(request, response, url) {
     const rest = channelSubMatch[2];
     console.log(`[mobile-code]   channel ${method} ${rest} id=${id}${url.search || ""}`);
     if (rest === "messages/stream") {
-      if (method === "POST") await streamChannelMessage(request, response, url, id);
+      if (method === "POST") await sendChannelMessage(request, response, url, id);
       else await streamChannelTimeline(request, response, url, id);
       return true;
     }
@@ -1468,11 +1468,16 @@ async function streamChannelTimeline(request, response, url, channelId) {
   console.log(`[mobile-code] channel timeline ${sessionId}: ${envelopes.length} events`);
 }
 
-// POST /v1/code/channels/{id}/messages/stream — send a turn on the channel leg,
-// the same protocol as the session leg: SSE `channel_message_updated` frames for
-// the optimistic user message and then the reply, closing once the session goes
-// idle.
-async function streamChannelMessage(request, response, url, channelId) {
+// POST /v1/code/channels/{id}/messages/stream — send a turn. Despite the path,
+// this leg is NOT a stream: the app decodes the response body as
+// `SendChannelMessageResponse` ({messageId?, threadRootId?, createdAt?} — all
+// optional; the binary's `MockSessionsApi.sendChannelMessageHandler` returns
+// exactly that). Answering with `text/event-stream` made the app try to
+// JSON-decode SSE text and surface `ClaudeApiServices.ModelDecodingError` on
+// every send. The turn's messages are delivered on the GET timeline
+// subscription (`channel_message_updated`), which the composer already holds
+// open, so this response only acknowledges the send.
+async function sendChannelMessage(request, response, url, channelId) {
   let body;
   try {
     body = await readJson(request);
@@ -1492,14 +1497,8 @@ async function streamChannelMessage(request, response, url, channelId) {
     sendErrorEnvelope(response, 400, "invalid_request", "message body is required");
     return;
   }
-  response.writeHead(200, SSE_HEADERS);
-  const emit = (record) => {
-    for (const frame of codeEngine.framesFor(desktopId, record)) {
-      const message = channelMessageForEnvelope(frame.data, { channelId: sessionId });
-      if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
-    }
-  };
-  const unsubscribe = codeEngine.listen(desktopId, emit);
+  // Resolves once the Desktop has taken the turn; the reply then flows over the
+  // timeline stream. Only the send itself can fail here.
   try {
     await codeEngine.sendMessage(sessionId, {
       text: String(text),
@@ -1507,24 +1506,14 @@ async function streamChannelMessage(request, response, url, channelId) {
       interrupt: Boolean(body?.interrupt),
     });
   } catch (error) {
-    unsubscribe?.();
-    sendSseRecord(response, "error", { type: "error", error: { type: error.type || "api_error", message: error.message } });
-    response.end();
+    sendErrorEnvelope(response, 502, error.type || "api_error", error.message);
     return;
   }
-  const keepalive = setInterval(() => {
-    if (!response.writableEnded) response.write(": keepalive\n\n");
-  }, 15000);
-  const abort = new AbortController();
-  request.on("close", () => {
-    clearInterval(keepalive);
-    unsubscribe?.();
-    abort.abort();
+  sendJson(response, 200, {
+    message_id: null,
+    thread_root_id: null,
+    created_at: new Date().toISOString(),
   });
-  await codeEngine.awaitTurn(desktopId, { signal: abort.signal }).catch(() => null);
-  clearInterval(keepalive);
-  unsubscribe?.();
-  if (!response.writableEnded) response.end();
 }
 
 async function handleConversationRoutes(request, response, url) {

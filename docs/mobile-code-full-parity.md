@@ -110,10 +110,14 @@ SendChannelMessageRequest   body, replyToMessageId, clientMessageId, attachments
 SendChannelMessageResponse  messageId, threadRootId, createdAt
 ```
 
-The composer POSTs `/v1/code/sessions/{id}/messages/stream` with a body of
-`{body, client_message_id, attachments?, reply_to_message_id?}` and then reads
-the turn from `sessions/watch`. `clientMessageId` is the app's optimistic uuid
-(mirrors the chat `messageUuid` honouring in `docs/mobile-claudesk-backend.md`).
+The composer POSTs `/v1/code/channels/{id}/messages/stream` with a body of
+`{body, client_message_id, attachments?, reply_to_message_id?}` and reads the
+reply from the channel timeline subscription it already holds open.
+`clientMessageId` is the app's optimistic uuid (mirrors the chat `messageUuid`
+honouring in `docs/mobile-claudesk-backend.md`). The body of that POST is
+**JSON** (`SendChannelMessageResponse`), not SSE — see the note under the
+endpoint list below; getting that wrong is what surfaces
+`ClaudeApiServices.ModelDecodingError` on send.
 
 **The path is the facade's invention, not the app's.** The binary contains a
 `v1/code/sessions/` literal and a `/messages/stream` literal, but they are never
@@ -146,16 +150,25 @@ GET  /v1/code/channels/{id}/artifacts           ChannelArtifactsPage {data,nextC
 GET  /v1/code/channels/{id}/files               ChannelFilesPage {entries,nextCursor}
 GET  /v1/code/channels/{id}/messages            ChannelTimelineResponse {data,nextCursor}
 GET  /v1/code/channels/{id}/messages/stream     SSE: channel_message_updated per turn
-POST /v1/code/channels/{id}/messages/stream     send a turn; SSE frames as above
+POST /v1/code/channels/{id}/messages/stream     send a turn; **JSON** SendChannelMessageResponse
 ```
 
 Every channel leg logs `[mobile-code]   channel <method> <rest> id=<id>` so a
-run that reaches this surface is unambiguous. The stream is the one leg that
-cannot be JSON: the client decodes `text/event-stream`, and only the event names
+run that reaches this surface is unambiguous. Only the **GET** is a stream: the
+client decodes `text/event-stream`, and only the event names
 in its table (`channel_message_updated`, `channel_message_reactions`,
 `session_activity`, `thread_session_bound`, `session_requires_action`) mean
 anything — unknown names are ignored, which is why the stream may safely carry
 only `channel_message_updated` frames.
+
+The **POST** is not a stream despite the path. The app decodes its body as
+`SendChannelMessageResponse` (`messageId?`, `threadRootId?`, `createdAt?`, all
+optional) — the same DTO `MockSessionsApi.sendChannelMessageHandler` returns.
+Answering it with `text/event-stream` is what makes the app throw
+`ClaudeApiServices.ModelDecodingError` when you send a message: the networking
+layer tries to JSON-decode the SSE text. The turn's messages reach the composer
+over the GET subscription, which it already holds open, so the POST only needs
+to acknowledge the send.
 
 ## 5. Enums (raw values recovered from the string pool)
 
