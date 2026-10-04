@@ -5,6 +5,11 @@ import { parse } from "acorn";
 // expression: regenerating a whole bundle would disturb its module graph.
 export const markerIds = ["cowork-native-rewind", "code-native-rewind-v2",
   "ime-keycode-229", "native-message-edit"];
+// The file pane's own download writes the reader's UTF-8 contents, which is
+// lossy for binary; a header button streams the raw file from the bridge's
+// download route instead. The pane header passes paneName "Files" to its
+// settings menu, so this is the file pane's trailing actions fragment.
+const downloadPatchId = "file-pane-download";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -19,6 +24,7 @@ function protocol(node) {
     && unwrap(node.object.object)?.type === "Identifier" && node.object.object.name === "window";
 }
 function literal(node, value) { return node?.type === "Literal" && node.value === value; }
+function identifier(node) { node = unwrap(node); return node?.type === "Identifier" ? node.name : undefined; }
 function key(node, name) {
   return node?.type === "Property" && (node.key.name === name || node.key.value === name);
 }
@@ -44,15 +50,90 @@ function checksWindow(node) {
   return contains(node, child => child.type === "UnaryExpression" && child.operator === "typeof"
     && child.argument.type === "Identifier" && child.argument.name === "window");
 }
+function checksFileKind(node) {
+  return contains(node, child => child.type === "BinaryExpression"
+    && ["==", "==="].includes(child.operator)
+    && (literal(child.left, "file") || literal(child.right, "file")));
+}
+// The file pane's trailing actions, gated by the pane kind (an `==="file"`
+// check on the enclosing logical expression), are a two-element children array
+// holding a session-scoped search button and a session-scoped anchor control.
+// Selecting the array itself keeps the splice to the single insertion point and
+// leaves the surrounding header untouched.
+function filePaneDownloadTarget({ type, elements }, ancestors) {
+  if (type !== "ArrayExpression" || elements.length !== 2) return false;
+  if (!key(ancestors.at(-1), "children")) return false;
+  const object = ancestors.at(-2);
+  if (object?.type !== "ObjectExpression") return false;
+  const call = ancestors.at(-3);
+  if (call?.type !== "CallExpression" || !call.arguments.includes(object)) return false;
+  const guard = ancestors.at(-4);
+  return guard?.type === "LogicalExpression" && guard.operator === "&&"
+    && guard.right === call && checksFileKind(guard.left);
+}
+// The injected button references only names that would otherwise be mangled, so
+// each is read back from the same parsed graph rather than hard-coded: the file
+// pane's absolute path (`x=$(t=>e==="file"?t.fileView:…:void 0)`), the element
+// factory the pane already calls, and the ghost icon-only Button component.
+// Ambiguous or missing anchors return undefined, and the caller then refuses to
+// emit a patch instead of producing code that breaks under a future minifier.
+function fileViewVariable(scope) {
+  const names = new Set();
+  walk(scope, [], node => {
+    if (node.type !== "VariableDeclarator" || node.id.type !== "Identifier") return;
+    const selector = node.init?.type === "CallExpression" ? node.init.arguments[0] : undefined;
+    if (selector?.type !== "ArrowFunctionExpression") return;
+    if (!contains(selector, child => property(child, "fileView"))) return;
+    if (!checksFileKind(selector)) return;
+    names.add(node.id.name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
+}
+function ghostIconButton(ast) {
+  const names = new Set();
+  walk(ast, [], node => {
+    if (node.type !== "CallExpression") return;
+    const props = node.arguments.map(unwrap).find(argument => argument?.type === "ObjectExpression");
+    if (!props) return;
+    if (!props.properties.some(entry => key(entry, "variant") && literal(entry.value, "ghost"))
+      || !props.properties.some(entry => key(entry, "icon"))
+      || !props.properties.some(entry => key(entry, "iconOnly"))) return;
+    const name = identifier(node.arguments[0]);
+    if (name) names.add(name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
+}
+function filePaneDownloadPatch(node, ancestors, source, button) {
+  const element = node.elements[0];
+  const factory = element?.type === "CallExpression" ? identifier(element.callee) : undefined;
+  const scope = [...ancestors].reverse().find(parent => functionTypes.has(parent.type));
+  const fileView = scope ? fileViewVariable(scope) : undefined;
+  if (!factory || !fileView || !button) return;
+  const handler = `()=>{const filePath=${fileView}&&${fileView}.path;`
+    + 'if(typeof filePath!="string"||filePath==="")return;'
+    + 'const link=document.createElement("a");'
+    + 'link.href="/api/remote/files/download?path="+encodeURIComponent(filePath);'
+    + 'link.rel="noopener";document.body.append(link);link.click();link.remove();}';
+  const injected = `${fileView}&&${fileView}.path?${factory}(${button},`
+    + `{variant:"ghost",iconOnly:!0,icon:"Download","aria-label":"Download file",onClick:${handler}}):null`;
+  const original = source.slice(node.start, node.end);
+  return { original, replacement: `[${original.slice(1, -1)},${injected}]` };
+}
 
 export function inspectRenderer(source, gatewayEnabled) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
   // String prefilter is only an optimization; all acceptance uses parsed nodes.
-  if (!/rewind|keyCode|onEdit|protocol/.test(source)) return { evidence, patches };
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef/.test(source)) return { evidence, patches };
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const redirectScopes = new Map();
+  let button;
   walk(ast, [], (node, ancestors) => {
+    if (filePaneDownloadTarget(node, ancestors)) {
+      button ??= ghostIconButton(ast);
+      const patch = filePaneDownloadPatch(node, ancestors, source, button);
+      if (patch) patches.push({ id: downloadPatchId, start: node.start, end: node.end, ...patch });
+    }
     let marker;
     if (literal(node, "rewindSession unavailable")) marker = markerIds[0];
     if (property(node, "rewindV2") || key(node, "rewindV2")) marker = markerIds[1];
@@ -101,8 +182,8 @@ export function patchRendererSources(sources, gatewayEnabled) {
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
-  const required = gatewayEnabled
-    ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [];
+  const required = [downloadPatchId, ...(gatewayEnabled
+    ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
     const count = matches.get(id)?.length || 0;
     if (count !== 1) throw new Error(`renderer patch ${id} expected once, found ${count}`);

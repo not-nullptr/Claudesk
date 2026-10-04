@@ -13,6 +13,9 @@ const release = JSON.parse(await readFile(releasePath, "utf8"));
 const native = 'const message="rewindSession unavailable"; callbacks.rewindV2; event.keyCode===229; const actions={edit:"onEdit"};';
 const guards = 'function signin(){const code=user.pendingUserCode;let changedFlag=enabled&&window.location.protocol==="app:";router.replace("/new");return changedFlag;}\n'
   + 'function route(){let changedRoute=typeof window<"u"&&window.location.protocol==="app:";router.replace("/new");return changedRoute;}';
+const filePane = 'function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileView:void 0);'
+  + 'g(Dl,{variant:"ghost",iconOnly:!0,icon:"Download"});'
+  + 'return e==="file"&&v(p,{children:[g(Kg,{sessionRef:C}),g(Um,{sessionRef:C,anchorRef:oe})]});}';
 function prepare(version = release.desktopVersion) {
   return spawnSync(process.execPath, [join(root,
     "rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs"), ion, state, releasePath], {
@@ -23,7 +26,7 @@ function prepare(version = release.desktopVersion) {
 try {
   await mkdir(ion);
   const source = join(ion, "renamed-bundle.js");
-  await writeFile(source, `${native}\n${guards}`);
+  await writeFile(source, `${native}\n${guards}\n${filePane}`);
   const first = prepare();
   assert.equal(first.status, 0, first.stderr);
   const pointer = await readFile(join(state, "current.json"), "utf8");
@@ -31,8 +34,8 @@ try {
     "renamed-bundle.js");
   const generated = await readFile(generatedPath, "utf8");
   assert.ok(generated.includes("changedFlag=enabled&&("), "minifier renaming must survive");
-  for (const badSource of [native, `${native}\n${guards}\n${guards}`,
-    guards, `${native}\nlet changedFlag=enabled&&window.location.protocol==="file:";`]) {
+  for (const badSource of [`${native}\n${filePane}`, `${native}\n${guards}\n${guards}\n${filePane}`,
+    `${guards}\n${filePane}`, `${native}\nlet changedFlag=enabled&&window.location.protocol==="file:";\n${filePane}`]) {
     await writeFile(source, badSource);
     assert.notEqual(prepare().status, 0, "missing/ambiguous/changed anchors must reject");
     assert.equal(await readFile(join(state, "current.json"), "utf8"), pointer);

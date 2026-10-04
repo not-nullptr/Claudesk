@@ -21,6 +21,7 @@ export const message='rewindSession unavailable';
 callback.rewindV2; event.keyCode===229; const actions={edit:'onEdit'};
 export function signin(){const code=user.pendingUserCode;const allowed=enabled&&window.location.protocol==='app:';router.replace('/new');return allowed;}
 export function route(){const allowed=typeof window!=='undefined'&&window.location.protocol==='app:';router.replace('/new');return allowed;}
+export function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileView:void 0);g(Dl,{variant:"ghost",iconOnly:!0,icon:"Download"});return e==="file"&&v(p,{children:[g(Kg,{sessionRef:C}),g(Um,{sessionRef:C,anchorRef:oe})]});}
 `);
   const result = spawnSync(process.execPath, [preparePath, ion, state, releasePath], {
     encoding: "utf8", env: { ...process.env, CLAUDE_DESKTOP_VERSION: release.desktopVersion,
@@ -28,7 +29,7 @@ export function route(){const allowed=typeof window!=='undefined'&&window.locati
   });
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
-  assert.equal(manifest.patches.length, 2);
+  assert.equal(manifest.patches.length, 3);
   const generation = join(state, release.desktopVersion, release.patchRelease);
   const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
   const handler = wrapper.slice(wrapper.indexOf("async function serveIon("),

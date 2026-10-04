@@ -208,6 +208,14 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 但该组件依赖官方 React Query / Intl 环境，当前没有从任意 Cowork/Code 页面调用它的公共入口。
 此实现通过 preload 替换现有选目录 API，不新增 frontend bundle 补丁，保留官方信任确认与会话处理。
 
+### 文件面板下载
+
+点击消息中的文件路径会打开官方文件面板。文件面板顶栏在“Files settings”左侧新增一个官方样式的下载图标
+（复用官方按钮与 `Download` 图标），点击后从 `GET /api/remote/files/download?path=...` 流式下载该文件的原始字节，
+因此二进制文件（如 `.ipa`）不会被官方面板读取器的 UTF-8 文本转换破坏。
+该按钮由前端补丁注入，选择器只定位文件面板的顶栏动作片段，始终启用且只匹配一次；详见
+[Frontend 补丁维护](docs/frontend-patches.md)。面板自身的“Download file”菜单仍按官方行为保留。
+
 ### Chat 回退与诊断接口
 
 - `GET /api/chat/models`
