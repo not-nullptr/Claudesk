@@ -170,6 +170,17 @@ image-relative (`0x10000004b28eac` is `0x104b28eac`). Reading such a word is wha
 a section read ahead of dyld, or a stale mapping, yields; undoing it costs one
 mask and one add, and without it that word walks nowhere.
 
+The name is read with **`readByteArray` and a scan for NUL, never Frida's sized
+`readUtf8String`**. A sized read treats a NUL before `size` as a decode failure:
+at the real TLVBlockError name — `54 4c 56 42 6c 6f 63 6b 45 72 72 6f 72 00`,
+"TLVBlockError" — `readUtf8String(128)` throws `can't decode byte 0x00 in
+position 13`. Every Swift type name is shorter than 128 bytes, so that call
+returned nothing for every name on every run. That was the whole of
+`names: []`: the walk was arriving at the right address all along and the read
+was rejecting it. The offline harness hid it by stubbing a cstring read that
+stopped at the NUL; it now stubs Frida's actual behaviour so the bug cannot come
+back unseen.
+
 Alongside that, `throw-types {names:[…], unresolved, calibrated}` goes out 15 s
 after boot (or as soon as 12 distinct types have been seen): the first distinct
 error types named, how many allocations yielded no name at all, and how the
@@ -184,8 +195,10 @@ allocation: the argument registers' words, which of them actually names a type
 `names` is empty — `why`, the per-hop reason the walk stopped (the value read,
 the offset applied, the string that failed `NAME_SHAPE`). `why` is what makes a
 blind run conclusive: `deref8@x0: null` is a null word, `… unreadable (…)` is a
-bad pointer, and `… = "…"` is a reachable string that is not a type name. Rebuild
-with a code_signing-disabled gadget to get `why` — see the risks note.
+bad pointer, and `… = "…"` is a reachable string that is not a type name — which
+is how the sized-read bug above was found: `why` showed the walk reaching the
+byte offset of a real name's terminator. Rebuild with a code_signing-disabled
+gadget to get `why` — see the risks note.
 
 ## How the gadget runs `probe.js` in script mode
 

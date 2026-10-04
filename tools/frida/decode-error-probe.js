@@ -191,6 +191,32 @@ function variants(pointer) {
   return out;
 }
 
+// Read the NUL-terminated token at `address`, at most `limit` bytes, and never
+// through Frida's *sized* `readUtf8String`.
+//
+// A sized read treats a NUL before `size` as a decode failure: at the real
+// TLVBlockError name — `54 4c 56 42 6c 6f 63 6b 45 72 72 6f 72 00`, i.e.
+// "TLVBlockError" — `readUtf8String(128)` throws "can't decode byte 0x00 in
+// position 13". Swift type names are all shorter than 128 bytes, so that read
+// returned nothing for every name on every run, which is what `names: []` was
+// for four builds. Bytes are read in small chunks and the scan stops at the
+// first NUL, so a short name costs one short read and a bogus address costs one
+// caught exception instead of a huge allocation.
+const NAME_CHUNK = 32;
+function readName(address, limit) {
+  let out = '';
+  for (let offset = 0; offset < limit; offset += NAME_CHUNK) {
+    const chunk = new Uint8Array(address.add(offset).readByteArray(NAME_CHUNK));
+    for (const byte of chunk) {
+      if (byte === 0) return out;
+      // A type name is ASCII; any high byte means this is not one, and the
+      // replacement character fails NAME_SHAPE like any other stray byte.
+      out += byte < 0x80 ? String.fromCharCode(byte) : String.fromCharCode(0xFFFD);
+    }
+  }
+  return out;
+}
+
 // Name the type reachable from `pointer` by `mode`: `direct` when the pointer is
 // already the descriptor, otherwise the pointer at `pointer + mode` is the
 // descriptor, whose name sits at `descriptor + 8` through a signed relative
@@ -205,7 +231,7 @@ function nameStep(pointer, mode, trail) {
   // bytes in the live run), and a signed base reads an unmapped page. This is
   // the bug the previous revision fixed, so it must survive every refactor.
   for (const base of variants(pointer)) {
-    const baseTag = base.equals(pointer) ? '' : '+masked';
+    const baseTag = base.equals(pointer) ? '' : '+alt';
     let descriptor = null;
     try {
       descriptor = mode === 'direct' ? ptrOrNull(base) : ptrOrNull(base.add(mode).readPointer());
@@ -222,7 +248,7 @@ function nameStep(pointer, mode, trail) {
 
 function nameFromDescriptor(descriptor, at, trail) {
   for (const candidate of variants(descriptor)) {
-    const tag = candidate.equals(descriptor) ? '' : '+fixed';
+    const tag = candidate.equals(descriptor) ? '' : '+alt';
     const field = candidate.add(8);
     let relative = null;
     try { relative = field.readS32(); } catch (error) {
@@ -234,18 +260,12 @@ function nameFromDescriptor(descriptor, at, trail) {
       if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} failed (${error.message})`);
       continue;
     }
-    // A short read first: a name this probe cares about is short, and a long
-    // read that runs into an unmapped page would throw and lose a name that was
-    // right there.
-    for (const length of [64, 128]) {
-      try {
-        const name = address.readUtf8String(length);
-        if (name && NAME_SHAPE.test(name)) return name;
-        if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} = ${JSON.stringify((name || '').slice(0, 32))}`);
-        break;
-      } catch (error) {
-        if (trail && length === 128) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} unreadable (${error.message})`);
-      }
+    try {
+      const name = readName(address, 128);
+      if (name && NAME_SHAPE.test(name)) return name;
+      if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} = ${JSON.stringify(name.slice(0, 32))}`);
+    } catch (error) {
+      if (trail) trail.push(`${at}@${candidate}${tag}: rel ${relative} -> ${address} unreadable (${error.message})`);
     }
   }
   return null;
