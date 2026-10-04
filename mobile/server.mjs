@@ -266,6 +266,9 @@ const CODE_FLAGS = [
   "claudeai_code_project_remote_control",
   "claudeai_code_project_drive_folder_browser",
   "claudeai_code_send_environment_setup",
+  // Gates the cross-device / paired-device listing the environment picker draws
+  // its "devices" rows from; on so the picker is offered its environments.
+  "claudeai_cross_device_sync",
   "claudeai_code_collapse_long_user_messages",
   "claudeai_code_routine_create_form",
   "claudeai_drawer_search",
@@ -894,7 +897,7 @@ async function handleCodeRoutes(request, response, url) {
   if (environmentsMatch && method === "GET") {
     const online = await desktopReady();
     const environments = [
-      cloudEnvironment({ online }),
+      cloudEnvironment({ online, cliVersion: desktopVersion() }),
       bridgeEnvironment({ online, cliVersion: desktopVersion() }),
     ];
     // The picker's cloud section stays empty on device even though this list is
@@ -949,7 +952,7 @@ async function handleCodeRoutes(request, response, url) {
     const body = await readJson(request).catch(() => ({}));
     const online = await desktopReady();
     const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-    sendJson(response, 201, cloudEnvironment({ online, ...(name ? { name } : {}) }));
+    sendJson(response, 201, cloudEnvironment({ online, cliVersion: desktopVersion(), ...(name ? { name } : {}) }));
     return true;
   }
 
@@ -985,7 +988,7 @@ async function handleCodeRoutes(request, response, url) {
       return true;
     }
     if (id === CLOUD_ENVIRONMENT_ID) {
-      sendJson(response, 200, cloudEnvironment({ online }));
+      sendJson(response, 200, cloudEnvironment({ online, cliVersion: desktopVersion() }));
       return true;
     }
     sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);

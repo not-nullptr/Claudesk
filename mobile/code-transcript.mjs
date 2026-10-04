@@ -43,12 +43,40 @@ export const BRIDGE_ENVIRONMENT_ID = "anthropic-bridge-local";
 // `environment_id` keeps resolving after a restart.
 export const CLOUD_ENVIRONMENT_ID = "anthropic-cloud-local";
 
+// The picker decodes the environment list ALL-OR-NOTHING: one field the app
+// cannot decode fails the whole `[EnvironmentResource]`, and with it every row —
+// which is the "Create a cloud environment to get started" empty state. `null`
+// is the only value that can fail a field the app declares non-optional, so the
+// fields whose optionality the binary's field metadata did NOT confirm optional
+// are never emitted as null. A non-null value decodes whether the property is
+// `T` or `T?`; null decodes only for `T?`. Fields the metadata DID confirm
+// optional (mangled `…Sg`, e.g. `initScript`/`branch`/`gitRepoUrl`/`cliVersion`)
+// stay null so they read as absent rather than as an empty string.
+//
+// Real environments always carry a creation time, and `createdAt` shares its
+// exact field encoding with the session DTO's `createdAt` — a field the app
+// already decodes from this facade's ISO-8601 strings. Mirror that here.
+const ENVIRONMENT_CREATED_AT = new Date().toISOString();
+
+function bridgeInfoFor({ name, online, cliVersion }) {
+  return {
+    max_sessions: 1,
+    machine_name: name,
+    directory: "/workspace",
+    branch: null,
+    git_repo_url: null,
+    online,
+    spawn_mode: BRIDGE_SPAWN_MODE.sameDir,
+    cli_version: cliVersion,
+  };
+}
+
 export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
   return {
     kind: ENVIRONMENT_KIND.bridge,
     environment_id: BRIDGE_ENVIRONMENT_ID,
     name,
-    created_at: null,
+    created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
     // `config` is `EnvironmentConfiguration`, a Swift enum with ASSOCIATED
     // values (`anthropic | byoc | paired | unknown`). The synthesised Codable
@@ -66,16 +94,7 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
         git_repo_url: null,
       },
     },
-    bridge_info: {
-      max_sessions: 1,
-      machine_name: name,
-      directory: "/workspace",
-      branch: null,
-      git_repo_url: null,
-      online,
-      spawn_mode: BRIDGE_SPAWN_MODE.sameDir,
-      cli_version: cliVersion,
-    },
+    bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
 }
 
@@ -86,12 +105,12 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
 // reads it for `kind == bridge`. The `state`/`online` axis is the same Desktop
 // health the bridge record uses, so a Desktop that is down is shown as unknown
 // here too rather than as a usable cloud.
-export function cloudEnvironment({ name = "Claudesk Desktop", online = true } = {}) {
+export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
   return {
     kind: ENVIRONMENT_KIND.anthropicCloud,
     environment_id: CLOUD_ENVIRONMENT_ID,
     name,
-    created_at: null,
+    created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
     config: {
       anthropic: {
@@ -100,10 +119,17 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true } = 
         init_script: null,
         environment: {},
         languages: [],
-        network_config: null,
+        // `networkConfig`’s optionality is not recoverable from the metadata;
+        // a well-formed, permissive value decodes whether it is `CCRNetworkConfig`
+        // or `CCRNetworkConfig?`, while `null` would fail the former.
+        network_config: { allowed_hosts: [], allow_default_hosts: true },
       },
     },
-    bridge_info: null,
+    // `bridgeInfo` sits on every `EnvironmentResource`; the app classifies the
+    // row by `kind` and only reads `bridgeInfo` for the bridge kind. Emitting
+    // the same Desktop descriptor here is ignored by a cloud row but decodes if
+    // the property is non-optional — `null` would fail that case.
+    bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
 }
 

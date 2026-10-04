@@ -210,7 +210,19 @@ assert.equal(cloud.kind, "anthropic_cloud");
 assert.equal(cloud.environment_id, CLOUD_ENVIRONMENT_ID);
 assert.deepEqual(Object.keys(cloud.config), ["anthropic"], "the case name is the only key");
 assert.equal(cloud.config.anthropic.environment_type, "anthropic");
-assert.equal(cloud.bridge_info, null, "bridgeInfo is only read for kind == bridge");
+// `bridgeInfo` is not *read* for a cloud row (the app classifies by `kind`),
+// but it is still *decoded* whatever the kind, and the list decodes
+// all-or-nothing. A struct-typed property fails to decode only when the value
+// is `null` and the property is non-optional; a well-formed object decodes
+// either way. So the cloud record carries one too rather than risking the
+// whole `[EnvironmentResource]` on a null.
+assert.equal(cloud.bridge_info.machine_name, "Claudesk Desktop");
+assert.equal(cloud.bridge_info.spawn_mode, "same-dir");
+assert.ok(Number.isFinite(Date.parse(cloud.created_at)), "createdAt is a non-null ISO date");
+// The same "never null an unconfirmed-optional field" rule applies to the
+// anthropic config's network settings; a null here would fail a non-optional
+// `CCRNetworkConfig` and drop the row.
+assert.deepEqual(cloud.config.anthropic.network_config, { allowed_hosts: [], allow_default_hosts: true });
 assert.equal(cloud.state, "active");
 assert.equal(cloudEnvironment({ online: false }).state, "unknown");
 // The two advertised records are distinct ids, so a session can name either.

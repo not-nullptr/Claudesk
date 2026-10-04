@@ -240,6 +240,44 @@ in the picker. The facade currently ignores that query parameter, so it cannot
 narrow anything today — but if the app sends a non-empty filter and then drops
 rows itself, returning the full set is not enough.
 
+### Correction: matching CodingKeys rules out *unknown keys*, not *null values*
+(2026-10-04)
+
+The section above concludes "a decode failure is no longer a live hypothesis"
+because `EnvironmentResource`'s CodingKeys match the emitted keys one-for-one.
+That reasoning has a hole, and the hole is the bug. **CodingKeys only name the
+keys; they say nothing about whether a property is optional.** A synthesized
+`init(from:)` calls `decode(_:forKey:)` for a non-optional property and
+`decodeIfPresent(_:forKey:)` for an optional one. A key that is *present but
+`null`* therefore still throws `valueNotFound` for a non-optional property —
+same all-or-nothing failure the CodingKeys check was meant to exclude:
+
+* `[EnvironmentResource]` decodes as one unit, so **one** bad value drops
+  **every** row — both the `anthropic_cloud` and the `bridge` record.
+* `EnvironmentPicker.swift:82` picks its empty state from a model Bool / string
+  `==` display state (see above), not from a row count. A load that throws
+  leaves that state in its un-populated arm — the `environments_empty_state`
+  onboarding screen — which is exactly the reported symptom, with clean logs.
+
+The facade had been emitting `created_at: null`, `network_config: null` (cloud)
+and `bridge_info: null` (cloud) — three values whose *optionality was never
+established* from the binary, unlike the fields whose fieldmd mangling ends in
+`Sg` (`init_script`, `branch`, `git_repo_url`, `cli_version`, confirmed
+Optional, safe as `null`). The fix (`mobile/code-transcript.mjs`) is: **never
+emit `null` for a field whose optionality is unconfirmed.** A well-formed value
+decodes whether the property is `T` or `T?`; `null` decodes only for `T?`. So:
+
+* `created_at` now carries an ISO-8601 string. It shares its exact field
+  encoding with `SessionResource.createdAt` (fieldmd type target `0x45ccb80`),
+  a field the app already decodes from this facade's ISO strings — but the
+  environment records sent `null` where the session records sent a string.
+* `network_config` now carries `{allowed_hosts: [], allow_default_hosts: true}`
+  rather than `null`.
+* the cloud record's `bridge_info` now carries the same machine descriptor the
+  bridge record uses. The app classifies rows by `kind` and only *reads*
+  `bridgeInfo` for a bridge row, so a value on a cloud row is ignored — but it
+  is still *decoded*, and a well-formed object is decode-safe either way.
+
 ## Endpoint 3 — `GET /api/organizations/<uuid>/experiences`
 
 Base string `experiences` (VA 0x1047bc2e1); tracking paths `/experiences/track`
