@@ -721,6 +721,7 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     "memory/settings",
     "reflections/settings",
     "sync/auth/status",
+    "sync/github/auth",
     "notification/preferences",
     "cowork_settings",
     "permission_mode_policy",
@@ -733,7 +734,21 @@ async function handleOptionalEmptyRoutes(request, response, url) {
         is_memory_search_enabled: false,
       },
       "reflections/settings": { verdict: null },
-      "sync/auth/status": { connected: false },
+      // The app decodes this whole body into `FirstPartyAuthStatus`, whose one
+      // stored property is `github: Bool` (ClaudeData/OrganizationStore.swift
+      // keeps it as `_firstPartyAuth`). A body without `github` throws
+      // `No value associated with key CodingKeys(stringValue: "github"…)` from
+      // the synthesized `FirstPartyAuthStatus.init(from:)` at `Claude+0x10b5770`
+      // — observed on-device at +7 s every launch. `connected` is kept because
+      // the mobile-API spec documents it; the decoder ignores keys it has no
+      // property for, so carrying both satisfies either shape.
+      "sync/auth/status": { github: false, connected: false },
+      // `CodeGitHubAuthStatus` — the Code tab's GitHub gate. The app GETs this
+      // and used to fall through to a 404. `ghe_connections: []` is a truthful
+      // "no enterprise GitHub connections" (wire casing is snake_case: the
+      // shared decoder sets .convertFromSnakeCase) and `github: false` says no
+      // github.com connection.
+      "sync/github/auth": { github: false, ghe_connections: [] },
       "notification/preferences": { preferences: {}, effective_push: {} },
       "cowork_settings": { skip_approvals_enabled: false, auto_mode_enabled: false },
       "permission_mode_policy": {
