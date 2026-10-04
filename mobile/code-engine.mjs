@@ -109,6 +109,7 @@ export function createCodeEngine({
   titles = process.env.CLAUDE_MOBILE_TITLES !== "0",
 }) {
   const cache = new Map(); // desktopId -> { base, at }
+  const records = new Map(); // desktopId -> Desktop session record (sync mirror of `cache`)
   const revisions = new Map(); // desktopId -> number
   const listeners = new Map(); // desktopId -> Set<fn({method, payload})>
   const allListeners = new Set(); // fn({method, payload}, desktopId)
@@ -171,15 +172,34 @@ export function createCodeEngine({
       onEvent: handleDesktopEvent,
       onReconnect: () => {
         cache.clear();
+        records.clear();
         for (const desktopId of listeners.keys()) bumpRevision(desktopId);
       },
+    });
+  }
+
+  // The list-watch leg (`GET /v1/code/sessions/watch`) carries whole
+  // `SessionResource`s, but the pure translator has only the relayed transcript
+  // entry. The engine is the one place with the session record and its mobile
+  // metadata, so it builds the resource here, synchronously, from the same
+  // mirror `loadSession`/`listSessions` keep. A session the engine has not seen
+  // yet still yields a decodable resource (a bare id) that the app replaces on
+  // its next list read.
+  function watchResourceFor(desktopId) {
+    const record = records.get(desktopId) || { sessionId: desktopId };
+    return sessionResource(record, {
+      meta: metaState?.sessions?.[desktopId] || {},
+      pendingApproval: hasPendingPermission(desktopId),
     });
   }
 
   function translatorFor(desktopId) {
     let translator = translators.get(desktopId);
     if (!translator) {
-      translator = createCodeEventTranslator({ sessionId: desktopId });
+      translator = createCodeEventTranslator({
+        sessionId: desktopId,
+        resourceFor: () => watchResourceFor(desktopId),
+      });
       translators.set(desktopId, translator);
     }
     return translator;
@@ -299,6 +319,7 @@ export function createCodeEngine({
       throw asCodeError(error);
     }
     if (!session) throw notFound();
+    records.set(desktopId, session);
     const meta = (await loadMeta()).sessions[desktopId];
     const base = {
       session,
@@ -340,6 +361,7 @@ export function createCodeEngine({
     });
     let rows = codes.map((session) => {
       const desktopId = String(session.sessionId ?? session.id ?? "");
+      records.set(desktopId, session);
       return sessionResponse(session, {
         meta: state.sessions[desktopId] || {},
         pendingApproval: hasPendingPermission(desktopId),
@@ -386,7 +408,9 @@ export function createCodeEngine({
     return {
       resource: sessionResource(loaded.session, {
         meta: loaded.meta,
-        revision: loaded.revision,
+        // The wire `revision` is a Date, so hand over a time — not the
+        // change-counter `loadSession` keeps for its own cache.
+        revision: loaded.session?.lastActivityAt ?? loaded.session?.createdAt ?? null,
         pendingApproval: loaded.pendingApproval,
       }),
       loaded,
@@ -427,9 +451,10 @@ export function createCodeEngine({
       lastActivityAt: Date.now(),
       isRunning: false,
     };
+    records.set(desktopId, record);
     return sessionResource(record, {
       meta: { draft: true, environment_id },
-      revision: revisionFor(desktopId),
+      revision: record.lastActivityAt,
     });
   }
 
@@ -443,6 +468,7 @@ export function createCodeEngine({
       throw asCodeError(error);
     }
     cache.delete(desktopId);
+    records.delete(desktopId);
     translators.delete(desktopId);
     await dropMeta(desktopId);
   }

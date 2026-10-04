@@ -19,7 +19,8 @@
 // and a permission prompt arrives the same way under
 // `onOnToolPermissionRequest`.
 
-import { eventEnvelopeForEntry, isRenderableEntry, sseFrameForEntry } from "./code-transcript.mjs";
+import { isRenderableEntry, sseFrameForEntry } from "./code-transcript.mjs";
+import { codeIdFor } from "./code-ids.mjs";
 
 // Is this relayed `desktop-ipc` record ours? The bridge broadcasts every
 // relayed record on every SSE connection regardless of mode
@@ -70,20 +71,25 @@ export function frameFromPayload(method, payload, sequence = 1) {
  * `frameFromPayload`: the list screen's `SessionWatchEvent` is
  * `upserted | deleted` over the whole session, not a transcript `client_event`.
  *
- * The existing list adapter carries an envelope. Its complete upstream wire
- * contract remains separate from the verified transcript contract.
+ * `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)` — a
+ * different type from the transcript leg's `SessionEventEnvelope`, and the
+ * reason this leg cannot reuse `eventEnvelopeForEntry`. The app decodes `data`
+ * as the case's payload, so `upserted` must be a whole `SessionResource` and
+ * `deleted` the session's tagged id string. The translator cannot build a
+ * `SessionResource` (it has only the relayed entry, not the session record or
+ * its metadata), so the engine supplies one through `resourceFor`.
  *
- * @returns {Array<{ event: "upserted" | "deleted", data: object }>}
+ * @returns {Array<{ event: "upserted" | "deleted", data: object | string | null }>}
  */
-export function watchFrameFromPayload(method, payload, sequence = 1) {
+export function watchFrameFromPayload(method, payload, sequence = 1, { sessionId = null, resourceFor = null } = {}) {
   if (method !== "onOnEvent") return [];
   const entry = entryPayload(payload);
   if (!entry) return [];
   if (payload?.removed || payload?.deleted || entry?.removed) {
-    return [{ event: "deleted", data: { session_id: payload?.sessionId ?? entry?.sessionId ?? null, event_id: entry?.uuid ?? null } }];
+    return [{ event: "deleted", data: sessionId ? codeIdFor(sessionId) : null }];
   }
   if (!entry.uuid) return [];
-  return [{ event: "upserted", data: eventEnvelopeForEntry(entry, sequence) }];
+  return [{ event: "upserted", data: resourceFor ? resourceFor(sessionId) : null }];
 }
 
 /**
@@ -94,9 +100,9 @@ export function watchFrameFromPayload(method, payload, sequence = 1) {
  * `resumeFrom()` returns the next assignable sequence; a Desktop replay on
  * reconnect must not advance it. The transcript resume floor is last-seen.
  *
- * @param {{ sessionId?: string, startSequence?: number }} options
+ * @param {{ sessionId?: string, startSequence?: number, resourceFor?: (sessionId: string) => object }} options
  */
-export function createCodeEventTranslator({ sessionId = null, startSequence = 1 } = {}) {
+export function createCodeEventTranslator({ sessionId = null, startSequence = 1, resourceFor = null } = {}) {
   const seen = new Map(); // event_id -> sequence_num
   let nextSequence = startSequence;
   const pendingPermissions = new Map();
@@ -151,7 +157,7 @@ export function createCodeEventTranslator({ sessionId = null, startSequence = 1 
      */
     acceptWatch({ method, payload } = {}) {
       const entry = entryPayload(payload);
-      const frames = watchFrameFromPayload(method, payload, seen.get(entry?.uuid) ?? nextSequence);
+      const frames = watchFrameFromPayload(method, payload, seen.get(entry?.uuid) ?? nextSequence, { sessionId, resourceFor });
       if (frames.some((frame) => frame.event === "upserted") && entry?.uuid && !seen.has(entry.uuid)) {
         seen.set(entry.uuid, nextSequence);
         nextSequence += 1;

@@ -97,11 +97,15 @@ assert.ok("last_event_at" in row && "session_context" in sessionResource(record)
 assert.deepEqual(row.tags, []);
 assert.equal(row.unread, true);
 
-const detail = sessionResource(record, { revision: 7 });
+// `revision` is a `Foundation.Date?` on the wire, not a change counter: an
+// integer there fails the decode of the whole `SessionResource`. A numeric
+// millisecond input is emitted as ISO-8601, like every other Date on this DTO.
+const revisionMs = 1759396800000;
+const detail = sessionResource(record, { revision: revisionMs });
 assert.equal(detail.session_status, SESSION_STATUS.idle);
 assert.equal(detail.permission_mode, "acceptEdits");
 assert.equal(detail.session_context.cwd, "/workspace/Claudesk");
-assert.equal(detail.revision, 7);
+assert.equal(detail.revision, new Date(revisionMs).toISOString());
 assert.equal(detail.status_bucket, STATUS_BUCKET.completed);
 // The detail record's worker axis is WorkerStatus (processing | idle) — a
 // running turn is `processing`, and `running` is not a case it has. The row
@@ -207,6 +211,16 @@ assert.deepEqual(frameFromPayload("onOnEvent", { type: "system" }), []);
 assert.deepEqual(frameFromPayload("onOnSomethingElse", next), []);
 assert.equal(watchFrameFromPayload("onOnEvent", next)[0].event, "upserted");
 assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next })[0].event, "deleted");
+// `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)`: the
+// list leg's `data` is the case payload, so `upserted` carries a whole
+// SessionResource (built by the engine, which alone has the record) and
+// `deleted` the session's tagged id string — not a transcript envelope.
+const upsertPayload = { id: "code_s1", status: "idle" };
+assert.deepEqual(
+  watchFrameFromPayload("onOnEvent", next, 1, { sessionId: "s1", resourceFor: () => upsertPayload })[0].data,
+  upsertPayload,
+);
+assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next }, 1, { sessionId: "s1" })[0].data, "code_s1");
 const prompt = { requestId: "req-1", sessionId: "s1", toolName: "Bash", input: { command: "ls" } };
 assert.deepEqual(translator.accept({ method: "onOnToolPermissionRequest", payload: prompt }), []);
 assert.deepEqual(translator.permissions(), [prompt]);
@@ -220,7 +234,11 @@ assert.equal(environment.bridge_info.spawn_mode, "same-dir");
 // `config` is a Swift enum with associated values, so its payload nests under
 // the case name — a flat `config` at this level fails to decode the resource.
 assert.deepEqual(Object.keys(environment.config), ["paired"]);
-assert.equal(environment.config.paired.environment_type, "paired");
+// The inner `environmentType` is a `ConfigType` — anthropic | byoc | bridge |
+// unknown, with NO `paired` case — so the paired payload reports `bridge`. A
+// literal `"paired"` fails the whole `EnvironmentConfiguration` and drops the
+// row (and, all-or-nothing, every other row of the list).
+assert.equal(environment.config.paired.environment_type, "bridge");
 assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 
 // ---- the cloud environment offered as the picker's "Cloud environments" row --

@@ -88,9 +88,14 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
     // the case name, and a flat `{environment_type: …}` at `config`'s top level
     // does not decode (which drops the whole EnvironmentResource, and with it
     // every row of the picker — the empty state on device).
+    // `environmentType` inside a payload is a `ConfigType` — `anthropic |
+    // byoc | bridge | unknown`, a case set with NO `paired` member — so the
+    // paired payload carries `bridge`, the same axis value its `kind` reports.
+    // A literal `"paired"` is not a case of that enum and fails the whole
+    // `EnvironmentConfiguration`, which drops the entire picker list.
     config: {
       paired: {
-        environment_type: "paired",
+        environment_type: "bridge",
         machine_name: name,
         directory: "/workspace",
         branch: null,
@@ -141,6 +146,21 @@ function iso(value) {
   return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null;
 }
 
+// Every timestamp on the Code DTOs is `Foundation.Date` — the field's mangled
+// type resolves through the executable's chained-fixup import table to
+// `_$s10Foundation4DateVMn` — and the app's decoder reads ISO-8601
+// (docs/mobile-spec §Dates). `SessionResource.createdAt`/`updatedAt` and
+// `SessionResponse.createdAt` are NON-optional, so a record without a usable
+// time must still emit a real date: `null` there fails the whole DTO, and with
+// it every row of the list. The first usable candidate wins.
+function wireDate(...candidates) {
+  for (const candidate of candidates) {
+    const value = iso(candidate);
+    if (value) return value;
+  }
+  return new Date().toISOString();
+}
+
 function desktopIdOf(record) {
   return record?.sessionId ?? record?.session_id ?? record?.id ?? null;
 }
@@ -182,7 +202,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
     worker_status: workerStatusOf(record, { pendingApproval }),
     connection_status: connectionStatusOf(record),
     external_metadata: null,
-    created_at: iso(record?.createdAt),
+    created_at: wireDate(record?.createdAt),
     last_event_at: iso(record?.lastActivityAt),
     updated_at: iso(record?.lastActivityAt ?? record?.createdAt),
     post_turn_summary: null,
@@ -198,9 +218,10 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
   };
 }
 
-// The detail record (GET /v1/code/sessions/{id}). `SessionResource` adds the
-// context, permission mode, spawn path and a revision counter.
-export function sessionResource(record, { meta = {}, revision = 0, pendingApproval = false } = {}) {
+// The detail record (GET /v1/code/sessions/{id}, and the body of the create
+// reply). `SessionResource` adds the context, permission mode and spawn path;
+// `revision` is a millisecond timestamp (see `wireDate`).
+export function sessionResource(record, { meta = {}, revision = null, pendingApproval = false } = {}) {
   const sessionStatus = sessionStatusOf(record, { pendingApproval });
   const environment = environmentForSession(meta);
   return {
@@ -209,8 +230,8 @@ export function sessionResource(record, { meta = {}, revision = 0, pendingApprov
     session_status: sessionStatus,
     environment_id: environment.id,
     environment_kind: environment.kind,
-    created_at: iso(record?.createdAt),
-    updated_at: iso(record?.lastActivityAt ?? record?.createdAt),
+    created_at: wireDate(record?.createdAt),
+    updated_at: wireDate(record?.lastActivityAt, record?.createdAt),
     session_context: {
       sources: [],
       cwd: record?.cwd ?? null,
@@ -239,7 +260,12 @@ export function sessionResource(record, { meta = {}, revision = 0, pendingApprov
     origin: null,
     bound_device: null,
     status_bucket: statusBucketOf(sessionStatus),
-    revision,
+    // `revision` is a `Foundation.Date?` on this DTO, NOT a counter: an integer
+    // here fails the decode of every `SessionResource` — the create reply, the
+    // detail read and the watch's `upserted` frame. The session's own
+    // last-change time is the date that moves when the record moves, which is
+    // what the field tracks, so that is what goes on the wire.
+    revision: wireDate(revision, record?.lastActivityAt, record?.createdAt),
     connector_domains_withheld: [],
   };
 }

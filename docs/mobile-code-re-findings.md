@@ -73,8 +73,24 @@ postTurnSummary, externalMetadata, unread, taskSummary, tags, agentId,
 selfHostedRunnerPoolId, selfHostedRunnerState, triggerId, origin, boundDevice,
 statusBucket, revision, connectorDomainsWithheld`.
 
+**`revision` is a `Foundation.Date?`** — its mangled field type resolves through
+the chained-fixup import table to `_$s10Foundation4DateVMn`, the same type as
+`createdAt`/`updatedAt` (see `docs/mobile-code-wire-correction.md`). It is the
+session's last-change *time*, not a counter: an integer here fails the decode of
+the whole `SessionResource`, i.e. the `POST /v1/code/sessions` 201 body, the
+detail read, and every watch `upserted` frame. This was the "can't send in Claude
+Code" failure (2026-10-04) — the session list rendered (its row has no
+`revision`), but the create reply died as `ModelDecodingError` before any
+message-send leg was even reached.
+
 Watch stream (`GET /v1/code/sessions/watch`, SSE): `SessionWatchEvent` (@0x4aea6d8)
-= `upserted | deleted`; the request carries `include_trigger_sessions`.
+= `upserted | deleted`; the request carries `include_trigger_sessions`. The
+associated values are `upserted(SessionResource)` and
+`deleted(AnthropicTagged<SessionTag>)` — so the SSE `data` for `upserted` is a
+whole `SessionResource` (more than a transcript entry carries; the engine builds
+it from its session mirror) and for `deleted` the session's tagged id string. An
+earlier revision of this leg wrongly put a `SessionEventEnvelope` on `upserted`
+and a `{session_id, event_id}` object on `deleted`.
 
 ## Transcript wire correction (2026-10-03)
 
@@ -383,7 +399,7 @@ key, the case name, whose value is the case's payload:
 
 ```
 "config": { "anthropic": { "environment_type": "anthropic", "cwd": …, … } }
-"config": { "paired":    { "environment_type": "paired", "machine_name": …, … } }
+"config": { "paired":    { "environment_type": "bridge", "machine_name": …, … } }
 ```
 
 The flat reading below was an inference from seeing the *inner* struct's keys
@@ -396,8 +412,14 @@ between the cases is therefore by the **single nested key**, not by a sibling
 `environmentType`; the sibling `kind` field (`"anthropic_cloud" | "byoc" |
 "bridge" | "unknown"`) remains the section split. `BridgeSpawnMode` wire values
 are `"single-session" | "worktree" | "same-dir"` (not the Swift spellings).
-`environmentType` inside a payload is still the case's own literal
-(`"anthropic"` / `"paired"`).
+`environmentType` inside a payload is **not** the case's own literal: it is typed
+`ConfigType` (@0x4aeae00), whose cases are `anthropic | byoc | bridge | unknown`
+— there is NO `paired` member. So the `paired` payload carries
+`environment_type = "bridge"`, the same axis value its sibling `kind` reports;
+the literal `"paired"` is not a case of that enum and fails the whole
+`EnvironmentConfiguration`, dropping every row of the picker. (The `anthropic`
+payload's `"anthropic"` happens to be both the case name and a valid
+`ConfigType`, which is why the flat-reading bug hid there.)
 NOTE: the earlier claim that BYOC's `cwd`/`taskSetupScript` thunk (0x101f32310)
 proved explicit camelCase keys was wrong — those literals are the *case names*
 of a synthesised `CodingKeys` enum (a raw value defaults to the case name), not
