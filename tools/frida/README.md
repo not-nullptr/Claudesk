@@ -23,6 +23,20 @@ the same IPAs, the same dylib and the same `probe.js`:
 `probe.js` reports through both sinks unconditionally — `send()` for an attached
 controller, POST for standalone — so the same file works either way.
 
+There is a **third path with no gadget in it at all**, and it is worth trying
+first. Frida 17's CoreDevice backend spawns a *debuggable* app on a jailed iOS
+17+ device over USB, so
+
+```sh
+frida -U -f com.anthropic.claude -l tools/frida/probe.js
+```
+
+instruments the app with no repackaging, no re-signing and nothing to install —
+and because Frida itself is the debugger, arbitrary code runs, so Interceptor
+works and the `throw` backtraces come back. It needs Developer Mode on the
+phone, a mounted developer disk image, and the phone on USB. When it works it
+deletes every moving part below, so reach for it before rebuilding anything.
+
 **Listen mode is the one to iterate in.** Install once, then:
 
 ```sh
@@ -138,6 +152,24 @@ be what fails, the run says so — the `hook {installed:[…]}` line lists exact
 which throw hooks actually took. Empty there means the JIT entitlement is the
 next thing to try.
 
+### `code_signing`, and the launch crash
+
+A jailed app that is not being debugged may not execute unsigned code, but the
+gadget's default (`code_signing: "optional"`) assumes it can. Get that wrong and
+the kernel kills the process during dyld initialisation — `EXC_BAD_ACCESS`
+(`SIGKILL - CODESIGNING`), `CODESIGNING 2 Invalid Page` — before `probe.js` runs
+a line. That reads exactly like a bad signature or a broken build. It is
+neither, and no amount of re-signing helps.
+
+The builder therefore defaults to `code_signing: "required"`, which is the
+documented way to run "on a jailed iOS device without a debugger attached". The
+trade-off is in the same sentence of the Frida docs: Interceptor becomes
+unavailable, so part B (the `swift_willThrow` hooks) cannot be installed and
+`hook {installed:[]}` comes back empty with a `note` saying so. Part A — the type
+and conformance census — hooks nothing and still works. Pass
+`--code-signing optional` to get the hooks back whenever the app really is
+spawned debuggable.
+
 ## Install and run
 
 1. Sign the built IPA with Feather and install it. Feather re-signs nested
@@ -162,10 +194,16 @@ next thing to try.
 
 ## Risks / if it does not work
 
-- **App will not launch after installing.** Most likely the gadget dylib was not
-  signed (Feather only signing frameworks, not loose dylibs) or the app detects
-  the change. Fallback: hand Feather the gadget *as a tweak* (it injects and
-  signs it) and ship only `FridaGadget.config` (+ `probe.js`) in the IPA.
+- **App will not launch after installing.** Check `code_signing` first: with
+  `optional` on a jailed device the kernel kills the app at launch (above), and
+  the fix is a rebuild, not a re-sign. If it is already `required`, the gadget's
+  own signature is the next suspect — Feather has to re-sign it to the app's
+  team, and a stock Claude.app contains no loose `.dylib` at all, so this is the
+  first one it has ever been asked to sign. Fallback: hand Feather the gadget
+  *as a tweak* (it injects and signs it) and ship only `FridaGadget.config`
+  (+ `probe.js`) in the IPA. The crash log says which it is: Settings → Privacy
+  & Security → Analytics & Improvements → Analytics Data, look for
+  `Claude-….ips`, or stream `pymobiledevice3 syslog live` while launching.
 - **Nothing at all in the log.** The gadget did not load: check the load path
   (`@executable_path/Frameworks/FridaGadget.dylib`) and that `FridaGadget.config`
   sits beside the dylib (config discovery matches the gadget's filename with a

@@ -22,6 +22,10 @@
 //     --out Claude-frida.ipa \
 //     --report-url https://<your-claudesk-host> --token <secret>
 //
+// Both modes also take --code-signing required|optional (default "required"),
+// which is the setting that decides whether a jailed app survives launch — see
+// the config comment further down before changing it.
+//
 // The gadget version is pinned: the Swift ApiResolver only grew nominal-type /
 // protocol / conformance queries in 17.21.0, which is the whole reason for
 // doing this instead of more static RE.
@@ -56,8 +60,15 @@ const cacheDir = arg("cache", "/tmp/claudesk-frida");
 const interaction = arg("interaction", "script");
 const listenAddress = arg("address", "0.0.0.0");
 const listenPort = Number(arg("port", "27042"));
+// The gadget's own code-signing stance, which is what decides whether the app
+// survives launch on a jailed device. See the config comment below.
+const codeSigning = arg("code-signing", "required");
 if (interaction !== "script" && interaction !== "listen") {
   console.error(`--interaction must be "script" or "listen", not ${interaction}`);
+  process.exit(2);
+}
+if (codeSigning !== "required" && codeSigning !== "optional") {
+  console.error(`--code-signing must be "required" or "optional", not ${codeSigning}`);
   process.exit(2);
 }
 if (!appDir || !outIpa || (interaction === "script" && (!reportUrl || !token))) {
@@ -279,9 +290,28 @@ const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.
 // needs a JIT entitlement to run our script at all, and QuickJS is a pure
 // interpreter that needs none — so it is worth being explicit rather than
 // inheriting whatever a future build decides.
+// code_signing: the one setting that decides whether the app launches at all on
+// a jailed device, and it is easy to miss because its name suggests something
+// about our unsigned build rather than about the app we are loading into.
+//
+// The default, "optional", tells Frida to assume the process may execute
+// unsigned code and modify it in memory — true for a debuggable process (one
+// launched under a debugger, or spawned by a Frida client over CoreDevice), and
+// false for a jailed app launched from the home screen. Assume it wrongly and
+// the kernel kills the process during dyld initialisation: EXC_BAD_ACCESS
+// (SIGKILL - CODESIGNING), "CODESIGNING 2 Invalid Page", before a line of
+// probe.js runs.
+//
+// "required" drops the assumption, which is what lets the app boot with no
+// debugger in the picture. The cost is stated in the docs: Interceptor is
+// unavailable, so the swift_willThrow hooks cannot be installed and the `throw`
+// findings are lost. The type/conformance census does not need it, so the
+// default of "required" buys a running app at the price of the backtraces —
+// pass --code-signing optional only when the app is spawned debuggable.
 const config = JSON.stringify(interaction === "script" ? {
   interaction: { type: "script", path: "probe.js", on_change: "ignore", parameters: { reportUrl, token } },
   runtime: "qjs",
+  code_signing: codeSigning,
   teardown: "minimal",
 } : {
   interaction: {
@@ -292,6 +322,7 @@ const config = JSON.stringify(interaction === "script" ? {
     on_load: "resume",
   },
   runtime: "qjs",
+  code_signing: codeSigning,
   teardown: "minimal",
 }, null, 2);
 for (const dir of [frameworks, stagedApp]) {
@@ -310,6 +341,7 @@ const zip = makeZip(entries);
 writeFileSync(outIpa, zip);
 console.log(`wrote ${outIpa} (${zip.length} bytes, ${entries.length} entries)`);
 console.log(`gadget load path: ${LOAD_PATH}`);
+console.log(`code signing: ${codeSigning}${codeSigning === "required" ? " (no Interceptor, so no throw hooks)" : ""}`);
 console.log(interaction === "script"
   ? `interaction: script, reporting to ${reportUrl}/__diag (token ${token.slice(0, 4)}…)`
   : `interaction: listen on ${listenAddress}:${listenPort}, attach with ` +

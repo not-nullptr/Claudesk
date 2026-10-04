@@ -264,7 +264,18 @@ function hookThrows() {
   if (done || hookTries > HOOK_TRIES) {
     if (hookTimer) clearInterval(hookTimer);
     hookTimer = null;
-    report('hook', { installed: [...installed], tries: hookTries });
+    report('hook', {
+      installed: [...installed],
+      tries: hookTries,
+      // An empty list is not necessarily a failure: a gadget built with
+      // code_signing "required" (the default here, the only way a jailed app
+      // survives launch without a debugger) cannot patch code at all, so
+      // Interceptor is unavailable and there are no backtraces to be had. The
+      // type census in part A needs no hooking, so it still works.
+      note: installed.size === 0
+        ? 'no hooks installed — Interceptor unavailable (gadget code_signing "required"?), or libswiftCore not yet mapped'
+        : undefined,
+    });
   }
 }
 
