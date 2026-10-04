@@ -885,6 +885,13 @@ async function handleCodeRoutes(request, response, url) {
         // by-id environment read finds the record it was created against.
         environmentId: body.environment_id ?? body.environmentId ?? null,
       });
+      // The create reply decides whether the app can hold the new session at
+      // all: `revision` has to be an ISO date, and every date the app decodes
+      // must be a string. Logging it here means a capture from a running build
+      // proves by itself whether it emits `"revision":"2026-…"` or the bare `0`
+      // that predates the wireDate fix — without needing the app-side decode
+      // error to say which build is in the container.
+      console.log(`[mobile-code]   create reply=${JSON.stringify(resource).slice(0, 2000)}`);
       sendJson(response, 201, resource);
     } catch (error) {
       await fail(error);
