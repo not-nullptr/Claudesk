@@ -93,8 +93,53 @@ needs to change.
 | file | role |
 | --- | --- |
 | `probe.js` | the agent: dumps Swift types/conformances, hooks `swift_willThrow`, reports via `send()` and/or POST |
+| `decode-error-probe.js` | one instrument: reports only `ClaudeApiServices.ModelDecodingError` (below) |
 | `build-instrumented-ipa.mjs` | fetches + thins the gadget, stages the app, patches the Mach-O, writes the IPA |
 | `swift-probe.js` | an older host-attach variant kept for reference |
+
+## The one-instrument probe for `ModelDecodingError`
+
+`decode-error-probe.js` exists because neither of `probe.js`'s two error
+instruments catches this app's own decode error, and it is the one that matters
+on the Code surface.
+
+`CAPTURE_DECODE_ERRORS` hooks Foundation's `DecodingError.Context.init`, so it
+sees a failure the **JSON decoder** builds. This app raises its own type instead:
+`ClaudeApiServices.ModelDecodingError`, a struct in
+`ClaudeApiServices/ModelDecodingError.swift` carrying `path: String`, which its
+decoders construct and throw directly. It never passes through
+`DecodingError.Context`, so that hook cannot see it — which is how a decode
+failure can be visible on the phone and absent from a probe log that is
+otherwise working. `CAPTURE_THROWS` *would* see it, but reports every throw in
+the process, `try?` included, so it is off by default.
+
+The new probe keeps the throw hook and drops the noise. It resolves the type of
+each thrown value — metadata → descriptor → name, the same walk the offline
+reader does, from a runtime address instead of a file offset — and reports only
+when the name matches `ModelDecodingError`. The filter is a few pointer reads, so
+it is cheap enough to leave attached, and the log is one line shape rather than a
+census. Run it exactly like `probe.js`:
+
+```sh
+frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
+```
+
+Each hit reports `model-decoding-error {n, type, site, text:[…], frames:[…]}`.
+`frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
+same binary); `text` is the printable ASCII in the error box, which holds the
+`path` the error was built with — the coding path that names the offending field.
+`type` is there so a hit is self-evidently the right type.
+
+**Naming is the one part that could be silently wrong**, so the probe calibrates
+itself rather than trusting a quiet log. `throw-types {names:[…], unresolved}`
+goes out 15 s after boot (or as soon as 12 distinct types have been seen): the
+first distinct thrown type names, and how many thrown values yielded no name at
+all. `names:[…] unresolved:0` is proof the namer reads this build; `names:[]
+unresolved:12000` is a *broken* namer, which is a different conclusion from "it
+did not throw" — and the only way to tell them apart from the log alone. Every
+throw resolves its type even when it is not the one asked for, so that count is
+free. Setting `TYPE_FILTER = null` at the top still reports every throw instead
+of filtering, for when a full census is wanted.
 
 ## How the gadget runs `probe.js` in script mode
 
@@ -313,3 +358,15 @@ app *debuggable*, and still nothing has attached.
   already talks to, so it is immune to this.
 - **`hello` arrives but no `types`.** The resolver queries need adjusting; the
   reported per-query errors say how.
+- **`decode-error-probe.js`: `throw-types` shows `names:[] unresolved:…`.** The
+  metadata → descriptor → name walk is reading nothing on this build. It walks
+  `metadata+8` → descriptor → relative name, the layout the offline reader also
+  assumes; if this build differs, `typeNameOf` in `decode-error-probe.js` is the
+  one function to change (both `+8` and `+16` are tried before it gives up). A
+  non-empty `names` with `unresolved` near zero means the walk is fine and a
+  quiet log is the real answer. Note the untyped throw path hands over an error
+  box built by `swift_allocError` whose internal layout lives in libswiftCore
+  (dyld shared cache, not in the bundle), so only the box's `+8` word *is* the
+  metadata pointer by assumption — the typed path's `x1` is disassembly-verified.
+  That assumption is why the walk is deliberately crash-free rather than calling
+  `swift_getTypeName` on the pointer.
