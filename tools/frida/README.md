@@ -124,11 +124,26 @@ census. Run it exactly like `probe.js`:
 frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
 ```
 
-Each hit reports `model-decoding-error {n, type, site, text:[…], frames:[…]}`.
+Each hit reports
+`model-decoding-error {n, source, type, site, path, pathWords, underlying, scanNear, frames}`.
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
-same binary); `text` is the printable ASCII in the error box, which holds the
-`path` the error was built with — the coding path that names the offending field.
-`type` is there so a hit is self-evidently the right type.
+same binary); `type` is there so a hit is self-evidently the right type.
+
+`path` is the field that answers the question — the coding path naming the
+offending field. It is read straight out of the error's value, as a Swift
+`String`; `pathWords` is that value's raw sixteen bytes, so a `path` of `null` is
+still readable by hand. `underlying` names the type of the `error` the wrapper
+was built around.
+
+`scanNear` used to be reported as `text` and described as holding the `path`.
+It does not. It follows the *metadata's* words — one of which is the descriptor
+pointer — and scans 640 bytes from each; the descriptor's neighbourhood is the
+`__TEXT,__const` blob the linker packs this module's type-name strings into, so
+it returns whatever is *declared* near the error type. That is a stable,
+plausible-looking, entirely misleading answer, and it is why every throw in a run
+reported the same seven names. Treat it as a smoke trail for a null `path`, never
+as the value. The reader is checked offline by
+`node tools/frida/swift-string-harness.mjs` (also run by `scripts/validate.sh`).
 
 **Naming is the one part that could be silently wrong**, so the probe calibrates
 itself rather than trusting a quiet log.

@@ -12,6 +12,9 @@ find bridge bridge-wrapper rootfs/opt \
 
 find rootfs scripts -type f -name '*.sh' -exec sh -n {} \;
 
+# Lifted out of the Frida probe, so it checks the reader the probe actually runs.
+node tools/frida/swift-string-harness.mjs
+
 node scripts/security-smoke.mjs
 node scripts/session-file-smoke.mjs
 node scripts/bridge-parity-smoke.mjs

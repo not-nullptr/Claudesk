@@ -385,14 +385,117 @@ function matches(name) {
   return name.toLowerCase().includes(TYPE_FILTER.toLowerCase());
 }
 
+// ------------------------------------------------- ModelDecodingError's fields
+// `path` is a Swift `String` and the struct's first field, so it is the first
+// sixteen bytes of the typed value: `x1` for `swift_allocError` (whose `x0` is
+// the metadata), `x2` for the typed throw entry. Reading it is what `textNear`
+// below was standing in for, and the stand-in does not work. `textNear` follows
+// the *metadata's* words — one of which is the descriptor pointer — and scans
+// 640 bytes from each; the descriptor's neighbourhood is the `__TEXT,__const`
+// blob the linker packs this module's type-name strings into, so the scan
+// returns whatever is declared *near* the error type rather than anything about
+// the value. It is stable (which is why it looks meaningful) and wrong: every
+// throw in a run reported the same seven names. The fields are read here
+// instead, and no accessor is ever called on the error — reading memory at a
+// pointer we already hold cannot run app code.
+function readBytesAt(address, length) {
+  try {
+    if (!address || address.isNull() || !Process.findRangeByAddress(address)) return null;
+    const raw = address.readByteArray(length);
+    return raw ? new Uint8Array(raw) : null;
+  } catch (error) { return null; }
+}
+
+function readPointerAt(address) {
+  const bytes = readBytesAt(address, 8);
+  if (!bytes) return null;
+  let value = 0n;
+  for (let i = 7; i >= 0; i -= 1) value = (value << 8n) | BigInt(bytes[i]);
+  const masked = value & 0x0000ffffffffffffn; // arm64e pointers carry a signature
+  return masked ? ptr(masked.toString()) : null;
+}
+
+function u64At(bytes, at) {
+  let value = 0n;
+  for (let i = 7; i >= 0; i -= 1) value = (value << 8n) | BigInt(bytes[at + i]);
+  return value;
+}
+
+function textOf(bytes, count) {
+  if (count <= 0 || count > bytes.length) return null;
+  let out = '';
+  for (let i = 0; i < count; i += 1) {
+    const byte = bytes[i];
+    if (byte < 0x20 || byte > 0x7e) return null; // a path is printable ASCII
+    out += String.fromCharCode(byte);
+  }
+  return out || null;
+}
+
+// The small-string case is decoded as "the longest printable prefix", not from
+// a count field: its tag and count share the last byte and the two nibbles are
+// easy to get backwards, while the payload is always the leading bytes and
+// Swift zero-fills whatever is left, so a zero ends the run on its own. A long
+// small string ends with the tag byte, which is not printable either.
+function smallString(bytes) {
+  let longest = null;
+  for (let count = 1; count <= 15; count += 1) {
+    const text = textOf(bytes, count);
+    if (!text) break;
+    longest = text;
+  }
+  return longest;
+}
+
+// A Swift `String` is two words, `(_countAndFlags, _object)`, in three shapes:
+// small (the last byte carries 0xE, up to fifteen bytes inline), bridged (a
+// tagged NSString, read back through ObjC), and native (`_object` is a heap
+// object holding UTF-8 behind a count word). The native header offset is not
+// worth being clever about: a few candidate shapes are tried and the first that
+// yields printable text wins. `pathWords` in the report is the raw pair, so a
+// null `path` is still readable by hand.
+function readSwiftString(address) {
+  const bytes = readBytesAt(address, 16);
+  if (!bytes) return null;
+  const last = bytes[15];
+  if ((last >> 4) === 0xe || (last & 0xf) === 0xe) return smallString(bytes);
+  const hi = u64At(bytes, 8);
+  if (hi & 0x8000000000000000n) {
+    if (!ObjC.available) return null;
+    try { return new ObjC.Object(ptr(hi.toString())).toString() || null; }
+    catch (error) { return null; }
+  }
+  const object = ptr(hi.toString());
+  for (const [countAt, bytesAt] of [[16, 32], [24, 32], [16, 24]]) {
+    const header = readBytesAt(object.add(countAt), 8);
+    if (!header) continue;
+    const count = Number(u64At(header, 0) & 0x0000ffffffffffffn);
+    if (!count || count > 4096) continue;
+    const storage = readBytesAt(object.add(bytesAt), count);
+    const text = storage ? textOf(storage, count) : null;
+    if (text) return text;
+  }
+  return null;
+}
+
+// `error: Error` sits at value+24 (path 16, isFailure 1, sampleRate 1, padding).
+// An `any Error` is a box whose metadata is at box+0, and a metadata's
+// descriptor is at +8 — the `x0 via 8` shape the layout line already reports.
+function underlyingErrorName(valuePointer) {
+  if (!valuePointer) return null;
+  const box = readPointerAt(valuePointer.add(24));
+  if (!box) return null;
+  const metadata = readPointerAt(box);
+  if (!metadata) return null;
+  return nameStep(metadata, 8, null) || nameStep(metadata, 'direct', null);
+}
+
 // ------------------------------------------------------------- reading text
-// The error value's *fields* are never interpreted — no accessor is called on
-// it, because calling the wrong entry on a bad pointer crashes the app.
-// Instead the raw words around it are taken as candidate pointers and printable
-// ASCII is pulled out of whatever they land on. `ModelDecodingError(path: …)` is the
-// error's own description format, and its `path` String's bytes are either
-// inline in the box or one hop away, so the coding path is readable in that
-// memory verbatim. A wrong guess costs a wasted scan.
+// Kept as the fallback it has always really been, and now labelled as such: the
+// raw words around the arguments are taken as candidate pointers and printable
+// ASCII is pulled out of whatever they land on. A wrong guess costs a wasted
+// scan, but the answer is whatever happens to be mapped nearby — see the note
+// above. `path` is the field to read; this is a smoke trail when it is null.
 const ASCII_MIN = 8;
 
 function asciiRuns(address, length = 512) {
@@ -532,12 +635,18 @@ function onThrow(context, source) {
     if (reported >= SITE_LIMIT) { capped += 1; return; }
     reported += 1;
     // The ModelDecodingError struct (path, isFailure, sampleRate, error,
-    // recoveredCount) is what we are after, and both entry points have a pointer
-    // to something holding it: x0 for a throw (the box), x2 for an allocation
-    // (the typed storage). Its first words are therefore followed, along with
-    // the argument registers themselves, since which one holds what depends on
-    // the caller. A wrong pointer just yields no text — textNear reads
-    // defensively — so the whole set is cheap to hand over.
+    // recoveredCount) is what we are after. `swift_allocError` takes the value
+    // as its second argument, so x1 is a pointer to the struct; the typed throw
+    // entry takes it third, so x2 is. Read `path` from there, and fall back to
+    // the other register only if the first does not hold a printable String.
+    const typed = source === 'swift_willThrowTypedImpl';
+    const primary = ptrOrNull(typed ? context.x2 : context.x1);
+    const spare = ptrOrNull(typed ? context.x1 : context.x2);
+    let path = readSwiftString(primary);
+    let valuePointer = primary;
+    if (!path) { path = readSwiftString(spare); if (path) valuePointer = spare; }
+    const pathRaw = readBytesAt(valuePointer, 16);
+    // The incidental words, only so a null `path` still carries a trail.
     const words = [context.x0, context.x1, context.x2, context.x3];
     for (const base of [context.x0, context.x2]) {
       try {
@@ -548,9 +657,15 @@ function onThrow(context, source) {
     }
     report('model-decoding-error', {
       n: reported,
+      source,
       type: name,
       site: key,
-      text: textNear(words, 640),
+      path,
+      pathWords: pathRaw
+        ? [...pathRaw].map((b) => b.toString(16).padStart(2, '0')).join('')
+        : null,
+      underlying: underlyingErrorName(valuePointer),
+      scanNear: textNear(words, 640),
       frames: frames(context),
     });
   } catch (error) {
