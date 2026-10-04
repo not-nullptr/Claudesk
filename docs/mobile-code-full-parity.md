@@ -32,7 +32,9 @@ GET    /v1/code/sessions?limit&cursor&statuses&tags&exclude_tags
                         &include_trigger_sessions&trigger_id
 POST   /v1/code/sessions                       create   (CreateSessionRequest)
 GET    /v1/code/sessions/{id}                  detail   (SessionResource)
-POST   /v1/code/sessions/{id}/messages/stream  SEND (SendChannelMessageRequest)
+POST   /v1/code/sessions/{id}/messages/stream  SEND — served by the facade, but
+                                               the path is NOT a literal in the
+                                               binary (see §4)
 GET    /v1/code/sessions/{id}/events           list_client_events_v2 -> ListClientEventsResponse
 GET    /v1/code/sessions/{id}/events/stream    SSE — the transcript read the
                                                session detail screen opens
@@ -110,6 +112,24 @@ The composer POSTs `/v1/code/sessions/{id}/messages/stream` with a body of
 `{body, client_message_id, attachments?, reply_to_message_id?}` and then reads
 the turn from `sessions/watch`. `clientMessageId` is the app's optimistic uuid
 (mirrors the chat `messageUuid` honouring in `docs/mobile-claudesk-backend.md`).
+
+**The path is the facade's invention, not the app's.** The binary contains a
+`v1/code/sessions/` literal and a `/messages/stream` literal, but they are never
+combined: `/messages/stream` (0x1047e6520) has exactly one string accessor
+(0x101dbbd68) and exactly two callers (0x101da4978, 0x101da4dc8), both of which
+build `v1/code/channels/{channelId}/messages/stream` with `scope=timeline` /
+`scope=thread`. There is no `…/sessions/{id}/messages/stream` literal anywhere in
+the binary. The channel DTOs are the ones the app really has:
+
+```
+ChannelStreamStart      after, tail
+SendChannelMessageRequest   body, replyToMessageId, clientMessageId, attachments
+SendChannelMessageResponse  messageId, threadRootId, createdAt   (all optional)
+```
+
+So the session-path send leg is exercised only because the facade accepts it; if
+the app's Code composer in fact sends somewhere else, the `[mobile-api]
+unmatched` line the facade now logs on every 404 is what will name the leg.
 
 ## 5. Enums (raw values recovered from the string pool)
 

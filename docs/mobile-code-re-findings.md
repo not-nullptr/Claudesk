@@ -408,6 +408,47 @@ Enum raw values recovered for the session responses: `SessionListStatusFilter` =
 `blocked | review_ready | waiting | completed | failed | unknown`;
 `EnvironmentKind` = `anthropic_cloud | byoc | bridge | unknown`.
 
+## The model selector, and how to tell a synthesized `Codable` from a custom one
+
+The empty model picker (2026-10-04) made the `ModelSelector` family worth nailing
+down. `__swift5_types` field descriptors give the shape; the **type kind** and the
+**string pool** give the encoding.
+
+Kinds (descriptor `flags & 0x1f`: 17 = struct, 18 = enum):
+
+```
+Surface, ThinkingEffort, ThinkingMode      Struct  { rawValue: String }   (one stored field)
+SurfaceState, SurfaceConfig, ModelEntry,
+ModelSelector, ModelThinkingDefault        Struct
+ThinkingState                              Enum    effortAndMode(effort:mode:) | effort | mode
+Section                                    Enum    main | overflow | deprecated
+```
+
+The trick for the encoding: a **synthesized** `CodingKeys` puts each property (or
+case) name into `__cstring` verbatim — that is the fact the "Wire casing" section
+above already uses. A **custom** `init(from:)`/`encode(to:)` does not. So:
+
+* `thinkingByModel` @0x10479e620, `shortName`, `selectionNotice`, `quickSelect`,
+  `requiredPermissionMode`, `voiceModel`, `minClaudeCodeVersion`, `effortOptions`,
+  `modeOptions`, `models` — all present as bare `__cstring` literals, pooled with
+  `main`/`overflow`/`deprecated` @0x10479e600. ⇒ the **structs** use synthesized
+  Codable, so their wire keys are the camelCase names the app's
+  `.convertFromSnakeCase` turns into `thinking_by_model`, `short_name`, ….
+* `rawValue` (the one field of `Surface`/`ThinkingEffort`/`ThinkingMode`) exists
+  **only** in `__swift5_reflstr` (reflection), never as a `__cstring` — so those
+  wrappers have a **custom** Codable and go on the wire as the **bare string** —
+  the shape the facade emits for `id`, `model`, `effort` and `mode`.
+* `effortAndMode` likewise exists only in `__swift5_reflstr` — so `ThinkingState`
+  is custom too, and the facade's flat `thinking: {effort, mode}` is the shape
+  those cases were written to read. (`effort`/`mode` do not appear as standalone
+  keys near the pool; the reflstr names are the tuple labels.)
+
+Open: `Section`'s three names sit in the *same pool as the coding keys*, which fits
+either a synthesized payload-less enum (wire `{"main":{}}`) or a `String`-raw enum
+(wire `"main"`). The facade sends `"main"` and `section` is non-optional, so if the
+picker is still empty after the per-surface fix, this is the next thing to test —
+along with the app's own PUT body, which the facade now logs.
+
 ## Gating: `CodeBlockedReason`
 
 `CodeBlockedReason` (@0x4b02c94) = `orgAdmin | orgTier | entitlement | platform |

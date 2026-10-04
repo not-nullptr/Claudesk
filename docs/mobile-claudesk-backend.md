@@ -68,8 +68,19 @@ sessions are never listed, read or modified, and a completion cannot adopt their
   `model_selector_config[].models[].thinking` (`effort_options`, `mode_options`) and the
   selection from `model_selector_state[]` (`thinking`: `{effort, mode}` and
   `thinking_by_model`). The service stores the selection the app writes to
-  `model_selector_state/chat`, reports it in bootstrap, and uses it for sends that carry
+  `model_selector_state/{surface}`, reports it in bootstrap, and uses it for sends that carry
   no pick of their own. Feature flags that might gate the picker are unverified.
+  The selector is **per surface**. The app's `ModelSurface` is exactly
+  `unspecified | chat | cowork | code`; `ModelSelector` holds
+  `states`/`configs` as `IdentifiedArray`s of `SurfaceState`/`SurfaceConfig`, and
+  a surface with no entry gets no model, no picker and no send. The service
+  answers all three real surfaces (`chat`, `cowork`, `code`) from the same model
+  list. Two shapes are load-bearing: `SurfaceState.id`/`SurfaceConfig.id` are a
+  `Surface` string wrapper that goes out as the bare string (`"chat"`), and
+  `thinkingByModel` is an `IdentifiedArray<ModelThinkingDefault>` — a JSON
+  **array** of `{id, thinking}`, not a dictionary. IdentifiedArray decodes
+  all-or-nothing and the states sit in one, so a wrong container there takes the
+  whole selector down with it.
 - **Code tab gate.** On a paid plan, app_start carries the `mobile_remote_enabled` flag (in `org_growthbook`) and a `claude_code_web` access entry (in `current_user_access`); without them the Code tab is hidden. The sessions behind it are not implemented yet.
 - **Titles.** After a new chat's first message starts, the service asks Desktop to
   write a title (`dust/generate_session_title`, the same call the web UI makes, which

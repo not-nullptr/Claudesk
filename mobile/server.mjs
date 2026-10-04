@@ -69,7 +69,7 @@ const MIME_TO_PROTO = new Map([
   ["application/connect+json", false],
 ]);
 
-function readJson(request, limit = 16 * 1024 * 1024) {
+function readJsonUntraced(request, limit = 16 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -93,6 +93,10 @@ function readJson(request, limit = 16 * 1024 * 1024) {
     request.on("error", reject);
   });
 }
+
+// `handleCodeRoutes` shadows this name with a logging wrapper; everywhere else
+// reads the body once and moves on.
+const readJson = readJsonUntraced;
 
 function sendJson(response, status, value, extraHeaders = {}) {
   if (response.writableEnded) return;
@@ -145,36 +149,102 @@ function cleanThinking(value) {
   return pick.effort || pick.mode ? pick : undefined;
 }
 
-// SurfaceState for the chat surface: the selected model plus the app's thinking
+// The model selector is per-surface: the Chat composer reads the `chat` entry,
+// the Code composer the `code` one, the Cowork session chat the `cowork` one
+// (the app's `ModelSurface` enum is exactly unspecified | chat | cowork |
+// code). A surface the bootstrap does not answer gets no model at all, which is
+// why a composer on an unlisted surface had no picker and none of the models
+// behind it. `Surface` is a RawRepresentable string wrapper and goes out as the
+// bare string (the `id: "chat"` entry has always decoded), so an entry for a
+// surface the app does not know is ignored rather than fatal — the list is
+// deliberately a superset.
+const MODEL_SURFACES = ["chat", "cowork", "code"];
+
+// The chat selection predates the per-surface split and keeps its original
+// top-level keys so an existing model-selection.json still reads back; every
+// other surface is namespaced.
+function surfaceKeys(surface) {
+  return surface === "chat"
+    ? { model: "model", byModel: "thinking_by_model" }
+    : { model: `${surface}_model`, byModel: `${surface}_thinking_by_model` };
+}
+
+// A PUT body is a ModelSelectorStateBody: `model` and `thinking` are each a
+// ModelSelectorEdit — a `{set, unchanged}` payload enum — and Swift nests the
+// payload, so accept the bare value, the case wrapper and the `_0` alike.
+function editValue(edit) {
+  if (typeof edit === "string") return edit;
+  if (!edit || typeof edit !== "object") return undefined;
+  const inner = "set" in edit ? edit.set : "value" in edit ? edit.value : undefined;
+  if (typeof inner === "string") return inner;
+  if (inner && typeof inner === "object" && "_0" in inner) return editValue(inner._0);
+  return undefined;
+}
+
+function editObject(edit) {
+  if (!edit || typeof edit !== "object") return undefined;
+  const inner = "set" in edit ? edit.set : "value" in edit ? edit.value : edit;
+  if (!inner || typeof inner !== "object") return undefined;
+  return "_0" in inner ? inner._0 : inner;
+}
+
+// `thinking_by_model` is an `IdentifiedArray<ModelThinkingDefault>`: an ARRAY of
+// `{id, thinking}`, not the dictionary its name suggests. IdentifiedArray
+// decodes all-or-nothing, and SurfaceState sits in the same all-or-nothing
+// `states` array, so emitting the wrong container takes the whole model
+// selector — every surface — down with it. The stored file is a map; the wire
+// is an array. Read either (the app has never been seen to send this field, but
+// the file could hold either shape), always write the array.
+function thinkingDefaultsFor(value) {
+  if (Array.isArray(value)) {
+    const out = {};
+    for (const row of value) {
+      if (row && typeof row.id === "string" && row.thinking) out[row.id] = row.thinking;
+    }
+    return out;
+  }
+  return value && typeof value === "object" ? value : {};
+}
+
+function thinkingDefaultsWire(byModel) {
+  return Object.entries(byModel).map(([id, thinking]) => ({ id, thinking }));
+}
+
+// SurfaceState for one surface: the selected model plus the app's thinking
 // choice (`thinking`) and the choice remembered for each model (`thinking_by_model`).
-async function chatSelectorState(fallbackModel) {
+// `model` is a non-optional String in SurfaceState, so it is always a string —
+// omitting it fails the app's decode of the whole bootstrap payload.
+async function surfaceSelectorState(surface, fallbackModel) {
   const saved = await store.readJsonFile("model-selection.json", null);
-  const model = (typeof saved?.model === "string" && saved.model) || fallbackModel;
-  const byModel = saved?.thinking_by_model && typeof saved.thinking_by_model === "object" ? saved.thinking_by_model : {};
+  const keys = surfaceKeys(surface);
+  const model = (typeof saved?.[keys.model] === "string" && saved[keys.model]) || fallbackModel || "";
+  const byModel = thinkingDefaultsFor(saved?.[keys.byModel]);
   const thinking = cleanThinking(byModel[model]);
   return {
-    id: "chat",
+    id: surface,
     model,
     ...(thinking ? { thinking } : {}),
-    ...(Object.keys(byModel).length ? { thinking_by_model: byModel } : {}),
+    ...(Object.keys(byModel).length ? { thinking_by_model: thinkingDefaultsWire(byModel) } : {}),
   };
 }
 
-async function saveChatSelection(body) {
+async function saveSurfaceSelection(surface, body) {
   const saved = (await store.readJsonFile("model-selection.json", null)) || {};
+  const keys = surfaceKeys(surface);
   const next = { ...saved };
-  if (typeof body.model === "string" && body.model) next.model = body.model;
-  const byModel = { ...(saved.thinking_by_model || {}) };
-  for (const [id, value] of Object.entries(body.thinking_by_model || {})) {
+  const model = editValue(body?.model);
+  if (model) next[keys.model] = model;
+  const byModel = { ...thinkingDefaultsFor(saved[keys.byModel]) };
+  for (const [id, value] of Object.entries(thinkingDefaultsFor(body?.thinking_by_model))) {
     const pick = cleanThinking(value);
     if (pick) byModel[id] = pick;
   }
-  const thinking = cleanThinking(body.thinking);
+  const thinking = cleanThinking(editObject(body?.thinking));
   if (thinking) {
-    next.thinking = thinking;
-    if (next.model) byModel[next.model] = thinking;
+    if (surface === "chat") next.thinking = thinking;
+    if (next[keys.model]) byModel[next[keys.model]] = thinking;
   }
-  if (Object.keys(byModel).length) next.thinking_by_model = byModel;
+  if (Object.keys(byModel).length) next[keys.byModel] = byModel;
   await store.writeJsonFile("model-selection.json", next);
 }
 
@@ -599,10 +669,8 @@ async function handleBootstrapRoute(request, response, url) {
     account: accountObject(),
     org_growthbook: orgGrowthbook(),
     current_user_access: userAccess(),
-    model_selector_state: [await chatSelectorState(defaultModel)],
-    model_selector_config: [
-      { id: "chat", models },
-    ],
+    model_selector_state: await Promise.all(MODEL_SURFACES.map((surface) => surfaceSelectorState(surface, defaultModel))),
+    model_selector_config: MODEL_SURFACES.map((surface) => ({ id: surface, models })),
   });
   return true;
 }
@@ -719,6 +787,21 @@ async function handleCodeRoutes(request, response, url) {
     traced = true;
     trace(args[0] ?? response.statusCode);
     return originalWriteHead(...args);
+  };
+
+  // Every body this surface reads is logged once, before it is handled: the
+  // phone shows only "Something went wrong", so the request the app actually
+  // sends is the difference between a leg this service implements and one it
+  // does not. Shadowing the module-level `readJson` inside this function (all
+  // the Code handlers are closed over by it) leaves every other surface quiet.
+  let bodyLogged = false;
+  const readJson = async (incoming) => {
+    const raw = await readJsonUntraced(incoming);
+    if (!bodyLogged) {
+      bodyLogged = true;
+      console.log(`[mobile-code]   body=${JSON.stringify(raw).slice(0, 2000)}`);
+    }
+    return raw;
   };
 
   async function fail(error) {
@@ -1170,6 +1253,7 @@ async function streamCodeMessage(request, response, url, sessionId) {
     sendErrorEnvelope(response, 400, "invalid_request", "expected a JSON body");
     return;
   }
+  console.log(`[mobile-code]   send body=${JSON.stringify(body).slice(0, 1500)}`);
   const desktopId = codeSessionDesktopId(sessionId);
   if (!desktopId) {
     sendErrorEnvelope(response, 404, "not_found", "session not found");
@@ -1287,15 +1371,18 @@ async function handleConversationRoutes(request, response, url) {
     return true;
   }
 
-  if (rest === "model_selector_state/chat") {
+  const selector = rest.match(/^model_selector_state\/([A-Za-z0-9_-]+)$/);
+  if (selector) {
+    const surface = selector[1].toLowerCase();
+    const fallbackModel = await engine.defaultModel().catch(() => "");
     if (request.method === "GET") {
-      sendJson(response, 200, await chatSelectorState(await engine.defaultModel()));
+      sendJson(response, 200, await surfaceSelectorState(surface, fallbackModel));
       return true;
     }
     if (["PUT", "POST", "PATCH"].includes(request.method)) {
-      const body = await readJson(request);
-      await saveChatSelection(body);
-      sendJson(response, 200, await chatSelectorState(body.model));
+      const body = await readJson(request).catch(() => ({}));
+      await saveSurfaceSelection(surface, body);
+      sendJson(response, 200, await surfaceSelectorState(surface, fallbackModel));
       return true;
     }
   }
@@ -1559,6 +1646,7 @@ function encodeConnectFrame(payload, flags = 0) {
 async function handleConnectUnary(request, response, url, method) {
   const handler = connectMethods[method];
   if (!handler) {
+    await logUnmatched(request, url, "connect");
     await captureUnhandled(request, url, "connect");
     sendErrorEnvelope(response, 404, "not_found", `unknown connect method "${url.pathname}"`);
     return true;
@@ -1756,8 +1844,34 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  await logUnmatched(request, url, "rest");
   await captureUnhandled(request, url, "rest");
   sendErrorEnvelope(response, 404, "not_found", `unknown API route ${url.pathname}`);
+}
+
+// Every route this service does not implement is logged with its body, always,
+// not only under CLAUDE_MOBILE_CAPTURE: the phone shows one opaque "Something
+// went wrong" for any 404, so this line is the only evidence of which leg the
+// app hit. Only the head of the body is kept — enough to name the request.
+async function logUnmatched(request, url, surface) {
+  let body = "";
+  // When capture is on it reads the body itself (and redacts it), so this must
+  // not read it first — a request stream can only be drained once, and a second
+  // reader would simply never see `end`. A request whose body some earlier
+  // layer already consumed is left with no body here rather than waiting on a
+  // stream that will not fire again.
+  const readable = !request.readableEnded && !request.destroyed
+    && request.method !== "GET" && request.method !== "HEAD";
+  if (!capture.enabled && readable) {
+    body = await Promise.race([
+      readJson(request).then(
+        (value) => ` body=${JSON.stringify(value).slice(0, 1000)}`,
+        () => " body=<unreadable>",
+      ),
+      new Promise((resolve) => { const timer = setTimeout(() => resolve(""), 2000); timer.unref?.(); }),
+    ]).catch(() => "");
+  }
+  console.log(`[mobile-api] unmatched(${surface}) ${request.method} ${url.pathname}${url.search || ""}${body}`);
 }
 
 // With CLAUDE_MOBILE_CAPTURE=1, remember what the app asked for that this
@@ -1823,10 +1937,12 @@ const server = http.createServer(async (request, response) => {
         return;
       }
       if (await handleCodeRoutes(request, response, url)) return;
+      await logUnmatched(request, url, "rest");
       await captureUnhandled(request, url, "rest");
       sendErrorEnvelope(response, 404, "not_found", `unknown API route ${url.pathname}`);
       return;
     }
+    await logUnmatched(request, url, "rest");
     sendErrorEnvelope(response, 404, "not_found", "unknown route");
   } catch (error) {
     console.error(`[mobile-api] ${request.method} ${url.pathname} failed: ${error.message}`);

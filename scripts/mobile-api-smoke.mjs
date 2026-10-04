@@ -156,6 +156,22 @@ try {
   const bootstrap = bootstrap0;
   assert.ok(bootstrap.model_selector_state[0].model.length >= 1);
   assert.ok(bootstrap.model_selector_config[0].models.some((m) => m.id === "stub-sonnet"), "models come from Claudesk");
+  // The selector is per-surface: the Chat composer reads `chat`, the Code
+  // composer `code`, the Cowork session chat `cowork`. A composer on a surface
+  // the bootstrap does not answer gets no picker at all and cannot send, so
+  // every surface the app can open must be answered with the same model list.
+  assert.deepEqual(
+    bootstrap.model_selector_config.map((entry) => entry.id),
+    ["chat", "cowork", "code"],
+  );
+  assert.deepEqual(
+    bootstrap.model_selector_state.map((entry) => entry.id),
+    ["chat", "cowork", "code"],
+    "states and configs agree surface for surface",
+  );
+  for (const entry of bootstrap.model_selector_config) {
+    assert.ok(entry.models.some((m) => m.id === "stub-sonnet"), `models for ${entry.id}`);
+  }
   // Every Code-relevant growthbook flag must be declared on a paid plan, in the
   // SDK shape the app's GrowthBookFeatureDefinition decodes ({ key, defaultValue,
   // rules }). The app's client hashes the flag name (base64(sha256(exact_key)),
@@ -597,13 +613,20 @@ try {
     body: { model: "stub-sonnet", thinking: { effort: "xhigh", mode: "auto" } },
   })).json();
   assert.deepEqual(savedState.thinking, { effort: "xhigh", mode: "auto" });
-  assert.deepEqual(savedState.thinking_by_model, { "stub-sonnet": { effort: "xhigh", mode: "auto" } });
+  // `thinking_by_model` is an IdentifiedArray<ModelThinkingDefault> — an ARRAY
+  // of {id, thinking}. It is decoded all-or-nothing alongside the rest of the
+  // bootstrap, so the dictionary it used to be would take the whole model
+  // selector (and with it the send path) down with it.
+  assert.deepEqual(savedState.thinking_by_model, [{ id: "stub-sonnet", thinking: { effort: "xhigh", mode: "auto" } }]);
   const bootState = (await (await call(
     `/api/bootstrap/${org.uuid}/app_start?growthbook_format=sdk&include_system_prompts=false`,
   )).json()).model_selector_state[0];
   assert.equal(bootState.model, "stub-sonnet");
   assert.deepEqual(bootState.thinking, { effort: "xhigh", mode: "auto" }, "bootstrap reports the selected effort");
-  assert.deepEqual((await (await call(statePath)).json()).thinking_by_model["stub-sonnet"], { effort: "xhigh", mode: "auto" });
+  assert.deepEqual(
+    (await (await call(statePath)).json()).thinking_by_model,
+    [{ id: "stub-sonnet", thinking: { effort: "xhigh", mode: "auto" } }],
+  );
   await call(statePath, { method: "PUT", body: { model: "stub-haiku" } });
   assert.equal((await (await call(statePath)).json()).thinking, undefined, "another model has no selection yet");
   await call(statePath, { method: "PUT", body: { model: "stub-sonnet" } });
