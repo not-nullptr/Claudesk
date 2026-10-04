@@ -215,10 +215,33 @@ app *debuggable*, and still nothing has attached.
   which is what tells us the correct syntax.
 - `names {query, chunk, of, names:[…]}` — the paged full list for the `Decodable`
   queries, since the summary truncates a multi-thousand-type census.
-- `throw {frames:[…]}` — a thrown Swift error with a backtrace. The app's symbols
-  are stripped, so a frame reads `Claude+0x…`; decompile that offset in Ghidra
-  against the same binary to name the call site. The frames *above* the
-  Foundation internals are the app's own `init(from:)`.
+- `throw-summary {reported, suppressed, sites:[…]}` — sent at +30 s, after the
+  late type pass: every throwing call site in the run with its total count.
+  Repetition is capped **per site** (4 reports each), not only globally, because
+  the loud sites are launch noise that repeats hundreds of times and a global cap
+  alone runs out before the app has finished starting. A site doing something
+  interesting throws once or twice, so the cap costs nothing real and the
+  summary proves nothing was hidden.
+- `throw {n, seen, frames:[…], text:[…]}` — a thrown Swift error with a backtrace;
+  `seen` is how often that site had thrown by this point (1 = first time). The app's
+  symbols are stripped, so a frame reads `Claude+0x…`; decompile that offset in
+  Ghidra against the same binary to name the call site. The frames *above* the
+  Foundation internals are the app's own `init(from:)`. `text` is whatever
+  printable ASCII hangs off the error value — Swift writes its own message there
+  ("Expected to decode Double but found a string/data instead."), which names
+  the failure without any further RE. Most of what launch throws is *not* a
+  failure: `NSFileManager` probes for absent files, WebKit storage setup, and a
+  polymorphic JSON-value decoder that `try?`s Int, Double and String in turn
+  (that one repeats at a single call site dozens of times). A decode failure is
+  the throw whose `text` names a type or a key.
+- `decoding-error {n, where, text:[…], frames:[…]}` — the same failure seen at
+  its source. Every Swift decode error is built by
+  `DecodingError.Context.init(codingPath:debugDescription:underlyingError:)`, so
+  this hook fires once per decode failure and reads the finished `Context` for
+  its message and coding-path keys. `where:"Context.init"` is the call site with
+  the arguments; `where:"Context"` is the constructed value, where a missing key
+  reads as `No value associated with key CodingKeys(stringValue: "createdAt"…)
+  ("createdAt")` — enough to name the DTO field outright.
 
 ## Risks / if it does not work
 

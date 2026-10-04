@@ -31,7 +31,13 @@
 //   A. the Swift type/conformance inventory (Frida 17.21's Swift ApiResolver),
 //      which is how we stop reconstructing DTO shapes from __swift5_fieldmd;
 //   B. every Swift error thrown in-process, with a backtrace — the decode
-//      failure the app hides behind "Something went wrong".
+//      failure the app hides behind "Something went wrong". Repetition is
+//      capped per call site, not just globally: launch throws the same handful
+//      of benign errors hundreds of times and would otherwise spend the whole
+//      budget before the app is even up;
+//   C. the DecodingError itself, caught at DecodingError.Context.init: its
+//      message and coding path, which name the offending DTO field. A backtrace
+//      alone says "something in the JSON decoder threw"; this says what about.
 //
 // It is deliberately defensive: nothing here may crash the host app, so every
 // step is wrapped and any failure is reported rather than thrown.
@@ -182,13 +188,35 @@ function dumpTypes(reason) {
 // pointer crashes the app, and the backtrace's `Claude+0x…` frame is what names
 // the throwing call site when fed to Ghidra against the same binary. The frames
 // *above* the Foundation internals are the app's own `init(from:)`.
-const THROW_LIMIT = 120;
+//
+// The cap is generous because app launch throws a great deal that has nothing to
+// do with the failure: NSFileManager probes for files that are not there, WebKit
+// storage setup, and a polymorphic JSON-value decoder that try?s Int, Double and
+// String in turn. At 120 the Code tab's own decode can be pushed out of the
+// window entirely — the first run hit the cap inside 0.6 s of launch.
+const THROW_LIMIT = 400;
 let thrown = 0;
+
+// …and a global cap is not enough, because the noise is *repetitive*: in the
+// first full run 94 of 120 captures were five sibling frames — the polymorphic
+// JSON-value decoder walking its `try?` ladder — and a handful of others were
+// FileManager/WebKit probes, so the budget was gone before the app finished
+// launching. Capping per call *site* instead of globally keeps the interesting
+// throws (a DTO's `init(from:)` throwing is exotic; the first run saw it once)
+// inside the window no matter how loud launch is. Suppressed throws do not
+// consume the global budget at all.
+const NOISE_PER_SITE = 4;
+const siteCounts = new Map();
+let suppressed = 0;
 
 function frameOf(address) {
   try {
     const symbol = DebugSymbol.fromAddress(address);
-    const offset = symbol.moduleBase ? address.sub(symbol.moduleBase) : null;
+    // DebugSymbol has no moduleBase, so read the load address off the module
+    // itself — otherwise every app frame renders as `Claude+null 0x…` and the
+    // offset has to be recovered by hand before Ghidra can be asked about it.
+    const module = symbol.moduleName ? Process.findModuleByName(symbol.moduleName) : null;
+    const offset = module ? address.sub(module.base) : null;
     return `${symbol.moduleName || '?'}+${offset}` + (symbol.name ? ` ${symbol.name}` : '');
   } catch (error) {
     return `?+${address}`;
@@ -213,16 +241,122 @@ function frames(context) {
   return stack.slice(0, 24).map(frameOf);
 }
 
+// Reading a thrown Swift error's *text* is the difference between a backtrace
+// that says "something inside the JSON decoder threw" and one that says which
+// field, in which DTO, and why. The value is a Swift `Error` existential, and
+// the runtime entry that would stringify it cannot be called safely from here,
+// so nothing below calls anything: it takes the raw words of the error box (and
+// the argument registers) as candidate pointers and pulls printable ASCII out
+// of whatever they land on. Swift's own messages — "Expected to decode Double
+// but found a string/data instead." — are in that memory verbatim, so a wrong
+// guess about which word is which costs a wasted scan, never a crash.
+const ASCII_MIN = 8;
+
+function asciiRuns(address, length = 512) {
+  const runs = [];
+  let bytes;
+  try {
+    if (!Process.findRangeByAddress(address)) return runs;
+    bytes = address.readByteArray(length);
+  } catch (error) {
+    return runs;
+  }
+  if (!bytes) return runs;
+  const view = new Uint8Array(bytes);
+  let run = "";
+  for (let i = 0; i < view.length; i += 1) {
+    const c = view[i];
+    if (c >= 0x20 && c < 0x7f) {
+      run += String.fromCharCode(c);
+      continue;
+    }
+    if (run.length >= ASCII_MIN) runs.push(run);
+    run = "";
+  }
+  if (run.length >= ASCII_MIN) runs.push(run);
+  return runs;
+}
+
+// A Swift reference is not always a bare pointer: object references carry tag
+// bits (a bridged String's `_object` has flags in the high and low bits), so
+// each word is tried as-is and with the tag masks that leave a real address.
+// Everything is inside try/catch — an unmapped guess just yields no runs.
+function pointerCandidates(value) {
+  const out = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    try {
+      if (!candidate || candidate.isNull()) return;
+      const key = candidate.toString();
+      if (!seen.has(key)) { seen.add(key); out.push(candidate); }
+    } catch (error) { /* not a pointer */ }
+  };
+  add(value);
+  for (const mask of ["0xfffffffffffffff8", "0x0000ffffffffffff", "0x0000fffffffffff8", "0x00000000ffffffff"]) {
+    try { add(value.and(ptr(mask))); } catch (error) { /* keep going */ }
+  }
+  return out;
+}
+
+// Everything printable reachable from a set of words.
+function textNear(words, length = 512) {
+  const found = new Set();
+  for (const word of words) {
+    for (const candidate of pointerCandidates(word)) {
+      for (const run of asciiRuns(candidate, length)) found.add(run);
+    }
+  }
+  return [...found];
+}
+
+// The first `Claude+…` frame is the call site *in the app*, and it is what
+// stands in for a symbol name here: two throws share a site, two sites do not
+// share a frame. (The app's symbols are stripped, so a per-site cap has to key
+// off the raw offset — the same reason a backtrace has to be fed to Ghidra.)
+function site(stack) {
+  for (const frame of stack) if (frame.startsWith('Claude+')) return frame.split(' ')[0];
+  return stack[0] || '?';
+}
+
 function reportThrow(context, where) {
+  const stack = frames(context);
+  const key = site(stack);
+  const seen = (siteCounts.get(key) || 0) + 1;
+  siteCounts.set(key, seen);
+  if (seen > NOISE_PER_SITE) {
+    suppressed += 1;
+    return;
+  }
   if (thrown >= THROW_LIMIT) return;
   thrown += 1;
+  // x0 is the SwiftError box; the error's own payload (a DecodingError's Context
+  // and its message String) hangs off it. The neighbours are scanned too, since
+  // which register holds what depends on the caller.
+  const words = [context.x0, context.x1, context.x2, context.x3];
+  try {
+    if (context.x0 && !context.x0.isNull()) {
+      for (let offset = 0; offset < 24; offset += 8) words.push(context.x0.add(offset).readPointer());
+    }
+  } catch (error) { /* not a readable box */ }
   report('throw', {
     n: thrown,
+    seen,
     where,
     x0: String(context.x0),
     x1: String(context.x1),
     x2: String(context.x2),
-    frames: frames(context),
+    text: textNear(words, 640),
+    frames: stack,
+  });
+}
+
+// Which sites were loud enough to be capped away, so a censored log still says
+// what it censored instead of looking like the app went quiet.
+function reportThrowSummary() {
+  report('throw-summary', {
+    reported: thrown,
+    suppressed,
+    sites: [...siteCounts.entries()].map(([key, count]) => `${key}×${count}`),
   });
 }
 
@@ -264,7 +398,7 @@ const HOOK_TRIES = 40;
 let hookTimer = null;
 let hookTries = 0;
 function hookThrows() {
-  const done = THROW_EXPORTS.every(([name, where]) => installOne(name, where));
+  const done = THROW_EXPORTS.every(([name, where]) => installOne(name, where)) && installContextHook();
   hookTries += 1;
   if (done || hookTries > HOOK_TRIES) {
     if (hookTimer) clearInterval(hookTimer);
@@ -281,6 +415,76 @@ function hookThrows() {
         ? 'no hooks installed — Interceptor unavailable (gadget code_signing "required"?), or libswiftCore not yet mapped'
         : undefined,
     });
+  }
+}
+
+// ------------------------------------------------- C: the DecodingError itself
+// The throw hook above answers "which function threw"; this one answers "about
+// what". Every Swift decode failure — the app's own and Foundation's — is built
+// by `DecodingError.Context.init(codingPath:debugDescription:underlyingError:)`,
+// and its second argument is the human-readable reason. The arguments are Swift
+// values (a String is two words, an Array one), so rather than interpret them
+// they are handed to the same printable-ASCII scan the throw hook uses: the
+// finished Context sits in the buffer the callee was given, and the message and
+// the coding-path keys are readable in it (or one hop from it). A decode failure
+// shows up here as a `decoding-error` finding whose `text` names the type and,
+// for a missing key, the field.
+const CONTEXT_INIT =
+  '$ss13DecodingErrorO7ContextV10codingPath16debugDescription010underlyingB0ADSays9CodingKey_pG_SSs0B0_pSgtcfC';
+const CONTEXT_LIMIT = 48;
+let contextHookInstalled = false;
+let contexts = 0;
+
+function installContextHook() {
+  if (contextHookInstalled) return true;
+  let target = null;
+  try {
+    target = Module.findGlobalExportByName(CONTEXT_INIT);
+  } catch (error) {
+    return false;
+  }
+  if (target === null) return false;
+  try {
+    Interceptor.attach(target, {
+      onEnter() {
+        this.bases = [this.context.x0, this.context.x8];
+        this.index = contexts;
+        contexts += 1;
+        if (this.index >= CONTEXT_LIMIT) return;
+        report('decoding-error', {
+          n: this.index + 1,
+          where: 'Context.init',
+          text: textNear([this.context.x1, this.context.x2, this.context.x3, this.context.x4], 384),
+          frames: frames(this.context),
+        });
+      },
+      onLeave() {
+        // { codingPath: [CodingKey], debugDescription: String, underlyingError:
+        // Error? } — a four-word struct, so whether it comes back in x0–x3 or
+        // through an indirect buffer in x8 depends on how the caller allocated
+        // the result, and the args it was called with fill every return
+        // register besides. Rather than bet on one ABI, take both entry pointers
+        // plus whatever register holds the first word on return and scan the lot;
+        // an unreadable guess yields no runs, never a crash.
+        if (this.index >= CONTEXT_LIMIT) return;
+        const words = [this.retval];
+        for (const base of this.bases) {
+          try {
+            if (!base || base.isNull()) continue;
+            for (let offset = 0; offset < 64; offset += 8) words.push(base.add(offset).readPointer());
+          } catch (error) { /* not a readable buffer */ }
+        }
+        try {
+          const text = textNear(words, 384);
+          if (text.length) report('decoding-error', { n: this.index + 1, where: 'Context', text });
+        } catch (error) { /* nothing readable */ }
+      },
+    });
+    contextHookInstalled = true;
+    installed.add('DecodingError.Context.init');
+    return true;
+  } catch (error) {
+    return false;
   }
 }
 
@@ -306,7 +510,12 @@ function boot() {
   setTimeout(() => dumpTypes('settled'), 8000);
   // A third pass much later, since the Code tab's DTOs may only be pulled in
   // when that surface is first reached.
-  setTimeout(() => dumpTypes('late'), 30000);
+  setTimeout(() => {
+    dumpTypes('late');
+    // Last, so it counts everything the run saw — a log that hit a cap should
+    // say which site was loudest rather than just stop mid-stream.
+    reportThrowSummary();
+  }, 30000);
 }
 
 let sawInit = false;
