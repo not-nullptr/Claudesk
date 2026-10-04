@@ -540,8 +540,39 @@ tolerated.
 
 ## Tooling left in the repo
 
-`/workspace/ipa-work/` holds the RE scripts: `swifttypes.py` (Swift type +
-field + field-type dumper, writes `/tmp/types_full.tsv`), `codingkeys.py`,
-`rawkeys.py`, `swiftmeta.py`, plus `/tmp/{macho,swift,fmd,refs,funcs,armdis}.py`
-from an earlier session. Do not create a file named `dis.py` (it shadows the
-stdlib module and breaks capstone).
+`scripts/inspect-swift-types.mjs` reads the Swift type metadata offline. It
+walks `__swift5_types` into a name → descriptor index and dumps a named type's
+fields with their types, flagging the non-Optional ones:
+
+```sh
+node scripts/inspect-swift-types.mjs SendChannelMessageResponse CreateSessionRequest
+node scripts/inspect-swift-types.mjs --grep ChannelMessage      # find types by name
+node scripts/inspect-swift-types.mjs --path /elsewhere/Claude SessionResource
+```
+
+The non-Optional flag is the whole game on this surface: an absent or null
+non-Optional field is exactly what throws `ClaudeApiServices.ModelDecodingError`,
+while an absent Optional one decodes fine. So the check for any route is
+mechanical — dump its DTO, make sure every required field is present, non-null,
+and the right shape. Two things this reader does that `/workspace/ipa-work/`'s
+cannot: it resolves field type pointers as Swift *symbolic references* (the
+older `swifttypes.mjs` reads them as C strings and prints garbage for every
+non-trivial field type — its `fields.tsv` is still fine for *names*), and it
+addresses any type by name rather than by a hand-found descriptor address.
+
+Route → type is the one link that is not automated. The route strings are
+enumerable in the image (`search_strings` over Ghidra, or grep
+`/workspace/ipa-work/strings6.txt`) and the type names are enumerable here, but
+nothing joins them: Swift string literals are referenced through a literal
+struct rather than by `adrp/add` to the character data, so `xref.mjs`/`findrefs.py`
+do not land on the call site. In practice the DTO's name restates the route's
+nouns (`SendChannelMessageResponse` for `…/channels/{id}/messages/stream`),
+`--grep` lists the candidates, and the field dump confirms which one fits — with
+the facade's `[mobile-code] posted=` self-report as the backstop when a shape is
+still wrong.
+
+`/workspace/ipa-work/` holds the rest of the RE scripts: `swifttypes.py`,
+`codingkeys.py`, `rawkeys.py`, `swiftmeta.py`, `xref.mjs` (string VA → `adrp/add`
+code refs), plus `/tmp/{macho,swift,fmd,refs,funcs,armdis}.py` from an earlier
+session. Do not create a file named `dis.py` (it shadows the stdlib module and
+breaks capstone).
