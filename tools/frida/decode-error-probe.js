@@ -125,13 +125,17 @@ function boxWord(context, offset) {
 }
 
 // Where in a throw's register/box the metadata might be, most likely first.
+//
+// The box is walked in pointer steps out to 88 bytes: a first run showed the
+// error box stack-allocated with its first five words zero and the only
+// image-pointer-looking word at +40, so the metadata is not at the front the way
+// a `{Storage, Type}` layout would put it. The whole prefix is cheap to try, and
+// the search stops as soon as it locks.
+const BOX_WORDS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88];
 const CANDIDATES = {
-  swift_willThrow: (context) => [
-    boxWord(context, 0), boxWord(context, 8), boxWord(context, 16), boxWord(context, 24),
-  ],
-  swift_willThrowTypedImpl: (context) => [
-    ptrOrNull(context.x1), boxWord(context, 0), boxWord(context, 8), boxWord(context, 16),
-  ],
+  swift_willThrow: (context) => BOX_WORDS.map((offset) => boxWord(context, offset)),
+  swift_willThrowTypedImpl: (context) =>
+    [ptrOrNull(context.x1), ...BOX_WORDS.map((offset) => boxWord(context, offset))],
 };
 
 // A descriptor keeps its name at +8 as a relative pointer. That offset is signed
@@ -159,23 +163,42 @@ function attemptName(candidates, index, mode) {
 
 const votes = new Map();  // "source|index|mode" -> consecutive agreements
 const locks = new Map();  // source -> { index, mode } once trusted
-const BRUTE_THROWS = 3000;
+const BRUTE_THROWS = 400;
 let bruteThrows = BRUTE_THROWS;
 let lockMisses = 0;
 let learned = null;       // reported once, so a log shows how the layout was found
-let boxSample = null;
+let layoutSent = false;
 
-function sampleBox(context) {
-  if (boxSample) return;
+// One-shot, on the first throw: which word of the box, if any, names a type —
+// and by which shape. This is the evidence that settles the layout, so a run
+// that stays blind is diagnostic instead of just quiet.
+function reportLayout(context, source) {
+  if (layoutSent) return;
+  layoutSent = true;
   const words = [];
-  for (let offset = 0; offset < 48; offset += 8) {
-    try { words.push(context.x0.add(offset).readPointer().toString()); } catch (error) { break; }
+  const names = [];
+  const inspect = (pointer, at) => {
+    if (!pointer) return;
+    const direct = relativeName(pointer);
+    if (direct) names.push({ at, via: 'direct', name: direct });
+    try {
+      const deref = relativeName(pointer.add(8).readPointer());
+      if (deref) names.push({ at, via: 'deref8', name: deref });
+    } catch (error) { /* not a pointer */ }
+  };
+  for (const offset of BOX_WORDS) {
+    const word = boxWord(context, offset);
+    words.push(word ? word.toString() : null);
+    inspect(word, `box+${offset}`);
   }
-  boxSample = {
+  inspect(ptrOrNull(context.x1), 'x1');
+  report('layout', {
+    source,
     x0: ptrOrNull(context.x0) ? context.x0.toString() : null,
     x1: ptrOrNull(context.x1) ? context.x1.toString() : null,
-    box: words,
-  };
+    words,
+    names,
+  });
 }
 
 function lock(source, index, mode, why) {
@@ -199,7 +222,6 @@ function typeNameOf(source, context) {
     bruteThrows = Math.max(bruteThrows, 500);
     return null;
   }
-  if (!boxSample) sampleBox(context);
   if (bruteThrows <= 0) return null;
   bruteThrows -= 1;
   let matched = null;
@@ -347,11 +369,9 @@ function census() {
     names: [...censusNames],
     unresolved,
     filter: TYPE_FILTER,
-    // How (or whether) the layout was learned, and — when it never was — the
-    // first throw's box words, which is the evidence needed to place the
-    // metadata word by hand.
+    // How the layout was learned, if it was; the one-shot `layout` report above
+    // carries the evidence when it was not.
     calibrated: learned,
-    box: learned ? undefined : boxSample,
   });
 }
 
@@ -366,6 +386,7 @@ function noteType(name) {
 
 function onThrow(context, source) {
   try {
+    reportLayout(context, source);
     const name = typeNameOf(source, context);
     noteType(name);
     if (!matches(name)) return;

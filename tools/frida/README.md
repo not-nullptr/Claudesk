@@ -146,14 +146,21 @@ winner is remembered and used alone from then on. The search is bounded and stop
 the moment it locks, so a healthy run pays it only for its first few throws. It
 announces the answer once as `calibrated {source, candidate, mode, why}`.
 
-Alongside that, `throw-types {names:[…], unresolved, calibrated, box}` goes out
-15 s after boot (or as soon as 12 distinct types have been seen). `names:[…]` is
-the first distinct thrown type names, `unresolved` how many thrown values yielded
-no name at all, and `calibrated`/`box` say how the layout was found — or, when it
-never was, carry the first throw's box words, which is the evidence needed to
-place the metadata word by hand. Every throw resolves its type even when it is not
-the one asked for, so that count is free. Setting `TYPE_FILTER = null` at the top
-still reports every throw instead of filtering, for when a full census is wanted.
+Alongside that, `throw-types {names:[…], unresolved, calibrated}` goes out 15 s
+after boot (or as soon as 12 distinct types have been seen): the first distinct
+thrown type names, how many thrown values yielded no name at all, and how the
+layout was found (or `null` if it never was). The box is walked in pointer steps
+out to 88 bytes, because a first run showed the box stack-allocated with its
+first five words zero and the only image-pointer-looking word at +40. Every throw
+resolves its type even when it is not the one asked for, so that count is free.
+Setting `TYPE_FILTER = null` at the top still reports every throw instead of
+filtering, for when a full census is wanted.
+
+A one-shot `layout {words:[…], names:[…]}` is emitted on the first throw: the
+box's words, and which of them actually names a type (`{at, via, name}`, `at`
+like `box+40`, `via` `direct` or `deref8`). That report is the whole answer to
+"where does the metadata live on this build" — a run that stays blind carries the
+evidence instead of only the count.
 
 ## How the gadget runs `probe.js` in script mode
 
@@ -373,12 +380,14 @@ app *debuggable*, and still nothing has attached.
 - **`hello` arrives but no `types`.** The resolver queries need adjusting; the
   reported per-query errors say how.
 - **`decode-error-probe.js`: `throw-types` shows `names:[] unresolved:…`.** The
-  probe could not find the metadata. `calibrated` will be absent and `box` will
-  carry the first throw's `x0`/`x1` and box words — that sample is what places
-  the metadata word: one of those words is a pointer into the app's metadata
-  region, and the fix is a line in `CANDIDATES`/`DEREF_MODES` in
-  `decode-error-probe.js`. A non-empty `names` with `unresolved` near zero means
-  naming is fine and a quiet `model-decoding-error` log is the real answer.
-  (The relative name offset is signed and negative as often as positive; it is
-  applied with `sub()` for the negative case, because Frida's `add()` throwing on
-  a negative number would be caught and read as a wrong layout.)
+  probe could not find the metadata. Read the one-shot `layout` report: if any
+  entry in `names` exists, the layout *is* findable and the search simply did not
+  reach it — widen `BOX_WORDS`, or move the winning `at`/`via` to the front of
+  `CANDIDATES`. If `names` is empty, no word of the box names a type, and the
+  next thing to try is hooking `swift_allocError` (whose first argument is the
+  metadata) rather than reaching through the box. A non-empty `names` with
+  `unresolved` near zero means naming is fine and a quiet `model-decoding-error`
+  log is the real answer. (The relative name offset is signed and negative as
+  often as positive; it is applied with `sub()` for the negative case, because
+  Frida's `add()` throwing on a negative number would be caught and read as a
+  wrong layout.)
