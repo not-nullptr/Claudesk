@@ -52,25 +52,48 @@ export async function resolveContainedRealPath(
   return canonicalTarget;
 }
 
+/**
+ * Resolve `target` to its real path, requiring it to live inside one of
+ * `roots`. Each root is canonicalized before the check, so a symlink planted
+ * inside a root cannot be used to escape it. A target the root list does not
+ * cover fails with the first root's 403; a target that is lexically inside a
+ * root but absent reports its 404 rather than falling through to the next root.
+ */
+export async function resolveWithinRoots(roots, target, options = {}) {
+  let outside;
+  for (const root of roots) {
+    try {
+      return await resolveContainedRealPath(root, target, options);
+    } catch (error) {
+      if (error.statusCode !== 403) throw error;
+      outside = error;
+    }
+  }
+  throw outside ?? Object.assign(
+    new Error(options.outsideMessage || "path is outside the allowed read roots"),
+    { statusCode: 403 },
+  );
+}
+
 export function createDownloadHandler({
   ApiError,
   artifactsRoot,
   mimeTypes,
-  workspaceRoot,
+  downloadRoots,
 }) {
   return async function handleDownload(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/remote/files/download") {
       const requestedPath = url.searchParams.get("path");
       if (typeof requestedPath !== "string" || !requestedPath || requestedPath.length > 4096) {
-        throw new ApiError(400, "workspace path is invalid");
+        throw new ApiError(400, "download path is invalid");
       }
-      const filePath = await resolveContainedRealPath(workspaceRoot, requestedPath, {
+      const filePath = await resolveWithinRoots(downloadRoots, requestedPath, {
         allowRoot: false,
-        missingMessage: "workspace file was not found",
-        outsideMessage: "workspace path is outside the remote workspace",
+        missingMessage: "download file was not found",
+        outsideMessage: "path is outside the allowed read roots",
       });
       const info = await stat(filePath);
-      if (!info.isFile()) throw new ApiError(404, "workspace file was not found");
+      if (!info.isFile()) throw new ApiError(404, "download file was not found");
       const originalName = basename(filePath);
       const safeName = originalName.replace(/[\r\n"]/g, "_");
       const disposition = url.searchParams.get("inline") === "1" ? "inline" : "attachment";

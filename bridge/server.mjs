@@ -20,6 +20,17 @@ const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
+// Roots the remote download route may serve from. The workspace is always
+// allowed, because the web UI's own file browser reads from it; extra roots
+// come from COWORK_REMOTE_READ_ROOTS so an operator can opt into reading other
+// paths. These are paths as THIS container sees them, so a host directory needs
+// a bind mount to be reachable. Default: workspace only.
+const extraDownloadRoots = String(process.env.COWORK_REMOTE_READ_ROOTS || "")
+  .split(/[:,]/)
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+  .map((entry) => resolve(entry));
+const downloadRoots = [...new Set([workspaceRoot, ...extraDownloadRoots])];
 const artifactsRoot = resolve(
   process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
 );
@@ -720,7 +731,7 @@ const handleDownload = createDownloadHandler({
   ApiError,
   artifactsRoot,
   mimeTypes,
-  workspaceRoot,
+  downloadRoots,
 });
 
 async function readJson(request, maxSize = 1024 * 1024) {
@@ -1635,6 +1646,7 @@ server.requestTimeout = 0;
 
 server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
+  console.log(`[cowork-bridge] download roots: ${downloadRoots.join(", ")}`);
 });
 
 const realtimePoller = setInterval(() => void realtime.pollState(), 1000);

@@ -156,6 +156,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `COWORK_WEB_PORT` | `15821` | 宿主机公开端口，映射到 Bridge `8080` |
 | `COWORK_BRIDGE_INTERNAL_PORT` | `9222` | Desktop 内部 Cowork adapter 端口，仅 loopback |
 | `COWORK_UPLOAD_MAX_BYTES` | `1073741824` | Web UI 单次上传（附件、拖入文件夹）的总大小上限，字节数，可带 `K`/`M`/`G` 后缀；文件以原始二进制流式写入 `/workspace/RemoteUploads`，不占内存 |
+| `COWORK_REMOTE_READ_ROOTS` | —（仅 `/workspace`） | 已认证的远程下载路由（`GET /api/remote/files/download`）额外可读的根目录，冒号或逗号分隔；`/workspace` 始终允许。路径在 cowork-bridge 容器内解析，宿主机目录还需 bind mount 进容器才可见。列出的路径即可被远程读取，务必配合已认证的 HTTPS 入口 |
 | `CLAUDE_DESKTOP_VERSION` | `2.9939.4` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |

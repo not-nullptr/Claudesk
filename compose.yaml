@@ -92,6 +92,11 @@ services:
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
       COWORK_REMOTE_WORKSPACE_ROOT: "/workspace"
+      # Extra roots (colon- or comma-separated) the authenticated remote
+      # download route may serve from, on top of the always-allowed workspace.
+      # Paths are resolved inside this container, so a host directory also
+      # needs a bind mount above to exist here. Empty means /workspace only.
+      COWORK_REMOTE_READ_ROOTS: "${COWORK_REMOTE_READ_ROOTS:-}"
       COWORK_UPLOAD_MAX_BYTES: "${COWORK_UPLOAD_MAX_BYTES:-1073741824}"
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
