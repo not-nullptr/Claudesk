@@ -133,17 +133,26 @@ same binary); `text` is the printable ASCII in the error box, which holds the
 **Naming is the one part that could be silently wrong**, so the probe calibrates
 itself rather than trusting a quiet log.
 
-Two things about naming cannot be settled offline, so the probe learns them at
-run time. *Where the metadata is:* the typed throw path's second argument is
-metadata by ABI and is disassembly-verified, but the untyped path hands over a
-box built by `swift_allocError`, whose internal layout belongs to libswiftCore —
-which ships in the iOS dyld shared cache, not this bundle, so it cannot be read
-out here. *Whether the word found is the metadata or already the descriptor:*
-also not knowable. So each throw is tried against a small set of candidates and
-shapes; a pair that returns the filtered name is trusted immediately (that string
-does not appear by chance), any other pair must agree three times first, and the
-winner is remembered and used alone from then on. The search is bounded and stops
-the moment it locks, so a healthy run pays it only for its first few throws. It
+The type is read where the error is *built*, not where it is thrown. Hooking the
+throw entry points was tried first and failed on hardware: `swift_willThrow(box)`
+hands over a box whose contents belong to libswiftCore — which ships in the iOS
+dyld shared cache, not this bundle, so its layout cannot be read out here — and
+four live runs found every word of that box to be String guts, ObjC data or zero,
+never a metadata pointer. The typed entry point `swift_willThrowTypedImpl` does
+pass metadata, but only covers `throws(T)` functions, and this app's decoders
+throw untyped. So the probe hooks **`swift_allocError`** instead, whose first
+argument *is* the error's type by ABI, with no box to walk; every untyped `throw`
+in a Swift binary goes through it (this app's throw sites disassemble as
+`bl _swift_allocError` then `bl _swift_willThrow`).
+
+Two things still cannot be settled offline, so the probe learns them at run time.
+*Whether x0 is the metadata (with the descriptor inside it) or already the
+descriptor* — both occur — and so *where in the metadata the descriptor sits*.
+Each throw is therefore tried against a small set of candidates and shapes; a
+pair that returns the filtered name is trusted immediately (that string does not
+appear by chance), any other pair must agree three times first, and the winner is
+remembered and used alone from then on. The search is bounded and stops the
+moment it locks, so a healthy run pays it only for its first few throws. It
 announces the answer once as `calibrated {source, candidate, mode, why}`.
 
 Every candidate is also tried **masked to its address bits**. arm64e pointers are
@@ -154,19 +163,17 @@ exactly that: `x1` and `box+0` sharing the low 47 bits under different top bytes
 
 Alongside that, `throw-types {names:[…], unresolved, calibrated}` goes out 15 s
 after boot (or as soon as 12 distinct types have been seen): the first distinct
-thrown type names, how many thrown values yielded no name at all, and how the
-layout was found (or `null` if it never was). The box is walked in pointer steps
-out to 88 bytes, because a first run showed the box stack-allocated with its
-first five words zero and the only image-pointer-looking word at +40. Every throw
-resolves its type even when it is not the one asked for, so that count is free.
-Setting `TYPE_FILTER = null` at the top still reports every throw instead of
-filtering, for when a full census is wanted.
+error types named, how many allocations yielded no name at all, and how the
+layout was found (or `null` if it never was). Every allocation resolves its type
+even when it is not the one asked for, so that count is free. Setting
+`TYPE_FILTER = null` at the top still reports every throw instead of filtering,
+for when a full census is wanted.
 
-A one-shot `layout {words:[…], names:[…]}` is emitted on the first throw: the
-box's words, and which of them actually names a type (`{at, via, name}`, `at`
-like `box+40`, `via` `direct` or `deref8`). That report is the whole answer to
-"where does the metadata live on this build" — a run that stays blind carries the
-evidence instead of only the count.
+A one-shot `layout {words:[…], names:[…]}` is emitted on the first allocation:
+the argument registers' words, and which of them actually names a type
+(`{at, via, name}`, `at` like `x0+8`, `via` `direct` or `deref8`). That report is
+the whole answer to "where does the metadata live on this build" — a run that
+stays blind carries the evidence instead of only the count.
 
 ## How the gadget runs `probe.js` in script mode
 
@@ -287,7 +294,7 @@ neither, and no amount of re-signing helps.
 The builder therefore defaults to `code_signing: "required"`, which is the
 documented way to run "on a jailed iOS device without a debugger attached". The
 trade-off is in the same sentence of the Frida docs: Interceptor becomes
-unavailable, so part B (the `swift_willThrow` hooks) cannot be installed and
+unavailable, so part B (the `swift_allocError`/`swift_willThrowTypedImpl` hooks) cannot be installed and
 `hook {installed:[]}` comes back empty with a `note` saying so. Part A — the type
 and conformance census — hooks nothing and still works. Pass
 `--code-signing optional` to get the hooks back whenever the app really is
@@ -386,14 +393,14 @@ app *debuggable*, and still nothing has attached.
 - **`hello` arrives but no `types`.** The resolver queries need adjusting; the
   reported per-query errors say how.
 - **`decode-error-probe.js`: `throw-types` shows `names:[] unresolved:…`.** The
-  probe could not find the metadata. Read the one-shot `layout` report: if any
-  entry in `names` exists, the layout *is* findable and the search simply did not
-  reach it — widen `BOX_WORDS`, or move the winning `at`/`via` to the front of
-  `CANDIDATES`. If `names` is empty, no word of the box names a type, and the
-  next thing to try is hooking `swift_allocError` (whose first argument is the
-  metadata) rather than reaching through the box. A non-empty `names` with
-  `unresolved` near zero means naming is fine and a quiet `model-decoding-error`
-  log is the real answer. (The relative name offset is signed and negative as
-  often as positive; it is applied with `sub()` for the negative case, because
-  Frida's `add()` throwing on a negative number would be caught and read as a
-  wrong layout.)
+  probe could not name the type. Read the one-shot `layout` report: if any entry
+  in `names` exists, the layout *is* findable and the search simply did not reach
+  it — move the winning `at`/`via` to the front of `CANDIDATES`. If `names` is
+  empty, `swift_allocError`'s first argument is not the type on this build after
+  all, and the next thing to try is `swift_getTypeName` on x0 (safe only once x0
+  is known to be a real pointer) or disassembling a known throw site. A
+  non-empty `names` with `unresolved` near zero means naming is fine and a quiet
+  `model-decoding-error` log is the real answer. (The relative name offset is
+  signed and negative as often as positive; it is applied with `sub()` for the
+  negative case, because Frida's `add()` throwing on a negative number would be
+  caught and read as a wrong layout.)

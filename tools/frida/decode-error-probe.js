@@ -18,10 +18,10 @@
 //   it reports every throw in the process, `try?` included, so it is off by
 //   default and has to be read past thousands of benign launch throws.
 //
-// This probe keeps the throw hook and drops the noise: it resolves the type of
-// each thrown value and reports only the one asked for. Naming a type is a
-// handful of pointer reads, so it is cheap enough to leave attached, and the log
-// has one line shape instead of a census.
+// This probe keeps that hook's vantage point but drops the noise: it resolves
+// the type of each error as it is built and reports only the one asked for.
+// Naming a type is a handful of pointer reads, so it is cheap enough to leave
+// attached, and the log has one line shape instead of a census.
 //
 // Same two sinks as probe.js, so it runs either way the gadget is configured:
 // `send`/console.log for a host-attached session, POST to <reportUrl>/__diag for
@@ -84,35 +84,40 @@ function report(kind, payload) {
 }
 
 // ------------------------------------------------------- the type of an error
-// A throw reaches the runtime either as `swift_willThrow(box)` or, for typed
-// throws, `swift_willThrowTypedImpl(box, metadata, storage)`. Naming the thrown
-// type means finding its metadata and reading the name out of the metadata's
-// descriptor.
+// Naming an error's type means finding its metadata and reading the name out of
+// the metadata's descriptor.
 //
-// Two things about that cannot be settled from this repo offline, so the probe
-// learns them at run time rather than assuming them:
+// The throw entry points are a dead end for that. `swift_willThrow(box)` hands
+// over a box whose contents belong to libswiftCore; four live runs showed every
+// word of it to be String guts, ObjC data or zero — never a metadata pointer.
+// libswiftCore ships in the iOS dyld shared cache and is not in this bundle, so
+// that layout cannot be read out here or guessed from this repo. The typed entry
+// point, `swift_willThrowTypedImpl(box, metadata, storage)`, does pass metadata
+// (disassembly-verified: x1 is a metadata accessor's result) but only covers
+// `throws(T)` functions, and this app's decoders throw untyped.
 //
-//   * where the metadata sits. The typed path's second argument is metadata by
-//     ABI (disassembly-verified in this app: x1 is a metadata accessor's
-//     result). The untyped path hands over a box built by `swift_allocError`,
-//     and *where the metadata word lives inside that box* belongs to
-//     libswiftCore — which ships in the iOS dyld shared cache and is not in this
-//     bundle, so it cannot be read out here.
-//   * whether the word found is the metadata (with the descriptor inside it) or
-//     already the descriptor.
+// So the probe hooks the call that *builds* the error instead. By ABI,
 //
-// So each throw is tried against a small set of candidates and shapes, and the
-// pair that keeps answering is remembered. A pair that yields the *filtered*
-// name is trusted at once — that string does not appear by chance — while any
-// other pair must agree three times first, so a one-off coincidental read cannot
-// lock the probe onto the wrong layout. The search is bounded and stops as soon
-// as it locks, so a healthy run pays it only for its first few throws.
+//   swift_allocError(const Metadata *type, const WitnessTable *conformance,
+//                    OpaqueValueStorage *typedStorage, bool isTake)
+//
+// hands the error's type over as its first argument — no box-walking, no
+// libswiftCore layout. Every untyped `throw` in a Swift binary goes through it;
+// the disassembly of this app's throw sites is `bl _swift_allocError` followed
+// immediately by `bl _swift_willThrow`. x1 is kept as a runner-up in case the
+// pointer is handed over as the value and the type alongside it.
+//
+// What x0 *is* — metadata (with the descriptor inside it) or the descriptor
+// itself — is left open and searched, since both occur. So each throw is tried
+// against a small set of candidates and shapes, and the pair that keeps
+// answering is remembered. A pair that yields the *filtered* name is trusted at
+// once — that string does not appear by chance — while any other pair must agree
+// three times first, so a one-off coincidental read cannot lock the probe onto
+// the wrong layout. The search is bounded and stops as soon as it locks.
 //
 // A runtime accessor (`swift_getTypeName`) would name types authoritatively, but
-// it dereferences whatever it is handed, and the untyped box's metadata word is
-// exactly what is unknown — so calling it would risk crashing on every throw.
-// The walk reads defensively instead: a wrong guess yields no name, never a
-// crash, which is what lets it be searched for at run time at all.
+// it dereferences whatever it is handed; the walk reads defensively instead, so
+// a wrong guess yields no name, never a crash.
 const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const DEREF_MODES = [8, 16, 0, 'direct'];
 
@@ -120,22 +125,25 @@ function ptrOrNull(value) {
   try { return value && !value.isNull() ? value : null; } catch (error) { return null; }
 }
 
-function boxWord(context, offset) {
+// The pointer-sized word at `x0 + offset`. For an allocation x0 is the error's
+// type, so this reads its fields; for a throw it is the error box.
+function x0Word(context, offset) {
   try { return ptrOrNull(context.x0.add(offset).readPointer()); } catch (error) { return null; }
 }
 
-// Where in a throw's register/box the metadata might be, most likely first.
+// Where the metadata might be, most likely first.
 //
-// The box is walked in pointer steps out to 88 bytes: a first run showed the
-// error box stack-allocated with its first five words zero and the only
+// A pointer value is walked in steps out to 88 bytes: a first run showed the
+// untyped error box stack-allocated with its first five words zero and the only
 // image-pointer-looking word at +40, so the metadata is not at the front the way
 // a `{Storage, Type}` layout would put it. The whole prefix is cheap to try, and
-// the search stops as soon as it locks.
+// the search stops as soon as it locks. It stays in the table as a long shot for
+// the entry points that carry a box, but nothing has ever been named from one.
 const BOX_WORDS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88];
 const CANDIDATES = {
-  swift_willThrow: (context) => BOX_WORDS.map((offset) => boxWord(context, offset)),
+  swift_allocError: (context) => [ptrOrNull(context.x0), ptrOrNull(context.x1)],
   swift_willThrowTypedImpl: (context) =>
-    [ptrOrNull(context.x1), ...BOX_WORDS.map((offset) => boxWord(context, offset))],
+    [ptrOrNull(context.x1), ...BOX_WORDS.map((offset) => x0Word(context, offset))],
 };
 
 // A descriptor keeps its name at +8 as a relative pointer. That offset is signed
@@ -144,14 +152,21 @@ const CANDIDATES = {
 // name" — indistinguishable from a wrong layout). So the negative case is
 // applied with `sub()`, which only ever sees a positive magnitude.
 function relativeName(descriptor) {
-  if (!descriptor || descriptor.isNull()) return null;
-  try {
-    const field = descriptor.add(8);
-    const relative = field.readS32();
-    const address = relative < 0 ? field.sub(-relative) : field.add(relative);
-    const name = address.readUtf8String(128);
-    return name && NAME_SHAPE.test(name) ? name : null;
-  } catch (error) { return null; }
+  // Masking happens here, not only at the caller: on arm64e the descriptor is
+  // itself a signed pointer (a metadata's `Description` field is a
+  // `TargetSignedPointer`), so a pointer that arrives looking clean can still
+  // carry signature bits. Masking at every hop is what makes one mask suffice
+  // for a walk of any depth.
+  for (const candidate of variants(descriptor)) {
+    try {
+      const field = candidate.add(8);
+      const relative = field.readS32();
+      const address = relative < 0 ? field.sub(-relative) : field.add(relative);
+      const name = address.readUtf8String(128);
+      if (name && NAME_SHAPE.test(name)) return name;
+    } catch (error) { /* try the next variant */ }
+  }
+  return null;
 }
 
 // arm64e pointers are signed: the address lives in bits 0-47 and bits 48-63
@@ -200,9 +215,10 @@ let lockMisses = 0;
 let learned = null;       // reported once, so a log shows how the layout was found
 let layoutSent = false;
 
-// One-shot, on the first throw: which word of the box, if any, names a type —
-// and by which shape. This is the evidence that settles the layout, so a run
-// that stays blind is diagnostic instead of just quiet.
+// One-shot, on the first allocation: which argument register, or which word of
+// what it points at, names a type — and by which shape. This is the evidence
+// that settles the layout, so a run that stays blind is diagnostic instead of
+// just quiet.
 function reportLayout(context, source) {
   if (layoutSent) return;
   layoutSent = true;
@@ -222,12 +238,15 @@ function reportLayout(context, source) {
       }
     }
   };
+  // The registers themselves first, then the words they point at: for an
+  // allocation x0 is the type (a name via `direct` or `deref8` depending on
+  // whether it is a descriptor or metadata), and for a throw x2 is the value.
+  for (const at of ['x0', 'x1', 'x2']) inspect(ptrOrNull(context[at]), at);
   for (const offset of BOX_WORDS) {
-    const word = boxWord(context, offset);
+    const word = x0Word(context, offset);
     words.push(word ? word.toString() : null);
-    inspect(word, `box+${offset}`);
+    inspect(word, `x0+${offset}`);
   }
-  inspect(ptrOrNull(context.x1), 'x1');
   report('layout', {
     source,
     x0: ptrOrNull(context.x0) ? context.x0.toString() : null,
@@ -289,9 +308,9 @@ function matches(name) {
 }
 
 // ------------------------------------------------------------- reading text
-// The thrown value's *fields* are never interpreted — no accessor is called on
-// the error, because calling the wrong entry on a bad pointer crashes the app.
-// Instead the raw words of the box are taken as candidate pointers and printable
+// The error value's *fields* are never interpreted — no accessor is called on
+// it, because calling the wrong entry on a bad pointer crashes the app.
+// Instead the raw words around it are taken as candidate pointers and printable
 // ASCII is pulled out of whatever they land on. `ModelDecodingError(path: …)` is the
 // error's own description format, and its `path` String's bytes are either
 // inline in the box or one hop away, so the coding path is readable in that
@@ -390,7 +409,7 @@ let capped = 0;
 // Automatic calibration. Naming a type is the one thing here that could be
 // silently wrong on a build nobody has probed, and a filter that never matches
 // is indistinguishable from a filter that never fired. So the first few
-// *distinct* thrown type names are reported once, with a count of thrown values
+// *distinct* error type names are reported once, with a count of allocations
 // that yielded no name at all: `names:[] unresolved:12000` is a broken namer — a
 // different log line from a quiet `names:[…]`.
 const CENSUS_MAX = 12;
@@ -434,16 +453,21 @@ function onThrow(context, source) {
     }
     if (reported >= SITE_LIMIT) { capped += 1; return; }
     reported += 1;
-    // x0 is the error box; its first words are the ModelDecodingError struct
-    // (path, isFailure, sampleRate, error, recoveredCount), so the path String
-    // is in there. The argument registers are scanned too, since which one holds
-    // what depends on the caller.
+    // The ModelDecodingError struct (path, isFailure, sampleRate, error,
+    // recoveredCount) is what we are after, and both entry points have a pointer
+    // to something holding it: x0 for a throw (the box), x2 for an allocation
+    // (the typed storage). Its first words are therefore followed, along with
+    // the argument registers themselves, since which one holds what depends on
+    // the caller. A wrong pointer just yields no text — textNear reads
+    // defensively — so the whole set is cheap to hand over.
     const words = [context.x0, context.x1, context.x2, context.x3];
-    try {
-      if (context.x0 && !context.x0.isNull()) {
-        for (let offset = 0; offset < 64; offset += 8) words.push(context.x0.add(offset).readPointer());
-      }
-    } catch (error) { /* not a readable box */ }
+    for (const base of [context.x0, context.x2]) {
+      try {
+        if (base && !base.isNull()) {
+          for (let offset = 0; offset < 64; offset += 8) words.push(base.add(offset).readPointer());
+        }
+      } catch (error) { /* not a readable value */ }
+    }
     report('model-decoding-error', {
       n: reported,
       type: name,
@@ -457,20 +481,24 @@ function onThrow(context, source) {
   }
 }
 
-// swift_willThrow is the untyped path, swift_willThrowTypedImpl its Swift 6
-// sibling; a throw takes one or the other, so installing both does not double-
-// report, and hooking both means the probe does not depend on how the throwing
-// site was compiled.
+// The call that builds an error carries its type; the call that throws it does
+// not, at least not where we can reach. So hook the builder, and keep the typed
+// entry point too — a throw takes exactly one of the two, so installing both
+// does not double-report, and between them they cover every way this app can
+// throw. `swift_willThrow` is deliberately not hooked: its box has been shown to
+// hold no metadata, so hooking it would only inflate the unresolved count.
 //
-// Each reaches the metadata differently; the probe knows only that the typed
-// path's second argument *is* metadata (see CANDIDATES, which searches the rest).
 // The signatures are fixed by the runtime:
 //
-//   swift_willThrow(SwiftError *error)                 // x0 = box
+//   swift_allocError(const Metadata *type,              // x0 = the error's type
+//                    const WitnessTable *conformance,   // x1
+//                    OpaqueValueStorage *typedStorage,  // x2 = the value
+//                    bool isTake)                       // x3
+//
 //   swift_willThrowTypedImpl(SwiftError *error,        // x0 = box
 //                            const Metadata *errorType, // x1 = metadata
 //                            TypedErrorInfoStorage *)   // x2
-const THROW_EXPORTS = ['swift_willThrow', 'swift_willThrowTypedImpl'];
+const THROW_EXPORTS = ['swift_allocError', 'swift_willThrowTypedImpl'];
 const installed = new Set();
 
 function installOne(name) {
