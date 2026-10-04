@@ -1,16 +1,22 @@
 #!/usr/bin/env node
-// Build an instrumented copy of the Claude IPA that loads FridaGadget in
-// **script interaction mode**. Feather then only has to sign and install it:
-// the gadget, its config and the probe script are already inside the bundle,
-// so no Mac, no USB, no frida-server and no host connection are involved.
+// Build an instrumented copy of the Claude IPA that loads FridaGadget. Feather
+// only has to sign and install it: the gadget and its config are already inside
+// the bundle, so no Mac, no USB and no frida-server are involved.
 //
 // What it does, in order:
 //   1. ensure the FridaGadget dylib for iOS is on disk (download + xz + thin);
-//   2. stage the app, drop the gadget / config / probe into Frameworks/;
+//   2. stage the app, drop the gadget / config (/ probe) into Frameworks/;
 //   3. add one LC_LOAD_DYLIB to the main binary so dyld loads the gadget;
 //   4. repackage Payload/ as an .ipa.
 //
-// Usage:
+// Usage — listen mode (recommended: attach and iterate with no re-signing):
+//   node tools/frida/build-instrumented-ipa.mjs \
+//     --app /workspace/ipa-work/extracted/Payload/Claude.app \
+//     --out /workspace/RemoteUploads/Claude-frida.ipa \
+//     --interaction listen
+//   then, with the app running:  frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js
+//
+// Usage — script mode (no host at all; findings POST to the facade):
 //   node tools/frida/build-instrumented-ipa.mjs \
 //     --app /workspace/ipa-work/extracted/Payload/Claude.app \
 //     --out /workspace/RemoteUploads/Claude-frida.ipa \
@@ -42,8 +48,20 @@ const outIpa = arg("out");
 const reportUrl = arg("report-url");
 const token = arg("token");
 const cacheDir = arg("cache", "/tmp/claudesk-frida");
-if (!appDir || !outIpa || !reportUrl || !token) {
-  console.error("need --app --out --report-url --token");
+// "script" bakes probe.js into the bundle and has it POST findings to
+// --report-url (no host; works from any network). "listen" opens a port on the
+// device instead, for a controller on the same network to attach to with
+// `frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js` — nothing is
+// baked in, so the script can be re-loaded and edited without re-signing.
+const interaction = arg("interaction", "script");
+const listenAddress = arg("address", "0.0.0.0");
+const listenPort = Number(arg("port", "27042"));
+if (interaction !== "script" && interaction !== "listen") {
+  console.error(`--interaction must be "script" or "listen", not ${interaction}`);
+  process.exit(2);
+}
+if (!appDir || !outIpa || (interaction === "script" && (!reportUrl || !token))) {
+  console.error("need --app --out, plus --report-url --token when --interaction script");
   process.exit(2);
 }
 
@@ -250,12 +268,29 @@ const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.
 // directory, and resolves a relative script against whichever directory it
 // found the config in — so both files go in both places rather than betting on
 // one resolution order.
-const config = JSON.stringify({
+//
+// on_load: the default ("wait") holds the app at its entrypoint until a
+// controller connects, which risks the launch watchdog if we are slow to
+// attach. "resume" lets it boot normally; the Code tab flow happens on a tap,
+// long after attach.
+const config = JSON.stringify(interaction === "script" ? {
   interaction: { type: "script", path: "probe.js", on_change: "ignore", parameters: { reportUrl, token } },
+  teardown: "minimal",
+} : {
+  interaction: {
+    type: "listen",
+    address: listenAddress,
+    port: listenPort,
+    on_port_conflict: "fail",
+    on_load: "resume",
+  },
   teardown: "minimal",
 }, null, 2);
 for (const dir of [frameworks, stagedApp]) {
-  writeFileSync(join(dir, "probe.js"), probe);
+  // In listen mode nothing is baked in: the controller supplies the script, and
+  // shipping a stale copy next to the config would only invite confusion about
+  // which one ran.
+  if (interaction === "script") writeFileSync(join(dir, "probe.js"), probe);
   writeFileSync(join(dir, "FridaGadget.config"), config);
 }
 
@@ -267,4 +302,7 @@ const zip = makeZip(entries);
 writeFileSync(outIpa, zip);
 console.log(`wrote ${outIpa} (${zip.length} bytes, ${entries.length} entries)`);
 console.log(`gadget load path: ${LOAD_PATH}`);
-console.log(`reporting to ${reportUrl}/__diag (token ${token.slice(0, 4)}…)`);
+console.log(interaction === "script"
+  ? `interaction: script, reporting to ${reportUrl}/__diag (token ${token.slice(0, 4)}…)`
+  : `interaction: listen on ${listenAddress}:${listenPort}, attach with ` +
+    `frida -H <phone-ip>:${listenPort} -n Gadget -l tools/frida/probe.js`);

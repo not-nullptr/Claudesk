@@ -1,11 +1,20 @@
 'use strict';
-// On-device probe, loaded by FridaGadget in **script interaction mode** (see
-// tools/frida/build-instrumented-ipa.mjs). It runs with no host attached: it
-// reports by POSTing JSON to the Claudesk server, so the findings land in the
-// same log the phone's traffic already reaches. That is the whole point of the
-// no-host setup — there is no Mac, no USB and no frida-server in this loop.
+// On-device probe. It is written to survive either way the gadget is configured
+// (see tools/frida/build-instrumented-ipa.mjs, `--interaction`):
 //
-// How the gadget runs this file, which is easy to get wrong:
+//   listen mode — the gadget opens a port and a controller attaches with
+//     `frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js`. Findings
+//     go out over that wire (`send`) and console.log lands in the CLI. This is
+//     the loop to iterate in; nothing is baked into the app.
+//
+//   script mode — no host at all. The gadget runs this file from the bundle and
+//     the probe POSTs its JSON to `<reportUrl>/__diag` on the Claudesk server,
+//     so findings land in the same log the phone's traffic already reaches.
+//
+// It reports through both sinks unconditionally, so the same file works
+// whichever way it is loaded.
+//
+// How the gadget runs this file in script mode, which is easy to get wrong:
 //   The gadget evaluates the script and then calls rpc.exports.init(stage,
 //   parameters) AUTOMATICALLY, and **blocks the app's entrypoint until it
 //   returns**. So init must do nothing but stash the parameters and hand off to
@@ -46,13 +55,13 @@ function describe(value) {
 // HTTP egress through the app's own Foundation stack. Frida's Socket would need
 // a raw TCP sink on the far end; NSURLSession needs only the URL the app
 // already reaches, and picks up the device's proxy/DNS/trust like the app does.
-function post(kind, payload) {
+function post(message) {
   if (!reportUrl) return;
-  let message;
+  let body;
   try {
-    message = JSON.stringify({ kind, seq: ++seq, at: Date.now(), payload });
+    body = JSON.stringify(message);
   } catch (error) {
-    message = JSON.stringify({ kind, seq: ++seq, at: Date.now(), payload: { error: String(error) } });
+    body = JSON.stringify({ kind: message.kind, seq: message.seq, at: message.at, payload: { error: String(error) } });
   }
   try {
     const nsBody = ObjC.classes.NSString.stringWithString_(message).dataUsingEncoding_(4 /* NSUTF8 */);
@@ -85,9 +94,20 @@ function bundleValue(read) {
   }
 }
 
+// Two sinks, one message. A host-attached session (`frida -H … -l probe.js`,
+// i.e. a gadget in listen mode) reads the findings off the wire; a standalone
+// gadget in script mode has no controller, so it POSTs them to the facade
+// instead. Sending is harmless with nobody listening, and posting is skipped
+// when no reportUrl was configured, so the same file serves both.
 function report(kind, payload) {
+  const message = { kind, seq: ++seq, at: Date.now(), payload };
   console.log(`${TAG}: ${kind} ${describe(payload).slice(0, 400)}`);
-  post(kind, payload);
+  try {
+    send(message);
+  } catch (error) {
+    // No controller attached — script mode. The POST below is the real sink.
+  }
+  post(message);
 }
 
 // ------------------------------------------------------------------- A: types
@@ -273,11 +293,14 @@ function boot() {
   setTimeout(() => dumpTypes('late'), 30000);
 }
 
+let sawInit = false;
+
 rpc.exports = {
   // Called by the gadget (and awaited — it gates the app's entrypoint), so this
   // must return immediately. Never throw out of here: a throwing init would
   // leave the app half-started.
   init(stage, parameters) {
+    sawInit = true;
     try {
       reportUrl = parameters && parameters.reportUrl ? String(parameters.reportUrl) : null;
       token = parameters && parameters.token ? String(parameters.token) : null;
@@ -290,11 +313,10 @@ rpc.exports = {
   },
 };
 
-// If something loads this file without gadget parameters (e.g. `frida -l` by
-// hand), still do the half that needs no destination: the throw hook and the
-// type dump, which will say in the app's own console that they had nowhere to
-// report.
+// A host-attached session (a gadget in listen mode, driven by `frida -H … -l`)
+// evaluates this file and never calls init — there is no gadget config to carry
+// parameters — so boot on a short timer instead of waiting for a call that will
+// not come. In script mode init has already run by then, and this no-ops.
 setTimeout(() => {
-  if (started) return;
-  boot();
-}, 3000);
+  if (!started && !sawInit) boot();
+}, 1000);
