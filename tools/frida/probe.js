@@ -34,7 +34,10 @@
 //      failure the app hides behind "Something went wrong". Repetition is
 //      capped per call site, not just globally: launch throws the same handful
 //      of benign errors hundreds of times and would otherwise spend the whole
-//      budget before the app is even up;
+//      budget before the app is even up. Because this hook is in the path of
+//      every throw in the process, the throttle reads `lr` and does nothing
+//      else — the backtrace, which is the expensive part, is built only for a
+//      throw that has earned a report;
 //   C. the DecodingError itself, caught at DecodingError.Context.init: its
 //      message and coding path, which name the offending DTO field. A backtrace
 //      alone says "something in the JSON decoder threw"; this says what about.
@@ -207,9 +210,24 @@ let thrown = 0;
 // consume the global budget at all.
 const NOISE_PER_SITE = 4;
 const siteCounts = new Map();
-let suppressed = 0;
+let suppressed = 0; // capped by the per-site rule
+let dropped = 0; // past the global limit even so
+
+// Symbolizing is the expensive half of a backtrace, and the same handful of
+// addresses come back throw after throw, so the answer is worth keeping: after
+// the first pass over a stack, repeats are a map lookup.
+const frameCache = new Map();
 
 function frameOf(address) {
+  const key = address.toString();
+  const cached = frameCache.get(key);
+  if (cached !== undefined) return cached;
+  const text = symbolize(address);
+  if (frameCache.size < 4096) frameCache.set(key, text);
+  return text;
+}
+
+function symbolize(address) {
   try {
     const symbol = DebugSymbol.fromAddress(address);
     // DebugSymbol has no moduleBase, so read the load address off the module
@@ -309,26 +327,39 @@ function textNear(words, length = 512) {
   return [...found];
 }
 
-// The first `Claude+…` frame is the call site *in the app*, and it is what
-// stands in for a symbol name here: two throws share a site, two sites do not
-// share a frame. (The app's symbols are stripped, so a per-site cap has to key
-// off the raw offset — the same reason a backtrace has to be fed to Ghidra.)
-function site(stack) {
-  for (const frame of stack) if (frame.startsWith('Claude+')) return frame.split(' ')[0];
-  return stack[0] || '?';
-}
-
+// The per-site cap has to be decided *cheaply*, because this hook runs inside
+// every throw in the process and launch throws benign errors by the thousand.
+// Keying it on the symbolized backtrace (which is what the first cut did) means
+// a stack walk plus a symbol lookup per frame, per throw — enough to park the
+// app on its splash screen for minutes, since the thing being throttled is
+// exactly the flood. `lr` is free: it is already in the CpuContext onEnter is
+// handed, it is the address the throwing function returns to, and two different
+// call sites do not share it. So the hot path is a register read and a map
+// lookup; the expensive `frames()` is built only once a site has earned a
+// report. (Symbols are stripped, so a reported site is still just `Claude+0x…`
+// — the same reason a backtrace has to be fed to Ghidra.)
 function reportThrow(context, where) {
-  const stack = frames(context);
-  const key = site(stack);
-  const seen = (siteCounts.get(key) || 0) + 1;
-  siteCounts.set(key, seen);
-  if (seen > NOISE_PER_SITE) {
-    suppressed += 1;
+  // A CpuContext without `lr` would collapse every throw onto one key and
+  // throttle the whole run down to four reports, so the cap only applies when
+  // the register is really there; without it this falls back to the plain
+  // global limit, which is known to run at full speed. An empty `sites` list
+  // next to a non-zero `dropped` is how the summary says that happened.
+  const key = context.lr ? String(context.lr) : null;
+  let seen = 1;
+  if (key) {
+    seen = (siteCounts.get(key) || 0) + 1;
+    siteCounts.set(key, seen);
+    if (seen > NOISE_PER_SITE) {
+      suppressed += 1;
+      return;
+    }
+  }
+  if (thrown >= THROW_LIMIT) {
+    dropped += 1;
     return;
   }
-  if (thrown >= THROW_LIMIT) return;
   thrown += 1;
+  const stack = frames(context);
   // x0 is the SwiftError box; the error's own payload (a DecodingError's Context
   // and its message String) hangs off it. The neighbours are scanned too, since
   // which register holds what depends on the caller.
@@ -341,6 +372,7 @@ function reportThrow(context, where) {
   report('throw', {
     n: thrown,
     seen,
+    site: key,
     where,
     x0: String(context.x0),
     x1: String(context.x1),
@@ -356,7 +388,20 @@ function reportThrowSummary() {
   report('throw-summary', {
     reported: thrown,
     suppressed,
-    sites: [...siteCounts.entries()].map(([key, count]) => `${key}×${count}`),
+    dropped,
+    // The keys are `lr` values, so give them back as the same `Claude+0x…`
+    // frames the reports carry — there are only ever a handful of distinct
+    // sites, so symbolizing them here is cheap, and it is what makes a capped
+    // log answer "did I lose the interesting one?" without a second run.
+    sites: [...siteCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => {
+        let name = key;
+        try {
+          name = frameOf(ptr(key));
+        } catch (error) { /* keep the raw key */ }
+        return `${name}×${count}`;
+      }),
   });
 }
 

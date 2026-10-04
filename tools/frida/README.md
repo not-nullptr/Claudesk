@@ -215,15 +215,22 @@ app *debuggable*, and still nothing has attached.
   which is what tells us the correct syntax.
 - `names {query, chunk, of, names:[…]}` — the paged full list for the `Decodable`
   queries, since the summary truncates a multi-thousand-type census.
-- `throw-summary {reported, suppressed, sites:[…]}` — sent at +30 s, after the
-  late type pass: every throwing call site in the run with its total count.
-  Repetition is capped **per site** (4 reports each), not only globally, because
-  the loud sites are launch noise that repeats hundreds of times and a global cap
-  alone runs out before the app has finished starting. A site doing something
-  interesting throws once or twice, so the cap costs nothing real and the
-  summary proves nothing was hidden.
-- `throw {n, seen, frames:[…], text:[…]}` — a thrown Swift error with a backtrace;
-  `seen` is how often that site had thrown by this point (1 = first time). The app's
+- `throw-summary {reported, suppressed, dropped, sites:[…]}` — sent at +30 s,
+  after the late type pass: every throwing call site in the run with its total
+  count, most frequent first. Repetition is capped **per site** (4 reports each),
+  not only globally, because the loud sites are launch noise that repeats
+  hundreds of times and a global cap alone runs out before the app has finished
+  starting. A site doing something interesting throws once or twice, so the cap
+  costs nothing real and the summary proves nothing was hidden. `suppressed` is
+  what the per-site cap swallowed, `dropped` what the global limit swallowed
+  after that; `sites` empty means the cap never engaged.
+- `throw {n, seen, site, frames:[…], text:[…]}` — a thrown Swift error with a
+  backtrace; `seen` is how often that site had thrown by this point (1 = first
+  time) and `site` is the return address the cap keys on. The cap is decided from
+  `lr` alone — a register read and a map lookup — because the report itself is
+  what it is worth avoiding: symbolizing a stack per throw once parked the app on
+  its splash screen. Someone changing this should keep the hot path allocation-
+  and symbol-free. The app's
   symbols are stripped, so a frame reads `Claude+0x…`; decompile that offset in
   Ghidra against the same binary to name the call site. The frames *above* the
   Foundation internals are the app's own `init(from:)`. `text` is whatever
