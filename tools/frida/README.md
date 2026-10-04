@@ -170,6 +170,14 @@ and conformance census — hooks nothing and still works. Pass
 `--code-signing optional` to get the hooks back whenever the app really is
 spawned debuggable.
 
+`required` is not a downgrade to live with, just the answer for a launch from
+the home screen. When something *is* the debugger — `frida -U -f` over USB, or
+an on-device JIT enabler such as StikDebug, which launches the app through a
+debugger to flip the flag that permits executable memory — build with
+`--code-signing optional` and Interceptor comes back. A `get-task-allow`
+entitlement is necessary for either and not sufficient on its own: it makes the
+app *debuggable*, and still nothing has attached.
+
 ## Install and run
 
 1. Sign the built IPA with Feather and install it. Feather re-signs nested
