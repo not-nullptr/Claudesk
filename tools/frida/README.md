@@ -125,15 +125,24 @@ frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
 ```
 
 Each hit reports
-`model-decoding-error {n, source, type, site, path, pathWords, underlying, scanNear, frames}`.
+`model-decoding-error {n, source, type, site, path, valuePointer, pathWords, underlying, scanNear, frames}`.
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
 same binary); `type` is there so a hit is self-evidently the right type.
 
 `path` is the field that answers the question — the coding path naming the
 offending field. It is read straight out of the error's value, as a Swift
-`String`; `pathWords` is that value's raw sixteen bytes, so a `path` of `null` is
-still readable by hand. `underlying` names the type of the `error` the wrapper
-was built around.
+`String`.
+
+Every pointer in the record is resolved where it is reported — module and offset,
+or symbol name, plus the permissions and backing of the mapping it lands in — so
+the log reads without a second pass against the binary. `valuePointer` says which
+address the struct was read from, and `pathWords` is the two words there, each
+named: a `String` word can only point at a writable object or at a
+`__TEXT,__const` literal, so a `path` of `null` whose words resolve to `[r-x
+file]` code or to an `[rw- anon]` heap page is self-evidently a wrong pointer
+rather than a string the reader failed on. `underlying` names the type of the
+`error` the wrapper was built around, and the `layout` line's `names` carry the
+same resolution for each candidate metadata.
 
 `scanNear` used to be reported as `text` and described as holding the `path`.
 It does not. It follows the *metadata's* words — one of which is the descriptor

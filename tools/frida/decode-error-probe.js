@@ -309,7 +309,7 @@ function reportLayout(context, source) {
     for (const mode of DEREF_MODES) {
       const steps = [];
       const name = nameStep(pointer, mode, steps);
-      if (name) names.push({ at, via: String(mode), name });
+      if (name) names.push({ at, via: String(mode), name, where: describeAddress(pointer) });
       else for (const step of steps) trail.push(`${at} ${step}`);
     }
   };
@@ -562,6 +562,47 @@ function symbolize(address) {
     return `?+${address}`;
   }
 }
+// A bare pointer in a record should say what it is without a second, offline
+// lookup against the binary: which module and offset it lands in, and what the
+// mapping there permits. That is the whole difference between a `path` word and
+// a red herring — a `String` word can only point at a writable object or at a
+// `__TEXT,__const` literal, so a word resolving to executable code, or to an
+// anonymous heap page, is visibly not a string.
+function describeAddress(value) {
+  if (!value || value.isNull()) return null;
+  const raw = value.toString();
+  let where = raw;
+  try {
+    const symbol = DebugSymbol.fromAddress(value);
+    if (symbol.name) {
+      where = `${symbol.name} in ${symbol.moduleName || '?'}`;
+    } else if (symbol.moduleName) {
+      const module = Process.findModuleByName(symbol.moduleName);
+      if (module) where = `${symbol.moduleName}+0x${value.sub(module.base).toString(16)}`;
+    }
+  } catch (error) { /* the raw address is still worth printing */ }
+  let memory = 'unmapped';
+  try {
+    const range = Process.findRangeByAddress(value);
+    if (range) memory = `${range.protection} ${range.file ? 'file' : 'anon'}`;
+  } catch (error) { /* leave it as unmapped */ }
+  return `${raw}${where === raw ? '' : ` = ${where}`} [${memory}]`;
+}
+
+// The words of a two-word `String`/`Error` slot, each named. Sixteen bytes at a
+// time, so `pathWords` reads as `["0x… [rw- anon]", "Claude+0x… [r-x file]"]` —
+// a null `path` with words like these is self-evidently a wrong pointer, not a
+// string the reader failed on.
+function describedWords(bytes) {
+  const words = [];
+  for (let at = 0; at + 8 <= bytes.length; at += 8) {
+    let value = 0n;
+    for (let i = 7; i >= 0; i -= 1) value = (value << 8n) | BigInt(bytes[at + i]);
+    words.push(describeAddress(ptr(value.toString())) || `0x${value.toString(16)}`);
+  }
+  return words;
+}
+
 function frameOf(address) {
   const key = address.toString();
   const cached = frameCache.get(key);
@@ -661,9 +702,12 @@ function onThrow(context, source) {
       type: name,
       site: key,
       path,
-      pathWords: pathRaw
-        ? [...pathRaw].map((b) => b.toString(16).padStart(2, '0')).join('')
-        : null,
+      // Which register the struct was read from, so a null `path` says whether
+      // the reader missed the field or was pointed at something that is not the
+      // struct at all — the latter being what a Foundation-internal allocation
+      // looks like from here.
+      valuePointer: describeAddress(valuePointer),
+      pathWords: pathRaw ? describedWords(pathRaw) : null,
       underlying: underlyingErrorName(valuePointer),
       scanNear: textNear(words, 640),
       frames: frames(context),
