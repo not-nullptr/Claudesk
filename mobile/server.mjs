@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
   connectMethods,
@@ -2077,7 +2077,15 @@ async function logUnmatched(request, url, surface) {
       new Promise((resolve) => { const timer = setTimeout(() => resolve(""), 2000); timer.unref?.(); }),
     ]).catch(() => "");
   }
-  console.log(`[mobile-api] unmatched(${surface}) ${request.method} ${url.pathname}${url.search || ""}${body}`);
+  const line = `unmatched(${surface}) ${request.method} ${url.pathname}${url.search || ""}${body}`;
+  console.log(`[mobile-api] ${line}`);
+  // A filtered `[mobile-code]` log is how the failing leg is usually read, and
+  // an unmatched leg never carries that tag — so a code-surface request the
+  // facade does not serve would be invisible in exactly the view that exists to
+  // show it. Mirror those here, once, under the tag people are already grepping.
+  if (url.pathname.startsWith("/v1/code/") || url.pathname.includes("/environments")) {
+    console.log(`[mobile-code] ${line}`);
+  }
 }
 
 // With CLAUDE_MOBILE_CAPTURE=1, remember what the app asked for that this
@@ -2097,6 +2105,29 @@ async function captureUnhandled(request, url, surface) {
   } catch (error) {
     console.error(`[mobile-capture] ${error.message}`);
   }
+}
+
+// The on-device Frida probe (tools/frida/) reports here. It runs inside the
+// phone's process with no signed-in session to present, so it authenticates with
+// the shared secret in CLAUDE_MOBILE_FRIDA_TOKEN instead of the normal cookie —
+// and the route does not exist at all unless that variable is set, so an
+// internet-facing deployment exposes nothing by default. Findings are logged
+// verbatim under [mobile-frida]; they are diagnostics, not API responses.
+async function handleFridaDiag(request, response) {
+  const expected = process.env.CLAUDE_MOBILE_FRIDA_TOKEN;
+  const provided = String(request.headers["x-claudesk-diag"] || "");
+  const ok = expected
+    ? provided.length === expected.length
+      && timingSafeEqual(Buffer.from(provided), Buffer.from(expected))
+    : false;
+  if (!ok) {
+    sendErrorEnvelope(response, 404, "not_found", "unknown route");
+    return;
+  }
+  const body = await readJson(request).catch(() => ({}));
+  const { kind, seq, payload } = body || {};
+  console.log(`[mobile-frida] #${seq ?? "?"} ${kind ?? "?"} ${JSON.stringify(payload).slice(0, 20000)}`);
+  sendJson(response, 200, {});
 }
 
 async function currentSession(request) {
@@ -2133,6 +2164,12 @@ const server = http.createServer(async (request, response) => {
     }
     if (url.pathname.startsWith("/api/")) {
       await handleApi(request, response, url);
+      return;
+    }
+    // The instrumented-build probe cannot hold a session cookie; it presents a
+    // shared token and lands here, ahead of the /v1 session gate.
+    if (url.pathname === "/__diag") {
+      await handleFridaDiag(request, response);
       return;
     }
     // The Code tab's session and environment legs live under /v1/, not /api/.

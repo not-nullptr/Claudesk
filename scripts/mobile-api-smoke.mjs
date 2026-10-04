@@ -25,6 +25,9 @@ process.env.CLAUDE_MOBILE_API_BASE_BAN_SECONDS = "60";
 // the bridge record, with the bridge still resolvable by id.
 process.env.CLAUDE_MOBILE_ENVIRONMENT_MODE = "both";
 delete process.env.CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID;
+// The on-device Frida probe's report sink (tools/frida). Its token is a shared
+// secret, so the suite pins one and proves the route is closed without it.
+process.env.CLAUDE_MOBILE_FRIDA_TOKEN = "smoke-diag-token";
 
 // The mobile facade talks to Claude Desktop only through the Claudesk bridge;
 // this fake keeps Desktop-shaped Chat sessions in memory.
@@ -1229,6 +1232,19 @@ try {
   assert.ok(Array.isArray(channelTimeline.data) && channelTimeline.data.length >= 2,
     "the channel timeline returns the transcript as ChannelMessage[]");
   assert.ok(channelTimeline.data.some((message) => message.body === "Reply with exactly one word: pong"));
+
+  // The Frida probe's report sink is not part of the app's API: it exists only
+  // when a token is configured, and then only for a caller that presents it.
+  // Everything else must look like the route is not there.
+  const diagBody = { kind: "throw", seq: 7, payload: { frames: ["Claude+0x1"] } };
+  assert.equal((await call("/__diag", { method: "POST", body: diagBody })).status, 404,
+    "the diag sink is closed without the token");
+  assert.equal((await call("/__diag", {
+    method: "POST", body: diagBody, headers: { "x-claudesk-diag": "wrong" },
+  })).status, 404, "the diag sink rejects a wrong token");
+  assert.equal((await call("/__diag", {
+    method: "POST", body: diagBody, headers: { "x-claudesk-diag": "smoke-diag-token" },
+  })).status, 200, "the diag sink accepts the configured token");
 
   console.log("mobile-api-smoke: PASS");
 } finally {
