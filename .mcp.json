@@ -1,26 +1,8 @@
 {
   "mcpServers": {
     "pyghidra": {
-      "type": "stdio",
-      "command": "/workspace/tools/pyghidra-mcp/.venv/bin/pyghidra-mcp",
-      "args": [
-        "--transport",
-        "stdio",
-        "--project-path",
-        "/workspace/ghidra-projects",
-        "--project-name",
-        "claude-ipa"
-      ],
-      "env": {
-        "HOME": "/config",
-        "GHIDRA_INSTALL_DIR": "/workspace/tools/ghidra",
-        "JAVA_HOME": "/workspace/tools/jdk21",
-        "JAVA_HOME_OVERRIDE": "/workspace/tools/jdk21",
-        "PATH": "/workspace/tools/jdk21/bin:/config/xdg/bin:/usr/bin:/bin",
-        "PYGHIDRA_INDEX_WORKERS": "2",
-        "PYGHIDRA_INDEX_BATCH": "256",
-        "PYGHIDRA_DECOMPILER_POOL": "3"
-      }
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }

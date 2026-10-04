@@ -3,6 +3,20 @@
 Reverse-engineering stack for iOS/IPA work, wired into Claude Code as a project
 MCP server (`.mcp.json` at the repo root).
 
+**Shared-server mode is the default** (`.mcp.json` is `type: http` at
+`http://127.0.0.1:8000/mcp`). A Ghidra project is locked to one process, so a
+per-session stdio server made sessions fight over the lock (the second one died
+with `LockException`). Instead one detached JVM serves all sessions:
+
+```bash
+setsid nohup tools/ghidra-mcp/serve-http.sh >/dev/null 2>&1 &   # start (idempotent-ish: don't start twice)
+```
+
+It must be running before a session connects, and it survives across sessions.
+If it is not up, Ghidra tools fail to connect. Start it (once) before working,
+and re-run it after a container rebuild. See "Shared-server mode" below for
+stopping it and reverting to per-session stdio.
+
 ## What runs where
 
 | Piece | Location |
@@ -103,23 +117,23 @@ See `gpu-embed/README.md`. A ready-to-ship copy is zipped at `/workspace/gpu-emb
   later with the `import_binary` MCP tool — it accepts a directory and imports
   recursively.
 
-## Shared-server mode (optional)
+## Shared-server mode (default)
 
-stdio is the default in `.mcp.json` (Claude Code spawns it per session —
-nothing to babysit). To share one JVM/analysis across sessions and use
-`pyghidra-mcp-cli` instead, start the HTTP flavor manually:
+`.mcp.json` is `"type": "http"` pointing at `http://127.0.0.1:8000/mcp`; every
+session is an HTTP client of one server. Start it with the launcher (env, paths
+and analyzer-free flags are baked in):
 
 ```bash
-GHIDRA_INSTALL_DIR=/workspace/tools/ghidra JAVA_HOME=/workspace/tools/jdk21 \
-PATH=/workspace/tools/jdk21/bin:$PATH \
-/workspace/tools/pyghidra-mcp/.venv/bin/pyghidra-mcp \
-  --transport streamable-http \
-  --project-path /workspace/ghidra-projects \
-  --project-name claude-ipa \
-  --program-options /workspace/Claudesk/tools/ghidra-mcp/ios-analyzer-options.json \
-  /workspace/ipa-work/extracted/Payload/Claude.app/Claude
+setsid nohup tools/ghidra-mcp/serve-http.sh >/dev/null 2>&1 &
 ```
 
-Server listens on `http://127.0.0.1:8000/mcp`; switch the `.mcp.json` entry to
-`"type": "http"` with `"url": "http://127.0.0.1:8000/mcp"` while it runs.
-Terminal client: `uvx --from /workspace/tools/pyghidra-mcp/cli pyghidra-mcp-cli`.
+Log: `/workspace/ghidra-projects/http-server.log`. The project already holds the
+analyzed binary, so no `input_paths` are passed (matches the old stdio config).
+
+- **Stop** the shared server: `pkill -INT -f 'pyghidra-mcp --transport streamable-http'`
+  (SIGINT triggers a clean save-and-close). Needed before a rebuild or to revert.
+- **Revert to per-session stdio:** set `.mcp.json` back to `"type": "stdio"` with
+  the `command`/`args`/`env` block (see git history), and restart sessions. Prefer
+  this only for single-session work — two stdio sessions deadlock on the lock.
+- **Terminal client:** `uvx --from /workspace/tools/pyghidra-mcp/cli pyghidra-mcp-cli`
+  (the MCP endpoint is the `/mcp` path on the same port).
