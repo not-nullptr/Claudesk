@@ -12,3 +12,6 @@ dist/
 tmp/
 gpu-embed.zip
 documents.jsonl.gz
+
+# Instrumented app builds (tools/frida/) — large binaries, never committed.
+*.ipa

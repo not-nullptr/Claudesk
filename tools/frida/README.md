@@ -66,7 +66,7 @@ Listen mode (nothing to configure server-side):
 ```sh
 node tools/frida/build-instrumented-ipa.mjs \
   --app /workspace/ipa-work/extracted/Payload/Claude.app \
-  --out /workspace/RemoteUploads/Claude-frida.ipa \
+  --out Claude-frida.ipa \
   --interaction listen
 ```
 
@@ -75,9 +75,13 @@ Script mode:
 ```sh
 node tools/frida/build-instrumented-ipa.mjs \
   --app /workspace/ipa-work/extracted/Payload/Claude.app \
-  --out /workspace/RemoteUploads/Claude-frida.ipa \
+  --out Claude-frida.ipa \
   --report-url https://<your-claudesk-host> --token <shared-secret>
 ```
+
+Write the `--out` file into `tools/frida`'s parent (the repo root): that
+directory is the only one the phone can actually download from, and `.gitignore`
+already drops `*.ipa` so it never reaches a commit.
 
 Either way it downloads FridaGadget 17.21.0 for iOS (the Swift `ApiResolver`
 only gained type / protocol / conformance queries in 17.21.0), thins the

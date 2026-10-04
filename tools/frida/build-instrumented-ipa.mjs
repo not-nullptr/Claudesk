@@ -12,14 +12,14 @@
 // Usage — listen mode (recommended: attach and iterate with no re-signing):
 //   node tools/frida/build-instrumented-ipa.mjs \
 //     --app /workspace/ipa-work/extracted/Payload/Claude.app \
-//     --out /workspace/RemoteUploads/Claude-frida.ipa \
+//     --out Claude-frida.ipa \
 //     --interaction listen
 //   then, with the app running:  frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js
 //
 // Usage — script mode (no host at all; findings POST to the facade):
 //   node tools/frida/build-instrumented-ipa.mjs \
 //     --app /workspace/ipa-work/extracted/Payload/Claude.app \
-//     --out /workspace/RemoteUploads/Claude-frida.ipa \
+//     --out Claude-frida.ipa \
 //     --report-url https://<your-claudesk-host> --token <secret>
 //
 // The gadget version is pinned: the Swift ApiResolver only grew nominal-type /
