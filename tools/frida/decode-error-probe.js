@@ -154,11 +154,42 @@ function relativeName(descriptor) {
   } catch (error) { return null; }
 }
 
+// arm64e pointers are signed: the address lives in bits 0-47 and bits 48-63
+// hold the signature. A box word therefore reads as 0x01_000001f6e05c51 where
+// the mapped address is 0x1f6e05c51, and a live run showed exactly that — x1 and
+// box+0 sharing `0x1f6e05c51` under different top bytes. Dereferencing the signed
+// form lands on an unmapped address, throws, and is swallowed as "no name",
+// which is indistinguishable from a wrong layout. So every candidate is tried
+// both as-read and masked down to its address bits.
+const POINTER_MASKS = ['0x0000ffffffffffff', '0x00ffffffffffffff'];
+
+function variants(pointer) {
+  if (!pointer) return [];
+  const out = [pointer];
+  for (const mask of POINTER_MASKS) {
+    try {
+      const masked = pointer.and(ptr(mask));
+      if (!masked.isNull() && !masked.equals(pointer)) out.push(masked);
+    } catch (error) { /* keep what we have */ }
+  }
+  return out;
+}
+
 function attemptName(candidates, index, mode) {
   const candidate = candidates[index];
   if (!candidate) return null;
-  if (mode === 'direct') return relativeName(candidate);
-  try { return relativeName(candidate.add(mode).readPointer()); } catch (error) { return null; }
+  for (const pointer of variants(candidate)) {
+    if (mode === 'direct') {
+      const name = relativeName(pointer);
+      if (name) return name;
+      continue;
+    }
+    try {
+      const name = relativeName(pointer.add(mode).readPointer());
+      if (name) return name;
+    } catch (error) { /* try the next variant */ }
+  }
+  return null;
 }
 
 const votes = new Map();  // "source|index|mode" -> consecutive agreements
@@ -179,12 +210,17 @@ function reportLayout(context, source) {
   const names = [];
   const inspect = (pointer, at) => {
     if (!pointer) return;
-    const direct = relativeName(pointer);
-    if (direct) names.push({ at, via: 'direct', name: direct });
-    try {
-      const deref = relativeName(pointer.add(8).readPointer());
-      if (deref) names.push({ at, via: 'deref8', name: deref });
-    } catch (error) { /* not a pointer */ }
+    for (const candidate of variants(pointer)) {
+      const tag = candidate.equals(pointer) ? '' : '+masked';
+      for (const mode of DEREF_MODES) {
+        let name = null;
+        if (mode === 'direct') name = relativeName(candidate);
+        else {
+          try { name = relativeName(candidate.add(mode).readPointer()); } catch (error) { /* not a pointer */ }
+        }
+        if (name) names.push({ at: at + tag, via: String(mode), name });
+      }
+    }
   };
   for (const offset of BOX_WORDS) {
     const word = boxWord(context, offset);

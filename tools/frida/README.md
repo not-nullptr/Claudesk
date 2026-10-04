@@ -146,6 +146,12 @@ winner is remembered and used alone from then on. The search is bounded and stop
 the moment it locks, so a healthy run pays it only for its first few throws. It
 announces the answer once as `calibrated {source, candidate, mode, why}`.
 
+Every candidate is also tried **masked to its address bits**. arm64e pointers are
+signed — the address is bits 0-47, bits 48-63 are the signature — so a box word
+reads as `0x01_000001f6e05c51` where the mapped address is `0x1f6e05c51`, and
+dereferencing the signed form lands on an unmapped page. A live run showed
+exactly that: `x1` and `box+0` sharing the low 47 bits under different top bytes.
+
 Alongside that, `throw-types {names:[…], unresolved, calibrated}` goes out 15 s
 after boot (or as soon as 12 distinct types have been seen): the first distinct
 thrown type names, how many thrown values yielded no name at all, and how the
