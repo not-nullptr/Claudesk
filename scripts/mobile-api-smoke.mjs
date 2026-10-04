@@ -3,7 +3,7 @@
 // inference gateway, runs the facade in-process, and drives the
 // device-confirmed sequence plus a Connect probe. See docs/mobile-spec.
 import assert from "node:assert/strict";
-import { decodeClientEvent, decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
+import { decodeChannelMessage, decodeChannelStreamFrame, decodeClientEvent, decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1207,30 +1207,41 @@ try {
   assert.ok("total" in channelArtifacts && "truncated" in channelArtifacts);
   assert.deepEqual((await (await call(channelPath("/files"))).json()).entries, []);
 
-  // The send leg speaks SSE end to end; the turn arrives as channel messages.
-  const channelSend = await sseStream(channelPath("/messages/stream?scope=timeline"), {
+  // The send leg is NOT a stream despite the path. The app decodes its body as
+  // `SendChannelMessageResponse` (`messageId?`, `threadRootId?`, `createdAt?`,
+  // all optional), the DTO `MockSessionsApi.sendChannelMessageHandler` returns;
+  // answering with `text/event-stream` here is what made the composer throw
+  // ModelDecodingError. The turn itself arrives on the GET subscription.
+  const channelSend = await call(channelPath("/messages/stream?scope=timeline"), {
     method: "POST",
-    body: { body: "Reply with exactly one word: pong" },
+    body: { body: "Reply with exactly one word: pong", client_message_id: "77777777-7777-4777-8777-777777777777" },
   });
-  const channelFrames = channelSend
-    .filter((record) => record.event === "channel_message_updated")
-    .map((record) => record.data);
-  assert.ok(channelFrames.length, "the channel stream carries the turn");
-  for (const frame of channelFrames) {
-    assert.ok(typeof frame.id === "string" && frame.id.length > 0, "ChannelMessage.id");
-    assert.equal(typeof frame.in_timeline, "boolean");
-    assert.equal(typeof frame.server_notice, "boolean");
-    assert.ok(Array.isArray(frame.attachments) && Array.isArray(frame.participant_account_ids));
+  assert.equal(channelSend.status, 200, "the channel send answers 200");
+  assert.match(channelSend.headers.get("content-type") || "", /^application\/json/, "the send body is JSON, not SSE");
+  const channelAck = await channelSend.json();
+  for (const key of Object.keys(channelAck)) {
+    assert.ok(["message_id", "thread_root_id", "created_at"].includes(key),
+      `SendChannelMessageResponse has no field ${key}`);
   }
+
+  // The turn arrives as `channel_message_updated` frames on the timeline
+  // subscription, each of which decodes as a full `ChannelMessage`.
+  const channelStreamResponse = await call(channelPath("/messages/stream?scope=timeline"));
+  assert.equal(channelStreamResponse.status, 200);
+  const channelFrames = (await readStreamRecords(channelStreamResponse.body.getReader(), 1, "channel_message_updated"))
+    .map((record) => decodeChannelStreamFrame(record.event, record.data));
+  assert.ok(channelFrames.length, "the channel stream carries the turn");
   assert.ok(channelFrames.some((frame) => frame.body === "Reply with exactly one word: pong"),
     "the user message body is carried on the channel stream");
   const channelDesktopId = channelSession.id.slice("code_".length);
   await waitFor(() => claudesk.codeSessions.get(channelDesktopId)?.isRunning === false, "the channel turn to finish");
 
-  // The timeline read returns the same transcript the session leg serves.
+  // The timeline read returns the same transcript the session leg serves, as
+  // `ChannelTimelineResponse.data` — the same nine-key ChannelMessage.
   const channelTimeline = await (await call(channelPath("/messages?scope=timeline"))).json();
   assert.ok(Array.isArray(channelTimeline.data) && channelTimeline.data.length >= 2,
     "the channel timeline returns the transcript as ChannelMessage[]");
+  channelTimeline.data.forEach(decodeChannelMessage);
   assert.ok(channelTimeline.data.some((message) => message.body === "Reply with exactly one word: pong"));
 
   // The Frida probe's report sink is not part of the app's API: it exists only

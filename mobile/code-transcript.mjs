@@ -415,6 +415,18 @@ export function channelMessageForEnvelope(envelope, { channelId = null, accountI
     thread_preview: null,
     participant_account_ids: [],
     participant_count: 1,
+    // `ChannelMessage` declares nine NON-optional fields (fd 104c762ac); the
+    // rest of its keys are optional. The four below are the ones that look
+    // incidental and are not: omitting any of them throws
+    // `ClaudeApiServices.ModelDecodingError` on every `channel_message_updated`
+    // frame, which is exactly what the composer decodes when a send's turn
+    // arrives. Empty collections are cheap and decode the element type not at
+    // all, so they are the honest value for a transcript the facade builds from
+    // raw SDK messages.
+    bound_sessions: [],
+    reactions: [],
+    attached_outputs: [],
+    links: [],
   };
 }
 

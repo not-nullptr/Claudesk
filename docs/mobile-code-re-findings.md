@@ -514,7 +514,8 @@ Types and their non-optional fields (`dec.mjs` over the descriptors at
 ```
 Channel                  storage, name
 ChannelMessage           id, inTimeline, serverNotice, attachments,
-                         participantAccountIds  (all else optional)
+                         participantAccountIds, boundSessions, reactions,
+                         attachedOutputs, links  (NINE; all else optional)
 ChannelMessageTag        (AnthropicTagged<ChannelMessageTag,String> — bare string on the wire)
 ChannelTimelineResponse  data: [ChannelMessage], nextCursor: String?
 ChannelThreadsResponse   sections: [ChannelThreadSection]
@@ -528,6 +529,16 @@ ChannelStreamEvent       message | messageUpdated | reactionsReplaced | sessionA
                          sessionModel | sessionRequiresAction
 ChannelPullRequestsSource live | no_github_token | github_unavailable | unspecified | unknown
 ```
+
+Record the `ChannelMessage` field set with `node scripts/inspect-swift-types.mjs
+ChannelMessage` before changing it: the first reading of the descriptor listed
+only the five fields that carry data and marked the rest optional, which is
+wrong. `boundSessions`, `reactions`, `attachedOutputs` and `links` are
+non-Optional collections that look incidental and are not — a `channel_message_updated`
+frame without them throws `ClaudeApiServices.ModelDecodingError` in the
+synthesized `Codable` before any of the visible content is read. Empty arrays
+are a valid value for all four. `scripts/lib/code-wire-contract.mjs` now pins
+the nine keys so a hand-written mock cannot hide the omission again.
 
 The channel the client streams by name uses the SSE event names in the string
 pool at `0x1047e67a8`: `channel_message_updated`, `channel_message_reactions`,
