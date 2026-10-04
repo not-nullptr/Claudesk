@@ -4,7 +4,11 @@ import { readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { createDownloadHandler } from "./downloads.mjs";
+import {
+  createDownloadHandler,
+  readContainedFile,
+  resolveContainedPath,
+} from "./downloads.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
@@ -31,6 +35,14 @@ const extraDownloadRoots = String(process.env.COWORK_REMOTE_READ_ROOTS || "")
   .filter(Boolean)
   .map((entry) => resolve(entry));
 const downloadRoots = [...new Set([workspaceRoot, ...extraDownloadRoots])];
+// Largest file the bridge will hand the session reader when Desktop itself
+// refuses. Desktop caps its own reader at 10 MiB (SESSION_FILE_MAX_BYTES) and
+// returns null above it; matching that by default avoids shipping huge bodies
+// through the IPC route. Raise it to open larger text files in the file pane.
+const sessionFileMaxBytes = (() => {
+  const parsed = Number.parseInt(process.env.COWORK_REMOTE_SESSION_FILE_MAX_BYTES || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 1024 * 1024;
+})();
 const artifactsRoot = resolve(
   process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
 );
@@ -918,6 +930,38 @@ function validateInvocation(surface, method, args) {
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
 }
 
+// Desktop's session-file reader returns null (never a status) when a path is
+// outside the session's granted directories or over 10 MiB, and the official
+// file pane then shows a generic "Couldn't read this file". When that happens,
+// read the file from the roots this bridge serves and answer the same call, so
+// the pane previews it normally. Desktop still owns the happy path: we only
+// fill a result it refused, never override one it produced.
+async function supplementSessionFileRead(body, value) {
+  if (value != null) return value;
+  if (body.method === "resolveSessionFile") {
+    // Chat renders a path as an openable file only when this resolves. Desktop
+    // refuses anything outside the session's folders, which would leave agent
+    // paths un-clickable; resolve them against the roots we serve instead.
+    const requested = body.args?.[1];
+    if (typeof requested !== "string" || !requested) return value;
+    const filePath = await resolveContainedPath(downloadRoots, requested, {
+      allowRoot: true,
+      missingMessage: "session file was not found",
+      outsideMessage: "session file path is outside the allowed read roots",
+    });
+    return filePath ? { path: filePath, aliases: [] } : value;
+  }
+  const requested = body.method === "readFileAtCwd" ? body.args?.[0] : body.args?.[1];
+  if (typeof requested !== "string" || !requested) return value;
+  const read = await readContainedFile(downloadRoots, requested, {
+    maxBytes: sessionFileMaxBytes,
+    allowRoot: false,
+    missingMessage: "session file was not found",
+    outsideMessage: "session file path is outside the allowed read roots",
+  });
+  return read.file ?? value;
+}
+
 function validateCodePreference(method, args) {
   if (method === "getPreferences" && args.length === 0) return;
   const [key, value] = args;
@@ -1062,6 +1106,16 @@ async function handleApi(request, response, url) {
         body.args ?? [],
         body.argsEncoding,
       );
+      if (
+        body.surface === "LocalSessions"
+        && (
+          body.method === "readSessionFile"
+          || body.method === "readFileAtCwd"
+          || body.method === "resolveSessionFile"
+        )
+      ) {
+        value = await supplementSessionFileRead(body, value);
+      }
       if (
         body.surface === "LocalAgentModeSessions"
         && body.method === "getSession"

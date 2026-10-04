@@ -97,6 +97,9 @@ services:
       # Paths are resolved inside this container, so a host directory also
       # needs a bind mount above to exist here. Empty means /workspace only.
       COWORK_REMOTE_READ_ROOTS: "${COWORK_REMOTE_READ_ROOTS:-}"
+      # Largest file the bridge will hand the session file pane when Desktop's
+      # own reader refuses it (Desktop caps at 10 MiB). Default 10485760.
+      COWORK_REMOTE_SESSION_FILE_MAX_BYTES: "${COWORK_REMOTE_SESSION_FILE_MAX_BYTES:-10485760}"
       COWORK_UPLOAD_MAX_BYTES: "${COWORK_UPLOAD_MAX_BYTES:-1073741824}"
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"

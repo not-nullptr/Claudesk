@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 
 export async function resolveContainedRealPath(
@@ -73,6 +74,57 @@ export async function resolveWithinRoots(roots, target, options = {}) {
     new Error(options.outsideMessage || "path is outside the allowed read roots"),
     { statusCode: 403 },
   );
+}
+
+/**
+ * Read a session file that Desktop's own reader refused, from the roots this
+ * bridge is allowed to serve. Mirrors Desktop's DTO exactly (UTF-8 contents, a
+ * SHA-256 of the same text, and the byte size) so the official file pane
+ * accepts the result without knowing where it came from. Binary content is
+ * returned the same lossy way Desktop would return it; the pane still flags it
+ * as non-previewable. `failure` is one of not_found / outside / too_large /
+ * read_error, and never leaks the path.
+ */
+export async function readContainedFile(roots, target, { maxBytes, ...options } = {}) {
+  let filePath;
+  try {
+    filePath = await resolveWithinRoots(roots, target, options);
+  } catch (error) {
+    return { failure: error.statusCode === 404 ? "not_found" : "outside" };
+  }
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    return { failure: "not_found" };
+  }
+  if (!info.isFile()) return { failure: "not_found" };
+  if (Number.isFinite(maxBytes) && info.size > maxBytes) {
+    return { failure: "too_large", fileSize: info.size, absPath: filePath };
+  }
+  let contents;
+  try {
+    contents = (await readFile(filePath)).toString("utf8");
+  } catch {
+    return { failure: "read_error" };
+  }
+  return {
+    file: {
+      contents,
+      absPath: filePath,
+      hash: createHash("sha256").update(contents, "utf8").digest("hex"),
+      fileSize: info.size,
+    },
+  };
+}
+
+/** Like resolveWithinRoots, but answers null instead of throwing. */
+export async function resolveContainedPath(roots, target, options = {}) {
+  try {
+    return await resolveWithinRoots(roots, target, options);
+  } catch {
+    return null;
+  }
 }
 
 export function createDownloadHandler({
