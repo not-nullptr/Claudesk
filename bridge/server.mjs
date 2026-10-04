@@ -39,10 +39,12 @@ const downloadRoots = [...new Set([workspaceRoot, ...extraDownloadRoots])];
 // refuses. Desktop caps its own reader at 10 MiB (SESSION_FILE_MAX_BYTES) and
 // returns null above it; matching that by default avoids shipping huge bodies
 // through the IPC route. Raise it to open larger text files in the file pane.
-const sessionFileMaxBytes = (() => {
-  const parsed = Number.parseInt(process.env.COWORK_REMOTE_SESSION_FILE_MAX_BYTES || "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 1024 * 1024;
-})();
+// Accepts a plain byte count or a K/M/G suffix, like COWORK_UPLOAD_MAX_BYTES;
+// a bare suffix-less parseInt would silently read "100M" as 100 bytes.
+const sessionFileMaxBytes = parseUploadLimit(
+  process.env.COWORK_REMOTE_SESSION_FILE_MAX_BYTES,
+  10 * 1024 * 1024,
+);
 const artifactsRoot = resolve(
   process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
 );
@@ -949,7 +951,9 @@ async function supplementSessionFileRead(body, value) {
       missingMessage: "session file was not found",
       outsideMessage: "session file path is outside the allowed read roots",
     });
-    return filePath ? { path: filePath, aliases: [] } : value;
+    if (!filePath) return value;
+    console.log(`[cowork-bridge] session-file resolve ${requested} -> ${filePath}`);
+    return { path: filePath, aliases: [] };
   }
   const requested = body.method === "readFileAtCwd" ? body.args?.[0] : body.args?.[1];
   if (typeof requested !== "string" || !requested) return value;
@@ -959,7 +963,19 @@ async function supplementSessionFileRead(body, value) {
     missingMessage: "session file was not found",
     outsideMessage: "session file path is outside the allowed read roots",
   });
-  return read.file ?? value;
+  if (read.file) {
+    console.log(
+      `[cowork-bridge] session-file ${body.method} served ${requested} (${read.file.fileSize} bytes)`,
+    );
+    return read.file;
+  }
+  // Log the refusal, since the pane shows the same generic message for every
+  // cause and a wrong root or an undersized cap is otherwise invisible.
+  console.log(
+    `[cowork-bridge] session-file ${body.method} declined ${requested}: ${read.failure}`
+      + (read.fileSize ? ` (${read.fileSize} bytes, cap ${sessionFileMaxBytes})` : ""),
+  );
+  return value;
 }
 
 function validateCodePreference(method, args) {
@@ -1701,6 +1717,9 @@ server.requestTimeout = 0;
 server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
   console.log(`[cowork-bridge] download roots: ${downloadRoots.join(", ")}`);
+  console.log(
+    `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`,
+  );
 });
 
 const realtimePoller = setInterval(() => void realtime.pollState(), 1000);
