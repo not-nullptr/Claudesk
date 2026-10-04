@@ -93,6 +93,17 @@ node tools/frida/build-instrumented-ipa.mjs \
   --report-url https://<your-claudesk-host> --token <shared-secret>
 ```
 
+No gadget at all — a plain repackage, which is the build to install when an
+instrumented one crashes and you need a working app, or when Frida's CoreDevice
+backend will spawn the app itself:
+
+```sh
+node tools/frida/build-instrumented-ipa.mjs \
+  --app /workspace/ipa-work/extracted/Payload/Claude.app \
+  --out Claude-plain.ipa \
+  --interaction none
+```
+
 `--out` may be any path you can fetch the file from; `.gitignore` drops `*.ipa`
 so a build never reaches a commit.
 

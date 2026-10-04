@@ -22,6 +22,12 @@
 //     --out Claude-frida.ipa \
 //     --report-url https://<your-claudesk-host> --token <secret>
 //
+// Usage — no gadget at all, the app back exactly as it was:
+//   node tools/frida/build-instrumented-ipa.mjs \
+//     --app /workspace/ipa-work/extracted/Payload/Claude.app \
+//     --out Claude-plain.ipa \
+//     --interaction none
+//
 // Both modes also take --code-signing required|optional (default "required"),
 // which is the setting that decides whether a jailed app survives launch — see
 // the config comment further down before changing it.
@@ -57,14 +63,15 @@ const cacheDir = arg("cache", "/tmp/claudesk-frida");
 // device instead, for a controller on the same network to attach to with
 // `frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js` — nothing is
 // baked in, so the script can be re-loaded and edited without re-signing.
+// "none" injects nothing: a plain repackage, for getting a working app back.
 const interaction = arg("interaction", "script");
 const listenAddress = arg("address", "0.0.0.0");
 const listenPort = Number(arg("port", "27042"));
 // The gadget's own code-signing stance, which is what decides whether the app
 // survives launch on a jailed device. See the config comment below.
 const codeSigning = arg("code-signing", "required");
-if (interaction !== "script" && interaction !== "listen") {
-  console.error(`--interaction must be "script" or "listen", not ${interaction}`);
+if (interaction !== "script" && interaction !== "listen" && interaction !== "none") {
+  console.error(`--interaction must be "script", "listen" or "none", not ${interaction}`);
   process.exit(2);
 }
 if (codeSigning !== "required" && codeSigning !== "optional") {
@@ -258,7 +265,12 @@ function makeZip(entries) {
 }
 
 // ---------------------------------------------------------------------- main
-const gadget = ensureGadget();
+// "none" repackages the app untouched: no gadget, no config, no LC_LOAD_DYLIB.
+// That is the build to install when the goal is a *working* app rather than an
+// instrumented one — to get the device back to a usable state after a build that
+// crashes, or to hand a jailed device to Frida's CoreDevice backend, which
+// spawns the app itself and wants no gadget in the bundle at all.
+const gadget = interaction === "none" ? null : ensureGadget();
 // Stage under its own root so the archive walk sees exactly `Payload/…` and not
 // the gadget/cache files sitting beside it.
 const stageRoot = join(cacheDir, "build");
@@ -269,8 +281,10 @@ mkdirSync(stage, { recursive: true });
 cpSync(appDir, stagedApp, { recursive: true });
 
 const frameworks = join(stagedApp, "Frameworks");
-mkdirSync(frameworks, { recursive: true });
-writeFileSync(join(frameworks, GADGET_NAME), gadget);
+if (gadget) {
+  mkdirSync(frameworks, { recursive: true });
+  writeFileSync(join(frameworks, GADGET_NAME), gadget);
+}
 const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.js"));
 // The config is discovered by matching the gadget's filename with a `.config`
 // suffix; the script path stays relative so it resolves beside the gadget
@@ -325,24 +339,30 @@ const config = JSON.stringify(interaction === "script" ? {
   code_signing: codeSigning,
   teardown: "minimal",
 }, null, 2);
-for (const dir of [frameworks, stagedApp]) {
-  // In listen mode nothing is baked in: the controller supplies the script, and
-  // shipping a stale copy next to the config would only invite confusion about
-  // which one ran.
-  if (interaction === "script") writeFileSync(join(dir, "probe.js"), probe);
-  writeFileSync(join(dir, "FridaGadget.config"), config);
-}
+if (gadget) {
+  for (const dir of [frameworks, stagedApp]) {
+    // In listen mode nothing is baked in: the controller supplies the script, and
+    // shipping a stale copy next to the config would only invite confusion about
+    // which one ran.
+    if (interaction === "script") writeFileSync(join(dir, "probe.js"), probe);
+    writeFileSync(join(dir, "FridaGadget.config"), config);
+  }
 
-const binaryPath = join(stagedApp, "Claude");
-writeFileSync(binaryPath, addLoadCommand(readFileSync(binaryPath)));
+  const binaryPath = join(stagedApp, "Claude");
+  writeFileSync(binaryPath, addLoadCommand(readFileSync(binaryPath)));
+}
 
 const entries = walk(stageRoot);
 const zip = makeZip(entries);
 writeFileSync(outIpa, zip);
 console.log(`wrote ${outIpa} (${zip.length} bytes, ${entries.length} entries)`);
-console.log(`gadget load path: ${LOAD_PATH}`);
-console.log(`code signing: ${codeSigning}${codeSigning === "required" ? " (no Interceptor, so no throw hooks)" : ""}`);
-console.log(interaction === "script"
-  ? `interaction: script, reporting to ${reportUrl}/__diag (token ${token.slice(0, 4)}…)`
-  : `interaction: listen on ${listenAddress}:${listenPort}, attach with ` +
-    `frida -H <phone-ip>:${listenPort} -n Gadget -l tools/frida/probe.js`);
+if (!gadget) {
+  console.log("interaction: none — app repackaged untouched, nothing to attach to");
+} else {
+  console.log(`gadget load path: ${LOAD_PATH}`);
+  console.log(`code signing: ${codeSigning}${codeSigning === "required" ? " (no Interceptor, so no throw hooks)" : ""}`);
+  console.log(interaction === "script"
+    ? `interaction: script, reporting to ${reportUrl}/__diag (token ${token.slice(0, 4)}…)`
+    : `interaction: listen on ${listenAddress}:${listenPort}, attach with ` +
+      `frida -H <phone-ip>:${listenPort} -n Gadget -l tools/frida/probe.js`);
+}
