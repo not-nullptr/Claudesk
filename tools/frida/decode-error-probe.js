@@ -84,49 +84,143 @@ function report(kind, payload) {
 }
 
 // ------------------------------------------------------- the type of an error
-// A thrown Swift error is described by its metadata, and this probe names that
-// metadata with a plain memory walk: metadata -> descriptor -> relative name.
-// The type's descriptor holds the name as a relative string, so naming is a few
-// pointer reads with no interpretation of the error value itself.
+// A throw reaches the runtime either as `swift_willThrow(box)` or, for typed
+// throws, `swift_willThrowTypedImpl(box, metadata, storage)`. Naming the thrown
+// type means finding its metadata and reading the name out of the metadata's
+// descriptor.
 //
-// A runtime accessor would be the authoritative namer — `swift_getTypeName` —
-// but it dereferences whatever it is handed, and neither metadata pointer here
-// is something this repo can confirm offline:
+// Two things about that cannot be settled from this repo offline, so the probe
+// learns them at run time rather than assuming them:
 //
-//   * the typed path (`swift_willThrowTypedImpl`) is disassembled-verified:
-//     x1 is a metadata accessor's result. Safe.
-//   * the untyped path (`swift_willThrow`) hands over an error box built by
-//     `swift_allocError`, and *where the metadata sits inside that box* is
-//     decided by libswiftCore, which ships in the iOS dyld shared cache and is
-//     not in this bundle — so it cannot be read out. A wrong guess there is a
-//     crash inside `swift_getTypeName`, on every throw, which is not a failure
-//     mode worth risking for a nicer name.
+//   * where the metadata sits. The typed path's second argument is metadata by
+//     ABI (disassembly-verified in this app: x1 is a metadata accessor's
+//     result). The untyped path hands over a box built by `swift_allocError`,
+//     and *where the metadata word lives inside that box* belongs to
+//     libswiftCore — which ships in the iOS dyld shared cache and is not in this
+//     bundle, so it cannot be read out here.
+//   * whether the word found is the metadata (with the descriptor inside it) or
+//     already the descriptor.
 //
-// So the walk is the only crash-free option, and its cost is that a wrong
-// descriptor offset reads as "no name" rather than a crash. That is exactly what
-// the `throw-types` census is for: it turns a broken walk into a visible
-// `unresolved` count instead of a silently quiet log, so the offset can be
-// corrected from evidence. Note the offline reader agrees on the layout and this
-// image simply has no statically-initialized value metadata to corroborate it:
-// scanning `__constg_swiftt` for `MetadataKind`-tagged records finds none, i.e.
-// this app's value metadata is instantiated lazily at run time.
+// So each throw is tried against a small set of candidates and shapes, and the
+// pair that keeps answering is remembered. A pair that yields the *filtered*
+// name is trusted at once — that string does not appear by chance — while any
+// other pair must agree three times first, so a one-off coincidental read cannot
+// lock the probe onto the wrong layout. The search is bounded and stops as soon
+// as it locks, so a healthy run pays it only for its first few throws.
 //
-// Offsets 8 and 16 are both tried and a candidate is accepted only if it reads
-// as a type-name shape, so being off by a word degrades to the census rather
-// than to a wrong report.
-const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_.]{0,120}$/;
+// A runtime accessor (`swift_getTypeName`) would name types authoritatively, but
+// it dereferences whatever it is handed, and the untyped box's metadata word is
+// exactly what is unknown — so calling it would risk crashing on every throw.
+// The walk reads defensively instead: a wrong guess yields no name, never a
+// crash, which is what lets it be searched for at run time at all.
+const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+const DEREF_MODES = [8, 16, 0, 'direct'];
 
-function typeNameOf(metadata) {
-  if (!metadata || metadata.isNull()) return null;
-  for (const offset of [8, 16]) {
-    try {
-      const descriptor = metadata.add(offset).readPointer();
-      if (!descriptor || descriptor.isNull()) continue;
-      const relative = descriptor.add(8).readS32();
-      const name = descriptor.add(8).add(relative).readUtf8String(128);
-      if (name && NAME_SHAPE.test(name)) return name;
-    } catch (error) { /* try the next offset */ }
+function ptrOrNull(value) {
+  try { return value && !value.isNull() ? value : null; } catch (error) { return null; }
+}
+
+function boxWord(context, offset) {
+  try { return ptrOrNull(context.x0.add(offset).readPointer()); } catch (error) { return null; }
+}
+
+// Where in a throw's register/box the metadata might be, most likely first.
+const CANDIDATES = {
+  swift_willThrow: (context) => [
+    boxWord(context, 0), boxWord(context, 8), boxWord(context, 16), boxWord(context, 24),
+  ],
+  swift_willThrowTypedImpl: (context) => [
+    ptrOrNull(context.x1), boxWord(context, 0), boxWord(context, 8), boxWord(context, 16),
+  ],
+};
+
+// A descriptor keeps its name at +8 as a relative pointer. That offset is signed
+// and negative as often as positive, and Frida's `add()` is not a safe home for
+// a negative number (it throws, which the catch would swallow into a silent "no
+// name" — indistinguishable from a wrong layout). So the negative case is
+// applied with `sub()`, which only ever sees a positive magnitude.
+function relativeName(descriptor) {
+  if (!descriptor || descriptor.isNull()) return null;
+  try {
+    const field = descriptor.add(8);
+    const relative = field.readS32();
+    const address = relative < 0 ? field.sub(-relative) : field.add(relative);
+    const name = address.readUtf8String(128);
+    return name && NAME_SHAPE.test(name) ? name : null;
+  } catch (error) { return null; }
+}
+
+function attemptName(candidates, index, mode) {
+  const candidate = candidates[index];
+  if (!candidate) return null;
+  if (mode === 'direct') return relativeName(candidate);
+  try { return relativeName(candidate.add(mode).readPointer()); } catch (error) { return null; }
+}
+
+const votes = new Map();  // "source|index|mode" -> consecutive agreements
+const locks = new Map();  // source -> { index, mode } once trusted
+const BRUTE_THROWS = 3000;
+let bruteThrows = BRUTE_THROWS;
+let lockMisses = 0;
+let learned = null;       // reported once, so a log shows how the layout was found
+let boxSample = null;
+
+function sampleBox(context) {
+  if (boxSample) return;
+  const words = [];
+  for (let offset = 0; offset < 48; offset += 8) {
+    try { words.push(context.x0.add(offset).readPointer().toString()); } catch (error) { break; }
   }
+  boxSample = {
+    x0: ptrOrNull(context.x0) ? context.x0.toString() : null,
+    x1: ptrOrNull(context.x1) ? context.x1.toString() : null,
+    box: words,
+  };
+}
+
+function lock(source, index, mode, why) {
+  locks.set(source, { index, mode });
+  if (!learned) {
+    learned = { source, candidate: index, mode, why };
+    report('calibrated', learned);
+  }
+}
+
+function typeNameOf(source, context) {
+  const candidates = CANDIDATES[source](context);
+  const locked = locks.get(source);
+  if (locked) {
+    const name = attemptName(candidates, locked.index, locked.mode);
+    if (name) { lockMisses = 0; return name; }
+    if ((lockMisses += 1) < 5) return null;
+    // The layout stopped answering — drop the lock and search again briefly.
+    locks.delete(source);
+    lockMisses = 0;
+    bruteThrows = Math.max(bruteThrows, 500);
+    return null;
+  }
+  if (!boxSample) sampleBox(context);
+  if (bruteThrows <= 0) return null;
+  bruteThrows -= 1;
+  let matched = null;
+  let agreed = null;
+  for (let index = 0; index < candidates.length && !matched; index += 1) {
+    for (const mode of DEREF_MODES) {
+      const name = attemptName(candidates, index, mode);
+      if (!name) continue;
+      if (matches(name)) { matched = { index, mode, name }; break; }
+      const key = `${source}|${index}|${mode}`;
+      const count = (votes.get(key) || 0) + 1;
+      votes.set(key, count);
+      // Preference is by candidate/mode order, not by who got there first.
+      if (count >= 3 && !agreed) agreed = { index, mode };
+    }
+  }
+  if (matched) {
+    lock(source, matched.index, matched.mode, 'name matched the filter');
+    return matched.name;
+  }
+  if (agreed) lock(source, agreed.index, agreed.mode, 'three throws agreed');
   return null;
 }
 
@@ -249,7 +343,16 @@ let censusSent = false;
 function census() {
   if (censusSent) return;
   censusSent = true;
-  report('throw-types', { names: [...censusNames], unresolved, filter: TYPE_FILTER });
+  report('throw-types', {
+    names: [...censusNames],
+    unresolved,
+    filter: TYPE_FILTER,
+    // How (or whether) the layout was learned, and — when it never was — the
+    // first throw's box words, which is the evidence needed to place the
+    // metadata word by hand.
+    calibrated: learned,
+    box: learned ? undefined : boxSample,
+  });
 }
 
 function noteType(name) {
@@ -261,9 +364,9 @@ function noteType(name) {
   }
 }
 
-function onThrow(context, metadata) {
+function onThrow(context, source) {
   try {
-    const name = typeNameOf(metadata);
+    const name = typeNameOf(source, context);
     noteType(name);
     if (!matches(name)) return;
     const key = context.lr ? String(context.lr) : null;
@@ -302,38 +405,30 @@ function onThrow(context, metadata) {
 // report, and hooking both means the probe does not depend on how the throwing
 // site was compiled.
 //
-// Each reaches the metadata differently, and naming only works on the metadata,
-// not on the box around it. The signatures are fixed by the runtime:
+// Each reaches the metadata differently; the probe knows only that the typed
+// path's second argument *is* metadata (see CANDIDATES, which searches the rest).
+// The signatures are fixed by the runtime:
 //
-//   swift_willThrow(SwiftError *error)                 // x0 = box; type at +8
+//   swift_willThrow(SwiftError *error)                 // x0 = box
 //   swift_willThrowTypedImpl(SwiftError *error,        // x0 = box
 //                            const Metadata *errorType, // x1 = metadata
 //                            TypedErrorInfoStorage *)   // x2
-const THROW_EXPORTS = [
-  { name: 'swift_willThrow', metadata: (context) => {
-    try { return context.x0.add(8).readPointer(); } catch (error) { return null; }
-  } },
-  { name: 'swift_willThrowTypedImpl', metadata: (context) => {
-    try {
-      return context.x1 && !context.x1.isNull() ? context.x1 : context.x0.add(8).readPointer();
-    } catch (error) { return null; }
-  } },
-];
+const THROW_EXPORTS = ['swift_willThrow', 'swift_willThrowTypedImpl'];
 const installed = new Set();
 
-function installOne(spec) {
-  if (installed.has(spec.name)) return true;
+function installOne(name) {
+  if (installed.has(name)) return true;
   let target = null;
-  try { target = Module.findGlobalExportByName(spec.name); } catch (error) { return false; }
+  try { target = Module.findGlobalExportByName(name); } catch (error) { return false; }
   if (target === null) return false;
   try {
     Interceptor.attach(target, {
-      onEnter() { onThrow(this.context, spec.metadata(this.context)); },
+      onEnter() { onThrow(this.context, name); },
     });
   } catch (error) {
     return false;
   }
-  installed.add(spec.name);
+  installed.add(name);
   return true;
 }
 
@@ -343,7 +438,7 @@ function installOne(spec) {
 let hookTimer = null;
 let hookTries = 0;
 function hook() {
-  const done = THROW_EXPORTS.every((spec) => installOne(spec));
+  const done = THROW_EXPORTS.every((name) => installOne(name));
   hookTries += 1;
   if (done || hookTries > 40) {
     if (hookTimer) clearInterval(hookTimer);
