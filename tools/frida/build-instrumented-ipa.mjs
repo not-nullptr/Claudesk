@@ -273,8 +273,15 @@ const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.
 // controller connects, which risks the launch watchdog if we are slow to
 // attach. "resume" lets it boot normally; the Code tab flow happens on a tap,
 // long after attach.
+//
+// runtime: pinned to QuickJS rather than left on "default". Frida's default is
+// already QuickJS, but it is the one thing here that decides whether the app
+// needs a JIT entitlement to run our script at all, and QuickJS is a pure
+// interpreter that needs none — so it is worth being explicit rather than
+// inheriting whatever a future build decides.
 const config = JSON.stringify(interaction === "script" ? {
   interaction: { type: "script", path: "probe.js", on_change: "ignore", parameters: { reportUrl, token } },
+  runtime: "qjs",
   teardown: "minimal",
 } : {
   interaction: {
@@ -284,6 +291,7 @@ const config = JSON.stringify(interaction === "script" ? {
     on_port_conflict: "fail",
     on_load: "resume",
   },
+  runtime: "qjs",
   teardown: "minimal",
 }, null, 2);
 for (const dir of [frameworks, stagedApp]) {

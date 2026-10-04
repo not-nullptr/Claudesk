@@ -79,9 +79,8 @@ node tools/frida/build-instrumented-ipa.mjs \
   --report-url https://<your-claudesk-host> --token <shared-secret>
 ```
 
-Write the `--out` file into `tools/frida`'s parent (the repo root): that
-directory is the only one the phone can actually download from, and `.gitignore`
-already drops `*.ipa` so it never reaches a commit.
+`--out` may be any path you can fetch the file from; `.gitignore` drops `*.ipa`
+so a build never reaches a commit.
 
 Either way it downloads FridaGadget 17.21.0 for iOS (the Swift `ApiResolver`
 only gained type / protocol / conformance queries in 17.21.0), thins the
@@ -104,6 +103,40 @@ CLAUDE_MOBILE_FRIDA_TOKEN=<shared-secret>
 with a constant-time compare, so an internet-facing box exposes nothing by
 default. The route sits *before* the login gate, so the probe needs no session.
 Findings are logged verbatim as `[mobile-frida] …`.
+
+## Attaching from Windows
+
+The client and the gadget must be the *same version* — 17.21.0 — or the
+handshake fails with an error that does not mention versions at all. With
+[uv](https://docs.astral.sh/uv/) this is one command and touches no system
+Python:
+
+```sh
+uv tool install frida-tools --with "frida==17.21.0"
+uv tool update-shell          # only if uv warns the tools dir is not on PATH
+frida-ps -H <phone-ip>:27042            # expect exactly one process: Gadget
+frida -H <phone-ip>:27042 -n Gadget -l tools/frida/probe.js
+```
+
+`uv tool install` builds an isolated environment (frida 17.21.0 has a
+`cp37-abi3-win_amd64` wheel, so any Python ≥3.7 works) and puts `frida`,
+`frida-ps`, `frida-trace` … on PATH.
+
+### JIT
+
+**Not needed, and the config enforces that.** Frida's default JavaScript runtime
+is already QuickJS, and QuickJS is a pure interpreter — no JIT, no RWX pages, no
+entitlement. The gadget config pins `"runtime": "qjs"` explicitly so a future
+Frida default cannot quietly move us onto V8, which *is* the runtime that wants
+JIT. So no StikDebug, no LocalDevVPN, no `dynamic-codesigning`.
+
+The one thing this does not settle is `Interceptor` itself: attaching a hook
+writes a trampoline into executable memory, and iOS gates that separately from
+the JS engine. The gadget is documented to work in re-signed apps on
+non-jailbroken devices without any JIT entitlement, but if hooking turns out to
+be what fails, the run says so — the `hook {installed:[…]}` line lists exactly
+which throw hooks actually took. Empty there means the JIT entitlement is the
+next thing to try.
 
 ## Install and run
 
