@@ -528,36 +528,26 @@ function underlyingError(valuePointer) {
     if (found && found.length > 1) text.push({ at, text: found });
   }
   // When the box's first word is not a Swift metadata and holds no `String`, it
-  // is an object — which is what a bridged `NSError` looks like from here. Ask
-  // it what it is instead of guessing: `description` on a Foundation error
-  // carries its domain, its code and its userInfo, which is where the failing
-  // key or route actually shows up. `path` cannot be asked, because the app
-  // reuses one error object: every record from it carries the same `path`.
-  let objc = null;
-  if (!name && !text.length && metadata) {
-    try {
-      if (ObjC.available) {
-        const object = new ObjC.Object(metadata);
-        let description = null;
-        try { description = String(object) || null; } catch (error) { /* no description */ }
-        let userInfo = null;
-        try {
-          const info = object.userInfo;
-          if (info && !info.isNull()) userInfo = String(info.$description() || '') || null;
-        } catch (error) { /* not an NSError, or no userInfo */ }
-        objc = {
-          className: object.$className || null,
-          description: description ? description.slice(0, 400) : null,
-          userInfo: userInfo ? userInfo.slice(0, 400) : null,
-        };
-      }
-    } catch (error) { /* not an object after all */ }
+  // is an object — which is what a bridged `NSError` looks like from here — and
+  // the words are reported so the class is readable from its `isa`'s symbol.
+  //
+  // They are *reported*, not interrogated. An earlier version called
+  // `-[NSObject description]` on the pointer to get the domain and the failing
+  // key in one line, and it crashed the app on the Code tab: `objc_msgSend` on
+  // a word that only looked like an object is an `EXC_BAD_ACCESS`, and a JS
+  // `try`/`catch` cannot catch a native fault. Nothing here may move the app
+  // toward a crash, so nothing here calls into a runtime on a pointer it cannot
+  // prove — a memory read and a symbol lookup are all this gets.
+  const boxWords = [];
+  {
+    const raw = readBytesAt(box, 32);
+    if (raw) boxWords.push(...describedWords(raw));
   }
   return {
     name: name || null,
     box: describeAddress(box),
+    boxWords: boxWords.length ? boxWords : null,
     text: text.length ? text.slice(0, 6) : null,
-    objc,
   };
 }
 
