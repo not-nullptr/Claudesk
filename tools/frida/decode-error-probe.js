@@ -36,7 +36,16 @@ const TAG = 'claudesk-decode-error';
 // log the type name of *every* throw instead — that is the calibration mode, and
 // it is how to confirm the resolver below reads the type correctly on a given
 // build before trusting a quiet log as "no such error was thrown".
-const TYPE_FILTER = 'ModelDecodingError';
+// Two spellings of the same failure, because the type the app *builds* is not
+// the one it is caught *reporting*. The decoder's `ModelDecodingError` goes into
+// `ClaudeTelemetry.ReportedError<T>`; every site that has produced a readable
+// record so far turns out to be a bridging site — Swift's error→NSError thunk
+// compiled into the app (`_getErrorEmbeddedNSError`, `_swift_getWitnessTable`,
+// `_swift_willThrow`) — and a bridged box is an object whose first word is an
+// isa, not the struct. The wrapper's own site is where the app builds the error,
+// and its payload is the `ModelDecodingError` the `path` lives in.
+const TYPE_FILTERS = ['ModelDecodingError', 'ReportedError'];
+const TYPE_FILTER = TYPE_FILTERS.join('|');
 // How many reports one call site may make before it is capped. A decode failure
 // repeats (every refresh of the same broken response), and the first one already
 // names the field; the rest only prove it kept happening.
@@ -380,9 +389,10 @@ function typeNameOf(source, context) {
 }
 
 function matches(name) {
-  if (TYPE_FILTER === null) return true; // calibration: everything
+  if (TYPE_FILTERS === null) return true; // calibration: everything
   if (!name) return false; // unknown type is not the type we asked for
-  return name.toLowerCase().includes(TYPE_FILTER.toLowerCase());
+  const lower = name.toLowerCase();
+  return TYPE_FILTERS.some((want) => lower.includes(want.toLowerCase()));
 }
 
 // ------------------------------------------------- ModelDecodingError's fields
