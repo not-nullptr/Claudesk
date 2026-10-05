@@ -665,10 +665,6 @@ function census() {
   report('throw-types', {
     names: [...censusNames],
     unresolved,
-    // Allocations of that type outside the app image, by module. Named here so
-    // that a run which armed nothing says so, instead of looking like a run
-    // where the type was never thrown.
-    foreign: [...foreignModules],
     // Throws that arrived while a record was armed and read as no `String` at
     // all. A run with several of these and no `model-decoding-error` record is
     // saying the storage never held the payload, which is a different problem
@@ -746,39 +742,23 @@ function cleanPointer(value) {
 // error for the log name the same type and never hold the struct — they are the
 // records whose value words were uninitialised. With no main module to compare
 // against, nothing is filtered.
-const foreignModules = new Set();
-const foreignSites = new Set();
-function inMainModule(address) {
+// Which module a site lives in is reported, never used to filter. It was a
+// filter for a while, to shed the records Foundation produced while rendering an
+// error for the log — and those records were only junk because their value was
+// read before the caller had written it. With the read deferred they are the
+// *only* live signal at the moment a failure is reported rather than made: the
+// app re-boxes nothing at send time, Foundation re-boxes the error it was
+// handed, and that copy carries the same `path`. Filtering it away is what made
+// a live run look like the send was failing for some other reason.
+function moduleNameOf(address) {
   try {
-    const main = Process.mainModule;
-    if (!main) return true;
-    const module = address ? Process.findModuleByAddress(address) : null;
-    if (module && module.base.equals(main.base)) return true;
-    // Which modules were turned away travels with the census: a run that arms
-    // nothing has to be distinguishable from a run that never matched the type.
-    if (foreignModules.size < 8) foreignModules.add(module ? module.name : 'unmapped');
-    // And the first sites to be turned away are named at once. If this test is
-    // wrong about where the app builds its own errors, the log must say so
-    // rather than simply going quiet — a silent probe cannot be told apart from
-    // an app that never threw.
-    const site = address ? address.toString() : null;
-    if (site && !foreignSites.has(site) && foreignSites.size < 8) {
-      foreignSites.add(site);
-      report('skipped', {
-        site,
-        module: module ? module.name : 'unmapped',
-        main: main.name,
-        why: 'allocation site is outside the app image',
-      });
-    }
-    return false;
+    if (!address) return null;
+    const pointer = typeof address === 'string' ? ptr(address) : address;
+    const module = Process.findModuleByAddress(pointer);
+    return module ? module.name : 'unmapped';
   } catch (error) {
-    return true;
+    return null;
   }
-}
-
-function mainModuleName() {
-  try { return Process.mainModule ? Process.mainModule.name : null; } catch (error) { return null; }
 }
 
 function onThrow(context, source) {
@@ -791,7 +771,9 @@ function onThrow(context, source) {
     const name = typeNameOf(source, context);
     noteType(name, source, context);
     if (!matches(name)) return;
-    if (!inMainModule(context.lr)) return;
+    // The site is the key the caps are counted against and the address the
+    // module is read from, so a throw with no return address has nothing to
+    // report and is the one thing still dropped without a record.
     const key = context.lr ? String(context.lr) : null;
     if (key) {
       const seen = (siteCounts.get(key) || 0) + 1;
@@ -810,18 +792,20 @@ function onThrow(context, source) {
     }
     // The counters are spent here rather than at the throw: the per-site cap is
     // there to bound the expensive part, and that is the backtrace.
-    pending = {
+    const record = {
       name,
       site: key,
       storage: cleanPointer(context.x1),
       thread: Process.getCurrentThreadId(),
       at: Date.now(),
     };
+    pending = record;
     // The carrying throw may never arrive, or may arrive on a thread this record
     // does not belong to, so the construction is reported as well — cheap, no
     // backtrace — because the one record that must not go missing is the one
     // saying this type was built here.
-    report('built', { n: reported, source, type: name, site: key, module: mainModuleName() });
+    report('built', { n: reported, source, type: name, site: key, module: moduleNameOf(key) });
+    deferRead(record, source);
   } catch (error) {
     // Never let the probe disturb the app.
     console.log(`${TAG}: hook error: ${error.message}`);
@@ -840,6 +824,34 @@ function rememberBox(pointer, name, site, path) {
   const key = pointer ? pointer.toString() : null;
   if (!key || knownBoxes.size >= 64 || knownBoxes.has(key)) return;
   knownBoxes.set(key, { name, site, path, reported: false });
+}
+
+// Some allocations are never thrown. Foundation re-boxes an error it has been
+// handed while rendering it for the log — `_getErrorDefaultUserInfo`, reached
+// from `Error.localizedDescription` — and that box is written and then dropped.
+// A live run showed exactly this as the only `ModelDecodingError` allocation at
+// send time, on the Foundation side of the app-image test, with no throw after
+// it, so the read never happened and the failure looked like nothing at all.
+//
+// The box is the app's own allocation — the caller writes the payload into the
+// pointer the runtime handed it — so the address outlives the call, and reading
+// it a moment later reads it correctly. Deferred rather than immediate because
+// the store sequence is *after* the call, which is the whole reason the value
+// was never there. Three attempts, then the record is left to expire.
+const DEFER_MS = [2, 12, 50];
+
+function deferRead(record, source) {
+  const attempt = (index) => {
+    if (pending !== record) return;          // a throw got there first
+    if (readSwiftString(record.storage)) {
+      pending = null;
+      emit(source, record.name, record.site, null, record.storage,
+        { paired: false, readFrom: 'deferred' });
+      return;
+    }
+    if (index + 1 < DEFER_MS.length) setTimeout(() => attempt(index + 1), DEFER_MS[index]);
+  };
+  setTimeout(() => attempt(0), DEFER_MS[0]);
 }
 
 function reportThrow(context) {
@@ -906,12 +918,15 @@ function reportRepeat(context) {
 }
 
 // `name`/`site` come from the allocation that built the error, `valuePointer`
-// and `frames` from the throw that carried it. `extra` carries what only the
-// throw can say: whether its argument was the error's own storage, and which of
-// the two the value was read from.
+// comes from wherever the payload turned out to be readable, and `frames` from
+// the throw that carried it. `context` is null when there was no throw — a
+// deferred read of a box nothing throws — and then there are no registers to
+// quote and no live stack to walk, so both are left out rather than faked.
+// `extra` carries what only the throw can say: whether its argument was the
+// error's own storage, and which of the two the value was read from.
 function emit(source, name, site, context, valuePointer, extra = {}) {
   const path = readSwiftString(valuePointer);
-  rememberBox(cleanPointer(context.x0) || valuePointer, name, site, path);
+  if (context) rememberBox(cleanPointer(context.x0) || valuePointer, name, site, path);
   const pathRaw = readBytesAt(valuePointer, 64);
   // The thrown value is not always the type whose fields are known. The app's
   // reporting layer re-throws through `ClaudeTelemetry.ReportedError<T>`, a
@@ -929,8 +944,8 @@ function emit(source, name, site, context, valuePointer, extra = {}) {
     pathCandidates.sort((a, b) => b.text.length - a.text.length);
   }
   // The incidental words, only so a null `path` still carries a trail.
-  const words = [context.x0, context.x1, context.x2, context.x3];
-  for (const base of [context.x0, context.x2]) {
+  const words = context ? [context.x0, context.x1, context.x2, context.x3] : [];
+  for (const base of (context ? [context.x0, context.x2] : [])) {
     try {
       if (base && !base.isNull()) {
         for (let offset = 0; offset < 64; offset += 8) words.push(base.add(offset).readPointer());
@@ -942,15 +957,20 @@ function emit(source, name, site, context, valuePointer, extra = {}) {
     source,
     type: name,
     site,
-    // Where the throw happened, next to where the error was built.
-    throwSite: context.lr ? String(context.lr) : null,
+    // Where the error was built. Foundation means this is a copy of an error
+    // the app was already holding — the app is reporting a failure, not making
+    // one — and the path is the app's own, carried through the copy.
+    module: moduleNameOf(site),
+    // Where the throw happened, next to where the error was built. Absent when
+    // nothing threw, which is itself the useful part of a deferred read.
+    throwSite: context && context.lr ? String(context.lr) : null,
     path,
     valuePointer: describeAddress(valuePointer),
     pathWords: pathRaw ? describedWords(pathRaw) : null,
     pathCandidates: pathCandidates.length ? pathCandidates.slice(0, 6) : null,
     underlying: underlyingError(valuePointer),
     scanNear: textNear(words, 640),
-    frames: frames(context),
+    frames: context ? frames(context) : null,
     ...extra,
   });
 }

@@ -149,29 +149,42 @@ the record. `readFrom` says whether that `String` came from the storage the
 allocation named or from the throw's own argument, and `paired` whether the two
 are the same address — a throw of some other error in the same window reads as
 neither (a live run produced `__SwiftNativeNSError` in a SwiftUI gesture stack)
-and is dropped. Allocations outside this app's own image are not armed at all,
-since a `ModelDecodingError` is built by the decoder; the modules that were
-turned away are listed as `foreign` on the `throw-types` census, so a run that
-arms nothing is legible as such.
+and is dropped.
 
-**Four ways this could go quiet, and a record for each.** A probe that logs
-nothing is indistinguishable from an app that threw nothing, and that ambiguity
-cost a full round trip more than once, so each suppression now says so at the
-moment it happens, bounded to the first few sites:
+**The site's module is a label, not a filter.** It was a filter for a while, to
+shed the records Foundation produces while rendering an error for the log — and
+those records were only junk because their value was read before the caller had
+written it. With the read deferred they are the *only* live signal when a failure
+is reported rather than made: the app builds nothing at that moment, Foundation
+re-boxes the error it was handed, and that copy carries the same `path`.
+Filtering it away is what made a live run look like the send was failing for some
+other reason. A record with `"module":"Foundation"` is a copy of an error the app
+was already holding, and its `path` is the app's own.
+
+**Ways this could go quiet, and a record for each.** A probe that logs nothing is
+indistinguishable from an app that threw nothing, and that ambiguity cost a full
+round trip more than once, so each remaining suppression says so as it happens,
+bounded to the first few sites:
 
 | record | means |
 |---|---|
 | `first-throw {name, source, site, wanted}` | a type was allocated for the first time — every distinct type, not just the filtered one, named as it appears rather than saved for the launch-time census |
 | `built {n, type, site, module}` | the filtered type was built here; cheap, no backtrace, so the carrying throw can fail to arrive without taking the record with it |
-| `skipped {site, module, main}` | an allocation of the filtered type was turned away by the app-image test, with both module names |
 | `unread-throw {type, site, throwSite, storage, thrown, paired}` | the record was armed and a throw arrived, but neither address held a `String` — so either the value was not this error, or it is not where the layout says |
 | `repeat-throw {type, site, path, throwSite}` | a throw of an error the probe named earlier, with no allocation behind it — the app kept the `any Error` and threw it again, so this is the failure being *used* rather than *built* |
 
-`repeat-throw` is the one that matters when only the first press produces a
-record. A decode failure is not always freshly made where it is used: the app
-keeps the error and re-throws it, so the moment the user sees the failure has no
-allocation to arm from. The box is the app's, not the runtime's, so its address
-is stable and the same error is recognisable when it comes back.
+`repeat-throw` matters when only the first press produces a record. A decode
+failure is not always freshly made where it is used: the app keeps the error and
+re-throws it, so the moment the user sees the failure has no allocation to arm
+from. The box is the app's, not the runtime's, so its address is stable and the
+same error is recognisable when it comes back.
+
+**Allocations that are never thrown** — the re-boxing case above — are read on a
+deferred timer instead (`DEFER_MS`, three attempts), because the store sequence
+runs *after* the `swift_allocError` call and there is no throw to trigger on. The
+box is the app's own allocation, so the address outlives the call. Those records
+carry `readFrom: "deferred"` and a null `throwSite`, and their `frames` are null
+because there is no live stack to walk — absent rather than faked.
 
 The value is not always the type whose fields are known, either: the app
 re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
