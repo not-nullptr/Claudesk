@@ -898,8 +898,15 @@ const modelSelectorFields = new Set([
 // A bound broad enough for every field the selector sends and for the desktop's
 // `epitaxyPrefs` bucket (many small UI picks, occasional short lists), strict
 // enough that the path cannot carry arbitrary payloads to the upstream API.
+// `undefined` is a legitimate value here: the renderer deletes a persisted pref
+// by writing the whole bucket back with that key set to `undefined` (its
+// `deleteStrict`), and the closed bucket carries it as a JSON-undefined sentinel.
+// Rejecting it left the deleted key stuck in the bucket and made *every*
+// subsequent pref write fail — including the permission-mode pick, which then
+// reverted on the next read (or on send).
 function isBoundedJsonValue(value, depth = 0) {
   if (depth > 8) return false;
+  if (value === undefined) return true;
   if (value === null || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value === "string") return value.length <= 8192;

@@ -42,6 +42,17 @@ for (const path of ["../bridge/server.mjs", "../bridge-wrapper/main.cjs"]) {
   // bucket, so that key has to pass or the picker resets on every reload.
   validate("setPreference", ["epitaxyPrefs", { [`cc-landing-draft-permission-mode.${account}`]: "auto" }]);
   validate("setPreference", ["epitaxyPrefs", { "epitaxy-perm-mode-acks": [`${account}:bypass`] }]);
+  // The renderer deletes a retired pref by rewriting the whole bucket with that
+  // key set to `undefined` (its `deleteStrict`), sent as a JSON-undefined
+  // sentinel. That must validate: if it throws, the key stays stuck in the
+  // bucket and every later pref write — the permission-mode pick included —
+  // is rejected, so the pick silently reverts on the next read or on send.
+  validate("setPreference", ["epitaxyPrefs", { "epitaxy-tasks-store": undefined }]);
+  validate("setPreference", ["epitaxyPrefs", {
+    ["epitaxy-folder-permission-mode." + account]: { "/workspace/project": "bypassPermissions" },
+    "dframe-unpinned-home-project": undefined,
+    "mixed-array": ["kept", undefined],
+  }]);
   for (const args of [["unrelatedPreference", true], ["bypassPermissionsModeEnabled", "true"],
     ["bypassPermissionsOptInByAccount", { all: true }], ["bypassPermissionsGateByAccount", { [account]: 1 }],
     ["epitaxyPrefs", ["not", "an", "object"]], ["epitaxyPrefs", "auto"],
