@@ -32,9 +32,9 @@ const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 // early init; the decode failure we want happens seconds later, on a tap, so
 // installing late avoids the crash window entirely.
 const HOOK_CONTEXT = true;
-const HOOK_FACTORIES = true;
+const HOOK_FACTORIES = false;
 const HOOK_ALLOC = false;
-const INSTALL_DELAY_MS = 3000;
+const INSTALL_DELAY_MS = 4000;
 
 // ------------------------------------------------------------ memory helpers
 function readBytes(address, length) {
@@ -146,21 +146,26 @@ function hookContextInit() {
   const name = '$ss13DecodingErrorO7ContextV10codingPath16debugDescription010underlyingB0ADSays9CodingKey_pG_SSs0B0_pSgtcfC';
   const address = Module.findGlobalExportByName(name);
   if (address === null) { log('A: Context.init not exported; skipping'); return; }
+  // One reused buffer, no backtrace, no scanning: the code tab decodes enough
+  // that anything heavy here runs thousands of times and takes the app down.
+  // The single String is read and printed, and that is all.
+  const scratch = Memory.alloc(16);
   Interceptor.attach(address, {
     onEnter(args) {
       try {
-        const scratch = Memory.alloc(16);
-        for (const [first, second] of [[args[2], args[3]], [args[3], args[2]]]) {
-          scratch.writePointer(first);
-          scratch.add(8).writePointer(second);
-          const text = readSwiftString(scratch);
-          if (text && text.length > 3) { log(`A: Context.init debugDescription=${JSON.stringify(text)}`); break; }
+        scratch.writePointer(args[2]);
+        scratch.add(8).writePointer(args[3]);
+        let text = readSwiftString(scratch);
+        if (!text || text.length < 4) {
+          scratch.writePointer(args[3]);
+          scratch.add(8).writePointer(args[2]);
+          text = readSwiftString(scratch);
         }
-        scan('codingPath', readPointerAt(args[1])); // Array -> buffer
+        if (text && text.length > 3) log(`A: Context.init ${JSON.stringify(text)}`);
       } catch (error) { /* never disturb the app */ }
     },
   });
-  log('A: hooked DecodingError.Context.init');
+  log('A: hooked DecodingError.Context.init (minimal)');
 }
 
 // The four cases, in case Context.init is inlined away. Their arguments differ
