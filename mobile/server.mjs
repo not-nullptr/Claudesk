@@ -1260,6 +1260,15 @@ async function handleCodeRoutes(request, response, url) {
     } catch (error) {
       console.log(`[mobile-code]   repos/all readdir(${root}) failed: ${error.message}`);
     }
+    if (folders.length === 0) {
+      // The facade has no view of the Desktop's filesystem — the workspace lives
+      // across the bridge, not in this container — so a readdir either fails or
+      // finds nothing. The app gates session start on a repository being
+      // selected, and the chosen name is cosmetic (the turn runs in the
+      // environment's cwd), so a declared list keeps the picker usable.
+      folders = (process.env.CLAUDE_MOBILE_REPOS || "workspace")
+        .split(",").map((name) => name.trim()).filter(Boolean);
+    }
     const repos = folders.map((name) => ({
       name,
       owner: { login: "local" },
