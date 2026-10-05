@@ -142,6 +142,7 @@ const WANT = /^(kind|environmentId|name|createdAt|state|config|bridgeInfo|enviro
 const CAUSE = /Expected to decode|Cannot get value|No value associated|isn't in the correct format|Unparseable|Invalid|invalid|not in the correct format/i;
 
 let calls = 0;
+const MAX_CALLS = 400;
 const scratch = Memory.alloc(16);
 function hook(base, offset, label) {
   const target = base.add(offset);
@@ -161,16 +162,15 @@ function hook(base, offset, label) {
             if (text && text.length > 2) found.push(text);
           }
         }
-        const want = found.filter((s) => WANT.test(s));
-        if (want.length) {
-          log(`*** MATCH *** ${label} #${calls} ${JSON.stringify([...new Set(want)].slice(0, 20))}`);
-        }
-        if (found.some((s) => CAUSE.test(s))) {
-          const saved = [REGION, MAX_DEPTH, BUDGET];
-          [REGION, MAX_DEPTH, BUDGET] = [256, 6, 12000];
-          const deep = stringsAround(args[0]);
-          [REGION, MAX_DEPTH, BUDGET] = saved;
-          log(`DEEP #${calls} ${JSON.stringify(deep.filter((s) => s.length < 60).slice(0, 30))}`);
+        // Log EVERY call (bounded) so silence is unambiguous: the hooks fire on
+        // any ModelDecodingError. Short identifier-ish strings are the coding
+        // path keys; long ones are the debugDescription.
+        if (calls <= MAX_CALLS) {
+          const short = [...new Set(found.filter((s) => s.length <= 24))].slice(0, 24);
+          const long = [...new Set(found.filter((s) => s.length > 24))].slice(0, 4);
+          const mark = found.some((s) => WANT.test(s)) ? ' *** MATCH ***' : '';
+          log(`${label} #${calls}${mark} keys=${JSON.stringify(short)}` +
+              (long.length ? ` msgs=${JSON.stringify(long).slice(0, 400)}` : ''));
         }
       } catch (error) { /* never disturb the app */ }
     },
