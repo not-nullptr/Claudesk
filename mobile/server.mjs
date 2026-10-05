@@ -1249,25 +1249,21 @@ async function handleCodeRoutes(request, response, url) {
   // source and runs in the environment's cwd.
   const reposAllMatch = path.match(/^\/api\/organizations\/[0-9a-f-]{36}\/code\/repos\/all$/i);
   if (reposAllMatch && method === "GET") {
-    const root = (process.env.CLAUDE_MOBILE_REPOS_ROOT || "/workspace").replace(/\/$/, "");
-    let folders = [];
-    try {
-      const { readdir } = await import("node:fs/promises");
-      folders = (await readdir(root, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-        .map((entry) => entry.name)
-        .sort();
-    } catch (error) {
-      console.log(`[mobile-code]   repos/all readdir(${root}) failed: ${error.message}`);
-    }
-    const repos = folders.map((name) => ({
+    // The workspace lives across the bridge, not in this container, so list it
+    // there: `/api/remote/folders` with no path returns the workspace root as
+    // `{ root, path, parent, folders: [{ name, path }], truncated }`.
+    const listing = await codeEngine.workspaceFolders();
+    const folders = Array.isArray(listing?.folders)
+      ? listing.folders.filter((entry) => entry && typeof entry.name === "string")
+      : [];
+    const repos = folders.map(({ name, path: repoPath }) => ({
       name,
       owner: { login: "local" },
       default_branch: "main",
-      source_url: `file://${root}/${name}`,
+      source_url: repoPath ? `file://${repoPath}` : undefined,
       ghe_configuration_id: null,
     }));
-    console.log(`[mobile-code]   repos/all -> ${repos.length} local repo(s) under ${root}: ${folders.join(", ")}`);
+    console.log(`[mobile-code]   repos/all -> ${repos.length} workspace folder(s) from bridge: ${folders.map((entry) => entry.name).join(", ")}`);
     sendJson(response, 200, {
       repos,
       source_warnings: [],

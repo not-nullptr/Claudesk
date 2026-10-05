@@ -731,7 +731,20 @@ export function createCodeEngine({
     return null;
   }
 
+  // The Desktop's workspace folders, from the bridge. The mobile API has no
+  // filesystem of its own — the workspace is on the far side of the bridge — so
+  // this is how the "add repository" list is populated.
+  async function workspaceFolders(path = null) {
+    try {
+      return (await desktop.folders(path)) || null;
+    } catch (error) {
+      log.error(`[mobile-code] cannot list workspace folders: ${error.message}`);
+      return null;
+    }
+  }
+
   return {
+    workspaceFolders,
     listSessions,
     getSession,
     createSession,

@@ -266,5 +266,14 @@ export function createDesktopClient({
     };
   }
 
-  return { ipc, upload, generateTitle, chatModels, health, subscribe, baseUrl: root };
+  // Lists a folder inside the bridge's mounted workspace; with no path it lists
+  // the workspace root. Returns the bridge's
+  // `{ root, path, parent, folders: [{ name, path }], truncated }`.
+  async function folders(path) {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const payload = await request(`/api/remote/folders${query}`);
+    return payload?.value ?? null;
+  }
+
+  return { ipc, upload, generateTitle, chatModels, health, folders, subscribe, baseUrl: root };
 }
