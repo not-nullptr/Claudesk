@@ -822,6 +822,7 @@ function onThrow(context, source) {
       storage: cleanPointer(context.x1),
       thread: Process.getCurrentThreadId(),
       at: Date.now(),
+      done: false,
     };
     pending = record;
     // The carrying throw may never arrive, or may arrive on a thread this record
@@ -879,10 +880,16 @@ const DEFER_MS = [2, 12, 50];
 
 function deferRead(record, source) {
   const attempt = (index) => {
-    if (pending !== record) return;          // a throw got there first
+    // Guarded on the record, not on `pending`. A live run showed four
+    // allocations inside the same millisecond — the app reporting one failure
+    // several ways — and a single pending slot means each one replaces the
+    // last. Guarding on the slot skipped every deferred read in that burst,
+    // which is the silence this was written to end.
+    if (record.done) return;                 // a throw, or an attempt, reported it
     const hit = readableValue(record, null);
     if (hit) {
-      pending = null;
+      record.done = true;
+      if (pending === record) pending = null;
       emit(source, record.name, record.site, null, hit.pointer,
         { paired: false, readFrom: hit.from, path: hit.text });
       return;
@@ -979,6 +986,7 @@ function reportThrow(context) {
       return;
     }
     const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));
+    armed.done = true;
     pending = null;
     emit('swift_willThrow', armed.name, armed.site, context, hit.pointer,
       { paired, readFrom: hit.from, path: hit.text });
