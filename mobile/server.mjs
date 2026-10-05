@@ -1030,6 +1030,30 @@ async function handleCodeRoutes(request, response, url) {
   //   * `bridge` — the same Desktop as a paired device ("Remote control").
   // The list is newest-first by convention elsewhere, but order is not
   // significant here; `first_id`/`last_id` bracket whatever order is returned.
+  // EXPERIMENT (wire casing). The Code REST decoder is assumed to run
+  // `.convertFromSnakeCase` (docs/mobile-code-re-findings.md §"Wire casing"), so
+  // these records use snake_case keys. A multi-word key that the decoder does
+  // NOT convert (`environment_id`, `created_at`, `bridge_info`, …) throws the
+  // same opaque `ModelDecodingError(kind: unexpected_schema)` as a genuinely
+  // wrong value — and the error names neither. Setting
+  // CLAUDE_MOBILE_ENVIRONMENT_WIRE_CASE=camel emits camelCase keys for every
+  // environment leg instead; if the app then decodes, the field was never a
+  // value at all, it was this leg's key strategy.
+  function camelKeys(value) {
+    if (Array.isArray(value)) return value.map(camelKeys);
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const [key, entry] of Object.entries(value)) {
+        out[key.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())] = camelKeys(entry);
+      }
+      return out;
+    }
+    return value;
+  }
+  const ENVIRONMENT_WIRE_CASE = process.env.CLAUDE_MOBILE_ENVIRONMENT_WIRE_CASE || "snake";
+  const wireEnvironment = (record) =>
+    ENVIRONMENT_WIRE_CASE === "camel" ? camelKeys(record) : record;
+
   const environmentsBase =
     /^\/v1\/environment_providers\/private\/organizations\/([0-9a-f-]{36})\/environments\/?$/i;
   const environmentsMatch = path.match(environmentsBase);
@@ -1073,12 +1097,12 @@ async function handleCodeRoutes(request, response, url) {
       (orgMismatch.length ? ` MISMATCH=${orgMismatch.join(",")}` : ""),
     );
     console.log(`[mobile-code]   environments(mode=${mode})=${JSON.stringify(advertised).slice(0, 4000)}`);
-    sendJson(response, 200, {
+    sendJson(response, 200, wireEnvironment({
       environments: advertised,
       has_more: false,
       first_id: advertised[0].environment_id,
       last_id: advertised[advertised.length - 1].environment_id,
-    });
+    }));
     return true;
   }
 
@@ -1091,7 +1115,7 @@ async function handleCodeRoutes(request, response, url) {
     const body = await readJson(request).catch(() => ({}));
     const online = await desktopReady();
     const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-    sendJson(response, 201, cloudEnvironment({ online, cliVersion: desktopVersion(), ...(name ? { name } : {}) }));
+    sendJson(response, 201, wireEnvironment(cloudEnvironment({ online, cliVersion: desktopVersion(), ...(name ? { name } : {}) })));
     return true;
   }
 
@@ -1123,11 +1147,15 @@ async function handleCodeRoutes(request, response, url) {
         sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
         return true;
       }
-      sendJson(response, 200, bridgeEnvironment({ online, cliVersion: desktopVersion() }));
+      const record = bridgeEnvironment({ online, cliVersion: desktopVersion() });
+      console.log(`[mobile-code]   environments/by-id ${id} -> ${JSON.stringify(record).slice(0, 4000)}`);
+      sendJson(response, 200, wireEnvironment(record));
       return true;
     }
     if (id === CLOUD_ENVIRONMENT_ID) {
-      sendJson(response, 200, cloudEnvironment({ online, cliVersion: desktopVersion() }));
+      const record = cloudEnvironment({ online, cliVersion: desktopVersion() });
+      console.log(`[mobile-code]   environments/by-id ${id} -> ${JSON.stringify(record).slice(0, 4000)}`);
+      sendJson(response, 200, wireEnvironment(record));
       return true;
     }
     sendErrorEnvelope(response, 404, "not_found_error", `unknown environment ${id}`);
