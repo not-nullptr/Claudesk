@@ -214,10 +214,11 @@ assert.deepEqual(frameFromPayload("onOnEvent", { type: "system" }), []);
 assert.deepEqual(frameFromPayload("onOnSomethingElse", next), []);
 assert.equal(watchFrameFromPayload("onOnEvent", next)[0].event, "upserted");
 assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next })[0].event, "deleted");
-// `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)`: the
-// list leg's `data` is the case payload, so `upserted` carries a whole
-// SessionResource (built by the engine, which alone has the record) and
-// `deleted` the session's tagged id string — not a transcript envelope.
+// `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)`. The
+// translator emits the case payload (the SSE writer wraps it into the app's
+// `SessionWatchFrame` as `{"event":{"<case>":{"_0":payload}}}`), so `upserted`
+// carries a whole SessionResource (built by the engine, which alone has the
+// record) and `deleted` the session's tagged id string.
 const upsertPayload = { id: "code_s1", status: "idle" };
 assert.deepEqual(
   watchFrameFromPayload("onOnEvent", next, 1, { sessionId: "s1", resourceFor: () => upsertPayload })[0].data,

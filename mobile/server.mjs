@@ -1433,9 +1433,20 @@ async function streamCodeWatch(request, response, url, sessionId) {
   // (no id) takes every Code session's frames. This leg speaks
   // `SessionWatchFrame` (upserted/deleted) — NOT the transcript leg's
   // `client_event`, which is a different protocol.
+  //
+  // The SSE `data` must be the whole `SessionWatchFrame`, and the enum payload
+  // nests under `_0` (SE-0295, one unlabelled associated value):
+  //   {"event":{"upserted":{"_0":<SessionResource>}}}
+  //   {"event":{"deleted":{"_0":"<tagged id>"}}}
+  // Emitting the bare payload (what this used to do) is NOT benign: the app
+  // decodes `data` as `SessionWatchFrame`, so the bare resource sneaks through
+  // as `event: nil`, but the bare `deleted` id is `typeMismatch(Dictionary,
+  // found string)` → `ModelDecodingError(kind: unexpected_schema)`. A frame with
+  // no payload cannot be encoded at all, so it is dropped.
   const emit = (id, record) => {
     for (const frame of codeEngine.watchFramesFor(id, record)) {
-      sendSseRecord(response, frame.event, frame.data);
+      if (frame.data == null) continue;
+      sendSseRecord(response, frame.event, { event: { [frame.event]: { _0: frame.data } } });
       console.log(`[mobile-code]   watch ${frame.event} ${id}`);
     }
   };

@@ -73,11 +73,13 @@ export function frameFromPayload(method, payload, sequence = 1) {
  *
  * `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)` — a
  * different type from the transcript leg's `SessionEventEnvelope`, and the
- * reason this leg cannot reuse `eventEnvelopeForEntry`. The app decodes `data`
- * as the case's payload, so `upserted` must be a whole `SessionResource` and
- * `deleted` the session's tagged id string. The translator cannot build a
- * `SessionResource` (it has only the relayed entry, not the session record or
- * its metadata), so the engine supplies one through `resourceFor`.
+ * reason this leg cannot reuse `eventEnvelopeForEntry`. These frames carry the
+ * case PAYLOAD; the SSE writer (mobile/server.mjs) wraps each into the app's
+ * `SessionWatchFrame` — `{"event":{"<case>":{"_0":<payload>}}}` — because the
+ * app decodes the SSE `data` as the frame, not the payload. The translator
+ * cannot build a `SessionResource` (it has only the relayed entry, not the
+ * session record or its metadata), so the engine supplies one through
+ * `resourceFor`.
  *
  * @returns {Array<{ event: "upserted" | "deleted", data: object | string | null }>}
  */
