@@ -278,8 +278,11 @@ same all-or-nothing failure the CodingKeys check was meant to exclude:
 The facade had been emitting `created_at: null`, `network_config: null` (cloud)
 and `bridge_info: null` (cloud) — three values whose *optionality was never
 established* from the binary, unlike the fields whose fieldmd mangling ends in
-`Sg` (`init_script`, `branch`, `git_repo_url`, `cli_version`, confirmed
-Optional, safe as `null`). The fix (`mobile/code-transcript.mjs`) is: **never
+`Sg` (`init_script`, `branch`, `git_repo_url`, `cli_version`) — which were
+*believed* Optional and safe as `null`, but are not: the app's decoder reports
+`valueNotFound` for at least one of them ("Cannot get value of type String --
+found null value instead", read off the live error). None of them may be `null`;
+each now carries `""`. The fix (`mobile/code-transcript.mjs`) is: **never
 emit `null` for a field whose optionality is unconfirmed.** A well-formed value
 decodes whether the property is `T` or `T?`; `null` decodes only for `T?`. So:
 

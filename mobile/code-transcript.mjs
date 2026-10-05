@@ -66,11 +66,16 @@ function bridgeInfoFor({ name, online, cliVersion }) {
     max_sessions: 1,
     machine_name: name,
     directory: "/workspace",
-    branch: null,
-    git_repo_url: null,
+    // Never null a String. The app's decoder says
+    // "Cannot get value of type String -- found null value instead" for a
+    // non-optional String that is present as null, and which of these the field
+    // metadata really marks optional turned out to be wrong for at least one of
+    // them. `""` decodes for `String` and `String?` alike; null does not.
+    branch: "",
+    git_repo_url: "",
     online,
     spawn_mode: BRIDGE_SPAWN_MODE.sameDir,
-    cli_version: cliVersion,
+    cli_version: cliVersion ?? "",
   };
 }
 
@@ -108,8 +113,8 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
       environment_type: "bridge",
       machine_name: name,
       directory: "/workspace",
-      branch: null,
-      git_repo_url: null,
+      branch: "",
+      git_repo_url: "",
     }),
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
@@ -132,7 +137,7 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cli
     config: environmentCase("anthropic", {
       environment_type: "anthropic",
       cwd: "/workspace",
-      init_script: null,
+      init_script: "",
       environment: {},
       languages: [],
       // `networkConfig`’s optionality is not recoverable from the metadata;
