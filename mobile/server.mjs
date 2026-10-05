@@ -1211,8 +1211,53 @@ async function handleCodeRoutes(request, response, url) {
   if (path.startsWith("/v1/code/github/")) {
     if (method === "POST") await readJson(request).catch(() => ({}));
     console.log(`[mobile-code]   github ${method} ${path}`);
-    sendJson(response, 200, { data: [], has_more: false, next_cursor: null });
+    sendJson(response, 200, githubEmptyBody(path));
     return true;
+  }
+
+  // One body that satisfies every response type behind the github family, so
+  // that the route's own type does not have to be known to answer it. The
+  // types are, from the image:
+  //
+  //   GithubBranchListResponse  data, hasMore                 (lastId, defaultBranch optional)
+  //   GitHubRepo               name, owner{login}, defaultBranch
+  //   GitHubPullRequestDetail  checks, reviewRequests
+  //   GitHubServiceCompareResponse  baseBranch, headBranch, aheadBy, behindBy,
+  //                                 totalCommits, files
+  //   GitHubServiceFileResponse     content, encoding, size, sha
+  //
+  // Codable ignores keys it does not want, so one body decodes as all of them.
+  // That matters because which one a given leg carries is inferred from field
+  // names in the binary, not proven: a body shaped for the branch list alone is
+  // a decode failure if the leg is in fact a repo read, and a `ModelDecodingError`
+  // on this family is what the app reports when session creation dies — the
+  // probe read that error's `path` as `/v1/code/github/{id}` from the app's own
+  // throw site. Empty lists are real states here; the facade has no upstream
+  // repo to describe.
+  function githubEmptyBody(requestPath) {
+    // The id the app asked about, so a repo read has a name to show rather than
+    // an empty cell.
+    const id = requestPath.split("/").filter(Boolean).pop() || "";
+    return {
+      data: [],
+      has_more: false,
+      next_cursor: null,
+      name: id,
+      owner: { login: "" },
+      default_branch: "main",
+      base_branch: "main",
+      head_branch: "main",
+      ahead_by: 0,
+      behind_by: 0,
+      total_commits: 0,
+      files: [],
+      content: "",
+      encoding: "utf-8",
+      size: 0,
+      sha: "",
+      checks: [],
+      review_requests: [],
+    };
   }
   if (path === "/v1/code/shared-sessions" && method === "GET") {
     sendJson(response, 200, { data: [], next_cursor: null });

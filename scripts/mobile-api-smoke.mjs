@@ -1150,11 +1150,22 @@ try {
       body: method === "POST" ? { refs: [{ repo: "o/r", ref: "main" }] } : undefined,
     });
     assert.equal(response.status, 200, `github get-batch-branch-status answers to ${method}`);
-    assert.deepEqual(await response.json(), { data: [], has_more: false, next_cursor: null });
+    const body = await response.json();
+    // The branch-list pair the type actually requires...
+    assert.deepEqual({ data: body.data, has_more: body.has_more }, { data: [], has_more: false });
+    // ...and the fields the *other* types behind this family require, which is
+    // the point of one body serving them all: which one a leg carries is
+    // inferred from the binary, so a body shaped for one is a decode failure
+    // for the next. A 200 that cannot decode is what this leg had, not a 404.
+    for (const key of ["owner", "base_branch", "head_branch", "files", "checks", "review_requests"]) {
+      assert.ok(key in body, `github body carries ${key} for the other response types`);
+    }
   }
   // The by-id form of the same family, which is the leg session creation dies on.
   const branchList = await call("/v1/code/github/some-repo-id");
-  assert.deepEqual(await branchList.json(), { data: [], has_more: false, next_cursor: null });
+  const byId = await branchList.json();
+  assert.deepEqual({ data: byId.data, has_more: byId.has_more }, { data: [], has_more: false });
+  assert.equal(byId.name, "some-repo-id", "a repo read gets the id it asked about");
 
   // The app pushes its own client events to the collection it reads history
   // from. The facade has no upstream to forward them to, but a 404 here broke
