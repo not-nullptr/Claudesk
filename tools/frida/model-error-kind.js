@@ -57,20 +57,39 @@ function ascii(bytes, count) {
   return out || null;
 }
 
+// A Swift small string packs up to 15 UTF-8 bytes as: `_countAndFlagsBits` holds
+// the first 7 bytes with the tag `0xE0 | count` in its top byte (byte 7), and
+// `_object` holds the remaining up-to-8 (bytes 8..15). The earlier "longest
+// printable prefix" guess never reassembled a string that spans the tag byte,
+// which is exactly every key name of 8-15 characters — `environment_id`,
+// `created_at`, `network_config` — so the field was there and unreadable.
+function smallString(bytes) {
+  for (const [tagAt, order] of [
+    [7, [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]],
+    [15, [8, 9, 10, 11, 12, 13, 14, 0, 1, 2, 3, 4, 5, 6]],
+  ]) {
+    const tag = bytes[tagAt];
+    if ((tag >> 4) !== 0xe) continue;
+    const count = tag & 0x0f;
+    if (count === 0 || count > 15) continue;
+    let out = '';
+    let ok = true;
+    for (let i = 0; i < count; i += 1) {
+      const byte = bytes[order[i]];
+      if (byte < 0x20 || byte > 0x7e) { ok = false; break; }
+      out += String.fromCharCode(byte);
+    }
+    if (ok && out.length === count) return out;
+  }
+  return null;
+}
+
 // Memory-only: no ObjC runtime calls, so a bad guess is a null, not a crash.
 function readSwiftString(address) {
   const bytes = safeRead(address, 16);
   if (!bytes) return null;
-  const last = bytes[15];
-  if ((last >> 4) === 0xe || (last & 0xf) === 0xe) {
-    let longest = null;
-    for (let count = 1; count <= 15; count += 1) {
-      const text = ascii(bytes, count);
-      if (!text) break;
-      longest = text;
-    }
-    return longest;
-  }
+  const small = smallString(bytes);
+  if (small) return small;
   const hi = u64(bytes, 8);
   if ((hi & 0x8000000000000000n) !== 0n) return null;
   const object = ptr(hi.toString());
@@ -125,6 +144,11 @@ function stringsAround() {
   return [...out];
 }
 
+// Substrings that mark a call as the one we care about: the environment route
+// or any of its field names. A hit gets a `*** MATCH ***` line so it stands out
+// from the shared-cache noise the harvest also picks up.
+const WANT = /environment|cloud-local|7de9bafa|environment_id|environmentId|created_at|createdAt|network_config|networkConfig|spawn|bridge_info|bridgeInfo|machine_name|max_sessions|allow_default_hosts|allowed_hosts|init_script|initScript|git_repo_url|cli_version/i;
+
 let calls = 0;
 const MAX_CALLS = 300;
 function hook(base, offset, label) {
@@ -137,6 +161,8 @@ function hook(base, offset, label) {
         calls += 1;
         const found = stringsAround(args[0], args[1], args[2], args[3]);
         log(`${label} #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
+        const want = found.filter((s) => WANT.test(s));
+        if (want.length) log(`*** MATCH *** ${label} #${calls} ${JSON.stringify(want)}`);
         if (calls <= 3) {
           const raw = safeRead(args[0], 48);
           const hex = raw ? [...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ') : null;
