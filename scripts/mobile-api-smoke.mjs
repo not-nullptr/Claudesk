@@ -1019,6 +1019,17 @@ try {
   await sseStream(codePath(permSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
   assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].permissionMode, "bypassPermissions", "the permission mode reaches start");
 
+  // The app's Code picker has no Bypass row, so its hands-off "Auto" maps to
+  // Desktop's bypassPermissions — at `start` and on a mid-session change.
+  const autoSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { permission_mode: "auto" },
+  })).json()).session;
+  await sseStream(codePath(autoSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].permissionMode, "bypassPermissions", "Auto maps to bypass at start");
+  await call(codePath(autoSession.id), { method: "PATCH", body: { permission_mode: "auto" } });
+  assert.equal(claudesk.codeIpcCalls("setPermissionMode").at(-1).args[1], "bypassPermissions", "Auto maps to bypass on a mode change");
+
   // The build under test sends its turns through `POST /events` (a `type:"user"`
   // client event), not `/messages/stream`. The facade must dispatch it to
   // Desktop, or the session never exists and every read 404s.
@@ -1047,7 +1058,7 @@ try {
 
   // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id, autoSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }

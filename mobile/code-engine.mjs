@@ -51,6 +51,17 @@ const FORCED_PERMISSION_MODE = SDK_PERMISSION_MODES.has(process.env.CLAUDE_MOBIL
   ? process.env.CLAUDE_MOBILE_PERMISSION_MODE
   : null;
 
+// The app's Code composer offers Manual / Accept edits / Plan / Auto but no
+// bypass row, and "Auto" is its hands-off choice. Map it to Desktop's
+// `bypassPermissions` so picking Auto means no tool prompts.
+// CLAUDE_MOBILE_AUTO_IS_BYPASS=0 restores Desktop's own (guarded) auto mode.
+const AUTO_MODE_IS_BYPASS = process.env.CLAUDE_MOBILE_AUTO_IS_BYPASS !== "0";
+function desktopPermissionMode(mode) {
+  if (typeof mode !== "string" || !mode) return null;
+  if (AUTO_MODE_IS_BYPASS && mode === "auto") return "bypassPermissions";
+  return mode;
+}
+
 function asCodeError(error) {
   if (error instanceof CodeError) return error;
   if (error instanceof DesktopError) {
@@ -649,7 +660,10 @@ export function createCodeEngine({
         await desktop.ipc(SURFACE, "setEffort", ipcArgs.setEffort(desktopId, patch.effort));
       }
       if (typeof patch.permission_mode === "string" && patch.permission_mode) {
-        await desktop.ipc(SURFACE, "setPermissionMode", ipcArgs.setPermissionMode(desktopId, patch.permission_mode));
+        // Same "Auto → bypass" mapping as `start`, so changing the mode
+        // mid-session behaves like picking it before the first message.
+        await desktop.ipc(SURFACE, "setPermissionMode",
+          ipcArgs.setPermissionMode(desktopId, FORCED_PERMISSION_MODE ?? desktopPermissionMode(patch.permission_mode)));
       }
       if (patch.is_archived === true) {
         await desktop.ipc(SURFACE, "archive", ipcArgs.archive(desktopId));
@@ -752,7 +766,7 @@ export function createCodeEngine({
           // turn runs under Desktop's default and prompts. A facade-level
           // `CLAUDE_MOBILE_PERMISSION_MODE` (e.g. `bypassPermissions`) wins over
           // the app's pick, since the Code composer has no bypass row.
-          permissionMode: FORCED_PERMISSION_MODE ?? meta?.permission_mode ?? undefined,
+          permissionMode: FORCED_PERMISSION_MODE ?? desktopPermissionMode(meta?.permission_mode) ?? undefined,
         }));
       } else {
         if (interrupt) await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId)).catch(() => {});
