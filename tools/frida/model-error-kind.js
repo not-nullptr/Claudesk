@@ -109,9 +109,9 @@ function readSwiftString(address) {
 // Bounded so one call can never run away: 48 bytes at the value and one level of
 // pointers, under a hard read budget. Enough for a DecodingError's Context
 // (debugDescription) and its coding path, and cheap enough to leave running.
-const REGION = 96;
-const MAX_DEPTH = 3;   // error -> box -> Context -> String
-const BUDGET = 600;    // hard cap per call; this is what stops the runaway
+let REGION = 96;
+let MAX_DEPTH = 3;   // error -> box -> Context -> String
+let BUDGET = 600;    // hard cap per call; this is what stops the runaway
 
 function harvest(address, depth, seen, out, budget) {
   if (depth < 0 || budget.left <= 0 || !address || address.isNull()) return;
@@ -163,6 +163,16 @@ function hook(base, offset, label) {
         log(`${label} #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
         const want = found.filter((s) => WANT.test(s));
         if (want.length) log(`*** MATCH *** ${label} #${calls} ${JSON.stringify(want)}`);
+        // A cause that reads like a real JSON failure gets a much wider read —
+        // the coding path (the field) is a small string a few hops further out
+        // than the debugDescription, so only go looking when the call is real.
+        if (found.some((s) => /Cannot get value|Expected to decode|No value associated|isn't in the correct format/i.test(s))) {
+          const saved = [REGION, MAX_DEPTH, BUDGET];
+          [REGION, MAX_DEPTH, BUDGET] = [192, 5, 6000];
+          const deep = stringsAround(args[0]);
+          [REGION, MAX_DEPTH, BUDGET] = saved;
+          log(`DEEP #${calls} ${JSON.stringify(deep.slice(0, 24))}`);
+        }
         if (calls <= 3) {
           const raw = safeRead(args[0], 48);
           const hex = raw ? [...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ') : null;
