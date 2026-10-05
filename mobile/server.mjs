@@ -868,6 +868,13 @@ async function handleCodeRoutes(request, response, url) {
   // --- sessions list / create -------------------------------------------------
   if (path === "/v1/code/sessions" && method === "GET") {
     try {
+      // Is the *list* the leg that fails? With this mode the app decodes an
+      // empty page; if the send then stops throwing /v1/code/sessions, it is a
+      // list row, not the create reply.
+      if (sessionMode() === "list-empty") {
+        sendJson(response, 200, { data: [], next_cursor: null, resume_token: null });
+        return true;
+      }
       const statuses = url.searchParams.getAll("statuses").flatMap((value) => value.split(",")).filter(Boolean);
       const tags = url.searchParams.getAll("tags").flatMap((value) => value.split(",")).filter(Boolean);
       const data = await codeEngine.listSessions({ statuses, tags, limit: url.searchParams.get("limit") });
@@ -879,11 +886,14 @@ async function handleCodeRoutes(request, response, url) {
     }
     return true;
   }
-  // A one-shot switch to bisect the create reply on device without a rebuild:
-  //   full (default) | nostatus (drop connection/worker status) | owned
-  //   | owned0 | camel | status200. CLAUDE_MOBILE_SESSION_CREATE_MODE, or the
-  // file /data/session-mode read per request.
-  function sessionCreateMode() {
+  // A one-shot switch to bisect the session replies on device without a
+  // rebuild: CLAUDE_MOBILE_SESSION_CREATE_MODE, or the file /data/session-mode
+  // read per request. Values:
+  //   full (default) | nostatus | owned | owned0 | camel | status200
+  //   drop:a,b,c     remove those top-level keys from the create reply
+  //   only:a,b,c     emit only those top-level keys (plus what is required)
+  //   list-empty     make GET /v1/code/sessions return an empty page
+  function sessionMode() {
     try {
       const value = readFileSync("/data/session-mode", "utf8").trim();
       if (value) return value;
@@ -907,7 +917,7 @@ async function handleCodeRoutes(request, response, url) {
         // by-id environment read finds the record it was created against.
         environmentId: body.environment_id ?? body.environmentId ?? null,
       });
-      const mode = sessionCreateMode();
+      const mode = sessionMode();
       if (mode === "nostatus") {
         delete resource.connection_status;
         delete resource.worker_status;
@@ -917,6 +927,11 @@ async function handleCodeRoutes(request, response, url) {
         resource = { owned: { _0: resource } };
       } else if (mode === "camel") {
         resource = camelKeys(resource);
+      } else if (mode.startsWith("drop:")) {
+        for (const key of mode.slice(5).split(",").filter(Boolean)) delete resource[key];
+      } else if (mode.startsWith("only:")) {
+        const keep = new Set(mode.slice(5).split(",").filter(Boolean));
+        for (const key of Object.keys(resource)) if (!keep.has(key)) delete resource[key];
       }
       console.log(`[mobile-code]   create sources=${JSON.stringify(body.config?.sources ?? null)}`);
       // The create reply decides whether the app can hold the new session at
