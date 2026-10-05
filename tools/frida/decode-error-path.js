@@ -126,15 +126,19 @@ function hook(base, offset, label) {
         // the reused sret buffer). Harvest x20 first, then the arg registers.
         const ctx = this.context;
         const self = ctx.x20;
-        const found = stringsAround(
-          ctx.x20, ctx.x19, ctx.x21, ctx.x22, ctx.x23, ctx.x8,
-          args[0], args[1], args[2], args[3]);
+        // ModelDecodingError is { path: String, isFailure: Bool, sampleRate, error, … }
+        // so its first field is the route — read it directly to pick OUR error out
+        // of the generic thunk's many callers.
+        const path = readSwiftString(self);
+        const found = stringsAround(self, ctx.x19, ctx.x21, ctx.x22, ctx.x23);
         const keys = [...new Set(found.filter((s) => s.length <= 32 &&
           /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)))].slice(0, 25);
         const msgs = [...new Set(found.filter((s) => s.length > 32))].slice(0, 4);
-        log(`${label} #${calls} self=${self} x0=${args[0]}`);
-        log(`   keys=${JSON.stringify(keys)}`);
-        if (msgs.length) log(`   msgs=${JSON.stringify(msgs)}`);
+        log(`${label} #${calls} path=${JSON.stringify(path)} self=${self}`);
+        if (path && /code\/sessions/.test(path)) {
+          log(`   *** OUR ERROR *** keys=${JSON.stringify(keys)}`);
+          if (msgs.length) log(`   msgs=${JSON.stringify(msgs)}`);
+        }
       } catch (error) { /* never disturb the app */ }
     },
   });
