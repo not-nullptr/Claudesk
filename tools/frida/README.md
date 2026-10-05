@@ -170,7 +170,7 @@ bounded to the first few sites:
 |---|---|
 | `first-throw {name, source, site, wanted}` | a type was allocated for the first time — every distinct type, not just the filtered one, named as it appears rather than saved for the launch-time census |
 | `built {n, type, site, module}` | the filtered type was built here; cheap, no backtrace, so the carrying throw can fail to arrive without taking the record with it |
-| `unread-throw {type, site, throwSite, storage, thrown, paired}` | the record was armed and a throw arrived, but neither address held a `String` — so either the value was not this error, or it is not where the layout says |
+| `unread-throw {type, site, throwSite, box, storage, thrown, paired}` | the record was armed and a throw arrived, but none of the three addresses held a `String` — so either the value was not this error, or it is not where the layout says |
 | `repeat-throw {type, site, path, throwSite}` | a throw of an error the probe named earlier, with no allocation behind it — the app kept the `any Error` and threw it again, so this is the failure being *used* rather than *built* |
 
 `repeat-throw` matters when only the first press produces a record. A decode
@@ -186,7 +186,19 @@ box is the app's own allocation, so the address outlives the call. Those records
 carry `readFrom: "deferred"` and a null `throwSite`, and their `frames` are null
 because there is no live stack to walk — absent rather than faked.
 
-The value is not always the type whose fields are known, either: the app
+The value is read from three places, most likely first — `box`, `storage`,
+`throw` — and `readFrom` says which answered:
+
+- **`box`** — what `swift_allocError` returned. The runtime copies the value in
+  when the caller hands it a buffer instead of writing the payload itself, so
+  this is where a *Foundation* allocation keeps its error.
+- **`storage`** — the buffer the caller passed (`x1`), which an app call site
+  writes into itself straight after the call.
+- **`throw`** — the argument `swift_willThrow` was given, when it has one.
+
+The order is not cosmetic. A live record showed a Foundation allocation whose
+storage held nothing readable and whose throw arrived with a null argument
+(`thrown: null`), and only the box had the value.
 re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
 (`underlying: T`, so the decoder's error sits at the wrapper's field offset
 rather than at zero) — the type the app's own log names, `Failed to create

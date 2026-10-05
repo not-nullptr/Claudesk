@@ -843,15 +843,42 @@ const DEFER_MS = [2, 12, 50];
 function deferRead(record, source) {
   const attempt = (index) => {
     if (pending !== record) return;          // a throw got there first
-    if (readSwiftString(record.storage)) {
+    const hit = readableValue(record, null);
+    if (hit) {
       pending = null;
-      emit(source, record.name, record.site, null, record.storage,
-        { paired: false, readFrom: 'deferred' });
+      emit(source, record.name, record.site, null, hit.pointer,
+        { paired: false, readFrom: hit.from });
       return;
     }
     if (index + 1 < DEFER_MS.length) setTimeout(() => attempt(index + 1), DEFER_MS[index]);
   };
   setTimeout(() => attempt(0), DEFER_MS[0]);
+}
+
+// Where an error's value can be, most likely first. Two of the three are
+// runtime bookkeeping and one is the app's:
+//
+//   box      — what `swift_allocError` returned, where the runtime copies the
+//              value when the caller hands it a buffer instead
+//   storage  — the buffer the caller passed, which an app call site writes into
+//              itself right after the call
+//   throw    — the argument `swift_willThrow` was given, when there is one
+//
+// The order is not cosmetic: a live record showed a Foundation allocation whose
+// storage held nothing readable and whose throw carried no argument at all, and
+// only the box had the value.
+function readableValue(record, thrown) {
+  const candidates = [
+    ['box', record && record.box],
+    ['storage', record && record.storage],
+    ['throw', thrown],
+  ];
+  for (const [from, candidate] of candidates) {
+    if (!candidate) continue;
+    const text = readSwiftString(candidate);
+    if (text) return { text, pointer: candidate, from };
+  }
+  return null;
 }
 
 function reportThrow(context) {
@@ -861,13 +888,9 @@ function reportThrow(context) {
     if (armed.thread !== Process.getCurrentThreadId()) { reportRepeat(context); return; }
     if (Date.now() - armed.at > PENDING_MS) pending = null;
     if (!pending) { reportRepeat(context); return; }
-    // The storage the allocation named is where the payload went; the throw's
-    // argument should be that same address, but it is the storage that is
-    // guaranteed to hold the error, so it is read first.
     const thrown = cleanPointer(context.x0);
-    const fromStorage = readSwiftString(armed.storage);
-    const fromThrown = fromStorage ? null : readSwiftString(thrown);
-    if (!fromStorage && !fromThrown) {
+    const hit = readableValue(armed, thrown);
+    if (!hit) {
       // Not this error — leave the record armed for the one that is. Counted and
       // named, because "armed but nothing readable" is a different failure from
       // "never armed", and until now the two looked identical in the log.
@@ -880,19 +903,19 @@ function reportThrow(context) {
           type: armed.name,
           site,
           throwSite: context.lr ? String(context.lr) : null,
+          box: describeAddress(armed.box),
           storage: describeAddress(armed.storage),
           thrown: describeAddress(thrown),
           paired: Boolean(thrown && armed.storage && thrown.equals(armed.storage)),
-          why: 'no String at either address; the value may not be this error',
+          why: 'no String at box, storage or throw; the value may not be this error',
         });
       }
       return;
     }
     const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));
     pending = null;
-    emit('swift_willThrow', armed.name, armed.site, context,
-      fromStorage ? armed.storage : thrown,
-      { paired, readFrom: fromStorage ? 'storage' : 'throw' });
+    emit('swift_willThrow', armed.name, armed.site, context, hit.pointer,
+      { paired, readFrom: hit.from });
   } catch (error) {
     console.log(`${TAG}: hook error: ${error.message}`);
   }
@@ -1008,6 +1031,20 @@ function installOne(name) {
   try {
     Interceptor.attach(target, {
       onEnter() { onThrow(this.context, name); },
+      // The box `swift_allocError` returns is where a *caller that does not
+      // write the payload itself* leaves it: the runtime copies the value in,
+      // and the pointer it was handed stays untouched. That is the Foundation
+      // case — an allocation with no throw after it, whose storage read as
+      // nothing — so the returned box is captured and read as well. The thread
+      // is checked because `pending` belongs to one allocation, and an
+      // unrelated allocation on another thread must not overwrite its box.
+      onLeave(retval) {
+        try {
+          if (pending && pending.thread === Process.getCurrentThreadId()) {
+            pending.box = cleanPointer(retval);
+          }
+        } catch (error) { /* never disturb the app */ }
+      },
     });
   } catch (error) {
     return false;
