@@ -1280,6 +1280,11 @@ async function handleCodeRoutes(request, response, url) {
         repos = []; sources = []; break;
       case "name":
         repos = folders.map((f) => ({ name: f.name, owner })); sources = []; break;
+      case "srcenum":
+        // Isolate `sources` alone: no repos, just the github.com source marker.
+        repos = []; sources = [{ gitHubDotCom: {} }]; break;
+      case "branchstr":
+        repos = folders.map((f) => ({ name: f.name, owner, default_branch: "main" })); sources = []; break;
       case "nobranch":
         repos = folders.map((f) => ({ name: f.name, owner, source_url: f.path ? `file://${f.path}` : undefined, ghe_configuration_id: null }));
         sources = []; break;
