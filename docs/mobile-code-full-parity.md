@@ -311,7 +311,7 @@ The signatures the facade depends on:
 | `getSession` | `sessionId` |
 | `getTranscript` | `sessionId` → array of entries |
 | `getTranscriptTail` | `sessionId`, `limit` (number) |
-| `sendMessage` | `sessionId`, `message`, then optional tails (`images`, `userSelectedFiles`, `messageUuid`, …) — **no positional gap** |
+| `sendMessage` | `sessionId`, `message`, `images`, `toolStates`, `attachments`, `priority`, `steeringGates`, **`messageUuid`** (8th), … — positional; pass `undefined` for the optional slots before `messageUuid` |
 | `interrupt` / `stop` | `sessionId` |
 | `delete` | `sessionId` |
 | `setModel` | `sessionId`, `model` |
@@ -327,7 +327,7 @@ Desktop.
 
 ### Corrections this produced
 
-Five bugs passed against the fake bridge and could only fail live; all are fixed
+Six bugs passed against the fake bridge and could only fail live; all are fixed
 and now guarded offline, because `scripts/lib/fake-claudesk.mjs` reproduces
 Desktop's validation:
 
@@ -337,7 +337,12 @@ Desktop's validation:
    `"allow"` would have validated (plain string) and been silently ignored.
 3. `createSession` fabricated a session Desktop had never heard of; the first
    `sendMessage` is what actually creates one.
-4. `sendMessage` inserted a positional `undefined` gap copied from Chat.
+4. `sendMessage` put `messageUuid` at the third argument. Read off the installed
+   ASAR, the real signature is
+   `sendMessage(sessionId, message, images, toolStates, attachments, priority, steeringGates, messageUuid, …)`,
+   so `messageUuid` is the **eighth** argument and a string in slot 4 lands in
+   `attachments` — Desktop rejects every *follow-up* message (502), while the
+   first message (which uses `start`) works.
 5. `setEffort`'s parameter is named `effortLevel`.
 
 Also corrected against the live surface: **`getAll` rows carry no `sessionType`**

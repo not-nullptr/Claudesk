@@ -1165,6 +1165,21 @@ try {
     assert.equal(arrived[0].data.event_id, liveUuid);
     assert.ok(arrived.some((record) => record.data.event_type === "assistant"), "the reply streams live");
     arrived.forEach((record) => decodeClientEvent(record.data));
+
+    // A follow-up goes through `sendMessage`, whose `messageUuid` is the EIGHTH
+    // positional argument — a wrong index puts it in the `attachments` slot and
+    // Desktop rejects the call (the 502 on every second message).
+    const followUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const followUp = await call(codePath(liveEv.id, "/events"), {
+      method: "POST",
+      body: { session_id: liveEv.id, events: [{ payload: { type: "user", uuid: followUuid, message: { role: "user", content: "and again" } } }] },
+    });
+    assert.equal(followUp.status, 200, "a follow-up message is accepted");
+    await waitFor(() => claudesk.codeSessions.get(liveEv.id.slice("code_".length))?.isRunning === false, "the follow-up turn");
+    assert.ok(
+      claudesk.codeSessions.get(liveEv.id.slice("code_".length)).transcript.some((entry) => entry.uuid === followUuid),
+      "the follow-up reached Desktop",
+    );
   } finally {
     await liveEvReader.cancel();
     await waitFor(() => claudesk.codeSessions.get(liveEv.id.slice("code_".length))?.isRunning === false, "the live events turn");

@@ -79,9 +79,17 @@ const ipcArgs = {
     ...(model ? { model } : {}),
     ...(title ? { title } : {}),
   }],
-  // The Code surface has no positional gap before `messageUuid` (unlike Chat):
-  // it is simply the next optional argument after `message`.
-  sendMessage: (desktopId, { message, messageUuid }) => [desktopId, message, undefined, undefined, messageUuid],
+  // `messageUuid` is the EIGHTH positional argument, not the third: Desktop's
+  // implementation is
+  //   sendMessage(sessionId, message, images, toolStates, attachments,
+  //               priority, steeringGates, messageUuid, …)
+  // (read off `/.vite/build/index.chunk-*.js` in the installed ASAR). The
+  // optional slots before it must still be passed as `undefined` to reach its
+  // position; sending it earlier puts a string where `attachments` is expected
+  // and Desktop rejects the call, which is the 502 on every follow-up message.
+  sendMessage: (desktopId, { message, messageUuid }) => [
+    desktopId, message, undefined, undefined, undefined, undefined, undefined, messageUuid,
+  ],
   interrupt: (desktopId) => [desktopId],
   delete: (desktopId) => [desktopId],
   setModel: (desktopId, model) => [desktopId, model],

@@ -218,7 +218,7 @@ export async function startFakeClaudesk() {
     session.isRunning = true;
     session.turnRunning = true;
     pushCodeEntry(session, {
-      uuid: messageUuid,
+      uuid: messageUuid ?? randomUUID(),
       type: "user",
       message: { role: "user", content: text },
       origin: { kind: "human" },
@@ -271,9 +271,19 @@ export async function startFakeClaudesk() {
       void runCodeTurn(session, { text: info.message, messageUuid: info.messageUuid, permission: /\[permission\]/.test(info.message) });
       return { sessionId: info.sessionId };
     },
-    sendMessage: ([id, message, , , messageUuid]) => {
+    // Desktop's signature is
+    //   sendMessage(sessionId, message, images, toolStates, attachments,
+    //               priority, steeringGates, messageUuid, …)
+    // — `messageUuid` is the EIGHTH argument. Mirrored exactly so a caller that
+    // puts it earlier (as the facade used to) fails here, not only on device.
+    sendMessage: ([id, message, images, toolStates, attachments, priority, steeringGates, messageUuid]) => {
       const session = codeSessions.get(id);
       if (!session) throw new Error(`Session "${id}" not found`);
+      if (images !== undefined && !Array.isArray(images)) throw ipcValidationError("LocalSessions", "sendMessage", "images", 2);
+      if (toolStates !== undefined && !Array.isArray(toolStates)) throw ipcValidationError("LocalSessions", "sendMessage", "toolStates", 3);
+      if (attachments !== undefined && !Array.isArray(attachments)) throw ipcValidationError("LocalSessions", "sendMessage", "attachments", 4);
+      if (priority !== undefined && !["now", "next", "later"].includes(priority)) throw ipcValidationError("LocalSessions", "sendMessage", "priority", 5);
+      if (messageUuid !== undefined && typeof messageUuid !== "string") throw ipcValidationError("LocalSessions", "sendMessage", "messageUuid", 7);
       void runCodeTurn(session, { text: message, messageUuid, permission: /\[permission\]/.test(message) });
       return { dispatched: true };
     },
