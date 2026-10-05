@@ -293,14 +293,31 @@ function sourcesFromMeta(meta) {
   return Array.isArray(meta?.sources) ? meta.sources : [];
 }
 
-// The environment a session reports. Every session runs on the same Desktop, so
-// the id is whichever record the picker created it against (meta.environment_id)
-// and defaults to the bridge record — the kind follows the id, because the
-// detail screen resolves the id back through the environments by-id read. A
-// folder environment (one bridge environment per workspace folder) is a bridge
-// kind, so any non-nil id other than the cloud one reports the chosen id back
-// rather than collapsing to the base bridge record.
-export function environmentForSession(meta = {}) {
+// The workspace root the folder environments are cut from. A bridge device's
+// default directory; `bridgeInfoFor` already advertises it, so it is the same
+// value here unless the deployment overrides it.
+const WORKSPACE_ROOT = (process.env.CLAUDE_MOBILE_WORKSPACE_ROOT || "/workspace").replace(/\/+$/, "");
+
+// A session's directory as a folder environment: any path strictly below the
+// workspace root is one of the advertised folders. The root itself is the
+// device's default (the base bridge environment).
+function workspaceFolderFor(cwd) {
+  if (typeof cwd !== "string") return null;
+  const clean = cwd.replace(/\/+$/, "");
+  if (!clean.startsWith(`${WORKSPACE_ROOT}/`)) return null;
+  return clean;
+}
+
+// The environment a session reports. The *directory the session ran in* decides
+// it: a session whose cwd is a workspace folder belongs to that folder's
+// environment, so the device's directory list counts it there rather than piling
+// every session onto the root. Falling back, the picker's own choice
+// (meta.environment_id) is reported — the kind follows the id, because the
+// detail screen resolves it through the environments by-id read — and with
+// nothing else the base bridge record.
+export function environmentForSession(meta = {}, cwd = null) {
+  const directory = workspaceFolderFor(cwd) || workspaceFolderFor(meta.cwd);
+  if (directory) return { id: folderEnvironmentId(directory), kind: ENVIRONMENT_KIND.bridge };
   const id = meta.environment_id;
   if (id === CLOUD_ENVIRONMENT_ID) return { id, kind: ENVIRONMENT_KIND.anthropicCloud };
   if (typeof id === "string" && id) return { id, kind: ENVIRONMENT_KIND.bridge };
@@ -314,7 +331,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
   // Only the bucket is derived from this axis on the row; the row's own
   // `status` is the lifecycle one below.
   const sessionStatus = sessionStatusOf(record, { pendingApproval });
-  const environment = environmentForSession(meta);
+  const environment = environmentForSession(meta, record?.cwd ?? null);
   return {
     id: codeIdFor(desktopIdOf(record)),
     environment_id: environment.id,
@@ -355,7 +372,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
 // `revision` is a millisecond timestamp (see `wireDate`).
 export function sessionResource(record, { meta = {}, revision = null, pendingApproval = false } = {}) {
   const sessionStatus = sessionStatusOf(record, { pendingApproval });
-  const environment = environmentForSession(meta);
+  const environment = environmentForSession(meta, record?.cwd ?? null);
   return {
     id: codeIdFor(desktopIdOf(record)),
     title: record?.title || record?.name || "Untitled session",

@@ -863,3 +863,11 @@ the paired Desktop (`remoteDeviceDirectory`), `display_name` equal to the
 environments' `machine_name`. If the group still does not form on device, the
 pairing key is not the name and the next probe is the device's `id`.
 
+The device's directory rows carry a **session count** (`DirectorySelectionRow.activeSessionCount`,
+`device_directory_at_capacity_hint`), computed from the sessions whose
+`environment_id` is that directory. A session must therefore report the
+environment of the directory it actually ran in, or every session piles onto the
+root: `environmentForSession(meta, cwd)` derives the folder environment from the
+session's `cwd` (any path strictly below the workspace root; the root itself is
+the base device) before falling back to the picker's `environment_id`.
+

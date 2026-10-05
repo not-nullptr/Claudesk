@@ -954,6 +954,11 @@ try {
   const repoDetail = await (await call(codePath(repoReply.id))).json();
   assert.equal(repoDetail.session_context.cwd, "/workspace/Claudesk", "the repository resolves to its workspace folder");
   assert.deepEqual(repoDetail.session_context.sources, [repoSource], "the detail read reports the picked repository");
+  // A session reports the environment of the directory it ran in, so the
+  // device's directory list counts it under that folder, not the workspace root.
+  assert.equal(repoDetail.environment_id, folderEnv.environment_id, "a folder session reports the folder environment");
+  const rootDetail = await (await call(codePath(createdResource.id))).json();
+  assert.equal(rootDetail.environment_id, "anthropic-bridge-local", "a workspace-root session reports the base device");
 
   // A `file://` source resolves to the exact path, not by name.
   const fileId = (await (await call("/v1/code/sessions", {
