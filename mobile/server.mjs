@@ -890,6 +890,7 @@ async function handleCodeRoutes(request, response, url) {
   // rebuild: CLAUDE_MOBILE_SESSION_CREATE_MODE, or the file /data/session-mode
   // read per request. Values:
   //   full (default) | nostatus | owned | owned0 | camel | status200 | ctxmin
+  //   session_res/session_env (+`0`)  wrap the reply as {session: <payload>}
   //   drop:a,b.c,d   remove those keys (dotted paths allowed) from the reply
   //   only:a,b,c     emit only those top-level keys (plus what is required)
   //   list-empty     make GET /v1/code/sessions return an empty page
@@ -927,6 +928,13 @@ async function handleCodeRoutes(request, response, url) {
         resource = { owned: { _0: resource } };
       } else if (mode === "camel") {
         resource = camelKeys(resource);
+      } else if (mode === "session_res" || mode === "session_res0") {
+        // `{session: <SessionResource>}`, with or without the SE-0295 `_0`.
+        resource = mode.endsWith("0") ? { session: { _0: resource } } : { session: resource };
+      } else if (mode === "session_env" || mode === "session_env0") {
+        // `{session: <SessionResponse>}` — the SessionResponseEnvelope shape.
+        const inner = resource.__sessionResponse ?? resource;
+        resource = mode.endsWith("0") ? { session: { _0: inner } } : { session: inner };
       } else if (mode === "ctxmin") {
         // session_context is required and is the only required field the env
         // record does not also exercise; keep just its required keys.

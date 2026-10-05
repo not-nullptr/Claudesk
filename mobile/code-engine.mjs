@@ -491,10 +491,19 @@ export function createCodeEngine({
       isRunning: false,
     };
     records.set(desktopId, record);
-    return sessionResource(record, {
+    const resource = sessionResource(record, {
       meta: { draft: true, environment_id },
       revision: record.lastActivityAt,
     });
+    // The app decodes a `/v1/code/sessions` reply through a `session`-keyed
+    // envelope (`SessionResponseEnvelope { session: SessionResponse }`), so the
+    // create route needs the list-row projection too. Keep it alongside the
+    // resource, non-enumerable so it never leaks into the JSON.
+    Object.defineProperty(resource, "__sessionResponse", {
+      value: sessionResponse(record, { meta: { environment_id } }),
+      enumerable: false,
+    });
+    return resource;
   }
 
   async function deleteSession(id) {
