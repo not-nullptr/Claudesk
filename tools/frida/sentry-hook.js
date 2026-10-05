@@ -62,6 +62,13 @@ function describe(cls, sel, arg) {
         value.respondsToSelector_(ObjC.selector('userInfo'))) {
       log(`\n=== ${tag} ===`);
       log(`domain=${value.domain()}  code=${value.code()}`);
+      // The bridged Swift error's localizedDescription is the only place its
+      // `path` shows up here — the NSError userInfo is empty — so print it to
+      // tell one ModelDecodingError from another.
+      try {
+        const description = value.localizedDescription();
+        if (description && !description.isNull()) log(`desc=${description.toString()}`);
+      } catch (error) { /* no localized description */ }
       const info = value.userInfo();
       log(objJson(info, true) || new ObjC.Object(info).toString());
       return;
