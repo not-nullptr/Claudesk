@@ -26,6 +26,7 @@ import {
   folderDirectoryFromEnvironmentId,
   folderEnvironment,
   isRenderableEntry,
+  remoteDeviceDirectory,
   sseFrameForEntry,
 } from "./code-transcript.mjs";
 import { desktopSessionIdFor as codeSessionDesktopId } from "./code-ids.mjs";
@@ -697,6 +698,16 @@ async function handleOptionalEmptyRoutes(request, response, url) {
   const org = orgUuidFromPath(url.pathname);
   if (!org) return false;
   const rest = url.pathname.replace(/^\/api\/organizations\/[0-9a-f-]{36}\/?/i, "");
+  // The paired Desktop as a `RemoteDevice`: the Code tab groups a device's
+  // directories (`ConnectedDevice.environments`, the bridge environments that
+  // share its name) under this record, and remembers the pick. Answering `[]`
+  // left every bridge environment floating as its own top-level row.
+  if (rest === "cowork/remote_devices" && request.method === "GET") {
+    const directory = remoteDeviceDirectory({ online: await desktopReady() });
+    console.log(`[mobile-code]   cowork/remote_devices -> ${JSON.stringify(directory)}`);
+    sendJson(response, 200, directory);
+    return true;
+  }
   const isEmptyList = [
     "projects",
     "published_artifacts",
@@ -704,7 +715,6 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     "composer_notices",
     "members/display_info",
     "cowork/sessions",
-    "cowork/remote_devices",
     "skills/list-skills",
     "mcp/remote_servers",
     "notification/channels",

@@ -838,3 +838,28 @@ What is still unverified on device: that this picker is *offered* in the Code
 new-session flow (the types say Code; the wiring into the composer is inferred),
 and how the app groups several bridge environments sharing one `machine_name`.
 
+### The grouping key is the RemoteDevice list (2026-10-05)
+
+Advertising the folders as bare bridge environments **without a device record**
+made each one surface as its own top-level environment — wrong. The app's model
+groups a device's directories:
+
+```
+ConnectedDevice      { name: String, environments: [EnvironmentResource], source }
+ConnectedDeviceModel { seed: ConnectedDevice, _selectedDirectoryId: CodeEnvironmentTag,
+                       initialSelection: EnvironmentResource, environmentStore }
+RemoteDevice         { id: AnthropicTagged<RemoteDevice>, displayName, lastSeenAt?, createdAt }
+ListRemoteDeviceDirectoryResponse { devices: [RemoteDevice], defaultDevice: DefaultDevice? }
+RememberedDeviceChoice = target(RemoteDevice) | noTarget
+```
+
+`ConnectedDeviceBuilding` (protocol, `ClaudeCode`) pairs a `RemoteDevice` with
+the bridge environments that share its name; `RemoteDeviceDirectory` is a
+`SyncedQuery<ListRemoteDeviceDirectoryResponse>` fetched over the fixed request
+`/cowork/remote_devices`; `RemoteDevicePicker` / `coworkRememberedRemoteDeviceId`
+persist the choice. The facade answered `/cowork/remote_devices` with `[]`, so
+there was nothing for the directories to hang off. It now answers the object with
+the paired Desktop (`remoteDeviceDirectory`), `display_name` equal to the
+environments' `machine_name`. If the group still does not form on device, the
+pairing key is not the name and the next probe is the device's `id`.
+

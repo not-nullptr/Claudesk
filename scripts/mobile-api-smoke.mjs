@@ -256,6 +256,16 @@ try {
   assert.equal(environmentList.first_id, environments[0].environment_id);
   assert.equal(environmentList.last_id, environments.at(-1).environment_id);
 
+  // The device the Code tab groups those directories under: a `RemoteDevice`
+  // whose name matches the environments' `machine_name`.
+  const devicesLeg = await call(`/api/organizations/${org.uuid}/cowork/remote_devices`);
+  assert.equal(devicesLeg.status, 200);
+  const deviceDirectory = await devicesLeg.json();
+  assert.equal(deviceDirectory.devices.length, 1, "the paired Desktop is the device");
+  assert.equal(deviceDirectory.devices[0].display_name, bridge.bridge_info.machine_name, "the device name matches machine_name");
+  assert.equal(deviceDirectory.default_device.id, deviceDirectory.devices[0].id);
+
+
   // The by-id read resolves each advertised record.
   const cloudById = await call(
     `/v1/environment_providers/private/organizations/${org.uuid}/environments/anthropic-cloud-local`,

@@ -123,7 +123,7 @@ function environmentConfig(caseName, payload) {
   return payload; // flat: environment_type discriminator beside the payload
 }
 
-export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
+export function bridgeEnvironment({ name = PAIRED_DEVICE_NAME, online = true, cliVersion = null } = {}) {
   return {
     kind: ENVIRONMENT_KIND.bridge,
     environment_id: BRIDGE_ENVIRONMENT_ID,
@@ -143,6 +143,29 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
       git_repo_url: "",
     }),
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
+  };
+}
+
+// The paired Desktop as a *device* in the app's `RemoteDevice` list
+// (`GET /api/organizations/{org}/cowork/remote_devices` →
+// `ListRemoteDeviceDirectoryResponse { devices, defaultDevice }`). The Code tab
+// builds `ConnectedDevice { name, environments: [EnvironmentResource] }` by
+// pairing a `RemoteDevice` with the bridge environments that share its name, and
+// persists the pick (`RememberedDeviceChoice`, `RemoteDevicePicker`). With this
+// list empty the app has no device to hang the directories on, so every bridge
+// environment surfaced as its own top-level row instead of under one device.
+export const PAIRED_DEVICE_NAME = "Claudesk Desktop";
+export const REMOTE_DEVICE_ID = "claudesk-desktop";
+
+export function remoteDeviceDirectory({ name = PAIRED_DEVICE_NAME, online = true } = {}) {
+  return {
+    devices: [{
+      id: REMOTE_DEVICE_ID,
+      display_name: name,
+      last_seen_at: online ? new Date().toISOString() : null,
+      created_at: ENVIRONMENT_CREATED_AT,
+    }],
+    default_device: { id: REMOTE_DEVICE_ID },
   };
 }
 
@@ -176,7 +199,7 @@ export function folderDirectoryFromEnvironmentId(id) {
 export function folderEnvironment({
   name,
   directory,
-  deviceName = "Claudesk Desktop",
+  deviceName = PAIRED_DEVICE_NAME,
   online = true,
   cliVersion = null,
 } = {}) {
@@ -204,7 +227,7 @@ export function folderEnvironment({
 // is "anthropic". The `state`/`online` axis is the same Desktop health the
 // bridge record uses, so a Desktop that is down is shown as unknown here too
 // rather than as a usable cloud.
-export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
+export function cloudEnvironment({ name = PAIRED_DEVICE_NAME, online = true, cliVersion = null } = {}) {
   const record = {
     kind: ENVIRONMENT_KIND.anthropicCloud,
     environment_id: CLOUD_ENVIRONMENT_ID,
