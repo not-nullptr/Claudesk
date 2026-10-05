@@ -856,14 +856,17 @@ try {
     return parseSse(await response.text());
   };
 
-  // Create: the app posts a draft session and gets a SessionResource back.
+  // Create: the app posts a draft session and gets a `SessionResponseEnvelope`
+  // — the list-row projection wrapped under `session`, NOT a bare SessionResource.
   const created = await call("/v1/code/sessions", { method: "POST", body: { title: "From the phone" } });
   assert.equal(created.status, 201, "create answers 201");
-  const createdResource = await created.json();
+  const createdReply = await created.json();
+  assert.ok(createdReply.session, "the create reply is `{session: …}` (SessionResponseEnvelope)");
+  const createdResource = createdReply.session;
   assert.match(createdResource.id, /^code_[0-9a-f-]{36}$/, "a Code id is code_<desktopId>");
-  assert.equal(createdResource.session_status, "idle");
-  // WorkerStatus (processing | idle) is what the detail record decodes; a new
-  // session's turn is not in flight yet.
+  assert.equal(typeof createdResource.status, "string");
+  // WorkerStatus/SessionWorkerStatus is `idle` for a session whose turn is not
+  // in flight yet.
   assert.equal(createdResource.worker_status, "idle");
   assert.equal(createdResource.connection_status, "connected");
   assert.equal(createdResource.environment_id, "anthropic-bridge-local");
@@ -1213,7 +1216,7 @@ try {
   // session id (ChannelMessagesApi.swift). Every channel read must carry the
   // keys its response type declares non-optional, and the message stream must
   // be SSE — a JSON body there is a shape the thread screen cannot decode.
-  const channelSession = await (await call("/v1/code/sessions", { method: "POST", body: { title: "Channel" } })).json();
+  const channelSession = (await (await call("/v1/code/sessions", { method: "POST", body: { title: "Channel" } })).json()).session;
   const channelPath = (action = "") => `/v1/code/channels/${channelSession.id}${action}`;
 
   const channel = await (await call(channelPath())).json();

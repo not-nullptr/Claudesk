@@ -957,8 +957,15 @@ async function handleCodeRoutes(request, response, url) {
       // proves by itself whether it emits `"revision":"2026-…"` or the bare `0`
       // that predates the wireDate fix — without needing the app-side decode
       // error to say which build is in the container.
-      console.log(`[mobile-code]   create mode=${mode} reply=${JSON.stringify(resource).slice(0, 2000)}`);
-      sendJson(response, mode === "status200" ? 200 : 201, resource);
+      // The app decodes this reply as `SessionResponseEnvelope` — a `session`-keyed
+      // envelope, NOT a bare SessionResource — so the default wire shape wraps
+      // the list-row projection under `session`. Every other mode above is a
+      // bisect override that replaces the shape.
+      const reply = mode === "full"
+        ? { session: resource.__sessionResponse ?? resource }
+        : resource;
+      console.log(`[mobile-code]   create mode=${mode} reply=${JSON.stringify(reply).slice(0, 2000)}`);
+      sendJson(response, mode === "status200" ? 200 : 201, reply);
     } catch (error) {
       await fail(error);
     }

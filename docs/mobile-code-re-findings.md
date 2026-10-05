@@ -734,3 +734,24 @@ stays the bare resource, keyed off the SSE `event:` name.
 (Superseded: an earlier note here claimed the `data` is a `SessionWatchFrame`
 with the payload under `_0` — that was inferred from the type name before
 checking its conformances, and is wrong.)
+
+## Create reply is `SessionResponseEnvelope` — `{"session": <SessionResponse>}`
+(2026-10-05)
+
+`POST /v1/code/sessions` does **not** return a bare `SessionResource`. The app
+decodes it as `ClaudeCodeApi.SessionResponseEnvelope { let session: SessionResponse }`,
+so the reply must be `{"session": <SessionResponse>}` — the LIST-ROW projection
+(`sessionResponse`, `status` lifecycle, `config`, `last_event_at`), not the
+detail `SessionResource`. Sending the bare resource fails with
+`ModelDecodingError(kind: unexpected_schema)` and, read at runtime, the exact
+coding path `keyNotFound("session")`.
+
+Confirmed on device: the facade's `session_env` bisect mode (which wraps the
+reply as `{"session": <SessionResponse>}`) is the one that stopped the error, and
+it is now the default in `mobile/server.mjs`. `session_res` (`{"session":
+<SessionResource>}`) and the `…0` variants remain as bisect overrides.
+
+The by-id read `GET /v1/code/sessions/{id}` (`?get_session_v2_bundled_shared=…`)
+is decoded through `GetSessionResponseShape<SessionResource, SharedEventsPage>`
+(probed by keys `id`/`session`) / `SharedSessionResponse { session, data,
+nextCursor }` — NOT yet verified against the app; it may need the same treatment.
