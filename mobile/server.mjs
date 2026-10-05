@@ -1256,24 +1256,46 @@ async function handleCodeRoutes(request, response, url) {
     const folders = Array.isArray(listing?.folders)
       ? listing.folders.filter((entry) => entry && typeof entry.name === "string")
       : [];
-    const repos = folders.map(({ name, path: repoPath }) => ({
-      name,
-      owner: { login: "local" },
-      default_branch: "main",
-      source_url: repoPath ? `file://${repoPath}` : undefined,
-      ghe_configuration_id: null,
-    }));
-    console.log(`[mobile-code]   repos/all -> ${repos.length} workspace folder(s) from bridge: ${folders.map((entry) => entry.name).join(", ")}`);
+    // The app decodes this into RepoListResponse and a field mismatch fails
+    // silently — no toast, only Sentry. CLAUDE_MOBILE_REPOS_MODE selects the
+    // shape, and the file /data/repos-mode overrides it per request so a test
+    // needs no restart: write a mode, tap Add repository, watch Sentry for the
+    // `/code/repos/all` ModelDecodingError to disappear.
+    //   empty      repos/sources both empty  (does the envelope itself decode?)
+    //   name       name + owner only         (does the repo element decode?)
+    //   nobranch   name/owner/sourceURL/ghe  (is default_branch the fault?)
+    //   branchobj  default_branch as GithubBranch {name,commit_sha,is_default}
+    //   full       everything (default)
+    let mode = process.env.CLAUDE_MOBILE_REPOS_MODE || "full";
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const override = (await readFile("/data/repos-mode", "utf8")).trim();
+      if (override) mode = override;
+    } catch { /* no override file */ }
+    const owner = { login: "local" };
+    let sources = [{ gitHubDotCom: {} }];
+    let repos;
+    switch (mode) {
+      case "empty":
+        repos = []; sources = []; break;
+      case "name":
+        repos = folders.map((f) => ({ name: f.name, owner })); sources = []; break;
+      case "nobranch":
+        repos = folders.map((f) => ({ name: f.name, owner, source_url: f.path ? `file://${f.path}` : undefined, ghe_configuration_id: null }));
+        sources = []; break;
+      case "branchobj":
+        repos = folders.map((f) => ({ name: f.name, owner, default_branch: { name: "main", commit_sha: "", is_default: true } }));
+        break;
+      default:
+        repos = folders.map((f) => ({ name: f.name, owner, default_branch: "main", source_url: f.path ? `file://${f.path}` : undefined, ghe_configuration_id: null }));
+    }
+    console.log(`[mobile-code]   repos/all mode=${mode} -> ${repos.length} repo(s): ${folders.map((entry) => entry.name).join(", ")}`);
     sendJson(response, 200, {
       repos,
       source_warnings: [],
       sso_required_org_ids: [],
-      // `RepoSource` is an enum — `.gitHubDotCom` (no payload) or
-      // `.enterprise(configurationId)`. The picker groups repos under a source,
-      // so an empty list showed "No repositories" however full `repos` was;
-      // declaring the github.com source is what makes it list them.
-      sources: [{ gitHubDotCom: {} }],
-      next_cursor: "",
+      sources,
+      next_cursor: null,
       is_complete: true,
     });
     return true;
