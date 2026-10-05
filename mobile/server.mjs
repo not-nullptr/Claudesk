@@ -1608,8 +1608,19 @@ async function streamCodeEvents(request, response, url, sessionId) {
   const from = Number.isSafeInteger(floor) && floor >= 0 ? floor : 0;
   let pending = [];
   const emit = (record) => {
-    for (const frame of codeEngine.framesFor(desktopId, record)) {
-      if (Number(frame.data.sequence_num) <= from) continue;
+    const frames = codeEngine.framesFor(desktopId, record);
+    // One line per relayed record so a live turn that renders nothing says
+    // *why*: `live-none` is a translation gap, `live-skip` a sequence/cursor
+    // mismatch, `live` a frame that actually went out.
+    if (!frames.length) {
+      console.log(`[mobile-code] live-none ${record?.method ?? "?"} (no frame for this record)`);
+      return;
+    }
+    for (const frame of frames) {
+      if (Number(frame.data.sequence_num) <= from) {
+        console.log(`[mobile-code] live-skip seq=${frame.data.sequence_num} <= from=${from}`);
+        continue;
+      }
       sendSseRecord(response, frame.event, frame.data);
       console.log(`[mobile-code] live ${describeSdkMessage(frame.data)}`);
     }

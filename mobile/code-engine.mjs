@@ -259,7 +259,20 @@ export function createCodeEngine({
     }
     if (method !== "onOnEvent") return;
     const desktopId = desktopIdOf(payload?.entry) ?? desktopIdOf(payload);
-    if (!desktopId) return;
+    if (!desktopId) {
+      log.log("[mobile-code] relay onOnEvent dropped: no sessionId in payload");
+      return;
+    }
+    // Diagnostics for the live-turn path: a watched session that receives no
+    // relayed record is a relay/bridge gap; a record that yields no frame is a
+    // translation gap. One line per relayed record, only for sessions someone
+    // is actually streaming, so a normal log stays quiet.
+    if (listeners.get(desktopId)?.size) {
+      const entry = payload?.entry ?? payload;
+      log.log(`[mobile-code] relay onOnEvent sid=${desktopId.slice(0, 12)}`
+        + ` type=${entry?.type ?? entry?.message?.type ?? "?"}`
+        + ` uuid=${String(entry?.uuid ?? "-").slice(0, 8)}`);
+    }
     const event = { method, payload };
     for (const callback of listeners.get(desktopId) || []) {
       try {

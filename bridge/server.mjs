@@ -1441,6 +1441,11 @@ async function handleApi(request, response, url) {
         configuredModels,
         codeActionsEnabled,
         infrastructureActionsEnabled,
+        // The actual methods the renderer exposes on each surface, filtered by
+        // what this bridge allows. `codeReady` only checks request/response
+        // methods, so the live listener (`LocalSessions.onOnEvent`) can be
+        // absent while Code still works — this is where that shows.
+        surfaces,
       });
     } catch (error) {
       sendJson(response, 503, { ok: false, error: error.message });
