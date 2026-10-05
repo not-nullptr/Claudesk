@@ -229,15 +229,15 @@ try {
   const bridge = environments.find((e) => e.kind === "bridge");
   assert.ok(cloud, "the cloud environment the picker requires is offered");
   assert.equal(cloud.environment_id, "anthropic-cloud-local");
-  // `config` is an enum with associated values, so the payload nests under the
-  // case name rather than sitting flat.
-  assert.equal(cloud.config.anthropic.environment_type, "anthropic");
+  // `config` is an enum with associated values: the payload nests under the
+  // case name and then under the associated value's key, `_0`.
+  assert.equal(cloud.config.anthropic._0.environment_type, "anthropic");
   assert.ok(bridge, "the paired Desktop is offered as a runner");
   assert.equal(bridge.environment_id, "anthropic-bridge-local");
   // `ConfigType` (the inner `environment_type`) has no `paired` member — the
   // case is `paired` but its payload reports the same `bridge` axis its `kind`
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
-  assert.equal(bridge.config.paired.environment_type, "bridge");
+  assert.equal(bridge.config.paired._0.environment_type, "bridge");
   assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);

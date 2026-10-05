@@ -425,6 +425,26 @@ proved explicit camelCase keys was wrong — those literals are the *case names*
 of a synthesised `CodingKeys` enum (a raw value defaults to the case name), not
 custom raw values. Their presence is expected under either strategy.
 
+### Correction — the `config` payload nests under `_0` (2026-10-05)
+
+The section above is right that `config` is a keyed container with a single key,
+the case name — but wrong about that key's value. The case's associated value is
+**unlabelled**, and SE-0295's synthesised Codable nests unlabelled associated
+values under `_0` (Apple's example: `case upc(Int, Int, Int, Int)` encodes as
+`{"upc":{"_0":8,"_1":…}}`). So the wire shape is
+
+```
+"config": { "anthropic": { "_0": { "environment_type": "anthropic", … } } }
+```
+
+Omitting `_0` throws `keyNotFound(_0)`, which drops the whole
+`EnvironmentConfiguration` → `EnvironmentResource` → the list, and reaches the
+phone as `ModelDecodingError(kind: unexpected_schema)` — naming neither the field
+nor the level. That is the decode failure seen on device, and it is also why the
+picker's cloud section stayed empty. The edit path already accepted `_0`
+(`mobile/server.mjs`, `editObject`); the response builders did not. Fixed in
+`mobile/code-transcript.mjs` (`environmentCase`).
+
 Enum raw values recovered for the session responses: `SessionListStatusFilter` =
 `active | paused | archived | provision_failed`; `SessionStatusBucket` =
 `blocked | review_ready | waiting | completed | failed | unknown`;

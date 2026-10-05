@@ -74,6 +74,22 @@ function bridgeInfoFor({ name, online, cliVersion }) {
   };
 }
 
+// `EnvironmentConfiguration` is a Swift enum with associated values, so its
+// synthesised Codable is a keyed container holding ONE key — the case name —
+// whose value is a nested keyed container of the case's associated values,
+// keyed by label or `_0` when unlabelled (SE-0295; Apple's own example:
+// `case upc(Int, Int, Int, Int)` encodes as `{"upc":{"_0":8,"_1":…}}`). The
+// payload therefore sits under `_0`, not directly under the case name. Missing
+// that level throws `keyNotFound(_0)`, which fails the whole
+// `EnvironmentConfiguration`, then the whole `EnvironmentResource`, and reaches
+// the app as ModelDecodingError(kind: unexpected_schema) — naming neither the
+// field nor the level. Set CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE=direct to
+// emit the old (wrong) flat shape for comparison.
+const CONFIG_SHAPE = process.env.CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE || "boxed";
+function environmentCase(caseName, payload) {
+  return CONFIG_SHAPE === "direct" ? { [caseName]: payload } : { [caseName]: { _0: payload } };
+}
+
 export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
   return {
     kind: ENVIRONMENT_KIND.bridge,
@@ -81,27 +97,20 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
     name,
     created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
-    // `config` is `EnvironmentConfiguration`, a Swift enum with ASSOCIATED
-    // values (`anthropic | byoc | paired | unknown`). The synthesised Codable
-    // for such an enum is a keyed container holding exactly ONE key — the case
-    // name — whose value is the case's payload. So the payload is nested under
-    // the case name, and a flat `{environment_type: …}` at `config`'s top level
-    // does not decode (which drops the whole EnvironmentResource, and with it
-    // every row of the picker — the empty state on device).
-    // `environmentType` inside a payload is a `ConfigType` — `anthropic |
+    // `config` is `EnvironmentConfiguration`, an enum with associated values,
+    // so a flat `{environment_type: …}` at `config`'s top level does not decode:
+    // the payload nests under the case name and, within that, under the
+    // associated value's key (`_0`) — see environmentCase above.
+    // `environmentType` inside the payload is a `ConfigType` — `anthropic |
     // byoc | bridge | unknown`, a case set with NO `paired` member — so the
     // paired payload carries `bridge`, the same axis value its `kind` reports.
-    // A literal `"paired"` is not a case of that enum and fails the whole
-    // `EnvironmentConfiguration`, which drops the entire picker list.
-    config: {
-      paired: {
-        environment_type: "bridge",
-        machine_name: name,
-        directory: "/workspace",
-        branch: null,
-        git_repo_url: null,
-      },
-    },
+    config: environmentCase("paired", {
+      environment_type: "bridge",
+      machine_name: name,
+      directory: "/workspace",
+      branch: null,
+      git_repo_url: null,
+    }),
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
 }
@@ -120,19 +129,17 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cli
     name,
     created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
-    config: {
-      anthropic: {
-        environment_type: "anthropic",
-        cwd: "/workspace",
-        init_script: null,
-        environment: {},
-        languages: [],
-        // `networkConfig`’s optionality is not recoverable from the metadata;
-        // a well-formed, permissive value decodes whether it is `CCRNetworkConfig`
-        // or `CCRNetworkConfig?`, while `null` would fail the former.
-        network_config: { allowed_hosts: [], allow_default_hosts: true },
-      },
-    },
+    config: environmentCase("anthropic", {
+      environment_type: "anthropic",
+      cwd: "/workspace",
+      init_script: null,
+      environment: {},
+      languages: [],
+      // `networkConfig`’s optionality is not recoverable from the metadata;
+      // a well-formed, permissive value decodes whether it is `CCRNetworkConfig`
+      // or `CCRNetworkConfig?`, while `null` would fail the former.
+      network_config: { allowed_hosts: [], allow_default_hosts: true },
+    }),
     // `bridgeInfo` sits on every `EnvironmentResource`; the app classifies the
     // row by `kind` and only reads `bridgeInfo` for the bridge kind. Emitting
     // the same Desktop descriptor here is ignored by a cloud row but decodes if
