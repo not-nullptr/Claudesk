@@ -25,14 +25,16 @@
 const TAG = 'claudesk-fish';
 const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
-// Bisect levers. Default is B only, installed after startup: hooking the
-// libswiftCore functions (A) ran during early process init and killed the app
-// before any handler output, so those stay off until B is proven to run clean.
-// Turn A back on one piece at a time afterwards.
-const HOOK_CONTEXT = false;
-const HOOK_FACTORIES = false;
-const HOOK_ALLOC = true;
-const INSTALL_DELAY_MS = 1500;
+// Bisect levers. Default is A only, installed well after startup. B
+// (swift_allocError) is off for good: it is a hot runtime call, so hooking it
+// made every tap take minutes, and it matched nothing at send time anyway.
+// A was what killed the app at spawn — but only because it was installed during
+// early init; the decode failure we want happens seconds later, on a tap, so
+// installing late avoids the crash window entirely.
+const HOOK_CONTEXT = true;
+const HOOK_FACTORIES = true;
+const HOOK_ALLOC = false;
+const INSTALL_DELAY_MS = 3000;
 
 // ------------------------------------------------------------ memory helpers
 function readBytes(address, length) {
