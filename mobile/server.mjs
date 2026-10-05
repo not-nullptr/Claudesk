@@ -1256,66 +1256,28 @@ async function handleCodeRoutes(request, response, url) {
     const folders = Array.isArray(listing?.folders)
       ? listing.folders.filter((entry) => entry && typeof entry.name === "string")
       : [];
-    // The app decodes this into RepoListResponse and a field mismatch fails
-    // silently — no toast, only Sentry. CLAUDE_MOBILE_REPOS_MODE selects the
-    // shape, and the file /data/repos-mode overrides it per request so a test
-    // needs no restart: write a mode, tap Add repository, watch Sentry for the
-    // `/code/repos/all` ModelDecodingError to disappear.
-    //   empty      repos/sources both empty  (does the envelope itself decode?)
-    //   name       name + owner only         (does the repo element decode?)
-    //   nobranch   name/owner/sourceURL/ghe  (is default_branch the fault?)
-    //   branchobj  default_branch as GithubBranch {name,commit_sha,is_default}
-    //   full       everything (default)
-    let mode = process.env.CLAUDE_MOBILE_REPOS_MODE || "full";
-    try {
-      const { readFile } = await import("node:fs/promises");
-      const override = (await readFile("/data/repos-mode", "utf8")).trim();
-      if (override) mode = override;
-    } catch { /* no override file */ }
-    const owner = { login: "local" };
-    let sources = [{ gitHubDotCom: {} }];
-    let repos;
-    switch (mode) {
-      case "empty":
-        repos = []; sources = []; break;
-      case "name":
-        repos = folders.map((f) => ({ name: f.name, owner })); sources = []; break;
-      case "srcenum":
-        // Isolate `sources` alone: no repos, just the github.com source marker.
-        repos = []; sources = [{ gitHubDotCom: {} }]; break;
-      case "withstatus":
-        // `repos` may be `[RepoWithStatus]` (repo + status), not `[GitHubRepo]`
-        // — the picker needs `status.appInstalled`. No `sources`.
-        repos = folders.map((f) => ({
-          repo: { name: f.name, owner, default_branch: "main" },
-          status: { workflow_enabled: true, app_installed: true },
-        }));
-        sources = [];
-        break;
-      case "withstatusrc":
-        repos = folders.map((f) => ({
-          repo: { name: f.name, owner, default_branch: "main" },
-          status: { workflow_enabled: true, app_installed: true },
-        }));
-        sources = [{ gitHubDotCom: {} }];
-        break;
-      case "branchstr":
-        repos = folders.map((f) => ({ name: f.name, owner, default_branch: "main" })); sources = []; break;
-      case "nobranch":
-        repos = folders.map((f) => ({ name: f.name, owner, source_url: f.path ? `file://${f.path}` : undefined, ghe_configuration_id: null }));
-        sources = []; break;
-      case "branchobj":
-        repos = folders.map((f) => ({ name: f.name, owner, default_branch: { name: "main", commit_sha: "", is_default: true } }));
-        break;
-      default:
-        repos = folders.map((f) => ({ name: f.name, owner, default_branch: "main", source_url: f.path ? `file://${f.path}` : undefined, ghe_configuration_id: null }));
-    }
-    console.log(`[mobile-code]   repos/all mode=${mode} -> ${repos.length} repo(s): ${folders.map((entry) => entry.name).join(", ")}`);
+    // `repos` is `[RepoWithStatus]` — each element `{ repo, status }` — not a bare
+    // `[GitHubRepo]`. The bare form fails the whole RepoListResponse, and the app
+    // reports that only to Sentry while rendering "No repositories", so the
+    // element type is not something to infer from the type's name. `sources` is
+    // a different element type and the picker's rows come from `repos`, so it
+    // stays empty; `status.appInstalled` is what makes a row offerable.
+    const repos = folders.map(({ name, path: repoPath }) => ({
+      repo: {
+        name,
+        owner: { login: "local" },
+        default_branch: "main",
+        source_url: repoPath ? `file://${repoPath}` : undefined,
+        ghe_configuration_id: null,
+      },
+      status: { workflow_enabled: true, app_installed: true },
+    }));
+    console.log(`[mobile-code]   repos/all -> ${repos.length} repo(s): ${folders.map((entry) => entry.name).join(", ")}`);
     sendJson(response, 200, {
       repos,
       source_warnings: [],
       sso_required_org_ids: [],
-      sources,
+      sources: [],
       next_cursor: null,
       is_complete: true,
     });
