@@ -2332,6 +2332,10 @@ async function bearerSession(request) {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  // Every request, unconditionally. The failing leg is often one the facade
+  // answers without its own [mobile-code] line, so this makes the sequence
+  // around a tap complete instead of a filtered view that may drop it.
+  console.log(`[mobile-req] ${request.method} ${url.pathname}${url.search || ""}`);
   if (capture.enabled) {
     response.on("finish", () => {
       void capture.record({
