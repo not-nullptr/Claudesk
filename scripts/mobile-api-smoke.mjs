@@ -241,6 +241,9 @@ try {
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
   assert.equal(bridge.config.environment_type, "bridge");
   assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
+  // A directory with a session must not read as "at capacity": the app gates the
+  // new-session button on the directory's session count against this.
+  assert.ok(bridge.bridge_info.max_sessions > 1, "directories are not capped at one session");
   // Each workspace folder is advertised as its own bridge environment, so the
   // app's remote folder picker (whose rows are `Folder { id: CodeEnvironmentTag }`)
   // lists the device's directories. They share the device's `machine_name`.

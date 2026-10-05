@@ -77,9 +77,20 @@ export const CLOUD_ENVIRONMENT_ID = "anthropic-cloud-local";
 // already decodes from this facade's ISO-8601 strings. Mirror that here.
 const ENVIRONMENT_CREATED_AT = new Date().toISOString();
 
+// How many sessions a directory may hold before the app calls it "at capacity"
+// and disables new-session there. The app pairs this with the count of the
+// directory's sessions (`Capacity { activeSessionCount, maxSessions }`) and
+// gates the new-session button on `activeSessionCount >= maxSessions`
+// (`device_directory_at_capacity_hint`, "Directory at capacity — end one of its
+// sessions"). A self-hosted single-user Desktop has no such cap, so the old
+// value of 1 made *any* directory with a session un-startable.
+const MAX_SESSIONS_PER_DIRECTORY = Number(process.env.CLAUDE_MOBILE_MAX_SESSIONS) > 0
+  ? Math.floor(Number(process.env.CLAUDE_MOBILE_MAX_SESSIONS))
+  : 1000;
+
 function bridgeInfoFor({ name, online, cliVersion, directory = "/workspace", branch = "", gitRepoUrl = "" }) {
   return {
-    max_sessions: 1,
+    max_sessions: MAX_SESSIONS_PER_DIRECTORY,
     machine_name: name,
     directory,
     // Never null a String. The app's decoder says
