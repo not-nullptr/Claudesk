@@ -1430,23 +1430,23 @@ async function streamCodeWatch(request, response, url, sessionId) {
   sendSseRecord(response, "hello", { from_sequence_num: fromSequence, session_id: sessionId });
 
   // A single-session watch filters to that session; the list screen's watch
-  // (no id) takes every Code session's frames. This leg speaks
-  // `SessionWatchFrame` (upserted/deleted) — NOT the transcript leg's
-  // `client_event`, which is a different protocol.
-  //
-  // The SSE `data` must be the whole `SessionWatchFrame`, and the enum payload
-  // nests under `_0` (SE-0295, one unlabelled associated value):
-  //   {"event":{"upserted":{"_0":<SessionResource>}}}
-  //   {"event":{"deleted":{"_0":"<tagged id>"}}}
-  // Emitting the bare payload (what this used to do) is NOT benign: the app
-  // decodes `data` as `SessionWatchFrame`, so the bare resource sneaks through
-  // as `event: nil`, but the bare `deleted` id is `typeMismatch(Dictionary,
-  // found string)` → `ModelDecodingError(kind: unexpected_schema)`. A frame with
-  // no payload cannot be encoded at all, so it is dropped.
+  // (no id) takes every Code session's frames. The SSE `event:` names the case
+  // and `data` carries that case's payload, NOT a `SessionWatchFrame` (which is
+  // an internal, non-Decodable model). The two payloads are:
+  //   upserted -> a whole `SessionResource`                       (bare object)
+  //   deleted  -> `SessionWatchWire.Removed` = {"id":"<session>"} (object!)
+  // The old code sent the bare session id STRING for `deleted`; decoded as
+  // `Removed`, that is `typeMismatch(Dictionary<String, Any>, found string)` —
+  // or `valueNotFound` when the id was null — which the classifier reports as
+  // `ModelDecodingError(kind: unexpected_schema)`. A frame with no id cannot be
+  // encoded at all, so it is dropped.
   const emit = (id, record) => {
     for (const frame of codeEngine.watchFramesFor(id, record)) {
-      if (frame.data == null) continue;
-      sendSseRecord(response, frame.event, { event: { [frame.event]: { _0: frame.data } } });
+      const payload = frame.event === "deleted"
+        ? (frame.data == null ? null : { id: frame.data })
+        : frame.data;
+      if (payload == null) continue;
+      sendSseRecord(response, frame.event, payload);
       console.log(`[mobile-code]   watch ${frame.event} ${id}`);
     }
   };

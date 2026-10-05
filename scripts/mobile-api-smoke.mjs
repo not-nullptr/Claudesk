@@ -1047,12 +1047,9 @@ try {
   });
   const liveFrame = await watchRecordsPromise;
   assert.ok(liveFrame, "the watch leg streams a frame for the live turn");
-  // Each record's `data` is the whole `SessionWatchFrame`; the app decodes it as
-  // `{event: SessionWatchEvent?}` and SE-0295 nests the one unlabelled payload
-  // under `_0`, so the resource is at `event.upserted._0` (a bare payload is
-  // silently dropped for `upserted` and rejected outright for `deleted`).
-  assert.equal(liveFrame.data.event.upserted._0.id, createdResource.id,
-    "a live frame upserts the session it names");
+  // The SSE `event:` is `upserted` and its `data` is the whole SessionResource
+  // (the app keys the payload type off the event name).
+  assert.equal(liveFrame.data.id, createdResource.id, "a live frame upserts the session it names");
 
   // Stop goes to LocalSessions.interrupt with the unprefixed id.
   const stopped = await call(codePath(createdResource.id, "/interrupt"), { method: "POST", body: {} });

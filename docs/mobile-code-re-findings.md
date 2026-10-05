@@ -705,32 +705,32 @@ code refs), plus `/tmp/{macho,swift,fmd,refs,funcs,armdis}.py` from an earlier
 session. Do not create a file named `dis.py` (it shadows the stdlib module and
 breaks capstone).
 
-## Code watch frames are `SessionWatchFrame` (wire corrected 2026-10-05)
+## Code watch SSE: payload is keyed by the event name; `deleted` is an object
+(2026-10-05)
 
-`GET /v1/code/sessions/watch` streams `SessionWatchFrame`:
+`GET /v1/code/sessions/watch` is an SSE stream. Each record's SSE `event:` names
+the case and its `data` is that case's payload — the app does **not** decode a
+`SessionWatchFrame` (that type is an internal, non-`Decodable` model: its only
+conformances are `Equatable` / `CasePathable`, and so are `SessionWatchEvent`'s).
+The two wire payloads are:
 
-```
-struct SessionWatchFrame { let event: SessionWatchEvent? }
-enum   SessionWatchEvent { case upserted(SessionResource); case deleted(AnthropicTagged<SessionTag,String>) }
-```
+* `event: upserted` → a whole `SessionResource` (bare object)
+* `event: deleted`  → `SessionWatchWire.Removed` = `{"id":"<session id>"}`
 
-The app decodes each SSE `data` as the whole frame, and SE-0295 nests the one
-unlabelled payload under `_0`. Confirmed by compiling the two types with Swift
-6 and round-tripping through a `JSONEncoder`/`JSONDecoder`:
+`SessionWatchWire.Removed { let id: AnthropicTagged<SessionTag,String> }` is
+`Decodable` with the single key `id`. Verified by compiling it with Swift 6:
 
-```json
-data: {"event":{"upserted":{"_0":<SessionResource>}}}
-data: {"event":{"deleted":{"_0":"<tagged id>"}}}
-```
+* `{"id":"code_x"}` → decodes
+* `"code_x"` (bare string) → `typeMismatch(Dictionary<String,Any>, found string)`
+* `null` → `valueNotFound(Dictionary<String,Any>, "found null value instead")`
 
-`AnthropicTagged` encodes as a bare string (single-value — the environment
-`environmentId` decodes that way), so `{"_0":"<id>"}`, not `{"_0":{"rawValue":…}}`.
+Neither failure is `dataCorrupted`, so the classifier returns `unexpected_schema`
+— i.e. `ModelDecodingError(path: /v1/code/sessions, kind: unexpected_schema)`,
+the failure seen on send. The facade had been sending the bare id **string**
+(and `null` when the list watch had no session id). Fixed in `mobile/server.mjs`:
+`deleted` now sends `{"id": …}` and a frame with no id is dropped; `upserted`
+stays the bare resource, keyed off the SSE `event:` name.
 
-The facade used to put the bare payload in `data` (the resource, or the id
-string). That is **not** benign: the app decodes `data` as `SessionWatchFrame`,
-so the bare resource sneaks through as `event: nil` (silently dropped), but the
-bare `deleted` id — or a `null` payload — is
-`typeMismatch(Dictionary<String, Any>, …)`, which the classifier reports as
-`ModelDecodingError(kind: unexpected_schema)` at path `/v1/code/sessions`. The
-SSE writer (`mobile/server.mjs`) now wraps each frame and drops payload-less
-frames.
+(Superseded: an earlier note here claimed the `data` is a `SessionWatchFrame`
+with the payload under `_0` — that was inferred from the type name before
+checking its conformances, and is wrong.)
