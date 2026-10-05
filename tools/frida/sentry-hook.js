@@ -49,6 +49,31 @@ function objJson(obj, pretty) {
   }
 }
 
+// A SentryEvent that `serialize` hands back nil for still has its `exception`
+// array populated, and each `SentryException`'s `value` is the formatted string
+// — the one that carries `ModelDecodingError(path: …)`. Read it directly.
+function sentryExceptions(value) {
+  try {
+    if (!value.respondsToSelector_(ObjC.selector('exception'))) return null;
+    const list = value.exception();
+    if (!list || list.isNull()) return null;
+    const out = [];
+    for (let i = 0; i < list.count(); i += 1) {
+      try {
+        const exception = list.objectAtIndex_(i);
+        const message = exception.value();
+        if (message && !message.isNull()) {
+          const text = message.respondsToSelector_(ObjC.selector('formatted'))
+            ? message.formatted() : message;
+          const string = text.toString();
+          if (string) out.push(string);
+        }
+      } catch (error) { /* skip this exception */ }
+    }
+    return out.length ? out : null;
+  } catch (error) { return null; }
+}
+
 function describe(cls, sel, arg) {
   let value;
   try { value = new ObjC.Object(arg); } catch (error) { return; }
@@ -61,6 +86,14 @@ function describe(cls, sel, arg) {
       if (out) { log(`\n=== ${tag} ===\n${out}`); return; }
     }
   } catch (error) { /* not an event */ }
+
+  // Events whose `serialize` returns nil still expose the exception value.
+  const exceptions = sentryExceptions(value);
+  if (exceptions) {
+    log(`\n=== ${tag} ===`);
+    for (const text of exceptions) log(`exc: ${text}`);
+    return;
+  }
 
   // An NSError: dump the userInfo Sentry is about to discard.
   try {
