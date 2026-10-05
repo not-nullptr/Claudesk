@@ -25,15 +25,14 @@
 const TAG = 'claudesk-fish';
 const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
-// Bisect levers. If the app dies at spawn again, turn these off one at a time —
-// A (Context.init) and the factory hooks are the ones that run during early
-// process init; B is the fallback and is the safest. INSTALL_DELAY_MS pushes all
-// installation past startup, which also sidesteps a crash caused by hooking a
-// function that early init calls.
-const HOOK_CONTEXT = true;
-const HOOK_FACTORIES = true;
+// Bisect levers. Default is B only, installed after startup: hooking the
+// libswiftCore functions (A) ran during early process init and killed the app
+// before any handler output, so those stay off until B is proven to run clean.
+// Turn A back on one piece at a time afterwards.
+const HOOK_CONTEXT = false;
+const HOOK_FACTORIES = false;
 const HOOK_ALLOC = true;
-const INSTALL_DELAY_MS = 0;
+const INSTALL_DELAY_MS = 1500;
 
 // ------------------------------------------------------------ memory helpers
 function readBytes(address, length) {
@@ -199,9 +198,11 @@ const seen = new Set();
 function looksLikeError(value) {
   const sample = readBytes(value.add(24), 8);
   if (!sample || u64(sample, 0) !== ONE_POINT_ZERO) return false;
-  if (readSwiftString(value)) return true;
-  const head = readBytes(value, 16);
-  return Boolean(head && u64(head, 0) === 0n);
+  // +0 is the error's `path`, and on this surface it is always a route. Requiring
+  // the leading slash keeps the (very common) `String + Double(1.0)` shape from
+  // matching every unrelated allocation at startup.
+  const path = readSwiftString(value);
+  return Boolean(path && path.startsWith('/'));
 }
 
 function dump(value) {
@@ -223,15 +224,17 @@ function hookAllocError() {
   Interceptor.attach(address, {
     onEnter(args) { this.storage = args[1]; },
     onLeave(retval) {
-      const candidates = [];
-      if (retval && !retval.isNull()) candidates.push(retval);
-      if (this.storage && !this.storage.isNull()) candidates.push(this.storage);
-      for (const candidate of candidates) {
-        if (!looksLikeError(candidate)) continue;
-        for (const delay of [2, 12, 50]) setTimeout(() => {
-          try { if (looksLikeError(candidate)) dump(candidate); } catch (error) {}
-        }, delay);
-      }
+      try {
+        const candidates = [];
+        if (retval && !retval.isNull()) candidates.push(retval);
+        if (this.storage && !this.storage.isNull()) candidates.push(this.storage);
+        for (const candidate of candidates) {
+          if (!looksLikeError(candidate)) continue;
+          for (const delay of [2, 12, 50]) setTimeout(() => {
+            try { if (looksLikeError(candidate)) dump(candidate); } catch (error) {}
+          }, delay);
+        }
+      } catch (error) { /* never disturb the app */ }
     },
   });
   log('B: hooked swift_allocError');
