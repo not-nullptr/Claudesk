@@ -499,7 +499,7 @@ struct EnvironmentListResponse {
 struct BridgeEnvironmentInfo {
   let maxSessions: Int?; let machineName: String?; let directory: String?
   let branch: String?; let gitRepoUrl: String?
-  let online: Bool?; let spawnMode: BridgeSpawnMode?   // singleSession|worktree|sameDir
+  let online: Bool?; let spawnMode: BridgeSpawnMode?   // wire: single-session|worktree|same-dir
   let cliVersion: String?
 }
 struct AnthropicEnvironmentConfiguration {
@@ -519,9 +519,21 @@ struct PairedEnvironmentConfiguration {
 `ClaudeCodable.TrimmedRawRepresentable`, and has **no** synthesised `CodingKeys`
 in the dump (unlike the real DTOs) — so it decodes as a single value (bare
 string), the way `SessionResource.Origin` (also `TrimmedRawRepresentable`)
-already does. `EnvironmentKind`/`EnvironmentState` conform to `LossyRawRepresentable`
-(unknown values fall back to `.unknown`, no throw). Fixed in
-`mobile/code-transcript.mjs` (`environmentConfig`).
+already does. `EnvironmentKind`/`EnvironmentState`/`ConfigType` conform to
+`LossyRawRepresentable` (unknown values fall back to `.unknown`, no throw).
+**`BridgeSpawnMode` does NOT** — it is the one enum on the record that rejects
+an unknown value, so its raw value is the one that can fail the decode. Those
+raw values are the HYPHENATED spellings `single-session | worktree | same-dir`:
+they sit in `__cstring`, referenced by the enum's raw-value table, while the
+`__swift5_reflstr` copies (`singleSession/worktree/sameDir`) are only the case
+names. `worktree` — where the two spellings coincide — is the only one that
+appears twice, which is what gives the custom spellings away. Fixed in
+`mobile/code-transcript.mjs` (`environmentConfig`) and `mobile/code-ids.mjs`
+(`BRIDGE_SPAWN_MODE`).
+
+These were **two independent wrong fields** (the nested `config` and the
+`spawn_mode` value), which is why the earlier single-field bisect
+(`nobridge`/`nocfg`/…) never decoded: removing one still left the other wrong.
 
 > Tooling note: `docs/mobile-code-decodable-types.txt` only lists conformance
 > names. The **fields and their types** come from `ipsw` (`blacktop/ipsw` release
