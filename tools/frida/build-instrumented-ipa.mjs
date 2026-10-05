@@ -22,6 +22,11 @@
 //     --out Claude-frida.ipa \
 //     --report-url https://<your-claudesk-host> --token <secret>
 //
+// Script mode takes --script NAME to choose which probe to bake (default
+// `probe.js`, beside this tool). Bake `decode-error-probe.js` when the question
+// is one specific error: it has to be running before the app builds it, and
+// script mode is the only mode that starts at the app's first instruction.
+//
 // Usage — no gadget at all, the app back exactly as it was:
 //   node tools/frida/build-instrumented-ipa.mjs \
 //     --app /workspace/ipa-work/extracted/Payload/Claude.app \
@@ -285,7 +290,17 @@ if (gadget) {
   mkdirSync(frameworks, { recursive: true });
   writeFileSync(join(frameworks, GADGET_NAME), gadget);
 }
-const probe = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "probe.js"));
+// Which script gets baked. `probe.js` is the census/throwing instrument; the
+// decode probe is the one to bake when the question is a specific error, because
+// it has to be running before the app builds it. Whichever is chosen is written
+// into the bundle as `probe.js`, so the config's path stays what it always was.
+const scriptName = arg("script", "probe.js");
+const scriptPath = join(dirname(fileURLToPath(import.meta.url)), scriptName);
+if (!existsSync(scriptPath)) {
+  console.error(`--script ${scriptName} is not beside this tool (${scriptPath})`);
+  process.exit(1);
+}
+const probe = readFileSync(scriptPath);
 // The config is discovered by matching the gadget's filename with a `.config`
 // suffix; the script path stays relative so it resolves beside the gadget
 // wherever the bundle lands (we cannot know the on-device UUID path). On iOS
