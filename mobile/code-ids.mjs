@@ -78,13 +78,8 @@ export const SESSION_LIFECYCLE_STATUS = Object.freeze({
   archived: "archived",
 });
 
-// The wire values are the enum CASE NAMES, not snake/hyphen spellings. The
-// binary's enum-case block reads `anthropicCloud, byoc, bridge, unknown`, and
-// `singleSession, worktree, sameDir` — no custom raw values, so Swift's
-// synthesised Codable decodes those exact strings. `anthropic_cloud` and
-// `same-dir` come from a different (analytics) string block in the same image
-// and are NOT accepted here; sending them fails the whole EnvironmentResource
-// with the app's opaque ModelDecodingError(kind: unexpected_schema).
+// `EnvironmentKind` is `LossyRawRepresentable`, so an unknown value falls back
+// to `.unknown` and never throws — the spelling here cannot fail the decode.
 export const ENVIRONMENT_KIND = Object.freeze({
   anthropicCloud: "anthropicCloud",
   byoc: "byoc",
@@ -92,10 +87,20 @@ export const ENVIRONMENT_KIND = Object.freeze({
   unknown: "unknown",
 });
 
+// `BridgeSpawnMode` — unlike `EnvironmentKind`/`EnvironmentState`/`ConfigType` —
+// is NOT lossy, so an unknown raw value throws `dataCorrupted` and fails the
+// whole `EnvironmentResource` (opaque `ModelDecodingError(kind:
+// unexpected_schema)`). Its cases are `singleSession | worktree | sameDir`, but
+// the raw values are the HYPHENATED spellings: `single-session | worktree |
+// same-dir`. The binary carries both (`single-session`/`same-dir` in __cstring,
+// referenced by the raw-value table; `singleSession`/`sameDir` in
+// __swift5_reflstr as the case names), and `worktree` — where the two coincide —
+// appears twice. This is the one enum on the environment record that can reject
+// a value, so sending `sameDir` here is what failed every environment decode.
 export const BRIDGE_SPAWN_MODE = Object.freeze({
-  singleSession: "singleSession",
+  singleSession: "single-session",
   worktree: "worktree",
-  sameDir: "sameDir",
+  sameDir: "same-dir",
 });
 
 // Desktop's own session record is flat and says `isRunning` / `isArchived`,

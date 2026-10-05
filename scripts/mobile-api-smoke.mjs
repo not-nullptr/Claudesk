@@ -238,7 +238,7 @@ try {
   // case is `paired` but its payload reports the same `bridge` axis its `kind`
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
   assert.equal(bridge.config.environment_type, "bridge");
-  assert.equal(bridge.bridge_info.spawn_mode, "sameDir");
+  assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);
   assert.equal(environmentList.last_id, environments.at(-1).environment_id);
