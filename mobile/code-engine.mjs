@@ -40,6 +40,17 @@ export class CodeError extends Error {
 
 const notFound = () => new CodeError("session not found", 404, "not_found_error");
 
+// `SdkPermissionMode` values Desktop accepts. The app's Code composer offers
+// only Manual / Accept edits / Plan / Auto — it has no Bypass row in this build
+// (`bypassPermissions` exists as a wire value only; "Skip all approvals" is the
+// Cowork mode). CLAUDE_MOBILE_PERMISSION_MODE=bypassPermissions forces the mode
+// on every session `start`, so Code runs without prompts even though the UI
+// cannot select it.
+const SDK_PERMISSION_MODES = new Set(["default", "acceptEdits", "bypassPermissions", "dontAsk", "plan", "auto"]);
+const FORCED_PERMISSION_MODE = SDK_PERMISSION_MODES.has(process.env.CLAUDE_MOBILE_PERMISSION_MODE)
+  ? process.env.CLAUDE_MOBILE_PERMISSION_MODE
+  : null;
+
 function asCodeError(error) {
   if (error instanceof CodeError) return error;
   if (error instanceof DesktopError) {
@@ -737,10 +748,11 @@ export function createCodeEngine({
           messageUuid,
           model: loaded?.session?.model ?? meta?.model ?? undefined,
           title: meta?.title || body.replace(/\s+/g, " ").trim().slice(0, 60),
-          // The composer's permission mode (e.g. `bypassPermissions`) must be
-          // set at start, or the first turn runs under Desktop's default and
-          // prompts. `meta.permission_mode` comes from the create/PATCH.
-          permissionMode: meta?.permission_mode ?? undefined,
+          // The composer's permission mode must be set at start, or the first
+          // turn runs under Desktop's default and prompts. A facade-level
+          // `CLAUDE_MOBILE_PERMISSION_MODE` (e.g. `bypassPermissions`) wins over
+          // the app's pick, since the Code composer has no bypass row.
+          permissionMode: FORCED_PERMISSION_MODE ?? meta?.permission_mode ?? undefined,
         }));
       } else {
         if (interrupt) await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId)).catch(() => {});
