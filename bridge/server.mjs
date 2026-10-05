@@ -1924,9 +1924,15 @@ const codeTitleStartedAt = Date.now();
 let codeTitlePollInFlight = false;
 const TITLE_DEVICE_ORG = "00000000-0000-4000-8000-000000000001";
 
-function firstUserMessageText(entries) {
+// Every non-empty user-message text in a transcript, in order. Used both to
+// find the first message and to prove the session has had exactly ONE user turn
+// — the trigger is "the first turn just finished", and a session with a
+// history is not that, however its title happens to read.
+function userMessageTexts(entries) {
+  const texts = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry !== "object" || entry.isMeta || entry.isSynthetic) continue;
+    if (entry.type !== "user" && entry.message?.role !== "user") continue;
     const content = entry.message?.content;
     const text = typeof content === "string"
       ? content
@@ -1934,9 +1940,9 @@ function firstUserMessageText(entries) {
         ? content.filter((block) => block?.type === "text").map((block) => block.text || "").join("")
         : "";
     const normalized = text.replace(/\s+/g, " ").trim();
-    if (normalized && (entry.type === "user" || entry.message?.role === "user")) return normalized;
+    if (normalized) texts.push(normalized);
   }
-  return "";
+  return texts;
 }
 
 function titleLooksLikeFirstMessage(title, firstMessage) {
@@ -1956,6 +1962,19 @@ async function generateCodeTitle(firstMessage) {
   });
   const body = JSON.parse(Buffer.from(result?.bodyBase64 || "", "base64").toString("utf8"));
   return typeof body?.title === "string" ? body.title.replace(/\s+/g, " ").trim() : "";
+}
+
+// The session as Desktop reports it RIGHT NOW, not a row from the list read
+// that started this poll. The rename is applied only against this fresh read, so
+// a stale row (or a transcript that read out of step with its id) can never
+// rename a session that no longer looks like an untitled first turn — which is
+// how an already-active chat got renamed with another chat's title.
+async function freshSession(id) {
+  try {
+    return await desktop.invoke("LocalSessions", "getSession", [id]);
+  } catch {
+    return null;
+  }
 }
 
 async function titleCodeSessions() {
@@ -1984,16 +2003,26 @@ async function titleCodeSessions() {
       } catch {
         continue; // not ready yet — look again next tick
       }
-      const firstMessage = firstUserMessageText(entries);
-      if (!firstMessage) continue; // no first turn yet
+      const userTexts = userMessageTexts(entries);
+      if (userTexts.length === 0) continue; // no first turn yet — look again
       codeTitleSessionIds.add(id);
-      if (!titleLooksLikeFirstMessage(session.title, firstMessage)) continue;
+      // Exactly one user turn: a fresh session whose first turn just finished.
+      // A session with more is not one we should rename.
+      if (userTexts.length !== 1) continue;
+      const firstMessage = userTexts[0];
+      const before = await freshSession(id);
+      if (!before || before.isRunning || before.isArchived) continue;
+      if (!titleLooksLikeFirstMessage(before.title, firstMessage)) continue;
       try {
         const title = await generateCodeTitle(firstMessage);
-        if (title && title !== session.title) {
-          await desktop.invoke("LocalSessions", "updateSession", [id, { title }]);
-          console.log(`[cowork-bridge] titled code session ${id}: ${JSON.stringify(title)}`);
-        }
+        if (!title) continue;
+        // Re-read after the model call: if the session moved on (another turn,
+        // a rename), leave it alone.
+        const after = await freshSession(id);
+        if (!after || after.isRunning || after.title === title) continue;
+        if (!titleLooksLikeFirstMessage(after.title, firstMessage)) continue;
+        await desktop.invoke("LocalSessions", "updateSession", [id, { title }]);
+        console.log(`[cowork-bridge] titled code session ${id}: ${JSON.stringify(title)}`);
       } catch (error) {
         console.warn(`[cowork-bridge] could not title code session ${id}: ${error.message}`);
       }
