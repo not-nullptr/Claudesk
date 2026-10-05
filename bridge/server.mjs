@@ -547,6 +547,7 @@ const protocolRules = [
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+\/(?:feature_settings|cowork_settings|office_settings)$/i },
   { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
+  { methods: new Set(["PATCH"]), path: /^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i },
 ];
 
 const officialAssetPrefixes = [
@@ -881,6 +882,64 @@ function validateAccountSettingsUpdate(method, pathname, body) {
   }
 }
 
+// The official renderer persists the per-surface model selector (the model, its
+// thinking effort/mode, the per-model defaults and the preset) with a PATCH to
+// /api/organizations/{org}/model_selector_state/{surface}. The bridge previously
+// dropped that path, so the optimistic selection rolled back and every composer
+// snapped back to the last saved model on reload.
+const modelSelectorFields = new Set([
+  "model",
+  "thinking",
+  "thinking_by_model",
+  "preset",
+  "selection_source",
+]);
+
+// A bound broad enough for every field the selector sends and for the desktop's
+// `epitaxyPrefs` bucket (many small UI picks, occasional short lists), strict
+// enough that the path cannot carry arbitrary payloads to the upstream API.
+function isBoundedJsonValue(value, depth = 0) {
+  if (depth > 8) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return value.length <= 8192;
+  if (Array.isArray(value)) {
+    return value.length <= 512 && value.every((item) => isBoundedJsonValue(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    return entries.length <= 512
+      && entries.every(([key, item]) =>
+        key.length <= 128 && isBoundedJsonValue(item, depth + 1));
+  }
+  return false;
+}
+
+function validateModelSelectorUpdate(method, pathname, body) {
+  if (
+    method !== "PATCH"
+    || !/^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i.test(pathname)
+  ) {
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    throw new ApiError(400, "Model selector update must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ApiError(400, "Model selector update must be an object");
+  }
+  const keys = Object.keys(parsed);
+  if (!keys.length) throw new ApiError(400, "Model selector update is empty");
+  for (const key of keys) {
+    if (!modelSelectorFields.has(key) || !isBoundedJsonValue(parsed[key])) {
+      throw new ApiError(400, "Model selector field is not allowed");
+    }
+  }
+}
+
 function sanitizeStoreValue(surface, store, value) {
   if (surface === "LocalAgentModeSessions" && store === "sessionsBridgeStatusStore") {
     return { remoteToolsDeviceName: value?.remoteToolsDeviceName ?? null };
@@ -915,6 +974,7 @@ async function forwardOfficialProtocol(request, response, url) {
     : await readRequestBuffer(request);
   validateAccountProfileUpdate(method, url.pathname, body);
   validateAccountSettingsUpdate(method, url.pathname, body);
+  validateModelSelectorUpdate(method, url.pathname, body);
   const result = await desktop.protocol({
     method,
     pathname: url.pathname,
@@ -1074,6 +1134,12 @@ function validateCodePreference(method, args) {
   const accountMap = ["bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key);
   if (method !== "setPreference" || args.length !== 2
     || !(key === "bypassPermissionsModeEnabled" && typeof value === "boolean"
+      // The desktop UI funnels its account-scoped UI picks (permission mode,
+      // notification levels, sidebar mode, ...) through one `epitaxyPrefs`
+      // bucket, so that key is what a permission-mode change actually writes.
+      || key === "epitaxyPrefs" && value && typeof value === "object" && !Array.isArray(value)
+        && Object.entries(value).every(([entry, item]) =>
+          entry.length <= 128 && isBoundedJsonValue(item, 1))
       || accountMap && value && typeof value === "object" && !Array.isArray(value)
         && Object.entries(value).every(([account, enabled]) =>
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(account)

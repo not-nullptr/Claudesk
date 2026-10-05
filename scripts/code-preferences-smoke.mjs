@@ -29,12 +29,23 @@ for (const path of ["../bridge/server.mjs", "../bridge-wrapper/main.cjs"]) {
   const text = await readFile(new URL(path, import.meta.url), "utf8");
   const start = text.indexOf("function validateCodePreference(");
   const end = text.indexOf("\nfunction ", start + 1);
-  const validate = vm.runInNewContext(`${text.slice(start, end)}\nvalidateCodePreference`, { ApiError: Error });
+  const boundStart = text.indexOf("function isBoundedJsonValue(");
+  const boundEnd = text.indexOf("\nfunction ", boundStart + 1);
+  const validate = vm.runInNewContext(
+    `${text.slice(boundStart, boundEnd)}\n${text.slice(start, end)}\nvalidateCodePreference`,
+    { ApiError: Error },
+  );
   validate("getPreferences", []);
   validate("setPreference", ["bypassPermissionsModeEnabled", false]);
   validate("setPreference", ["bypassPermissionsOptInByAccount", { [account]: true }]);
+  // The permission-mode pick is stored inside the desktop's `epitaxyPrefs`
+  // bucket, so that key has to pass or the picker resets on every reload.
+  validate("setPreference", ["epitaxyPrefs", { [`cc-landing-draft-permission-mode.${account}`]: "auto" }]);
+  validate("setPreference", ["epitaxyPrefs", { "epitaxy-perm-mode-acks": [`${account}:bypass`] }]);
   for (const args of [["unrelatedPreference", true], ["bypassPermissionsModeEnabled", "true"],
-    ["bypassPermissionsOptInByAccount", { all: true }], ["bypassPermissionsGateByAccount", { [account]: 1 }]]) {
+    ["bypassPermissionsOptInByAccount", { all: true }], ["bypassPermissionsGateByAccount", { [account]: 1 }],
+    ["epitaxyPrefs", ["not", "an", "object"]], ["epitaxyPrefs", "auto"],
+    ["epitaxyPrefs", { ["k".repeat(129)]: true }]]) {
     assert.throws(() => validate("setPreference", args));
   }
   assert.throws(() => validate("getPreferences", ["extra"]));
@@ -50,14 +61,30 @@ for (const path of ["../bridge/server.mjs", "../bridge-wrapper/main.cjs"]) {
 }
 const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
 const invocation = wrapper.slice(wrapper.indexOf("async function invokeSettings("), wrapper.indexOf("async function readStore("));
-let nativePreferences = { bypassPermissionsOptInByAccount: {}, unrelatedPrivatePreference: "private" };
+let nativePreferences = {
+  bypassPermissionsOptInByAccount: {},
+  unrelatedPrivatePreference: "private",
+  epitaxyPrefs: {
+    [`cc-landing-draft-permission-mode.${account}`]: "auto",
+    "epitaxy-perm-mode-acks": [`${account}:bypass`],
+    ["k".repeat(129)]: "dropped",
+    "builtinBrowserAllowedDomains": ["example.com"],
+  },
+};
 const invoke = vm.runInNewContext(`${invocation}\ninvokeSettings`, {
   Buffer, undefinedSentinelKey: "__claudeRemoteUndefinedV1",
   decodeIpcValue: value => value, validateSettingsInvocation() {},
   gatewaySettingsRenderer: async () => ({ executeJavaScript: async () => JSON.stringify({ ok: true, value: nativePreferences }) }),
 });
 let exposed = await invoke("AppPreferences", "getPreferences", []);
-assert.deepEqual(Object.keys(exposed), ["bypassPermissionsOptInByAccount"]);
+assert.deepEqual(Object.keys(exposed).sort(), ["bypassPermissionsOptInByAccount", "epitaxyPrefs"]);
+assert.equal(exposed.epitaxyPrefs[`cc-landing-draft-permission-mode.${account}`], "auto");
+assert.equal(
+  JSON.stringify(exposed.epitaxyPrefs["epitaxy-perm-mode-acks"]),
+  JSON.stringify([`${account}:bypass`]),
+);
+assert.equal(exposed.epitaxyPrefs["k".repeat(129)], undefined, "oversized preference keys are dropped");
+assert.equal(exposed.unrelatedPrivatePreference, undefined);
 nativePreferences = {};
 exposed = await invoke("AppPreferences", "getPreferences", []);
 assert.equal(Object.keys(exposed).length, 0, "unsupported preferences must not be fabricated");

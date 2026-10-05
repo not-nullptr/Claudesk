@@ -969,6 +969,7 @@ const protocolRules = [
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+\/(?:feature_settings|cowork_settings|office_settings)$/i },
   { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
+  { methods: new Set(["PATCH"]), path: /^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i },
 ];
 
 function sendJson(response, statusCode, body) {
@@ -1022,6 +1023,12 @@ function validateCodePreference(method, args) {
   const accountMap = ["bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key);
   if (method !== "setPreference" || args.length !== 2
     || !(key === "bypassPermissionsModeEnabled" && typeof value === "boolean"
+      // The desktop UI funnels its account-scoped UI picks (permission mode,
+      // notification levels, sidebar mode, ...) through one `epitaxyPrefs`
+      // bucket, so that key is what a permission-mode change actually writes.
+      || key === "epitaxyPrefs" && value && typeof value === "object" && !Array.isArray(value)
+        && Object.entries(value).every(([entry, item]) =>
+          entry.length <= 128 && isBoundedJsonValue(item, 1))
       || accountMap && value && typeof value === "object" && !Array.isArray(value)
         && Object.entries(value).every(([account, enabled]) =>
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(account)
@@ -1142,6 +1149,64 @@ function validateAccountSettingsUpdate(method, pathname, body) {
     const values = allowedAccountSettings.get(key);
     if (!values || !values.has(parsed[key])) {
       throw new Error("Account setting is not allowed");
+    }
+  }
+}
+
+// The official renderer persists the per-surface model selector (the model, its
+// thinking effort/mode, the per-model defaults and the preset) with a PATCH to
+// /api/organizations/{org}/model_selector_state/{surface}. The bridge previously
+// dropped that path, so the optimistic selection rolled back and every composer
+// snapped back to the last saved model on reload.
+const modelSelectorFields = new Set([
+  "model",
+  "thinking",
+  "thinking_by_model",
+  "preset",
+  "selection_source",
+]);
+
+// A bound broad enough for every field the selector sends and for the desktop's
+// `epitaxyPrefs` bucket (many small UI picks, occasional short lists), strict
+// enough that the path cannot carry arbitrary payloads to the upstream API.
+function isBoundedJsonValue(value, depth = 0) {
+  if (depth > 8) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return value.length <= 8192;
+  if (Array.isArray(value)) {
+    return value.length <= 512 && value.every((item) => isBoundedJsonValue(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    return entries.length <= 512
+      && entries.every(([key, item]) =>
+        key.length <= 128 && isBoundedJsonValue(item, depth + 1));
+  }
+  return false;
+}
+
+function validateModelSelectorUpdate(method, pathname, body) {
+  if (
+    method !== "PATCH"
+    || !/^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i.test(pathname)
+  ) {
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    throw new Error("Model selector update must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Model selector update must be an object");
+  }
+  const keys = Object.keys(parsed);
+  if (!keys.length) throw new Error("Model selector update is empty");
+  for (const key of keys) {
+    if (!modelSelectorFields.has(key) || !isBoundedJsonValue(parsed[key])) {
+      throw new Error("Model selector field is not allowed");
     }
   }
 }
@@ -1576,8 +1641,45 @@ async function invokeSettings(surface, method, args, argsEncoding) {
   const result = JSON.parse(serialized);
   if (!result.ok) throw new Error(result.error || "Gateway settings IPC call failed");
   if (surface === "AppPreferences" && method === "getPreferences") {
-    return Object.fromEntries(Object.entries(result.value || {}).filter(([key]) =>
-      ["bypassPermissionsModeEnabled", "bypassPermissionsOptInByAccount", "bypassPermissionsGateByAccount"].includes(key)));
+    const source = result.value || {};
+    const allowed = {};
+    for (const key of [
+      "bypassPermissionsModeEnabled",
+      "bypassPermissionsOptInByAccount",
+      "bypassPermissionsGateByAccount",
+    ]) {
+      if (source[key] !== undefined) allowed[key] = source[key];
+    }
+    // The desktop UI stores its account-scoped UI picks (permission mode among
+    // them) in the `epitaxyPrefs` bucket. Echo it back so the picker restores
+    // on reload, bounded to plain JSON so no unexpected field leaks out.
+    if (source.epitaxyPrefs && typeof source.epitaxyPrefs === "object"
+      && !Array.isArray(source.epitaxyPrefs)) {
+      const cleanValue = (value, depth) => {
+        if (depth > 8) return undefined;
+        if (value === null || typeof value === "boolean") return value;
+        if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+        if (typeof value === "string") return value.length <= 8192 ? value : undefined;
+        if (Array.isArray(value)) {
+          return value.length <= 512
+            ? value.map((item) => cleanValue(item, depth + 1)).filter((item) => item !== undefined)
+            : undefined;
+        }
+        if (value && typeof value === "object") {
+          const clean = {};
+          for (const [key, item] of Object.entries(value)) {
+            if (key.length > 128) continue;
+            const item2 = cleanValue(item, depth + 1);
+            if (item2 !== undefined) clean[key] = item2;
+          }
+          return clean;
+        }
+        return undefined;
+      };
+      const clean = cleanValue(source.epitaxyPrefs, 0);
+      if (clean !== undefined) allowed.epitaxyPrefs = clean;
+    }
+    return allowed;
   }
   return result.value;
 }
@@ -1679,6 +1781,7 @@ async function fetchOfficialProtocol({ method, pathname, search, headers, bodyBa
   const body = Buffer.from(typeof bodyBase64 === "string" ? bodyBase64 : "", "base64");
   validateAccountProfileUpdate(normalizedMethod, pathname, body);
   validateAccountSettingsUpdate(normalizedMethod, pathname, body);
+  validateModelSelectorUpdate(normalizedMethod, pathname, body);
   const safeHeaders = {};
   for (const [name, value] of Object.entries(headers || {})) {
     if ([
