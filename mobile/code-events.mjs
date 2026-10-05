@@ -30,15 +30,26 @@ export function isCodeRecord(record) {
   return record?.data?.surface === "LocalSessions";
 }
 
-// A transcript entry is identified by `uuid` (see transcript.mjs), so that is
-// what tells an entry apart from a wrapper object. Desktop has been seen to
-// relay the entry either directly or under `entry`; the probe settles which,
-// but accepting both keeps a rename from silently dropping every event.
+// A transcript entry is identified by `uuid` (see transcript.mjs). Desktop
+// relays its live LocalSessions events as a granular envelope wrapping the SDK
+// entry one level down:
+//
+//   { type: "message", sessionId: <desktop id>, message: <SDK entry> }
+//
+// (`session_updated` / `commands_changed` wrap no entry and are ignored.) The
+// wrapper has a `type` of its own, so the old "has a type ⇒ it is the entry"
+// test returned the wrapper, which has no `uuid`, and every live event failed
+// `isRenderableEntry` — the turn rendered nothing live while history, built from
+// the same SDK entries, worked. Prefer the nested entry when the outer object is
+// a wrapper; a real SDK entry carries its `uuid` at the top level.
 function entryPayload(payload) {
   if (!payload || typeof payload !== "object") return null;
+  const nested = payload.entry ?? payload.message;
+  if (!payload.uuid && nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return nested;
+  }
   if (payload.uuid || payload.type) return payload;
-  const wrapped = payload.entry ?? payload.message ?? null;
-  return wrapped && typeof wrapped === "object" ? wrapped : null;
+  return null;
 }
 
 /**

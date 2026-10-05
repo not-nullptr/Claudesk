@@ -268,12 +268,12 @@ export function createCodeEngine({
     // translation gap. One line per relayed record, only for sessions someone
     // is actually streaming, so a normal log stays quiet.
     if (listeners.get(desktopId)?.size) {
-      const entry = payload?.entry ?? payload;
+      // Live events wrap the SDK entry one level down; unwrap for the log so a
+      // `message` event reports the message's own type/uuid, not the wrapper's.
+      const entry = payload?.entry ?? payload?.message ?? payload;
       log.log(`[mobile-code] relay onOnEvent sid=${desktopId.slice(0, 12)}`
         + ` type=${entry?.type ?? entry?.message?.type ?? "?"}`
-        + ` uuid=${String(entry?.uuid ?? "-").slice(0, 8)}`
-        + ` keys=${Object.keys(payload || {}).join(",")}`
-        + ` payload=${JSON.stringify(payload).slice(0, 700)}`);
+        + ` uuid=${String(entry?.uuid ?? "-").slice(0, 8)}`);
     }
     const event = { method, payload };
     for (const callback of listeners.get(desktopId) || []) {

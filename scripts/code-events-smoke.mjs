@@ -215,6 +215,19 @@ assert.equal(translator.resumeFrom(), envelopes.length + 2, "watch does not cons
 assert.deepEqual(frameFromPayload("onOnEvent", { removed: true, entry: next }), []);
 assert.deepEqual(frameFromPayload("onOnEvent", { type: "system" }), []);
 assert.deepEqual(frameFromPayload("onOnSomethingElse", next), []);
+// Desktop's live LocalSessions events wrap the SDK entry one level down. The
+// wrapper has its own `type`, so it must be unwrapped or the frame has no uuid.
+const wrappedLive = frameFromPayload("onOnEvent", {
+  type: "message",
+  sessionId: "desktop-session",
+  message: { type: "assistant", uuid: "live-1", message: { role: "assistant", content: [{ type: "text", text: "live" }] } },
+})[0];
+assert.equal(wrappedLive.event, "client_event");
+assert.equal(wrappedLive.data.event_id, "live-1");
+assert.equal(wrappedLive.data.event_type, "assistant");
+// A wrapper that carries no entry (`session_updated`, `commands_changed`) yields nothing.
+assert.deepEqual(frameFromPayload("onOnEvent", { type: "session_updated", sessionId: "s" }), []);
+assert.deepEqual(frameFromPayload("onOnEvent", { type: "commands_changed", sessionId: "s" }), []);
 assert.equal(watchFrameFromPayload("onOnEvent", next)[0].event, "upserted");
 assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next })[0].event, "deleted");
 // `SessionWatchEvent` is `upserted(SessionResource) | deleted(SessionTag)`. The

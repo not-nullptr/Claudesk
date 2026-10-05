@@ -863,6 +863,24 @@ the paired Desktop (`remoteDeviceDirectory`), `display_name` equal to the
 environments' `machine_name`. If the group still does not form on device, the
 pairing key is not the name and the next probe is the device's `id`.
 
+### Live events wrap the SDK entry one level down (2026-10-05)
+
+Desktop's live `LocalSessions.onOnEvent` records are **not** transcript entries.
+They are granular session events whose SDK entry sits under `message`:
+
+```json
+{"type":"message","sessionId":"<desktop id>","message":{"type":"user","uuid":"…","session_id":"<cli id>","message":{"role":"user","content":"hi!"}}}
+```
+
+alongside `type:"session_updated"` and `type:"commands_changed"`, which carry no
+entry and are ignored. The wrapper has its own `type`, so the translator's
+"has a `type` ⇒ it is the entry" test returned the wrapper, which has no `uuid`
+— every live record failed `isRenderableEntry` and the turn rendered nothing
+live, while history (built from the same SDK entries) rendered on reload.
+`entryPayload` now unwraps `payload.entry ?? payload.message` when the outer
+object has no `uuid`. Live event types seen: `user`, `assistant`,
+`system(init|status)`, `command_lifecycle`, `stream_event`.
+
 ### This build sends the turn through `POST /events` (2026-10-05)
 
 The app does **not** send the first (or any) user message via
