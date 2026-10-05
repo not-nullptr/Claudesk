@@ -1839,6 +1839,108 @@ desktopEventPoller.unref();
 const realtimeHeartbeat = setInterval(() => realtime.heartbeat(), 15000);
 realtimeHeartbeat.unref();
 
+// --- Code session titles -----------------------------------------------------
+// Desktop names its own Code sessions through a "stale-name check" that runs
+// the CLI's `generate_session_title` control request — and that whole path is
+// behind a feature gate which is OFF in self-hosted ("custom3p") mode, where
+// Desktop ships empty statsig values and a hardcoded growthbook table without
+// the gate. So a session started in the Desktop/browser UI keeps its first
+// message as the title forever, silently (the check returns before it can log).
+//
+// The facade titles sessions the *phone* creates, via Desktop's own
+// `/dust/generate_session_title` stub — Anthropic's title prompt and Desktop's
+// default session model. This does the same for every other Code session: no
+// custom prompt, no pinned model, just Desktop's generator invoked at the point
+// Desktop's gate would have. Only sessions started after the bridge came up are
+// considered, so a restart does not backfill (and pay for) the entire history.
+const codeTitleSessionIds = new Set(); // desktop session ids already handled
+const codeTitleStartedAt = Date.now();
+let codeTitlePollInFlight = false;
+const TITLE_DEVICE_ORG = "00000000-0000-4000-8000-000000000001";
+
+function firstUserMessageText(entries) {
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== "object" || entry.isMeta || entry.isSynthetic) continue;
+    const content = entry.message?.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.filter((block) => block?.type === "text").map((block) => block.text || "").join("")
+        : "";
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (normalized && (entry.type === "user" || entry.message?.role === "user")) return normalized;
+  }
+  return "";
+}
+
+function titleLooksLikeFirstMessage(title, firstMessage) {
+  const current = String(title || "").replace(/\s+/g, " ").trim();
+  if (!current) return true;
+  // Desktop sets the code title to the (usually truncated) first message.
+  return current === firstMessage || firstMessage.startsWith(current);
+}
+
+async function generateCodeTitle(firstMessage) {
+  const result = await desktop.protocol({
+    method: "POST",
+    pathname: `/api/organizations/${TITLE_DEVICE_ORG}/dust/generate_session_title`,
+    search: "",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    bodyBase64: Buffer.from(JSON.stringify({ first_session_message: firstMessage })).toString("base64"),
+  });
+  const body = JSON.parse(Buffer.from(result?.bodyBase64 || "", "base64").toString("utf8"));
+  return typeof body?.title === "string" ? body.title.replace(/\s+/g, " ").trim() : "";
+}
+
+async function titleCodeSessions() {
+  if (!codeActionsEnabled || codeTitlePollInFlight) return;
+  codeTitlePollInFlight = true;
+  try {
+    const sessions = await desktop.invoke("LocalSessions", "getAll", []);
+    for (const session of Array.isArray(sessions) ? sessions : []) {
+      const id = session?.sessionId;
+      if (!id || session.isArchived || session.isRunning) continue;
+      if (codeTitleSessionIds.has(id)) continue;
+      // Existing-at-startup sessions are left as they are; only new ones are
+      // titled, so a restart does not spawn a model call per historical session.
+      const createdAt = Number(session.createdAt);
+      if (!Number.isFinite(createdAt) || createdAt < codeTitleStartedAt) {
+        codeTitleSessionIds.add(id);
+        continue;
+      }
+      if (session.titleSource === "user" || session.titleSource === "tool") {
+        codeTitleSessionIds.add(id);
+        continue;
+      }
+      let entries;
+      try {
+        entries = await desktop.invoke("LocalSessions", "getTranscript", [id]);
+      } catch {
+        continue; // not ready yet — look again next tick
+      }
+      const firstMessage = firstUserMessageText(entries);
+      if (!firstMessage) continue; // no first turn yet
+      codeTitleSessionIds.add(id);
+      if (!titleLooksLikeFirstMessage(session.title, firstMessage)) continue;
+      try {
+        const title = await generateCodeTitle(firstMessage);
+        if (title && title !== session.title) {
+          await desktop.invoke("LocalSessions", "updateSession", [id, { title }]);
+          console.log(`[cowork-bridge] titled code session ${id}: ${JSON.stringify(title)}`);
+        }
+      } catch (error) {
+        console.warn(`[cowork-bridge] could not title code session ${id}: ${error.message}`);
+      }
+    }
+  } catch {
+    // Desktop not reachable yet; the next tick retries.
+  } finally {
+    codeTitlePollInFlight = false;
+  }
+}
+const codeTitlePoller = setInterval(() => void titleCodeSessions(), 5000);
+codeTitlePoller.unref();
+
 // `network_mode: service:claude-desktop` pins this container to the Desktop
 // container's current network namespace. If Desktop restarts, Docker can leave
 // an already-running dependent in the retired namespace. Exiting after

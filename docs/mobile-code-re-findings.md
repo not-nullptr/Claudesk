@@ -910,3 +910,29 @@ root: `environmentForSession(meta, cwd)` derives the folder environment from the
 session's `cwd` (any path strictly below the workspace root; the root itself is
 the base device) before falling back to the picker's `environment_id`.
 
+
+## Desktop-created Code sessions never get titles (2026-10-05)
+
+Desktop names its own Code sessions through a "stale-name check"
+(`maybeCheckSessionTitle`) that calls the CLI's `generate_session_title` control
+request and then *offers* the result. It bails **silently** on a feature gate:
+
+```
+if (!mV("2240013170") || … || e.titleSuggestionsOff === true || …) return;
+```
+
+In self-hosted ("custom3p") mode Desktop synthesizes its own bootstrap with
+**empty** feature values — `statsig: { values: {} }` and a hardcoded growthbook
+table `LRt(e)` that does not contain the gate — so the gate is false and the
+check never runs or logs. Sessions started in the Desktop/browser UI therefore
+keep their first user message as the title forever. There is no server-side
+toggle: Desktop never asks this stack for feature flags.
+
+The facade already titles the sessions the *phone* creates, via Desktop's own
+`/dust/generate_session_title` stub (`Zgr`/`Qgr` run Anthropic's title prompt
+`Rgr` against Desktop's default session model). `bridge/server.mjs` now does the
+same for every other Code session: a 5s poll (`titleCodeSessions`) that titles a
+session whose first turn has completed and whose title still looks like its first
+user message, then renames it with `LocalSessions.updateSession` — the exact
+generator and rename Desktop would have used. Only sessions created after the
+bridge starts are titled, so a restart never backfills (and pays for) history.
