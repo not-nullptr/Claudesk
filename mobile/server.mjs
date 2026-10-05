@@ -1153,7 +1153,8 @@ async function handleCodeRoutes(request, response, url) {
     // device and lists them as that device's directories.
     // CLAUDE_MOBILE_ENVIRONMENT_FOLDERS=0 withholds them.
     const folderEnvironments = [];
-    if ((process.env.CLAUDE_MOBILE_ENVIRONMENT_FOLDERS ?? "1") !== "0") {
+    const foldersEnabled = (process.env.CLAUDE_MOBILE_ENVIRONMENT_FOLDERS ?? "1") !== "0";
+    if (foldersEnabled) {
       const listing = await codeEngine.workspaceFolders();
       const folders = Array.isArray(listing?.folders) ? listing.folders : [];
       for (const folder of folders) {
@@ -1165,6 +1166,16 @@ async function handleCodeRoutes(request, response, url) {
           cliVersion,
         }));
       }
+      // Whether the folders reached the picker at all is the whole experiment:
+      // `enabled` says the build has the feature, `listed` says the bridge
+      // folder read worked, and the names are what the device's directories
+      // should show.
+      console.log(
+        `[mobile-code]   environments folders enabled=${foldersEnabled}` +
+        ` listed=${folders.length} -> ${folderEnvironments.map((e) => e.name).join(", ") || "(none)"}`,
+      );
+    } else {
+      console.log("[mobile-code]   environments folders enabled=false (CLAUDE_MOBILE_ENVIRONMENT_FOLDERS=0)");
     }
     const environments = [
       cloudEnvironment({ online, cliVersion }),
