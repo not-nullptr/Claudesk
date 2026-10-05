@@ -129,18 +129,24 @@ Each hit reports
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
 same binary); `type` is there so a hit is self-evidently the right type.
 
-`path` is the field that answers the question — the coding path naming the
-offending field, e.g. `["session_context", "model"]`. **It is read at the throw,
-not at the allocation.** The runtime splits the two: `swift_allocError` returns
-the error's storage and the *caller* writes the payload into it afterwards, so a
-read on allocation entry sees uninitialised memory (every app call site
-disassembles as `mov x1,x0; mov x0,<metadata>; bl _swift_allocError` with the
-`stp`/`str` store sequence *after* the call — see `Claude+0x10ece18`). What
-those uninitialised words look like is in the log: a heap pointer, four code
-addresses, `OpaqueExistentialValueWitnesses_1`, `0x303`. So the allocation names
-the type and remembers the storage the runtime handed back, and `swift_willThrow`
-supplies the moment; `site` is the allocation's return address and `throwSite`
-the throw's.
+`path` is the field that *should* answer the question — the coding path naming
+the offending field. **Treat it as a hint, not an answer**: the app reuses one
+error object, so every record it produces carries the same `path`, whatever
+failed. A live run reported `/v1/code/github/{id}` on every send, across runs and
+across days, which no per-query field would do. When it *does* vary it is worth
+reading; when it does not, it is telling you that the error was built once and
+replayed, and the failing query is elsewhere.
+
+**It is read at the throw, not at the allocation.** The runtime splits the two:
+`swift_allocError` returns the error's storage and the *caller* writes the
+payload into it afterwards, so a read on allocation entry sees uninitialised
+memory (every app call site disassembles as `mov x1,x0; mov x0,<metadata>; bl
+_swift_allocError` with the `stp`/`str` store sequence *after* the call — see
+`Claude+0x10ece18`). What those uninitialised words look like is in the log: a
+heap pointer, four code addresses, `OpaqueExistentialValueWitnesses_1`, `0x303`.
+So the allocation names the type and remembers the storage the runtime handed
+back, and `swift_willThrow` supplies the moment; `site` is the allocation's
+return address and `throwSite` the throw's.
 
 `swift_willThrow` carries no type, so it cannot be filtered and must not be
 allowed to *claim* a name. A throw is only a trigger: the pending storage is read
