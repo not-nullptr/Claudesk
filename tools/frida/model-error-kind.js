@@ -133,13 +133,24 @@ function hook(base, offset, label) {
   });
 }
 
+let armed = false;
 function install() {
+  if (armed) { log('already armed'); return; }
+  armed = true;
   const module = Process.findModuleByName('Claude');
   if (!module) { log('Claude module not found'); return; }
   const base = module.base;
   hook(base, CLASSIFIER_OFFSET, 'classifier');
   hook(base, CONSTRUCTOR_OFFSET, 'constructor');
-  log('installed');
+  log('installed — now press send');
 }
 
-install();
+// Do NOT install at load. These hooks fire on every decode error in the
+// process, and harvesting strings on each one stalls launch on the splash
+// screen. Instead, expose `arm()` and call it from the Frida prompt once you
+// are on the new-session screen — the process is then idle, so there are only a
+// handful of errors left to see and the cost is irrelevant. Comment the line
+// below back to `install();` to arm at load instead.
+globalThis.arm = install;
+rpc.exports = { arm: install };
+log('loaded — navigate to the new-session screen, then type arm() here');
