@@ -1283,6 +1283,22 @@ async function handleCodeRoutes(request, response, url) {
       case "srcenum":
         // Isolate `sources` alone: no repos, just the github.com source marker.
         repos = []; sources = [{ gitHubDotCom: {} }]; break;
+      case "withstatus":
+        // `repos` may be `[RepoWithStatus]` (repo + status), not `[GitHubRepo]`
+        // — the picker needs `status.appInstalled`. No `sources`.
+        repos = folders.map((f) => ({
+          repo: { name: f.name, owner, default_branch: "main" },
+          status: { workflow_enabled: true, app_installed: true },
+        }));
+        sources = [];
+        break;
+      case "withstatusrc":
+        repos = folders.map((f) => ({
+          repo: { name: f.name, owner, default_branch: "main" },
+          status: { workflow_enabled: true, app_installed: true },
+        }));
+        sources = [{ gitHubDotCom: {} }];
+        break;
       case "branchstr":
         repos = folders.map((f) => ({ name: f.name, owner, default_branch: "main" })); sources = []; break;
       case "nobranch":
