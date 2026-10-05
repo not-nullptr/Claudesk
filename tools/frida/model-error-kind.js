@@ -22,6 +22,9 @@
 //   frida -U -f com.anthropic.claude -l tools/frida/model-error-kind.js
 // Then send a message. Lines to look for: `MATCH` and `DEEP`.
 
+// Wrapped in an IIFE: Frida evaluates every `-l` script in one global scope, so
+// a top-level `log` here collides with sentry-hook.js's (or any other script's).
+(function () {
 const TAG = 'claudesk-kind';
 const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
@@ -186,3 +189,4 @@ if (!claudeModule) {
   hook(claudeModule.base, CONSTRUCTOR_OFFSET, 'constructor');
   log('installed — now send a message');
 }
+})();
