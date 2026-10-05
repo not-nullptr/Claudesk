@@ -649,6 +649,11 @@ function census() {
     // that a run which armed nothing says so, instead of looking like a run
     // where the type was never thrown.
     foreign: [...foreignModules],
+    // Throws that arrived while a record was armed and read as no `String` at
+    // all. A run with several of these and no `model-decoding-error` record is
+    // saying the storage never held the payload, which is a different problem
+    // from the error never being built.
+    unread: unreadThrows,
     filter: TYPE_FILTER,
     // How the layout was learned, if it was; the one-shot `layout` report above
     // carries the evidence when it was not.
@@ -692,6 +697,7 @@ function noteType(name) {
 // read that yields a `String` consumes the pending record, and `paired` says
 // whether that throw was the error's own or merely the occasion for it.
 let pending = null;
+let unreadThrows = 0;
 const PENDING_MS = 50;
 
 function cleanPointer(value) {
@@ -775,7 +781,13 @@ function reportThrow(context) {
     const thrown = cleanPointer(context.x0);
     const fromStorage = readSwiftString(armed.storage);
     const fromThrown = fromStorage ? null : readSwiftString(thrown);
-    if (!fromStorage && !fromThrown) return;   // not this error; leave it armed
+    if (!fromStorage && !fromThrown) {
+      // Not this error — leave the record armed for the one that is. Counted,
+      // because "no records" would otherwise be ambiguous between a throw that
+      // never came and a value that was never readable.
+      unreadThrows += 1;
+      return;
+    }
     const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));
     pending = null;
     emit('swift_willThrow', armed.name, armed.site, context,
