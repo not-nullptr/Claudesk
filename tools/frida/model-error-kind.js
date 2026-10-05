@@ -114,19 +114,30 @@ function stringsAround() {
   return [...out];
 }
 
-function install() {
-  const base = Module.findBaseAddress('Claude');
-  if (base === null) { log('Claude module not found'); return; }
-  const target = base.add(CLASSIFIER_OFFSET);
-  log(`classifier @ ${target}`);
+const CONSTRUCTOR_OFFSET = 0x11138a8; // FUN_1011138a8, ModelDecodingError.init
+
+let calls = 0;
+function hook(base, offset, label) {
+  const target = base.add(offset);
+  log(`${label} @ ${target}`);
   Interceptor.attach(target, {
     onEnter(args) {
       try {
-        const found = stringsAround(args[0], args[1]);
-        if (found.length) log(`cause: ${JSON.stringify(found.slice(0, 12))}`);
+        calls += 1;
+        const found = stringsAround(args[0], args[1], args[2], args[3]);
+        if (calls <= 200) {
+          log(`${label} call #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
+        }
       } catch (error) { /* never disturb the app */ }
     },
   });
+}
+
+function install() {
+  const base = Module.findBaseAddress('Claude');
+  if (base === null) { log('Claude module not found'); return; }
+  hook(base, CLASSIFIER_OFFSET, 'classifier');
+  hook(base, CONSTRUCTOR_OFFSET, 'constructor');
   log('installed');
 }
 
