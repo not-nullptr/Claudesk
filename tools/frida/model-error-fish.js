@@ -25,6 +25,16 @@
 const TAG = 'claudesk-fish';
 const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
+// Bisect levers. If the app dies at spawn again, turn these off one at a time —
+// A (Context.init) and the factory hooks are the ones that run during early
+// process init; B is the fallback and is the safest. INSTALL_DELAY_MS pushes all
+// installation past startup, which also sidesteps a crash caused by hooking a
+// function that early init calls.
+const HOOK_CONTEXT = true;
+const HOOK_FACTORIES = true;
+const HOOK_ALLOC = true;
+const INSTALL_DELAY_MS = 0;
+
 // ------------------------------------------------------------ memory helpers
 function readBytes(address, length) {
   try {
@@ -227,7 +237,11 @@ function hookAllocError() {
   log('B: hooked swift_allocError');
 }
 
-hookContextInit();
-hookFactories();
-hookAllocError();
-log('installed');
+function install() {
+  if (HOOK_CONTEXT) hookContextInit();
+  if (HOOK_FACTORIES) hookFactories();
+  if (HOOK_ALLOC) hookAllocError();
+  log('installed');
+}
+if (INSTALL_DELAY_MS > 0) setTimeout(install, INSTALL_DELAY_MS);
+else install();
