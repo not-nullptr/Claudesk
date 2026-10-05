@@ -996,9 +996,35 @@ try {
     "start runs in the picked folder environment's directory",
   );
 
-  // These four were created only for the cwd assertions; drop them so the list
+  // The build under test sends its turns through `POST /events` (a `type:"user"`
+  // client event), not `/messages/stream`. The facade must dispatch it to
+  // Desktop, or the session never exists and every read 404s.
+  const evSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { config: { cwd: "/workspace/Claudesk" } },
+  })).json()).session;
+  const evUuid = "99999999-9999-4999-8999-999999999999";
+  const evBody = {
+    session_id: evSession.id,
+    events: [{ payload: { type: "user", uuid: evUuid, message: { role: "user", content: "hi from events" } } }],
+  };
+  const evPost = await call(codePath(evSession.id, "/events"), { method: "POST", body: evBody });
+  assert.equal(evPost.status, 200, "the /events write leg accepts the turn");
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].cwd, "/workspace/Claudesk", "the /events turn runs in the folder");
+  await waitFor(() => claudesk.codeSessions.get(evSession.id.slice("code_".length))?.isRunning === false, "the /events turn to finish");
+  const evDetail = await (await call(codePath(evSession.id))).json();
+  assert.equal(evDetail.environment_id, folderEnv.environment_id, "the /events turn reports its folder environment");
+  // A retried batch re-posts the same client uuid; it must not dispatch twice.
+  await call(codePath(evSession.id, "/events"), { method: "POST", body: evBody });
+  assert.equal(
+    claudesk.codeSessions.get(evSession.id.slice("code_".length)).transcript.filter((entry) => entry.uuid === evUuid).length,
+    1,
+    "a retried turn is not dispatched twice",
+  );
+
+  // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }

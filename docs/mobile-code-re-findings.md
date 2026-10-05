@@ -863,6 +863,27 @@ the paired Desktop (`remoteDeviceDirectory`), `display_name` equal to the
 environments' `machine_name`. If the group still does not form on device, the
 pairing key is not the name and the next probe is the device's `id`.
 
+### This build sends the turn through `POST /events` (2026-10-05)
+
+The app does **not** send the first (or any) user message via
+`POST /sessions/{id}/messages/stream` in this build. It POSTs a client event to
+the same collection it reads history from:
+
+```json
+{"session_id":"code_…","events":[{"payload":{"type":"user","uuid":"…",
+  "message":{"role":"user","content":"hi!"}}}]}
+```
+
+and reads the reply from `GET /sessions/{id}/events/stream`. The facade treated
+`/events` POST as accept-and-discard, so the session was never started on
+Desktop; the app then read an empty transcript, 404'd on
+`/events` and `/events/stream` (session unknown), and sat on "Connecting".
+`/events` POST now dispatches each `type:"user"` event through
+`codeEngine.sendMessage` (the event `uuid` is the client message id), awaited so
+the session exists before the app's follow-up reads. A retried batch re-posts
+the same uuid; `codeEngine` keeps a dispatched `(session, messageUuid)` set so it
+is not handed to Desktop twice.
+
 The device's directory rows carry a **session count** (`DirectorySelectionRow.activeSessionCount`,
 `device_directory_at_capacity_hint`), computed from the sessions whose
 `environment_id` is that directory. A session must therefore report the

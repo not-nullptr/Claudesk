@@ -116,6 +116,11 @@ export function createCodeEngine({
   const translators = new Map(); // desktopId -> code-events translator
   const permissionRequests = new Map(); // requestId -> { sessionId, payload }
   const activeTurns = new Map(); // desktopId -> { abort }
+  // `${desktopId}:${messageUuid}` already handed to Desktop. The app can deliver
+  // the same user message on more than one leg (`POST /events` and its retries),
+  // and Desktop would start/send it twice; the client message id makes the
+  // dispatch idempotent.
+  const dispatched = new Set();
   let subscription = null;
   let metaState = null;
   let metaWrite = Promise.resolve();
@@ -684,8 +689,14 @@ export function createCodeEngine({
     const body = String(text ?? "");
     if (!body) throw new CodeError("message body is required", 400, "invalid_request_error");
     const messageUuid = clientMessageId && /^[0-9a-f-]{36}$/i.test(clientMessageId) ? clientMessageId : randomUUID();
+    const dispatchKey = `${desktopId}:${messageUuid}`;
+    if (dispatched.has(dispatchKey)) {
+      log.log(`[mobile-code] send ${desktopId} duplicate messageUuid ${messageUuid} ignored`);
+      return { messageId: messageUuid, threadRootId: null, createdAt: nowIso() };
+    }
     const loaded = await loadSession(desktopId).catch(() => null);
     const exists = Boolean(loaded?.session);
+    dispatched.add(dispatchKey);
     try {
       if (!exists) {
         const meta = (await loadMeta()).sessions[desktopId];
@@ -701,6 +712,7 @@ export function createCodeEngine({
         await desktop.ipc(SURFACE, "sendMessage", ipcArgs.sendMessage(desktopId, { message: body, messageUuid }));
       }
     } catch (error) {
+      dispatched.delete(dispatchKey);
       throw asCodeError(error);
     }
     await updateMeta(desktopId, (entry) => {

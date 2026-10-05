@@ -813,6 +813,18 @@ async function handleOptionalEmptyRoutes(request, response, url) {
 // app declares as raw values.
 // Secrets at rest: none of these responses carries a credential, so nothing
 // here is redacted.
+// The text of a `type:"user"` client event the app POSTs to `/events`. `content`
+// is a plain string on the wire the app sends, but the SDK shape allows an array
+// of content blocks, so both are read.
+function userEventText(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content.filter((block) => block?.type === "text").map((block) => block.text || "").join("").trim();
+  }
+  return "";
+}
+
 async function handleCodeRoutes(request, response, url) {
   const path = url.pathname;
   const method = request.method;
@@ -1085,15 +1097,32 @@ async function handleCodeRoutes(request, response, url) {
   }
 
   // The app pushes its own client events (presence, attestation, the "I loaded
-  // these events" ack) to the same collection it reads history from. There is no
-  // upstream for them on this facade — Desktop owns the transcript — so accept
-  // and discard rather than 404, which is what made the detail screen error.
-  if (/^\/v1\/code\/sessions\/[^/]+\/events$/.test(path) && method === "POST") {
+  // these events" ack) to the same collection it reads history from — and, for
+  // this build, the *user message* itself: a sent turn arrives here as
+  // `{events:[{payload:{type:"user", message:{role:"user", content}, uuid}}]}`,
+  // and the reply is read from `GET /events/stream`. So this write leg must
+  // dispatch the message to Desktop; accepting-and-discarding left the session
+  // non-existent, and both reads then 404 (the detail screen's "Connecting").
+  const eventsPostMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events$/);
+  if (eventsPostMatch && method === "POST") {
     const posted = await readJson(request).catch(() => ({}));
-    // The app pushes its own events here (presence, the "I loaded these"
-    // ack, attestation) — and, on a bad decode, an error report. Logging the
-    // body is how we see the app's own complaint when the screen stays blank.
     console.log(`[mobile-code]   posted=${JSON.stringify(posted).slice(0, 1500)}`);
+    try {
+      for (const event of Array.isArray(posted?.events) ? posted.events : []) {
+        const payload = event?.payload ?? event;
+        const message = payload?.message;
+        const isUser = payload?.type === "user" || message?.role === "user";
+        const text = isUser ? userEventText(message) : "";
+        if (!text) continue;
+        await codeEngine.sendMessage(eventsPostMatch[1], {
+          text,
+          clientMessageId: typeof payload?.uuid === "string" ? payload.uuid : null,
+        });
+      }
+    } catch (error) {
+      await fail(error);
+      return true;
+    }
     sendJson(response, 200, {});
     return true;
   }
