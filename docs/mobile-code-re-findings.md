@@ -704,3 +704,33 @@ still wrong.
 code refs), plus `/tmp/{macho,swift,fmd,refs,funcs,armdis}.py` from an earlier
 session. Do not create a file named `dis.py` (it shadows the stdlib module and
 breaks capstone).
+
+## Code watch frames are `SessionWatchFrame` (wire corrected 2026-10-05)
+
+`GET /v1/code/sessions/watch` streams `SessionWatchFrame`:
+
+```
+struct SessionWatchFrame { let event: SessionWatchEvent? }
+enum   SessionWatchEvent { case upserted(SessionResource); case deleted(AnthropicTagged<SessionTag,String>) }
+```
+
+The app decodes each SSE `data` as the whole frame, and SE-0295 nests the one
+unlabelled payload under `_0`. Confirmed by compiling the two types with Swift
+6 and round-tripping through a `JSONEncoder`/`JSONDecoder`:
+
+```json
+data: {"event":{"upserted":{"_0":<SessionResource>}}}
+data: {"event":{"deleted":{"_0":"<tagged id>"}}}
+```
+
+`AnthropicTagged` encodes as a bare string (single-value — the environment
+`environmentId` decodes that way), so `{"_0":"<id>"}`, not `{"_0":{"rawValue":…}}`.
+
+The facade used to put the bare payload in `data` (the resource, or the id
+string). That is **not** benign: the app decodes `data` as `SessionWatchFrame`,
+so the bare resource sneaks through as `event: nil` (silently dropped), but the
+bare `deleted` id — or a `null` payload — is
+`typeMismatch(Dictionary<String, Any>, …)`, which the classifier reports as
+`ModelDecodingError(kind: unexpected_schema)` at path `/v1/code/sessions`. The
+SSE writer (`mobile/server.mjs`) now wraps each frame and drops payload-less
+frames.
