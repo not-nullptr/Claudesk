@@ -681,8 +681,22 @@ function census() {
   });
 }
 
-function noteType(name) {
+// Every distinct error type this app allocates is named the moment it is first
+// seen, not saved for the census. The census is a launch-time story — it goes
+// out once, early — so a name that only appears later is a name the log would
+// never mention, and "no record" would then be unreadable as "not this type"
+// when it actually meant "not yet".
+function noteType(name, source, context) {
   if (name) {
+    if (!censusNames.has(name)) {
+      report('first-throw', {
+        name,
+        source,
+        site: context && context.lr ? String(context.lr) : null,
+        filter: TYPE_FILTER,
+        wanted: matches(name),
+      });
+    }
     censusNames.add(name);
     if (censusNames.size >= CENSUS_MAX) census();
   } else {
@@ -718,6 +732,7 @@ function noteType(name) {
 // whether that throw was the error's own or merely the occasion for it.
 let pending = null;
 let unreadThrows = 0;
+const unreadSites = new Set();
 const PENDING_MS = 50;
 
 function cleanPointer(value) {
@@ -732,6 +747,7 @@ function cleanPointer(value) {
 // records whose value words were uninitialised. With no main module to compare
 // against, nothing is filtered.
 const foreignModules = new Set();
+const foreignSites = new Set();
 function inMainModule(address) {
   try {
     const main = Process.mainModule;
@@ -741,10 +757,28 @@ function inMainModule(address) {
     // Which modules were turned away travels with the census: a run that arms
     // nothing has to be distinguishable from a run that never matched the type.
     if (foreignModules.size < 8) foreignModules.add(module ? module.name : 'unmapped');
+    // And the first sites to be turned away are named at once. If this test is
+    // wrong about where the app builds its own errors, the log must say so
+    // rather than simply going quiet — a silent probe cannot be told apart from
+    // an app that never threw.
+    const site = address ? address.toString() : null;
+    if (site && !foreignSites.has(site) && foreignSites.size < 8) {
+      foreignSites.add(site);
+      report('skipped', {
+        site,
+        module: module ? module.name : 'unmapped',
+        main: main.name,
+        why: 'allocation site is outside the app image',
+      });
+    }
     return false;
   } catch (error) {
     return true;
   }
+}
+
+function mainModuleName() {
+  try { return Process.mainModule ? Process.mainModule.name : null; } catch (error) { return null; }
 }
 
 function onThrow(context, source) {
@@ -755,7 +789,7 @@ function onThrow(context, source) {
     if (source === 'swift_willThrow') { reportThrow(context); return; }
     reportLayout(context, source);
     const name = typeNameOf(source, context);
-    noteType(name);
+    noteType(name, source, context);
     if (!matches(name)) return;
     if (!inMainModule(context.lr)) return;
     const key = context.lr ? String(context.lr) : null;
@@ -783,6 +817,11 @@ function onThrow(context, source) {
       thread: Process.getCurrentThreadId(),
       at: Date.now(),
     };
+    // The carrying throw may never arrive, or may arrive on a thread this record
+    // does not belong to, so the construction is reported as well — cheap, no
+    // backtrace — because the one record that must not go missing is the one
+    // saying this type was built here.
+    report('built', { n: reported, source, type: name, site: key, module: mainModuleName() });
   } catch (error) {
     // Never let the probe disturb the app.
     console.log(`${TAG}: hook error: ${error.message}`);
@@ -802,10 +841,24 @@ function reportThrow(context) {
     const fromStorage = readSwiftString(armed.storage);
     const fromThrown = fromStorage ? null : readSwiftString(thrown);
     if (!fromStorage && !fromThrown) {
-      // Not this error — leave the record armed for the one that is. Counted,
-      // because "no records" would otherwise be ambiguous between a throw that
-      // never came and a value that was never readable.
+      // Not this error — leave the record armed for the one that is. Counted and
+      // named, because "armed but nothing readable" is a different failure from
+      // "never armed", and until now the two looked identical in the log.
       unreadThrows += 1;
+      const site = armed.site || 'unknown';
+      if (!unreadSites.has(site) && unreadSites.size < 8) {
+        unreadSites.add(site);
+        report('unread-throw', {
+          n: unreadThrows,
+          type: armed.name,
+          site,
+          throwSite: context.lr ? String(context.lr) : null,
+          storage: describeAddress(armed.storage),
+          thrown: describeAddress(thrown),
+          paired: Boolean(thrown && armed.storage && thrown.equals(armed.storage)),
+          why: 'no String at either address; the value may not be this error',
+        });
+      }
       return;
     }
     const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));

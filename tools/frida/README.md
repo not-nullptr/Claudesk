@@ -154,6 +154,18 @@ since a `ModelDecodingError` is built by the decoder; the modules that were
 turned away are listed as `foreign` on the `throw-types` census, so a run that
 arms nothing is legible as such.
 
+**Four ways this could go quiet, and a record for each.** A probe that logs
+nothing is indistinguishable from an app that threw nothing, and that ambiguity
+cost a full round trip more than once, so each suppression now says so at the
+moment it happens, bounded to the first few sites:
+
+| record | means |
+|---|---|
+| `first-throw {name, source, site, wanted}` | a type was allocated for the first time — every distinct type, not just the filtered one, named as it appears rather than saved for the launch-time census |
+| `built {n, type, site, module}` | the filtered type was built here; cheap, no backtrace, so the carrying throw can fail to arrive without taking the record with it |
+| `skipped {site, module, main}` | an allocation of the filtered type was turned away by the app-image test, with both module names |
+| `unread-throw {type, site, throwSite, storage, thrown, paired}` | the record was armed and a throw arrived, but neither address held a `String` — so either the value was not this error, or it is not where the layout says |
+
 The value is not always the type whose fields are known, either: the app
 re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
 (`underlying: T`, so the decoder's error sits at the wrapper's field offset
