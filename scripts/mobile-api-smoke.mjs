@@ -1139,6 +1139,38 @@ try {
     await call(codePath(emptyCodeId), { method: "DELETE" });
   }
 
+  // The build under test sends turns over POST /events while reading this
+  // stream: opening the stream and then POSTing the user event must deliver the
+  // turn live (user + assistant client_event frames), not only into history.
+  const liveEv = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { config: { cwd: "/workspace/Claudesk" } },
+  })).json()).session;
+  const liveEvResponse = await call(codePath(liveEv.id, "/events/stream?from_sequence_num=0"));
+  assert.equal(liveEvResponse.status, 200, "the events stream opens for a session that does not exist yet");
+  const liveEvReader = liveEvResponse.body.getReader();
+  try {
+    assert.deepEqual(await readStreamRecords(liveEvReader, 1), [
+      { event: "session_update", data: { connection_status: "connected" } },
+    ]);
+    const arriving = readClientEvents(liveEvReader, 3);
+    const liveUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    await call(codePath(liveEv.id, "/events"), {
+      method: "POST",
+      body: { session_id: liveEv.id, events: [{ payload: { type: "user", uuid: liveUuid, message: { role: "user", content: "live over events" } } }] },
+    });
+    const arrived = await arriving;
+    assert.ok(arrived.length >= 3, "the POSTed turn is delivered on the open stream");
+    assert.equal(arrived[0].data.event_type, "user");
+    assert.equal(arrived[0].data.event_id, liveUuid);
+    assert.ok(arrived.some((record) => record.data.event_type === "assistant"), "the reply streams live");
+    arrived.forEach((record) => decodeClientEvent(record.data));
+  } finally {
+    await liveEvReader.cancel();
+    await waitFor(() => claudesk.codeSessions.get(liveEv.id.slice("code_".length))?.isRunning === false, "the live events turn");
+    await call(codePath(liveEv.id), { method: "DELETE" });
+  }
+
   // The list leg now reports the session, with the app's enum values.
   const codeListed = await (await call("/v1/code/sessions")).json();
   assert.equal(codeListed.data.length, 1);

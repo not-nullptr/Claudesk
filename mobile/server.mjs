@@ -1637,10 +1637,18 @@ async function streamCodeEvents(request, response, url, sessionId) {
     // four-case SessionConnectionStatus used by the session resource.
     connectionStatus = resource.connection_status === "connected" ? "connected" : "disconnected";
   } catch (error) {
-    done();
-    if (!response.destroyed) sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
-      error?.message || "could not read the transcript");
-    return;
+    // A session that has no Desktop record yet is not an error here: the app
+    // opens this stream to receive the turn it is about to send, and that first
+    // message is what creates the session. 404ing it is the "Connecting" loop —
+    // open the stream empty instead and let the live frames fill it.
+    if (error?.status !== 404) {
+      done();
+      if (!response.destroyed) sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
+        error?.message || "could not read the transcript");
+      return;
+    }
+    envelopes = [];
+    connectionStatus = "connected";
   }
   if (closed) return;
   response.writeHead(200, SSE_HEADERS);
