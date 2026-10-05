@@ -283,6 +283,11 @@ try {
   assert.equal(folderById.status, 200, "the folder environment's by-id read answers");
   assert.equal((await folderById.json()).bridge_info.directory, "/workspace/Claudesk");
 
+  // The app offers its Bypass/Auto permission rows only when the policy allows
+  // them: `ModePolicy { allowed, managed }`.
+  const permissionPolicy = await (await call(`/api/organizations/${org.uuid}/permission_mode_policy`)).json();
+  assert.equal(permissionPolicy.bypass_permissions.allowed, true, "bypass permissions are offered");
+
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");
   assert.deepEqual(await experiencesLeg.json(), { experiences: [], rules: { global: {}, placements: {} } });
@@ -1005,6 +1010,15 @@ try {
   await sseStream(codePath(modelSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
   assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].model, "stub-haiku", "the picked model reaches start");
 
+  // The picked permission mode must reach `start` too, or the first turn
+  // prompts even though the composer says "Bypass permissions".
+  const permSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { permission_mode: "bypassPermissions" },
+  })).json()).session;
+  await sseStream(codePath(permSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].permissionMode, "bypassPermissions", "the permission mode reaches start");
+
   // The build under test sends its turns through `POST /events` (a `type:"user"`
   // client event), not `/messages/stream`. The facade must dispatch it to
   // Desktop, or the session never exists and every read 404s.
@@ -1033,7 +1047,7 @@ try {
 
   // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }

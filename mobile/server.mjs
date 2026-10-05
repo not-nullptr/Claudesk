@@ -70,6 +70,11 @@ const SSE_HEADERS = {
   "X-Accel-Buffering": "no",
 };
 
+// Whether the app is told it may use auto/bypass permission modes
+// (`permission_mode_policy`). Bypass runs Code sessions with no prompts, so it
+// is a real safety switch: CLAUDE_MOBILE_BYPASS_PERMISSIONS=0 turns it back off.
+const bypassPermissionsAllowed = process.env.CLAUDE_MOBILE_BYPASS_PERMISSIONS !== "0";
+
 const MIME_TO_PROTO = new Map([
   ["application/proto", true],
   ["application/connect+proto", true],
@@ -770,9 +775,14 @@ async function handleOptionalEmptyRoutes(request, response, url) {
       "sync/github/auth": { github: githubConnected, ghe_connections: [] },
       "notification/preferences": { preferences: {}, effective_push: {} },
       "cowork_settings": { skip_approvals_enabled: false, auto_mode_enabled: false },
+      // The app gates its "Bypass permissions" / "Auto" picker rows on this
+      // policy (`PermissionModePolicy { autoPermissions: ModePolicy,
+      // bypassPermissions: ModePolicy? }`, `ModePolicy { allowed, managed }`).
+      // A `false` here is why the option never appeared. `CLAUDE_MOBILE_BYPASS_
+      // PERMISSIONS=0` withholds it again.
       "permission_mode_policy": {
-        auto_permissions: { allowed: false, managed: false },
-        bypass_permissions: { allowed: false, managed: false },
+        auto_permissions: { allowed: bypassPermissionsAllowed, managed: false },
+        bypass_permissions: { allowed: bypassPermissionsAllowed, managed: false },
       },
     };
     sendJson(response, 200, defaults[rest]);

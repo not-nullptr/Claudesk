@@ -71,13 +71,14 @@ const ipcArgs = {
   // `start` takes one argument named `info`; its validator requires BOTH
   // `cwd` and `message` to be strings. Omitting `cwd` is what made every
   // earlier probe shape fail identically ("Argument \"info\" at position 0").
-  start: (desktopId, { cwd, message, messageUuid, model, title }) => [{
+  start: (desktopId, { cwd, message, messageUuid, model, title, permissionMode }) => [{
     cwd,
     message,
     sessionId: desktopId,
     ...(messageUuid ? { messageUuid } : {}),
     ...(model ? { model } : {}),
     ...(title ? { title } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
   }],
   // `messageUuid` is the EIGHTH positional argument, not the third: Desktop's
   // implementation is
@@ -736,6 +737,10 @@ export function createCodeEngine({
           messageUuid,
           model: loaded?.session?.model ?? meta?.model ?? undefined,
           title: meta?.title || body.replace(/\s+/g, " ").trim().slice(0, 60),
+          // The composer's permission mode (e.g. `bypassPermissions`) must be
+          // set at start, or the first turn runs under Desktop's default and
+          // prompts. `meta.permission_mode` comes from the create/PATCH.
+          permissionMode: meta?.permission_mode ?? undefined,
         }));
       } else {
         if (interrupt) await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId)).catch(() => {});
