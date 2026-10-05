@@ -661,8 +661,33 @@ function noteType(name) {
   }
 }
 
+// An allocation names the error; it does not yet hold it. The two are separate
+// calls in the runtime's error ABI, and the value only exists at the second one:
+//
+//   mov x1,x0          ; x1 = the storage the runtime just returned
+//   mov x0,x23         ; metadata
+//   mov x2,#0x0        ; isTake      = false
+//   mov w3,#0x0        ; isFromThrow = false
+//   bl  _swift_allocError
+//   ldur q0,[sp,#0x78] ; <- and only here does the *caller* write the payload
+//   stp q0,q1,[x1]
+//   str x8,[x1,#0x20]
+//
+// Reading x1 at hook entry therefore reads uninitialised storage, which is what
+// the words in the log were: a heap pointer, four code addresses, a runtime
+// witness symbol, `0x303`. So the allocation is used only for what it is good
+// for — naming the type — and the record is emitted at the throw that follows,
+// where x0 is the finished error value. The thread id is kept with the pending
+// name so a throw on another thread cannot claim it.
+let pending = null;
+const PENDING_MS = 50;
+
 function onThrow(context, source) {
   try {
+    // A plain throw has no registers worth laying out, and the layout report is
+    // a one-shot: it must land on an allocation to be the evidence it is meant
+    // to be.
+    if (source === 'swift_willThrow') { reportThrow(context); return; }
     reportLayout(context, source);
     const name = typeNameOf(source, context);
     noteType(name);
@@ -675,83 +700,109 @@ function onThrow(context, source) {
     }
     if (reported >= SITE_LIMIT) { capped += 1; return; }
     reported += 1;
-    // The ModelDecodingError struct (path, isFailure, sampleRate, error,
-    // recoveredCount) is what we are after. `swift_allocError` takes the value
-    // as its second argument, so x1 is a pointer to the struct; the typed throw
-    // entry takes it third, so x2 is. Read `path` from there, and fall back to
-    // the other register only if the first does not hold a printable String.
+    pending = null;
     const typed = source === 'swift_willThrowTypedImpl';
-    const primary = ptrOrNull(typed ? context.x2 : context.x1);
-    const spare = ptrOrNull(typed ? context.x1 : context.x2);
-    let path = readSwiftString(primary);
-    let valuePointer = primary;
-    if (!path) { path = readSwiftString(spare); if (path) valuePointer = spare; }
-    const pathRaw = readBytesAt(valuePointer, 64);
-    // The thrown value is not always the type whose fields are known. The app's
-    // reporting layer re-throws through `ClaudeTelemetry.ReportedError<T>`, a
-    // one-field generic wrapper — `underlying: T` — so the decoder's error sits
-    // at whatever offset that field has in the wrapper rather than at zero. So
-    // do not trust a single offset: try every word of the value for a String and
-    // report each hit with the offset it came from. The coding path is one of
-    // them, and where it sits names the wrapper's shape in the same record.
-    const pathCandidates = [];
-    if (valuePointer) {
-      for (let at = 0; at < 64; at += 8) {
-        const text = readSwiftString(valuePointer.add(at));
-        if (text && text.length > 1 && text !== path) pathCandidates.push({ at, text });
-      }
-      pathCandidates.sort((a, b) => b.text.length - a.text.length);
+    if (typed) {
+      // The typed entry is namer and thrower in one, so it reports at once:
+      // x1 named the type (already read) and the error is its first argument.
+      emit(source, name, key, context, ptrOrNull(context.x0) || ptrOrNull(context.x2));
+      return;
     }
-    // The incidental words, only so a null `path` still carries a trail.
-    const words = [context.x0, context.x1, context.x2, context.x3];
-    for (const base of [context.x0, context.x2]) {
-      try {
-        if (base && !base.isNull()) {
-          for (let offset = 0; offset < 64; offset += 8) words.push(base.add(offset).readPointer());
-        }
-      } catch (error) { /* not a readable value */ }
-    }
-    report('model-decoding-error', {
-      n: reported,
-      source,
-      type: name,
-      site: key,
-      path,
-      // Which register the struct was read from, so a null `path` says whether
-      // the reader missed the field or was pointed at something that is not the
-      // struct at all — the latter being what a Foundation-internal allocation
-      // looks like from here.
-      valuePointer: describeAddress(valuePointer),
-      pathWords: pathRaw ? describedWords(pathRaw) : null,
-      pathCandidates: pathCandidates.length ? pathCandidates.slice(0, 6) : null,
-      underlying: underlyingErrorName(valuePointer),
-      scanNear: textNear(words, 640),
-      frames: frames(context),
-    });
+    // The counters are spent here rather than at the throw: the per-site cap is
+    // there to bound the expensive part, and that is the backtrace.
+    pending = { name, site: key, thread: Process.getCurrentThreadId(), at: Date.now() };
   } catch (error) {
     // Never let the probe disturb the app.
     console.log(`${TAG}: hook error: ${error.message}`);
   }
 }
 
-// The call that builds an error carries its type; the call that throws it does
-// not, at least not where we can reach. So hook the builder, and keep the typed
-// entry point too — a throw takes exactly one of the two, so installing both
-// does not double-report, and between them they cover every way this app can
-// throw. `swift_willThrow` is deliberately not hooked: its box has been shown to
-// hold no metadata, so hooking it would only inflate the unresolved count.
+// The throw: `swift_willThrow(error)` is handed the error's value storage, so
+// x0 is the payload itself — which is why every word of it looks like the
+// payload. The type comes from the allocation that immediately preceded it.
+function reportThrow(context) {
+  const armed = pending;
+  if (!armed) return;
+  if (armed.thread !== Process.getCurrentThreadId()) return;
+  if (Date.now() - armed.at > PENDING_MS) { pending = null; return; }
+  pending = null;
+  if (!matches(armed.name)) return;
+  try {
+    emit('swift_willThrow', armed.name, armed.site, context, ptrOrNull(context.x0));
+  } catch (error) {
+    console.log(`${TAG}: hook error: ${error.message}`);
+  }
+}
+
+// `name`/`site` come from the allocation that built the error, `valuePointer`
+// and `frames` from the throw that carried it.
+function emit(source, name, site, context, valuePointer) {
+  const path = readSwiftString(valuePointer);
+  const pathRaw = readBytesAt(valuePointer, 64);
+  // The thrown value is not always the type whose fields are known. The app's
+  // reporting layer re-throws through `ClaudeTelemetry.ReportedError<T>`, a
+  // one-field generic wrapper — `underlying: T` — so the decoder's error sits
+  // at whatever offset that field has in the wrapper rather than at zero. So
+  // do not trust a single offset: try every word of the value for a String and
+  // report each hit with the offset it came from. The coding path is one of
+  // them, and where it sits names the wrapper's shape in the same record.
+  const pathCandidates = [];
+  if (valuePointer) {
+    for (let at = 0; at < 64; at += 8) {
+      const text = readSwiftString(valuePointer.add(at));
+      if (text && text.length > 1 && text !== path) pathCandidates.push({ at, text });
+    }
+    pathCandidates.sort((a, b) => b.text.length - a.text.length);
+  }
+  // The incidental words, only so a null `path` still carries a trail.
+  const words = [context.x0, context.x1, context.x2, context.x3];
+  for (const base of [context.x0, context.x2]) {
+    try {
+      if (base && !base.isNull()) {
+        for (let offset = 0; offset < 64; offset += 8) words.push(base.add(offset).readPointer());
+      }
+    } catch (error) { /* not a readable value */ }
+  }
+  report('model-decoding-error', {
+    n: reported,
+    source,
+    type: name,
+    site,
+    // Where the throw happened, next to where the error was built.
+    throwSite: context.lr ? String(context.lr) : null,
+    path,
+    valuePointer: describeAddress(valuePointer),
+    pathWords: pathRaw ? describedWords(pathRaw) : null,
+    pathCandidates: pathCandidates.length ? pathCandidates.slice(0, 6) : null,
+    underlying: underlyingErrorName(valuePointer),
+    scanNear: textNear(words, 640),
+    frames: frames(context),
+  });
+}
+
+// The call that builds an error carries its type; the call that throws it
+// carries the value. Neither has both, so both are hooked and the pair is
+// matched up. The typed entry point carries both itself, and is kept for the
+// `throws(T)` functions that use it.
 //
-// The signatures are fixed by the runtime:
+// The signatures, as the runtime declares them and as this app's call sites
+// confirm:
 //
-//   swift_allocError(const Metadata *type,              // x0 = the error's type
-//                    const WitnessTable *conformance,   // x1
-//                    OpaqueValueStorage *typedStorage,  // x2 = the value
-//                    bool isTake)                       // x3
+//   swift_allocError(const Metadata *type,             // x0 = the error's type
+//                    OpaqueValue *value,               // x1 = its storage
+//                    bool isTake,                      // x2
+//                    bool isFromThrow)                 // x3
 //
 //   swift_willThrowTypedImpl(SwiftError *error,        // x0 = box
 //                            const Metadata *errorType, // x1 = metadata
 //                            TypedErrorInfoStorage *)   // x2
-const THROW_EXPORTS = ['swift_allocError', 'swift_willThrowTypedImpl'];
+//
+//   swift_willThrow(SwiftError *error)                 // x0 = box
+//
+// `swift_willThrow` is hooked for the value only: its argument holds no
+// metadata, so it names nothing and would inflate `unresolved` if it were fed
+// to the namer. It is not fed to it.
+const THROW_EXPORTS = ['swift_allocError', 'swift_willThrowTypedImpl', 'swift_willThrow'];
 const installed = new Set();
 
 function installOne(name) {

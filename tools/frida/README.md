@@ -125,18 +125,29 @@ frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
 ```
 
 Each hit reports
-`model-decoding-error {n, source, type, site, path, valuePointer, pathWords, pathCandidates, underlying, scanNear, frames}`.
+`model-decoding-error {n, source, type, site, throwSite, path, valuePointer, pathWords, pathCandidates, underlying, scanNear, frames}`.
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
 same binary); `type` is there so a hit is self-evidently the right type.
 
 `path` is the field that answers the question — the coding path naming the
-offending field. It is read straight out of the error's value, as a Swift
-`String`. The value is not always the type whose fields are known, though: the
-app re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic
-wrapper (`underlying: T`, so the decoder's error sits at the wrapper's field
-offset rather than at zero), which is the type the app's own log names —
-`Failed to create session: Error Domain=…ReportedError<ClaudeApiServices.ModelDecodingError>`.
-So every word of the value is tried for a String and the hits land in
+offending field, e.g. `["session_context", "model"]`. **It is read at the throw,
+not at the allocation.** The runtime splits the two: `swift_allocError` returns
+the error's storage and the *caller* writes the payload into it afterwards, so a
+read on allocation entry sees uninitialised memory (every app call site
+disassembles as `mov x1,x0; mov x0,<metadata>; bl _swift_allocError` with the
+`stp`/`str` store sequence *after* the call — see `Claude+0x10ece18`). What
+those uninitialised words look like is in the log: a heap pointer, four code
+addresses, `OpaqueExistentialValueWitnesses_1`, `0x303`. So the allocation names
+the type and `swift_willThrow` supplies the value, and the two are matched up by
+thread and by a 50 ms window; `site` is the allocation's return address and
+`throwSite` the throw's.
+
+The value is not always the type whose fields are known, either: the app
+re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
+(`underlying: T`, so the decoder's error sits at the wrapper's field offset
+rather than at zero) — the type the app's own log names, `Failed to create
+session: Error Domain=…ReportedError<ClaudeApiServices.ModelDecodingError>`. So
+every word of the value is tried for a String and the hits land in
 `pathCandidates` with the offset each came from; the coding path is one of them,
 and its offset says where the wrapper put its payload.
 
