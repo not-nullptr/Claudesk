@@ -793,14 +793,23 @@ export function createCodeEngine({
     return { messageId: messageUuid, threadRootId: null, createdAt: nowIso() };
   }
 
+  // A title worth overwriting with a generated one: empty, the first-message
+  // fallback this service writes, or the generic placeholder the app sends in
+  // the create body ("New chat"). A real title the user or Desktop chose is
+  // kept.
+  const PLACEHOLDER_TITLE = /^(new chat|new session|untitled( session)?)$/i;
+  function isReplaceableTitle(sessionTitle, text) {
+    if (!sessionTitle) return true;
+    const fallback = String(text || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    return sessionTitle === fallback || PLACEHOLDER_TITLE.test(sessionTitle.trim());
+  }
+
   async function generateTitle(desktopId, text) {
     try {
       const title = (await desktop.generateTitle({ message: text })).replace(/\s+/g, " ").trim().slice(0, 200);
       if (!title) return;
       const session = await fetchSession(desktopId).catch(() => null);
-      // Keep a title the user (or Desktop) already chose; only replace the
-      // placeholder this service wrote from the first message.
-      if (!session || (session.title && session.title !== text.replace(/\s+/g, " ").trim().slice(0, 60))) return;
+      if (!session || !isReplaceableTitle(session.title, text)) return;
       await desktop.ipc(SURFACE, "updateSession", ipcArgs.updateSession(desktopId, { title }));
       cache.delete(desktopId);
       bumpRevision(desktopId);

@@ -1033,6 +1033,18 @@ try {
   await call(codePath(autoSession.id), { method: "PATCH", body: { permission_mode: "auto" } });
   assert.equal(claudesk.codeIpcCalls("setPermissionMode").at(-1).args[1], "bypassPermissions", "Auto maps to bypass on a mode change");
 
+  // The app sends the placeholder title "New chat"; the first turn's generated
+  // title replaces it (a real title would be kept).
+  const titleSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { title: "New chat" },
+  })).json()).session;
+  await sseStream(codePath(titleSession.id, "/messages/stream"), { method: "POST", body: { body: "explain the folder browser" } });
+  await waitFor(
+    () => (claudesk.codeSessions.get(titleSession.id.slice("code_".length))?.title || "").startsWith("Title for"),
+    "the generated title",
+  );
+
   // The build under test sends its turns through `POST /events` (a `type:"user"`
   // client event), not `/messages/stream`. The facade must dispatch it to
   // Desktop, or the session never exists and every read 404s.
@@ -1061,7 +1073,7 @@ try {
 
   // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id, autoSession.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id, autoSession.id, titleSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }
