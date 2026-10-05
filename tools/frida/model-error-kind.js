@@ -1,38 +1,36 @@
 'use strict';
-// Catch the Foundation DecodingError the app wraps in ModelDecodingError.
+// Read the Foundation DecodingError the app wraps in ModelDecodingError.
 //
-// ModelDecodingError stores its cause as `error: any Error` (offset +32) and
-// derives its `kind` from it in ClaudeApiServices. That classifier is the one
-// place the cause is still alive, and it is app code called once per error — not
-// a hot runtime function. It is reached here by address, because the binary is
-// stripped: VM 0x101112d54 / 0x1011138a8 at image base 0x100000000, so module
-// base + 0x1112d54 / + 0x11138a8.
+// ModelDecodingError stores its cause as `error: any Error` and derives its
+// `kind` from it in ClaudeApiServices. That classifier is app code called once
+// per decode error — not a hot runtime function — so it is safe to hook from
+// launch. It is reached here by address (the binary is stripped): image base
+// 0x100000000, so module base + 0x1112d54 (classifier) / + 0x10f39cc (the
+// description builder that owns the "unexpected_schema" literal and calls the
+// classifier) / + 0x11138a8 (the ModelDecodingError constructor).
 //
-// Why the earlier hooks missed it: on this OS Foundation's JSONDecoder lives in
-// swift-foundation, where `DecodingError.Context.init` and the case factories
-// are `@inlinable` — inlined at every call site, never called as exported
-// functions, so `Module.findGlobalExportByName` hooks install and never fire.
-// The cause is still a real Foundation DecodingError, it just has to be read out
-// of the value, not caught at construction.
+// The classifier's own logic (disassembled) is the reason this dump names the
+// failing field: it dynamic-casts the cause to `DecodingError`, and for the
+// `dataCorrupted` case it reads `Context.codingPath` and returns a different
+// kind depending on whether that path is EMPTY. `unexpected_schema` is the arm
+// reached when the coding path is NON-empty (or the error is a
+// typeMismatch/keyNotFound/valueNotFound) — i.e. the error names a key. Those
+// key strings (small Swift strings, camelCase) are reachable from the error, so
+// harvest them and print the ones that look like a coding path.
 //
-// `arm()` is deliberately NOT called at load. These hooks fire on every decode
-// error in the process, and probing each one stalls launch on the splash; call
-// `arm()` from the Frida prompt once the app is on the new-session screen, where
-// the cost is irrelevant and the environment error is a few calls away.
-//
-// Run:  frida -U -f com.anthropic.claude -l tools/frida/model-error-kind.js
-//       ... navigate ... then type `arm()` at the prompt ... then send.
+// Run:
+//   frida -U -f com.anthropic.claude -l tools/frida/model-error-kind.js
+// Then send a message. Lines to look for: `MATCH` and `DEEP`.
 
 const TAG = 'claudesk-kind';
 const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
-const CLASSIFIER_OFFSET = 0x1112d54;  // FUN_101112d54
-const CONSTRUCTOR_OFFSET = 0x11138a8; // FUN_1011138a8
+const CLASSIFIER_OFFSET = 0x1112d54;  // FUN_101112d54 — kind from the cause
 const DESCRIPTION_OFFSET = 0x10f39cc; // FUN_1010f39cc — owns "unexpected_schema"
+const CONSTRUCTOR_OFFSET = 0x11138a8; // FUN_1011138a8 — builds ModelDecodingError
 
 // A read on an unmapped page throws and is caught; that is far cheaper than
-// Process.findRangeByAddress, which this used to call on every single read and
-// which is what made a hundred bytes cost a visible stall.
+// Process.findRangeByAddress, which this used to call on every read.
 function safeRead(address, length) {
   try {
     if (!address || address.isNull()) return null;
@@ -58,12 +56,8 @@ function ascii(bytes, count) {
   return out || null;
 }
 
-// A Swift small string packs up to 15 UTF-8 bytes as: `_countAndFlagsBits` holds
-// the first 7 bytes with the tag `0xE0 | count` in its top byte (byte 7), and
-// `_object` holds the remaining up-to-8 (bytes 8..15). The earlier "longest
-// printable prefix" guess never reassembled a string that spans the tag byte,
-// which is exactly every key name of 8-15 characters — `environment_id`,
-// `created_at`, `network_config` — so the field was there and unreadable.
+// A Swift small string packs up to 15 UTF-8 bytes. Field/key names on the
+// CodingKeys are 3-15 chars, so this is what makes the coding path readable.
 function smallString(bytes) {
   for (const [tagAt, order] of [
     [7, [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]],
@@ -107,12 +101,9 @@ function readSwiftString(address) {
   return null;
 }
 
-// Bounded so one call can never run away: 48 bytes at the value and one level of
-// pointers, under a hard read budget. Enough for a DecodingError's Context
-// (debugDescription) and its coding path, and cheap enough to leave running.
-let REGION = 96;
-let MAX_DEPTH = 3;   // error -> box -> Context -> String
-let BUDGET = 600;    // hard cap per call; this is what stops the runaway
+let REGION = 128;
+let MAX_DEPTH = 4;   // error -> box -> Context -> codingPath array -> element
+let BUDGET = 1500;   // hard cap per call: this is what stops the runaway
 
 function harvest(address, depth, seen, out, budget) {
   if (depth < 0 || budget.left <= 0 || !address || address.isNull()) return;
@@ -125,7 +116,7 @@ function harvest(address, depth, seen, out, budget) {
   for (let at = 0; at < REGION; at += 8) {
     if (budget.left <= 0) return;
     const text = readSwiftString(address.add(at));
-    if (text && text.length > 2) out.add(text);
+    if (text && text.length > 1) out.add(text);
     if (depth > 0) {
       const target = u64(bytes, at) & 0x0000ffffffffffffn;
       if (target > 0x100000000n && target < 0x2000000000000n) {
@@ -145,13 +136,12 @@ function stringsAround() {
   return [...out];
 }
 
-// Substrings that mark a call as the one we care about: the environment route
-// or any of its field names. A hit gets a `*** MATCH ***` line so it stands out
-// from the shared-cache noise the harvest also picks up.
-const WANT = /environment|cloud-local|7de9bafa|environment_id|environmentId|created_at|createdAt|network_config|networkConfig|spawn|bridge_info|bridgeInfo|machine_name|max_sessions|allow_default_hosts|allowed_hosts|init_script|initScript|git_repo_url|cli_version/i;
+// Coding-path keys and the environment route. A hit names the failing field.
+const WANT = /^(kind|environmentId|name|createdAt|state|config|bridgeInfo|environmentType|cwd|initScript|environment|languages|networkConfig|allowedHosts|allowDefaultHosts|taskSetupScript|machineName|directory|branch|gitRepoUrl|maxSessions|online|spawnMode|cliVersion)$|environment|cloud-local|7de9bafa/i;
+// The DecodingError.Context.debugDescription phrasing.
+const CAUSE = /Expected to decode|Cannot get value|No value associated|isn't in the correct format|Unparseable|Invalid|invalid|not in the correct format/i;
 
 let calls = 0;
-const MAX_CALLS = 300;
 const scratch = Memory.alloc(16);
 function hook(base, offset, label) {
   const target = base.add(offset);
@@ -159,12 +149,10 @@ function hook(base, offset, label) {
   Interceptor.attach(target, {
     onEnter(args) {
       try {
-        if (calls >= MAX_CALLS) return;
         calls += 1;
         const found = stringsAround(args[0], args[1], args[2], args[3]);
         // A Swift String passed by value arrives as two register words, not a
-        // pointer, so a String handed straight to this function (the route) has
-        // no memory of its own to scan. Rebuild it from adjacent arg pairs.
+        // pointer; rebuild it from adjacent arg pairs to recover the route.
         for (let i = 0; i + 1 < args.length && i < 5; i += 1) {
           if (args[i] && args[i + 1] && !args[i].isNull() && !args[i + 1].isNull()) {
             scratch.writePointer(args[i]);
@@ -173,44 +161,28 @@ function hook(base, offset, label) {
             if (text && text.length > 2) found.push(text);
           }
         }
-        log(`${label} #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
         const want = found.filter((s) => WANT.test(s));
-        if (want.length) log(`*** MATCH *** ${label} #${calls} ${JSON.stringify(want)}`);
-        // A cause that reads like a real JSON failure gets a much wider read —
-        // the coding path (the field) is a small string a few hops further out
-        // than the debugDescription, so only go looking when the call is real.
-        if (found.some((s) => /Cannot get value|Expected to decode|No value associated|isn't in the correct format/i.test(s))) {
+        if (want.length) {
+          log(`*** MATCH *** ${label} #${calls} ${JSON.stringify([...new Set(want)].slice(0, 20))}`);
+        }
+        if (found.some((s) => CAUSE.test(s))) {
           const saved = [REGION, MAX_DEPTH, BUDGET];
-          [REGION, MAX_DEPTH, BUDGET] = [192, 5, 6000];
+          [REGION, MAX_DEPTH, BUDGET] = [256, 6, 12000];
           const deep = stringsAround(args[0]);
           [REGION, MAX_DEPTH, BUDGET] = saved;
-          log(`DEEP #${calls} ${JSON.stringify(deep.slice(0, 24))}`);
-        }
-        if (calls <= 3) {
-          const raw = safeRead(args[0], 48);
-          const hex = raw ? [...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ') : null;
-          log(`${label} #${calls} x0 bytes: ${hex}`);
+          log(`DEEP #${calls} ${JSON.stringify(deep.filter((s) => s.length < 60).slice(0, 30))}`);
         }
       } catch (error) { /* never disturb the app */ }
     },
   });
 }
 
-let armed = false;
-function install() {
-  if (armed) { log('already armed'); return; }
-  armed = true;
-  const module = Process.findModuleByName('Claude');
-  if (!module) { log('Claude module not found'); return; }
-  hook(module.base, CLASSIFIER_OFFSET, 'classifier');
-  hook(module.base, CONSTRUCTOR_OFFSET, 'constructor');
-  // 0x1010f39cc: the function that owns the `unexpected_schema` string and calls
-  // the classifier. Its arguments carry the ModelDecodingError's route, so a
-  // call that names the environment is the one to read.
-  hook(module.base, DESCRIPTION_OFFSET, 'desc');
-  log('installed — now press send');
+const claudeModule = Process.findModuleByName('Claude');
+if (!claudeModule) {
+  log('Claude module not found — is the app running?');
+} else {
+  hook(claudeModule.base, DESCRIPTION_OFFSET, 'desc');
+  hook(claudeModule.base, CLASSIFIER_OFFSET, 'classifier');
+  hook(claudeModule.base, CONSTRUCTOR_OFFSET, 'constructor');
+  log('installed — now send a message');
 }
-
-globalThis.arm = install;
-rpc.exports = { arm: install };
-log('loaded — navigate to the new-session screen, then type arm() here');
