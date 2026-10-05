@@ -78,17 +78,24 @@ export const SESSION_LIFECYCLE_STATUS = Object.freeze({
   archived: "archived",
 });
 
+// The wire values are the enum CASE NAMES, not snake/hyphen spellings. The
+// binary's enum-case block reads `anthropicCloud, byoc, bridge, unknown`, and
+// `singleSession, worktree, sameDir` — no custom raw values, so Swift's
+// synthesised Codable decodes those exact strings. `anthropic_cloud` and
+// `same-dir` come from a different (analytics) string block in the same image
+// and are NOT accepted here; sending them fails the whole EnvironmentResource
+// with the app's opaque ModelDecodingError(kind: unexpected_schema).
 export const ENVIRONMENT_KIND = Object.freeze({
-  anthropicCloud: "anthropic_cloud",
+  anthropicCloud: "anthropicCloud",
   byoc: "byoc",
   bridge: "bridge",
   unknown: "unknown",
 });
 
 export const BRIDGE_SPAWN_MODE = Object.freeze({
-  singleSession: "single-session",
+  singleSession: "singleSession",
   worktree: "worktree",
-  sameDir: "same-dir",
+  sameDir: "sameDir",
 });
 
 // Desktop's own session record is flat and says `isRunning` / `isArchived`,

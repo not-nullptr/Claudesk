@@ -233,7 +233,7 @@ assert.deepEqual(translator.permissions(), []);
 const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2.1.284" });
 assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
-assert.equal(environment.bridge_info.spawn_mode, "same-dir");
+assert.equal(environment.bridge_info.spawn_mode, "sameDir");
 // `config` is a Swift enum with associated values, so its payload nests under
 // the case name — a flat `config` at this level fails to decode the resource.
 assert.deepEqual(Object.keys(environment.config), ["paired"]);
@@ -250,7 +250,7 @@ assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 // empty, which is the "Create a cloud environment to get started" onboarding
 // state that blocks starting a session.
 const cloud = cloudEnvironment({ name: "Claudesk Desktop" });
-assert.equal(cloud.kind, "anthropic_cloud");
+assert.equal(cloud.kind, "anthropicCloud");
 assert.equal(cloud.environment_id, CLOUD_ENVIRONMENT_ID);
 assert.deepEqual(Object.keys(cloud.config), ["anthropic"], "the case name is the only key");
 // The case name's value is the nested container of associated values, keyed
@@ -264,7 +264,7 @@ assert.equal(cloud.config.anthropic._0.environment_type, "anthropic");
 // either way. So the cloud record carries one too rather than risking the
 // whole `[EnvironmentResource]` on a null.
 assert.equal(cloud.bridge_info.machine_name, "Claudesk Desktop");
-assert.equal(cloud.bridge_info.spawn_mode, "same-dir");
+assert.equal(cloud.bridge_info.spawn_mode, "sameDir");
 assert.ok(Number.isFinite(Date.parse(cloud.created_at)), "createdAt is a non-null ISO date");
 // The same "never null an unconfirmed-optional field" rule applies to the
 // anthropic config's network settings; a null here would fail a non-optional
@@ -281,7 +281,7 @@ const cloudSession = sessionResource({ sessionId: "s1", title: "t" }, {
   meta: { environment_id: CLOUD_ENVIRONMENT_ID },
 });
 assert.equal(cloudSession.environment_id, CLOUD_ENVIRONMENT_ID);
-assert.equal(cloudSession.environment_kind, "anthropic_cloud");
+assert.equal(cloudSession.environment_kind, "anthropicCloud");
 const bridgeSession = sessionResponse({ sessionId: "s2" }, { meta: {} });
 assert.equal(bridgeSession.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(bridgeSession.environment_kind, "bridge");

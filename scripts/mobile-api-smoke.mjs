@@ -225,7 +225,7 @@ try {
   const environmentList = await environmentsLeg.json();
   const environments = environmentList.environments;
   assert.equal(environments.length, 2);
-  const cloud = environments.find((e) => e.kind === "anthropic_cloud");
+  const cloud = environments.find((e) => e.kind === "anthropicCloud");
   const bridge = environments.find((e) => e.kind === "bridge");
   assert.ok(cloud, "the cloud environment the picker requires is offered");
   assert.equal(cloud.environment_id, "anthropic-cloud-local");
@@ -238,7 +238,7 @@ try {
   // case is `paired` but its payload reports the same `bridge` axis its `kind`
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
   assert.equal(bridge.config.paired._0.environment_type, "bridge");
-  assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
+  assert.equal(bridge.bridge_info.spawn_mode, "sameDir");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);
   assert.equal(environmentList.last_id, environments.at(-1).environment_id);
@@ -248,7 +248,7 @@ try {
     `/v1/environment_providers/private/organizations/${org.uuid}/environments/anthropic-cloud-local`,
   );
   assert.equal(cloudById.status, 200);
-  assert.equal((await cloudById.json()).kind, "anthropic_cloud");
+  assert.equal((await cloudById.json()).kind, "anthropicCloud");
 
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");
