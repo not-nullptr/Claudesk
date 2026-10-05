@@ -502,6 +502,21 @@ function emptyStringAt(address) {
   return Boolean(readBytesAt(ptr(object.toString()), 8));
 }
 
+// A `ModelDecodingError`'s value, recognised by its shape rather than by being
+// handed to us: a `String` at +0 and exactly 1.0 as a Double at +24, which is
+// the `sampleRate` this app's decoders always set. That pair is what the heap
+// scan looks for, so it lives here beside the readers it uses and the offline
+// harness holds it to it.
+const ONE_POINT_ZERO = 0x3ff0000000000000n;
+
+function errorValueAt(address) {
+  const sample = readBytesAt(address.add(24), 8);
+  if (!sample || u64At(sample, 0) !== ONE_POINT_ZERO) return null;
+  const path = readSwiftString(address);
+  if (path === null && !emptyStringAt(address)) return null;
+  return { path, box: readPointerAt(address.add(32)) };
+}
+
 // `error: Error` sits at value+32, not +24. The field order is path, isFailure,
 // sampleRate, error, recoveredCount, and `sampleRate` is a *Double*, so the one
 // byte of `isFailure` is padded out to the eight that `sampleRate` needs:
@@ -1169,6 +1184,60 @@ function hook() {
   }
 }
 
+// Every live `ModelDecodingError` in the heap, found by its *shape* instead of
+// by watching one be thrown. This is the one thing here that does not need
+// Interceptor — no code is patched, memory is only read — so it works in script
+// mode and works even when the error was built before the probe attached, which
+// is the case that has beaten every other approach.
+//
+// The field layout makes it findable: `path` is a native `String` at +0, the
+// `sampleRate` Double is at +24 and this app's decoders always set it to 1.0,
+// and the boxed `error` is at +32. So scan for the 1.0, step back to the value,
+// and keep it if the first two words really are a `String`. Then report the
+// *distinct paths*: one path repeated is a store of one error, several paths are
+// several failures, and that is the question `path` alone could not answer.
+const SAMPLE_RATE_ONES = '00 00 00 00 00 00 f0 3f';
+
+function scanForErrors() {
+  const seen = new Map();
+  let examined = 0;
+  try {
+    for (const range of Process.enumerateRanges('rw-')) {
+      let matches = [];
+      try {
+        matches = Memory.scanSync(range.base, range.size, SAMPLE_RATE_ONES);
+      } catch (error) {
+        continue;                                  // an unreadable range is fine
+      }
+      for (const match of matches) {
+        examined += 1;
+        const at = match.address.sub(24);
+        const value = errorValueAt(at);
+        if (!value) continue;
+        const key = `${value.path}\u0000${at.toString()}`;
+        if (seen.has(key)) continue;
+        seen.set(key, {
+          at: at.toString(),
+          path: value.path,
+          box: describeAddress(value.box),
+        });
+      }
+    }
+  } catch (error) {
+    console.log(`${TAG}: scan failed: ${error.message}`);
+  }
+  const errors = [...seen.values()];
+  const paths = [...new Set(errors.map((hit) => hit.path))];
+  report('live-errors', {
+    count: errors.length,
+    onesMatched: examined,
+    // The headline: every distinct `path` a live ModelDecodingError carries.
+    // One entry means one stored error; several mean several real failures.
+    paths,
+    errors: errors.slice(0, 24),
+  });
+}
+
 function boot() {
   if (started) return;
   started = true;
@@ -1184,6 +1253,15 @@ function boot() {
   // CENSUS_MAX distinct types were thrown — `names:[NSFileManager, …]` with
   // `unresolved:0` is the line that proves the namer works on this build.
   setTimeout(census, 15000);
+  // The heap scan needs no hook, so it is scheduled rather than triggered: by
+  // 20 s the app has shown whatever it is going to show, and the second look at
+  // 90 s catches a failure that was produced by pressing Send in between — which
+  // is exactly when a decode error in this app appears.
+  setTimeout(scanForErrors, 20000);
+  setTimeout(scanForErrors, 90000);
+  // And once more when the user asks, so a run can be reproduced without
+  // waiting out a timer: `rpc.export('scan')` over the CLI, or the same call
+  // from a script-mode build.
 }
 
 rpc.exports = {
@@ -1198,6 +1276,13 @@ rpc.exports = {
     }
     setTimeout(boot, 500);
     return { ok: true, reportUrl };
+  },
+  // The heap scan on demand, so a reproduction does not have to wait out the
+  // timers. In the attach-mode CLI that is typing `rpc.exports.scan()`; a
+  // script-mode build has no host to call it, which is why it is scheduled too.
+  scan() {
+    scanForErrors();
+    return { ok: true };
   },
 };
 

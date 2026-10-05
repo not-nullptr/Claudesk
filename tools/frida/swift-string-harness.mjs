@@ -69,9 +69,9 @@ const ObjC = { available: false };
 
 const build = new Function(
   "Process", "ptr", "ObjC",
-  `${block}\nreturn { readSwiftString, smallString, textOf, u64At, readBytesAt, readPointerAt, emptyStringAt };`,
+  `${block}\nreturn { readSwiftString, smallString, textOf, u64At, readBytesAt, readPointerAt, emptyStringAt, errorValueAt };`,
 );
-const { readSwiftString, emptyStringAt } = build(Process, ptr, ObjC);
+const { readSwiftString, emptyStringAt, errorValueAt } = build(Process, ptr, ObjC);
 
 // ------------------------------------------------------- string encodings
 // A small string: `_object`'s high nibble is 0xE and the count rides under it.
@@ -138,5 +138,32 @@ assert.equal(emptyStringAt(makePointer(put(new Uint8Array(16)))), false, "two ze
 assert.equal(emptyStringAt(makePointer(0xdead0000n)), false, "an unreadable address is not an empty String");
 // An unreadable address is null, not a throw.
 assert.equal(readSwiftString(makePointer(0xdead0000n)), null);
+
+// ------------------------------------------------- a ModelDecodingError's shape
+// The heap scan finds errors by their shape, so the shape is worth pinning: a
+// `String` at +0, `1.0` as a Double at +24, a boxed error at +32. A live record
+// is what said `sampleRate` sits there — the third word of a real payload was
+// `0x3ff0000000000000` — and getting it wrong would make the scan find nothing
+// while looking like it worked.
+function errorValue(path, sampleRate, box) {
+  const body = new Uint8Array(48);
+  const pathBytes = Buffer.from(path, "latin1");
+  if (pathBytes.length > 15) throw new Error("small strings only in this fixture");
+  for (let i = 0; i < pathBytes.length; i += 1) body[i] = pathBytes[i];
+  body[15] = 0xe0 | pathBytes.length;                 // a small String, so no object
+  const view = new DataView(body.buffer);
+  view.setBigUint64(24, sampleRate, true);
+  if (box) view.setBigUint64(32, BigInt(box), true);
+  return { body, length: 48 };
+}
+const withBox = put(errorValue("/v1/code/github/{id}".slice(0, 15), 0x3ff0000000000000n, 0x1000n).body);
+const found = errorValueAt(makePointer(withBox));
+assert.ok(found && found.path && found.path.length > 0, "a value with 1.0 at +24 is recognised");
+assert.equal(found.box.toString(), "0x1000");
+// Everything else that has a 1.0 in it must not be mistaken for an error.
+const decoy = put(errorValue("not-an-error", 0x4000000000000000n, 0x1000n).body);   // 2.0
+assert.equal(errorValueAt(makePointer(decoy)), null, "2.0 at +24 is not a ModelDecodingError");
+const zeros = put(new Uint8Array(48));
+assert.equal(errorValueAt(makePointer(zeros)), null, "an empty slot is not a ModelDecodingError");
 
 console.log("swift-string-harness: ok");
