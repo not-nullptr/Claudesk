@@ -656,6 +656,7 @@ export function createCodeEngine({
     if (typeof patch.title === "string" && patch.title.trim()) ipcPatch.title = patch.title.trim().slice(0, 200);
     try {
       if (Object.keys(ipcPatch).length) {
+        log.log(`[mobile-code] title ${desktopId}: app PATCH ${JSON.stringify(ipcPatch)}`);
         await desktop.ipc(SURFACE, "updateSession", ipcArgs.updateSession(desktopId, ipcPatch));
       }
       if (typeof patch.model === "string" && patch.model) {
@@ -806,13 +807,17 @@ export function createCodeEngine({
 
   async function generateTitle(desktopId, text) {
     try {
-      const title = (await desktop.generateTitle({ message: text })).replace(/\s+/g, " ").trim().slice(0, 200);
-      if (!title) return;
+      const generated = await desktop.generateTitle({ message: text });
+      const title = String(generated || "").replace(/\s+/g, " ").trim().slice(0, 200);
       const session = await fetchSession(desktopId).catch(() => null);
-      if (!session || !isReplaceableTitle(session.title, text)) return;
+      const replaceable = session ? isReplaceableTitle(session.title, text) : false;
+      log.log(`[mobile-code] title ${desktopId}: generated=${JSON.stringify(title)}` +
+        ` current=${JSON.stringify(session?.title ?? null)} replaceable=${replaceable}`);
+      if (!title || !session || !replaceable) return;
       await desktop.ipc(SURFACE, "updateSession", ipcArgs.updateSession(desktopId, { title }));
       cache.delete(desktopId);
       bumpRevision(desktopId);
+      log.log(`[mobile-code] title ${desktopId}: set ${JSON.stringify(title)}`);
     } catch (error) {
       log.error(`[mobile-code] cannot title ${desktopId}: ${error.message}`);
     }
