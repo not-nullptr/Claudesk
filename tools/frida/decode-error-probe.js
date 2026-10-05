@@ -645,6 +645,10 @@ function census() {
   report('throw-types', {
     names: [...censusNames],
     unresolved,
+    // Allocations of that type outside the app image, by module. Named here so
+    // that a run which armed nothing says so, instead of looking like a run
+    // where the type was never thrown.
+    foreign: [...foreignModules],
     filter: TYPE_FILTER,
     // How the layout was learned, if it was; the one-shot `layout` report above
     // carries the evidence when it was not.
@@ -675,12 +679,47 @@ function noteType(name) {
 //
 // Reading x1 at hook entry therefore reads uninitialised storage, which is what
 // the words in the log were: a heap pointer, four code addresses, a runtime
-// witness symbol, `0x303`. So the allocation is used only for what it is good
-// for — naming the type — and the record is emitted at the throw that follows,
-// where x0 is the finished error value. The thread id is kept with the pending
-// name so a throw on another thread cannot claim it.
+// witness symbol, `0x303`. So the allocation is used for what it is good for —
+// naming the type and remembering *which* storage holds the error — and the
+// record is emitted at a throw that follows, by which time the caller has
+// written the payload.
+//
+// The throw is only a trigger, and `swift_willThrow` cannot be filtered by type:
+// it is handed an error value and nothing that says which. So it must not be
+// allowed to *claim* the pending name — an unrelated throw in the same window
+// (a `__SwiftNativeNSError` in a SwiftUI gesture stack, in a live run) reads the
+// storage, finds no `String` where a `path` would be, and is dropped. Only a
+// read that yields a `String` consumes the pending record, and `paired` says
+// whether that throw was the error's own or merely the occasion for it.
 let pending = null;
 const PENDING_MS = 50;
+
+function cleanPointer(value) {
+  const pointer = ptrOrNull(value);
+  if (!pointer) return null;
+  try { return pointer.and(ptr('0x0000ffffffffffff')); } catch (error) { return pointer; }
+}
+
+// Only the app's own image arms a record. A `ModelDecodingError` is built by
+// this app's decoder; the allocations Foundation makes while *rendering* an
+// error for the log name the same type and never hold the struct — they are the
+// records whose value words were uninitialised. With no main module to compare
+// against, nothing is filtered.
+const foreignModules = new Set();
+function inMainModule(address) {
+  try {
+    const main = Process.mainModule;
+    if (!main) return true;
+    const module = address ? Process.findModuleByAddress(address) : null;
+    if (module && module.base.equals(main.base)) return true;
+    // Which modules were turned away travels with the census: a run that arms
+    // nothing has to be distinguishable from a run that never matched the type.
+    if (foreignModules.size < 8) foreignModules.add(module ? module.name : 'unmapped');
+    return false;
+  } catch (error) {
+    return true;
+  }
+}
 
 function onThrow(context, source) {
   try {
@@ -692,6 +731,7 @@ function onThrow(context, source) {
     const name = typeNameOf(source, context);
     noteType(name);
     if (!matches(name)) return;
+    if (!inMainModule(context.lr)) return;
     const key = context.lr ? String(context.lr) : null;
     if (key) {
       const seen = (siteCounts.get(key) || 0) + 1;
@@ -710,33 +750,47 @@ function onThrow(context, source) {
     }
     // The counters are spent here rather than at the throw: the per-site cap is
     // there to bound the expensive part, and that is the backtrace.
-    pending = { name, site: key, thread: Process.getCurrentThreadId(), at: Date.now() };
+    pending = {
+      name,
+      site: key,
+      storage: cleanPointer(context.x1),
+      thread: Process.getCurrentThreadId(),
+      at: Date.now(),
+    };
   } catch (error) {
     // Never let the probe disturb the app.
     console.log(`${TAG}: hook error: ${error.message}`);
   }
 }
 
-// The throw: `swift_willThrow(error)` is handed the error's value storage, so
-// x0 is the payload itself — which is why every word of it looks like the
-// payload. The type comes from the allocation that immediately preceded it.
 function reportThrow(context) {
   const armed = pending;
   if (!armed) return;
-  if (armed.thread !== Process.getCurrentThreadId()) return;
-  if (Date.now() - armed.at > PENDING_MS) { pending = null; return; }
-  pending = null;
-  if (!matches(armed.name)) return;
   try {
-    emit('swift_willThrow', armed.name, armed.site, context, ptrOrNull(context.x0));
+    if (armed.thread !== Process.getCurrentThreadId()) return;
+    if (Date.now() - armed.at > PENDING_MS) { pending = null; return; }
+    // The storage the allocation named is where the payload went; the throw's
+    // argument should be that same address, but it is the storage that is
+    // guaranteed to hold the error, so it is read first.
+    const thrown = cleanPointer(context.x0);
+    const fromStorage = readSwiftString(armed.storage);
+    const fromThrown = fromStorage ? null : readSwiftString(thrown);
+    if (!fromStorage && !fromThrown) return;   // not this error; leave it armed
+    const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));
+    pending = null;
+    emit('swift_willThrow', armed.name, armed.site, context,
+      fromStorage ? armed.storage : thrown,
+      { paired, readFrom: fromStorage ? 'storage' : 'throw' });
   } catch (error) {
     console.log(`${TAG}: hook error: ${error.message}`);
   }
 }
 
 // `name`/`site` come from the allocation that built the error, `valuePointer`
-// and `frames` from the throw that carried it.
-function emit(source, name, site, context, valuePointer) {
+// and `frames` from the throw that carried it. `extra` carries what only the
+// throw can say: whether its argument was the error's own storage, and which of
+// the two the value was read from.
+function emit(source, name, site, context, valuePointer, extra = {}) {
   const path = readSwiftString(valuePointer);
   const pathRaw = readBytesAt(valuePointer, 64);
   // The thrown value is not always the type whose fields are known. The app's
@@ -777,6 +831,7 @@ function emit(source, name, site, context, valuePointer) {
     underlying: underlyingErrorName(valuePointer),
     scanNear: textNear(words, 640),
     frames: frames(context),
+    ...extra,
   });
 }
 

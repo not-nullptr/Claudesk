@@ -125,7 +125,7 @@ frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
 ```
 
 Each hit reports
-`model-decoding-error {n, source, type, site, throwSite, path, valuePointer, pathWords, pathCandidates, underlying, scanNear, frames}`.
+`model-decoding-error {n, source, type, site, throwSite, path, valuePointer, pathWords, pathCandidates, underlying, scanNear, frames, paired, readFrom}`.
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
 same binary); `type` is there so a hit is self-evidently the right type.
 
@@ -138,9 +138,21 @@ disassembles as `mov x1,x0; mov x0,<metadata>; bl _swift_allocError` with the
 `stp`/`str` store sequence *after* the call — see `Claude+0x10ece18`). What
 those uninitialised words look like is in the log: a heap pointer, four code
 addresses, `OpaqueExistentialValueWitnesses_1`, `0x303`. So the allocation names
-the type and `swift_willThrow` supplies the value, and the two are matched up by
-thread and by a 50 ms window; `site` is the allocation's return address and
-`throwSite` the throw's.
+the type and remembers the storage the runtime handed back, and `swift_willThrow`
+supplies the moment; `site` is the allocation's return address and `throwSite`
+the throw's.
+
+`swift_willThrow` carries no type, so it cannot be filtered and must not be
+allowed to *claim* a name. A throw is only a trigger: the pending storage is read
+at it, and only a read that yields a `String` where a `path` would be consumes
+the record. `readFrom` says whether that `String` came from the storage the
+allocation named or from the throw's own argument, and `paired` whether the two
+are the same address — a throw of some other error in the same window reads as
+neither (a live run produced `__SwiftNativeNSError` in a SwiftUI gesture stack)
+and is dropped. Allocations outside this app's own image are not armed at all,
+since a `ModelDecodingError` is built by the decoder; the modules that were
+turned away are listed as `foreign` on the `throw-types` census, so a run that
+arms nothing is legible as such.
 
 The value is not always the type whose fields are known, either: the app
 re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
