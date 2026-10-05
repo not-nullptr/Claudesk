@@ -274,10 +274,13 @@ and the turn translated to `SessionEventEnvelope` / `ToolCall`.
 | `mobile/code-events.mjs` | live `LocalSessions.onOnEvent` records → both SSE protocols: `client_event` frames for the transcript leg (`frameFromPayload`) and `SessionWatchFrame` upserted/deleted for the list leg (`watchFrameFromPayload`), with the per-session sequence counter |
 | `mobile/code-engine.mjs` | the engine: list/create/detail/update/delete, history paging, send, interrupt, permissions, live watch, `code-meta.json` |
 
-The id scheme is deliberately distinct from Chat's `local_<uuid>`: a Code
-session is `code_<desktopSessionId>`, so the two can never be confused and a
-Desktop id is never adopted by the wrong surface. Both still satisfy the
-bridge's `^[A-Za-z0-9_-]+$` sessionId charset.
+The id scheme is `code_<desktopSessionId>`, and a *new* session's desktop id is
+`local_<uuid>` — Desktop's own convention. Desktop accepts any
+`^[A-Za-z0-9_-]+$` id, but its UI resolves a session by the `local_…` id its
+store uses, so a bare UUID made every mobile-created session render as "could
+not be found" in the Desktop app. The facade's `code_` prefix still keeps the
+Code and Chat surfaces apart, and both satisfy the bridge's
+`^[A-Za-z0-9_-]+$` sessionId charset.
 
 Two things are **not** implemented here and answer clean empty states rather
 than 404s, so those screens render: routines/triggers/channels, projects, the

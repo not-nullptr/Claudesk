@@ -545,7 +545,12 @@ export function createCodeEngine({
   }
 
   async function createSession({ title = null, model = null, permissionMode = null, cwd = null, configCwd = null, environmentId = null, sources = null } = {}) {
-    const desktopId = randomUUID();
+    // Desktop's own LocalSessions ids are `local_<uuid>`; it accepts any
+    // `^[A-Za-z0-9_-]+$` id, but its UI resolves a session by the `local_…` id
+    // its store uses, so a bare UUID made every mobile-created session render
+    // as "could not be found" in the Desktop app. Match the convention; the
+    // facade's own `code_` prefix still keeps the two surfaces apart.
+    const desktopId = `local_${randomUUID()}`;
     try {
       const session = await fetchSession(desktopId).catch(() => null);
       if (session) throw new CodeError("session id collision", 409, "invalid_request_error");

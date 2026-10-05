@@ -901,7 +901,10 @@ try {
   const createdReply = await created.json();
   assert.ok(createdReply.session, "the create reply is `{session: …}` (SessionResponseEnvelope)");
   const createdResource = createdReply.session;
-  assert.match(createdResource.id, /^code_[0-9a-f-]{36}$/, "a Code id is code_<desktopId>");
+  // Desktop's own LocalSessions ids are `local_<uuid>`, and its UI resolves a
+  // session by that id — a bare UUID made mobile-created sessions un-openable
+  // in the Desktop app.
+  assert.match(createdResource.id, /^code_local_[0-9a-f-]{36}$/, "a Code id is code_<local_desktopId>");
   assert.equal(typeof createdResource.status, "string");
   // WorkerStatus/SessionWorkerStatus is `idle` for a session whose turn is not
   // in flight yet.
