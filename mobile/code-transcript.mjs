@@ -171,6 +171,10 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cli
   else if (mode === "date0") record.created_at = String(record.created_at).replace(/\.\d+Z$/, "Z");
   else if (mode === "cfgflat" && CONFIG_SHAPE !== "direct") record.config = { anthropic: record.config.anthropic._0 };
   else if (mode === "minimal") { delete record.bridge_info; delete record.created_at; delete record.state; }
+  else if (mode === "kindold") record.kind = "anthropic_cloud";
+  else if (mode === "nocfg") delete record.config;
+  else if (mode === "noname") delete record.name;
+  else if (mode === "iduuid") record.environment_id = "00000000-0000-4000-8000-000000000000";
   else if (mode === "wrapped") return { environment: record };
   return record;
 }
