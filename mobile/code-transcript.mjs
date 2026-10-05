@@ -210,6 +210,14 @@ function desktopIdOf(record) {
   return record?.sessionId ?? record?.session_id ?? record?.id ?? null;
 }
 
+// The repository/sources a session was created against, kept verbatim from the
+// create request. Echoing the app's own `[SessionContextSource]` encoding back
+// means the phone decodes the selection it made (and shows the picked folder)
+// rather than an empty, repo-less session.
+function sourcesFromMeta(meta) {
+  return Array.isArray(meta?.sources) ? meta.sources : [];
+}
+
 // The environment a session reports. Every session runs on the same Desktop, so
 // the id is whichever record the picker created it against (meta.environment_id)
 // and defaults to the bridge record — the kind follows the id, because the
@@ -236,7 +244,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
     status: sessionLifecycleStatusOf(record),
     tags: Array.isArray(meta.tags) ? meta.tags : [],
     config: {
-      sources: [],
+      sources: sourcesFromMeta(meta),
       outcomes: [],
       model: record?.model ?? null,
       permission_mode: record?.permissionMode ?? null,
@@ -278,8 +286,8 @@ export function sessionResource(record, { meta = {}, revision = null, pendingApp
     created_at: wireDate(record?.createdAt),
     updated_at: wireDate(record?.lastActivityAt, record?.createdAt),
     session_context: {
-      sources: [],
-      cwd: record?.cwd ?? null,
+      sources: sourcesFromMeta(meta),
+      cwd: record?.cwd ?? meta?.cwd ?? null,
       outcomes: [],
       custom_system_prompt: null,
       append_system_prompt: null,

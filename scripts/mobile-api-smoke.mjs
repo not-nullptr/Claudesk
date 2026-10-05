@@ -891,6 +891,65 @@ try {
   assert.equal(startCall.args[0].sessionType, undefined);
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
 
+  // ---- the repository picker decides the session's cwd ----
+  //
+  // The app attaches the picked repository as `config.sources`
+  // ([SessionContextSource], `{ type: "git_repository", url, revision }`). The
+  // facade must (a) resolve that to the workspace folder of the same name, (b)
+  // run Desktop's `start` in it, and (c) echo the selection and the resolved cwd
+  // back on the session DTOs, or the phone renders the repo-less
+  // "Running in the shared directory" state.
+  const repoSource = {
+    type: "git_repository",
+    url: "https://github.com/local/Claudesk",
+    revision: "main",
+  };
+  const repoCreate = await call("/v1/code/sessions", {
+    method: "POST",
+    // `config.cwd` is the environment's default directory the app may echo; the
+    // picked repository must win over it.
+    body: { title: "Picked a repo", config: { cwd: "/workspace", sources: [repoSource] } },
+  });
+  assert.equal(repoCreate.status, 201, "a repo-backed create answers 201");
+  const repoReply = (await repoCreate.json()).session;
+  // The list-row projection echoes the app's own source encoding verbatim.
+  assert.deepEqual(repoReply.config.sources, [repoSource], "the create reply reports the picked repository");
+  // The session does not exist on Desktop until the first message, so the
+  // resolved cwd is checked on the `start` call and on the detail read after it.
+  await sseStream(codePath(repoReply.id, "/messages/stream"), {
+    method: "POST", body: { body: "where am I" },
+  });
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].cwd, "/workspace/Claudesk", "start runs in the picked repository");
+  await waitFor(() => claudesk.codeSessions.get(repoReply.id.slice("code_".length))?.isRunning === false, "the repo turn to finish");
+  const repoDetail = await (await call(codePath(repoReply.id))).json();
+  assert.equal(repoDetail.session_context.cwd, "/workspace/Claudesk", "the repository resolves to its workspace folder");
+  assert.deepEqual(repoDetail.session_context.sources, [repoSource], "the detail read reports the picked repository");
+
+  // A `file://` source resolves to the exact path, not by name.
+  const fileId = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { config: { sources: [{ type: "git_repository", url: "file:///srv/code/Demo" }] } },
+  })).json()).session.id;
+  await sseStream(codePath(fileId, "/messages/stream"), { method: "POST", body: { body: "hi" } });
+  const fileDetail = await (await call(codePath(fileId))).json();
+  assert.equal(fileDetail.session_context.cwd, "/srv/code/Demo", "a file:// source is an exact path");
+
+  // `config.cwd` (a directory picked directly, with no repository) still wins.
+  const cwdId = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { config: { cwd: "/workspace/Chosen" } },
+  })).json()).session.id;
+  await sseStream(codePath(cwdId, "/messages/stream"), { method: "POST", body: { body: "hi" } });
+  const cwdDetail = await (await call(codePath(cwdId))).json();
+  assert.equal(cwdDetail.session_context.cwd, "/workspace/Chosen", "config.cwd decides the session directory");
+
+  // These three were created only for the cwd assertions; drop them so the list
+  // leg below still sees exactly the one session it drives.
+  for (const id of [repoReply.id, fileId, cwdId]) {
+    await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
+    await call(codePath(id), { method: "DELETE" });
+  }
+
   // HTTP data[] and SSE data: are the same SessionEventEnvelope DTO.
   const history = await (await call(codePath(createdResource.id, "/events?sort_order=desc&limit=50"))).json();
   const historyDecoded = decodeClientEventsResponse(history);

@@ -301,25 +301,67 @@ export function createCodeEngine({
   }
 
   // The new-session picker attaches the repository the session was created
-  // against as `config.sources` — `[{ type: "git_repository", url, revision }]`.
-  // The url is `https://github.com/<owner>/<name>`, rebuilt by the app from the
-  // GitHubRepo the facade advertised (`/v1/code/github/...`), not the
-  // `file://…` source_url we send, so the only usable part is the last path
-  // segment: the repository name. Map that onto the Desktop workspace folder of
-  // the same name so the session's `cwd` is the repository the user picked.
+  // against as `config.sources` — `[SessionContextSource]`. That enum is
+  // CUSTOM-coded (`ClaudeCodeApi.SessionContextSource.SourceType`, a nested
+  // discriminator type in docs/mobile-code-decodable-types.txt), so its JSON is
+  // flat: `{ type: "git_repository", url, revision }`. The app builds the url
+  // from the GitHubRepo the facade advertised, so it is usually
+  // `https://github.com/<owner>/<name>` — but a source may also carry the
+  // `file://<path>` we advertise, or a plain path. Read all three so the
+  // repository the user picked decides the session's `cwd`.
+  //
+  // The raw `sources` array is also kept verbatim on the session's meta (see
+  // createSession) and echoed back in the session DTOs: it is the app's own
+  // encoding of its own Decodable, so a round-trip is guaranteed to decode,
+  // whatever the exact discriminator key.
+  function sourceUrl(source) {
+    if (!source || typeof source !== "object") return null;
+    // Flat custom coding (`source.url`), the synthesised SE-0295 nesting
+    // (`source.gitRepository.url`), and the snake-cased variant are all read so
+    // a shape change upstream cannot silently drop the selection.
+    const candidate = source.url
+      ?? source.gitRepository?.url
+      ?? source.git_repository?.url;
+    return typeof candidate === "string" && candidate ? candidate : null;
+  }
+
+  function repoNameFromUrl(url) {
+    const clean = url.replace(/\.git$/, "").replace(/\/+$/, "");
+    const name = clean.split("/").filter(Boolean).pop();
+    if (!name) return null;
+    try { return decodeURIComponent(name); } catch { return name; }
+  }
+
   function repoNameFromSources(sources) {
     if (!Array.isArray(sources)) return null;
     for (const source of sources) {
-      const url = source && typeof source.url === "string" ? source.url : null;
+      const url = sourceUrl(source);
+      const name = url && repoNameFromUrl(url);
+      if (name) return name;
+    }
+    return null;
+  }
+
+  // A `file://…` or absolute-path source is a real workspace path and is used
+  // as-is; anything else (a github URL) is mapped by its last path segment onto
+  // the Desktop workspace folder of the same name.
+  function localPathFromSources(sources) {
+    if (!Array.isArray(sources)) return null;
+    for (const source of sources) {
+      const url = sourceUrl(source);
       if (!url) continue;
-      const clean = url.replace(/\.git$/, "").replace(/\/+$/, "");
-      const name = clean.split("/").pop();
-      if (name) { try { return decodeURIComponent(name); } catch { return name; } }
+      if (url.startsWith("file://")) {
+        const rest = url.slice("file://".length).replace(/^localhost/, "");
+        try { return decodeURIComponent(rest); } catch { return rest; }
+      }
+      if (url.startsWith("/")) return url;
     }
     return null;
   }
 
   async function resolveRepoCwd(sources) {
+    const direct = localPathFromSources(sources);
+    if (direct) return direct;
     const name = repoNameFromSources(sources);
     if (!name) return null;
     const listing = await workspaceFolders();
@@ -451,7 +493,7 @@ export function createCodeEngine({
     };
   }
 
-  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, environmentId = null, sources = null } = {}) {
+  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, configCwd = null, environmentId = null, sources = null } = {}) {
     const desktopId = randomUUID();
     try {
       const session = await fetchSession(desktopId).catch(() => null);
@@ -471,16 +513,34 @@ export function createCodeEngine({
     // bridge default for an unset one — see environmentForSession).
     const environment_id = typeof environmentId === "string" && environmentId ? environmentId : null;
     // A repository chosen in the picker (`config.sources`) decides the project
-    // cwd; an explicit `cwd` still wins, and no repository leaves the previous
-    // default in place. Resolved before the meta write so the very first
-    // `sendMessage`'s `start` call runs in the repository folder.
-    const repoCwd = cwd || (sources ? await resolveRepoCwd(sources) : null);
-    await updateMeta(desktopId, (entry) => {
-      entry.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
-      entry.cwd = repoCwd || entry.cwd || null;
-      if (environment_id) entry.environment_id = environment_id;
-      if (title) entry.title = String(title).slice(0, 200);
+    // cwd. A top-level `cwd` (an explicit caller argument) wins over it, and a
+    // `config.cwd` — the directory the app picked directly, or the environment
+    // default it echoes — is the fallback, so a repo pick is never overridden by
+    // a default directory. No repository and no cwd leaves the previous default
+    // in place. Resolved before the meta write so the very first `sendMessage`'s
+    // `start` call runs in the repository folder.
+    const repoCwd = cwd
+      || (sources ? await resolveRepoCwd(sources) : null)
+      || (typeof configCwd === "string" && configCwd ? configCwd : null);
+    // The picker's effect is invisible on the phone beyond the toast, so leave a
+    // line naming the request's sources and the cwd they resolved to. A create
+    // that runs in the workspace root with sources present is the one case this
+    // cannot explain from the code alone.
+    log.log(`[mobile-code] create ${desktopId} cwd=${repoCwd ?? "(default)"} sources=${JSON.stringify(sources ?? [])}`);
+    const entry = await updateMeta(desktopId, (state) => {
+      state.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
+      state.cwd = repoCwd || state.cwd || null;
+      // Keep the app's own `sources` verbatim: the session DTOs echo it so the
+      // phone sees the repository it picked (and the resolved cwd) instead of an
+      // empty, repo-less session ("Running in the shared directory").
+      if (Array.isArray(sources) && sources.length) state.sources = sources;
+      if (environment_id) state.environment_id = environment_id;
+      if (title) state.title = String(title).slice(0, 200);
     });
+    // The reply must report the intent just persisted — the resolved cwd and the
+    // picked source — not a bare `{draft}` meta: the app decides the new
+    // session's directory from this payload.
+    const replyMeta = { ...entry, draft: true, environment_id };
     const record = {
       sessionId: desktopId,
       title: title || "",
@@ -492,7 +552,7 @@ export function createCodeEngine({
     };
     records.set(desktopId, record);
     const resource = sessionResource(record, {
-      meta: { draft: true, environment_id },
+      meta: replyMeta,
       revision: record.lastActivityAt,
     });
     // The app decodes a `/v1/code/sessions` reply through a `session`-keyed
@@ -500,7 +560,7 @@ export function createCodeEngine({
     // create route needs the list-row projection too. Keep it alongside the
     // resource, non-enumerable so it never leaks into the JSON.
     Object.defineProperty(resource, "__sessionResponse", {
-      value: sessionResponse(record, { meta: { environment_id } }),
+      value: sessionResponse(record, { meta: replyMeta }),
       enumerable: false,
     });
     return resource;

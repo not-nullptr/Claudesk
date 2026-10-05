@@ -755,3 +755,38 @@ The by-id read `GET /v1/code/sessions/{id}` (`?get_session_v2_bundled_shared=…
 is decoded through `GetSessionResponseShape<SessionResource, SharedEventsPage>`
 (probed by keys `id`/`session`) / `SharedSessionResponse { session, data,
 nextCursor }` — NOT yet verified against the app; it may need the same treatment.
+
+## The picked repository decides the cwd (2026-10-05)
+
+`CreateSessionRequestConfig` (`sources, cwd, outcomes, customSystemPrompt,
+appendSystemPrompt, model, effortLevel`) is required to carry `sources`
+(`[SessionContextSource]`), and a repository picked in the "Add repository" menu
+arrives there. `SessionContextSource` is **custom-coded** — its discriminator is
+the nested `SessionContextSource.SourceType` (alongside `Outcome.OutcomeType`
+and `EnvironmentConfiguration.ConfigType` in
+`docs/mobile-code-decodable-types.txt`), and the raw-value strings
+`git_repository` / `knowledge_base` sit in `__cstring` — so the JSON is flat:
+`{ "type": "git_repository", "url": …, "revision": … }`. The facade resolves the
+url's last path segment to the Desktop workspace folder of the same name, so the
+session's `start` cwd is the folder the user picked. Three fixes were needed:
+
+1. **`GitHubRepo.sourceURL` does not round-trip through `.convertFromSnakeCase`.**
+   The property is `sourceURL` (all-caps), but the strategy maps the wire key
+   `source_url` to `sourceUrl`, which never matches — so the URL decoded as nil.
+   (Verified with a Swift 6 harness: encoding `sourceURL` emits `source_url`,
+   but decoding `source_url` yields nil; only `sourceURL` or `source_u_r_l`
+   populate it.) `repos/all` now sends `sourceURL`. This is the one acronym
+   field on the Code DTOs; `defaultBranch`, `gheConfigurationId`, `nextCursor`
+   etc. all round-trip fine.
+2. **The create reply reported a bare `{draft}` meta**, so `session_context.cwd`
+   was null and `config.sources` empty however the session resolved. The reply
+   (and the detail/ list reads) now echo the resolved `cwd` and the app's own
+   `sources` array verbatim — echoing the app's encoding of its own `Decodable`
+   guarantees it decodes, whatever the discriminator key.
+3. **`config.cwd`** (a directory picked directly, with no repository) was ignored;
+   the create route now reads `body.config.cwd` as well as a top-level `cwd`.
+
+`bridge_spawn_toast_same_dir` ("Running in the shared directory %@ …") is keyed
+off the bridge **spawn mode**, not the repository: the facade advertises the
+paired Desktop as `same-dir`, so the advisory toast is expected for every
+session on it and is independent of which folder the session runs in.

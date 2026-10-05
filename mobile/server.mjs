@@ -909,7 +909,15 @@ async function handleCodeRoutes(request, response, url) {
         title: body.title ?? body.name ?? null,
         model: body.model ?? body.config?.model ?? null,
         permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
+        // `CreateSessionRequestConfig.cwd` is where the app puts a directly
+        // picked directory (the device folder picker); a top-level `cwd` is
+        // still accepted for older callers.
         cwd: body.cwd ?? null,
+        // `CreateSessionRequestConfig.cwd` is where the app puts a directory it
+        // picked directly. It is kept apart from the top-level `cwd` because a
+        // repository in `config.sources` is the more specific pick and must win
+        // over a `config.cwd` that is only the environment's default directory.
+        configCwd: body.config?.cwd ?? null,
         // The repository the picker was created against (`config.sources`); the
         // session's project cwd is that repository's workspace folder.
         sources: body.config?.sources ?? null,
@@ -1329,16 +1337,31 @@ async function handleCodeRoutes(request, response, url) {
     // element type is not something to infer from the type's name. `sources` is
     // a different element type and the picker's rows come from `repos`, so it
     // stays empty; `status.appInstalled` is what makes a row offerable.
-    const repos = folders.map(({ name, path: repoPath }) => ({
-      repo: {
-        name,
-        owner: { login: "local" },
-        default_branch: "main",
-        source_url: repoPath ? `file://${repoPath}` : undefined,
-        ghe_configuration_id: null,
-      },
-      status: { workflow_enabled: true, app_installed: true },
-    }));
+    //
+    // `GitHubRepo.sourceURL` is the one field whose casing the decoder's
+    // `.convertFromSnakeCase` does NOT round-trip: it turns `source_url` into
+    // `sourceUrl`, which never matches the all-caps `sourceURL` CodingKey, so
+    // the URL silently stayed nil and a picked repo had nothing to attach as its
+    // session source. Send the camelCase key the property actually decodes from.
+    // The URL itself is the github.com/<owner>/<name> the app rebuilds for a
+    // session source, so the selection matches the catalog row.
+    const repos = folders.map(({ name }) => {
+      const sourceURL = `https://github.com/local/${name}`;
+      return {
+        repo: {
+          name,
+          owner: { login: "local" },
+          default_branch: "main",
+          sourceURL,
+          ghe_configuration_id: null,
+        },
+        // `RepoWithStatus.sourceUrl` (lowercase, which round-trips fine) carries
+        // the same URL so the row and the inner repo agree whichever field the
+        // app reads when it builds the session's source.
+        status: { workflow_enabled: true, app_installed: true },
+        sourceUrl: sourceURL,
+      };
+    });
     console.log(`[mobile-code]   repos/all -> ${repos.length} repo(s): ${folders.map((entry) => entry.name).join(", ")}`);
     sendJson(response, 200, {
       repos,
