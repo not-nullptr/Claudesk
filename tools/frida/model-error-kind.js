@@ -90,9 +90,9 @@ function readSwiftString(address) {
 // Bounded so one call can never run away: 48 bytes at the value and one level of
 // pointers, under a hard read budget. Enough for a DecodingError's Context
 // (debugDescription) and its coding path, and cheap enough to leave running.
-const REGION = 48;
-const MAX_DEPTH = 2;   // error -> box -> Context: the message is ~2 hops in
-const BUDGET = 200;    // hard cap per call; this is what stops the runaway
+const REGION = 96;
+const MAX_DEPTH = 3;   // error -> box -> Context -> String
+const BUDGET = 600;    // hard cap per call; this is what stops the runaway
 
 function harvest(address, depth, seen, out, budget) {
   if (depth < 0 || budget.left <= 0 || !address || address.isNull()) return;
@@ -137,6 +137,11 @@ function hook(base, offset, label) {
         calls += 1;
         const found = stringsAround(args[0], args[1], args[2], args[3]);
         log(`${label} #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
+        if (calls <= 3) {
+          const raw = safeRead(args[0], 48);
+          const hex = raw ? [...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ') : null;
+          log(`${label} #${calls} x0 bytes: ${hex}`);
+        }
       } catch (error) { /* never disturb the app */ }
     },
   });
