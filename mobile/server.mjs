@@ -889,8 +889,8 @@ async function handleCodeRoutes(request, response, url) {
   // A one-shot switch to bisect the session replies on device without a
   // rebuild: CLAUDE_MOBILE_SESSION_CREATE_MODE, or the file /data/session-mode
   // read per request. Values:
-  //   full (default) | nostatus | owned | owned0 | camel | status200
-  //   drop:a,b,c     remove those top-level keys from the create reply
+  //   full (default) | nostatus | owned | owned0 | camel | status200 | ctxmin
+  //   drop:a,b.c,d   remove those keys (dotted paths allowed) from the reply
   //   only:a,b,c     emit only those top-level keys (plus what is required)
   //   list-empty     make GET /v1/code/sessions return an empty page
   function sessionMode() {
@@ -927,8 +927,17 @@ async function handleCodeRoutes(request, response, url) {
         resource = { owned: { _0: resource } };
       } else if (mode === "camel") {
         resource = camelKeys(resource);
+      } else if (mode === "ctxmin") {
+        // session_context is required and is the only required field the env
+        // record does not also exercise; keep just its required keys.
+        resource.session_context = { sources: [], outcomes: [] };
       } else if (mode.startsWith("drop:")) {
-        for (const key of mode.slice(5).split(",").filter(Boolean)) delete resource[key];
+        for (const key of mode.slice(5).split(",").filter(Boolean)) {
+          const parts = key.split(".");
+          let target = resource;
+          for (let i = 0; i < parts.length - 1 && target; i += 1) target = target[parts[i]];
+          if (target && typeof target === "object") delete target[parts[parts.length - 1]];
+        }
       } else if (mode.startsWith("only:")) {
         const keep = new Set(mode.slice(5).split(",").filter(Boolean));
         for (const key of Object.keys(resource)) if (!keep.has(key)) delete resource[key];
