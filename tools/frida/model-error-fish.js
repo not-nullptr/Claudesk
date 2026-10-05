@@ -72,20 +72,22 @@ function smallString(bytes) {
 
 // A Swift String is two words, `(_countAndFlags, _object)`: small (up to 15
 // bytes inline, tagged 0xE), bridged (a tagged NSString), or native (`_object`
-// is a heap object holding UTF-8 behind a count word). The native header offset
-// is tried a few ways and the first printable read wins.
+// is a heap object holding UTF-8 behind a count word). Only the small and native
+// shapes are read. A bridged String is deliberately NOT followed: that needs a
+// call into the ObjC runtime, and this function is handed arbitrary register
+// values from the factory hooks, not proven pointers — `objc_msgSend` on a word
+// that only looked like an object is an EXC_BAD_ACCESS a JS `try`/`catch` cannot
+// catch. Nothing here may move the app toward a crash, so a wrong guess is a
+// null and nothing more.
 function readSwiftString(address) {
   const bytes = readBytes(address, 16);
   if (!bytes) return null;
   const last = bytes[15];
   if ((last >> 4) === 0xe || (last & 0xf) === 0xe) return smallString(bytes);
   const hi = u64(bytes, 8);
-  if ((hi & 0x8000000000000000n) !== 0n) {
-    if (!ObjC.available) return null;
-    try { return new ObjC.Object(ptr(hi.toString())).toString() || null; }
-    catch (error) { return null; }
-  }
+  if ((hi & 0x8000000000000000n) !== 0n) return null; // tagged/bridged: not read
   const object = ptr(hi.toString());
+  if (object.isNull()) return null;
   for (const [countAt, bytesAt] of [[16, 32], [24, 32], [16, 24]]) {
     const header = readBytes(object.add(countAt), 8);
     if (!header) continue;
