@@ -1164,15 +1164,27 @@ function installOne(name) {
 // every throw.
 let hookTimer = null;
 let hookTries = 0;
+// How long the app ran before the hooks were in place. It cannot be zero: the
+// exports live in libswiftCore, so dyld has to have mapped it first, and at
+// `init` time it has not. What *can* be avoided is adding to that: this used to
+// start from `boot()` on a 500 ms delay, so the app ran for most of a second
+// with nothing intercepted — and a spawn run showed exactly that gap from the
+// other side, with every `built` record on a bridge site and none on the
+// decoder. So hook first, and report the wait rather than hide it.
+const HOOK_POLL_MS = 20;
+const HOOK_MAX_TRIES = 400;               // ~8 s of dyld taking its time
+const STARTED_AT = Date.now();
+
 function hook() {
   const done = THROW_EXPORTS.every((name) => installOne(name));
   hookTries += 1;
-  if (done || hookTries > 40) {
+  if (done || hookTries > HOOK_MAX_TRIES) {
     if (hookTimer) clearInterval(hookTimer);
     hookTimer = null;
     report('hook', {
       installed: [...installed],
       tries: hookTries,
+      elapsedMs: Date.now() - STARTED_AT,
       filter: TYPE_FILTER,
       // Empty is not necessarily failure: a gadget built with code_signing
       // "required" cannot patch code at all, so Interceptor is unavailable and
@@ -1182,6 +1194,13 @@ function hook() {
         : undefined,
     });
   }
+}
+
+// Called from `init` and from the listen-mode load, before anything else runs.
+function startHooking() {
+  if (hookTimer) return;
+  hookTimer = setInterval(hook, HOOK_POLL_MS);
+  hook();
 }
 
 // Every live `ModelDecodingError` in the heap, found by its *shape* instead of
@@ -1273,8 +1292,7 @@ function boot() {
     frida: Frida.version,
     process: `${Process.arch} ${Process.platform}`,
   });
-  hookTimer = setInterval(hook, 250);
-  hook();
+  startHooking();
   // The census is a launch-time story, so it goes out even if fewer than
   // CENSUS_MAX distinct types were thrown — `names:[NSFileManager, …]` with
   // `unresolved:0` is the line that proves the namer works on this build.
@@ -1296,6 +1314,11 @@ rpc.exports = {
     } catch (error) {
       console.log(`${TAG}: init failed: ${error.message}`);
     }
+    // Before returning, and therefore before the app's entrypoint — the gadget
+    // awaits this call. The hooks still cannot land until dyld has mapped
+    // libswiftCore, but the poll starts here rather than three quarters of a
+    // second later.
+    startHooking();
     setTimeout(boot, 500);
     return { ok: true, reportUrl };
   },
@@ -1311,4 +1334,9 @@ rpc.exports = {
 // Listen mode evaluates the file and never calls init (there is no gadget config
 // to carry parameters), so boot on a timer; script mode has already run init by
 // then and this no-ops.
+//
+// Hooking starts at load either way. In listen mode the app is already running
+// and there is no window to lose, but starting late would mean the poll's first
+// attempt happens after `boot()`, and that is the delay this file just removed.
+startHooking();
 setTimeout(() => { if (!started) boot(); }, 1000);
