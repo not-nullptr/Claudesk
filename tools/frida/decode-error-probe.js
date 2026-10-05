@@ -1197,45 +1197,71 @@ function hook() {
 // *distinct paths*: one path repeated is a store of one error, several paths are
 // several failures, and that is the question `path` alone could not answer.
 const SAMPLE_RATE_ONES = '00 00 00 00 00 00 f0 3f';
+// How much address space one scan is allowed to walk, and why there is a limit
+// at all: `Memory.scanSync` over every writable range *blocked this thread*, and
+// with hooks installed every allocation and throw in the app waits behind the
+// callback that cannot be delivered while it runs — a live spawn froze on the
+// Code tab. So the scan is asynchronous (one chunk of one range per turn, the
+// thread yields between them), it is bounded, it runs only when asked for, and
+// the largest ranges are walked first because the app's heap is the largest.
+const SCAN_BUDGET = 192 * 1024 * 1024;
 
 function scanForErrors() {
   const seen = new Map();
   let examined = 0;
+  let scanned = 0;
+  let ranges = [];
   try {
-    for (const range of Process.enumerateRanges('rw-')) {
-      let matches = [];
-      try {
-        matches = Memory.scanSync(range.base, range.size, SAMPLE_RATE_ONES);
-      } catch (error) {
-        continue;                                  // an unreadable range is fine
-      }
-      for (const match of matches) {
-        examined += 1;
-        const at = match.address.sub(24);
-        const value = errorValueAt(at);
-        if (!value) continue;
-        const key = `${value.path}\u0000${at.toString()}`;
-        if (seen.has(key)) continue;
-        seen.set(key, {
-          at: at.toString(),
-          path: value.path,
-          box: describeAddress(value.box),
-        });
-      }
-    }
+    ranges = Process.enumerateRanges('rw-').sort((a, b) => b.size - a.size);
   } catch (error) {
-    console.log(`${TAG}: scan failed: ${error.message}`);
+    report('live-errors', { count: 0, why: `cannot enumerate ranges: ${error.message}` });
+    return;
   }
-  const errors = [...seen.values()];
-  const paths = [...new Set(errors.map((hit) => hit.path))];
-  report('live-errors', {
-    count: errors.length,
-    onesMatched: examined,
-    // The headline: every distinct `path` a live ModelDecodingError carries.
-    // One entry means one stored error; several mean several real failures.
-    paths,
-    errors: errors.slice(0, 24),
-  });
+
+  const finish = (why) => {
+    const errors = [...seen.values()];
+    report('live-errors', {
+      count: errors.length,
+      onesMatched: examined,
+      scannedBytes: scanned,
+      rangesConsidered: ranges.length,
+      stoppedBecause: why,
+      // The headline: every distinct `path` a live ModelDecodingError carries.
+      // One entry means one stored error; several mean several real failures.
+      paths: [...new Set(errors.map((hit) => hit.path))],
+      errors: errors.slice(0, 24),
+    });
+  };
+
+  let index = 0;
+  const nextRange = () => {
+    if (index >= ranges.length) { finish('ranges-exhausted'); return; }
+    if (scanned >= SCAN_BUDGET) { finish('budget-reached'); return; }
+    const range = ranges[index];
+    index += 1;
+    const size = Math.min(range.size, SCAN_BUDGET - scanned);
+    scanned += size;
+    let advanced = false;
+    const advance = () => { if (!advanced) { advanced = true; nextRange(); } };
+    try {
+      Memory.scan(range.base, size, SAMPLE_RATE_ONES, {
+        onMatch(address) {
+          examined += 1;
+          const at = address.sub(24);
+          const value = errorValueAt(at);
+          if (!value) return;
+          const key = `${value.path}\u0000${at.toString()}`;
+          if (seen.has(key)) return;
+          seen.set(key, { at: at.toString(), path: value.path, box: describeAddress(value.box) });
+        },
+        onError() { advance(); },
+        onComplete() { advance(); },
+      });
+    } catch (error) {
+      advance();
+    }
+  };
+  nextRange();
 }
 
 function boot() {
@@ -1253,15 +1279,11 @@ function boot() {
   // CENSUS_MAX distinct types were thrown — `names:[NSFileManager, …]` with
   // `unresolved:0` is the line that proves the namer works on this build.
   setTimeout(census, 15000);
-  // The heap scan needs no hook, so it is scheduled rather than triggered: by
-  // 20 s the app has shown whatever it is going to show, and the second look at
-  // 90 s catches a failure that was produced by pressing Send in between — which
-  // is exactly when a decode error in this app appears.
-  setTimeout(scanForErrors, 20000);
-  setTimeout(scanForErrors, 90000);
-  // And once more when the user asks, so a run can be reproduced without
-  // waiting out a timer: `rpc.export('scan')` over the CLI, or the same call
-  // from a script-mode build.
+  // The heap scan is deliberately *not* scheduled. It is the one thing here
+  // that costs real work, and a probe that spends the app's CPU on its own
+  // initiative is a probe that changes what it is trying to observe. Ask for it:
+  // `rpc.exports.scan()` at the attach-mode prompt, or the same call from a
+  // script-mode build, after the failure has been produced.
 }
 
 rpc.exports = {
