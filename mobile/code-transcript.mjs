@@ -12,8 +12,23 @@
 // Code transcript payloads retain SDK tool names and content blocks. The tool
 // display helpers below remain available to callers needing Chat-style labels.
 
+import { readFileSync } from "node:fs";
 import { describeTool, resultText, trimInput } from "./blocks.mjs";
 import { isHumanEntry } from "./transcript.mjs";
+
+// The environment by-id decode fails the same silent way the repo list did
+// (Sentry only). CLAUDE_MOBILE_ENV_MODE, or the file /data/env-mode read per
+// request, selects a shape to bisect the failing field without a restart:
+//   default  as built        nobridge  omit bridge_info
+//   date0    drop ms from created_at     cfgflat  config without the `_0` level
+//   minimal  only kind/id/name           wrapped  { "environment": <record> }
+function environmentMode() {
+  try {
+    const fromFile = readFileSync("/data/env-mode", "utf8").trim();
+    if (fromFile) return fromFile;
+  } catch { /* no override file */ }
+  return process.env.CLAUDE_MOBILE_ENV_MODE || "default";
+}
 import {
   BRIDGE_SPAWN_MODE,
   ENVIRONMENT_KIND,
@@ -128,7 +143,7 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
 // health the bridge record uses, so a Desktop that is down is shown as unknown
 // here too rather than as a usable cloud.
 export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
-  return {
+  const record = {
     kind: ENVIRONMENT_KIND.anthropicCloud,
     environment_id: CLOUD_ENVIRONMENT_ID,
     name,
@@ -151,6 +166,13 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cli
     // the property is non-optional — `null` would fail that case.
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
+  const mode = environmentMode();
+  if (mode === "nobridge") delete record.bridge_info;
+  else if (mode === "date0") record.created_at = String(record.created_at).replace(/\.\d+Z$/, "Z");
+  else if (mode === "cfgflat" && CONFIG_SHAPE !== "direct") record.config = { anthropic: record.config.anthropic._0 };
+  else if (mode === "minimal") { delete record.bridge_info; delete record.created_at; delete record.state; }
+  else if (mode === "wrapped") return { environment: record };
+  return record;
 }
 
 function iso(value) {
