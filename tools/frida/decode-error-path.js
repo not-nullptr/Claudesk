@@ -126,7 +126,9 @@ function hook(base, offset, label) {
         // the reused sret buffer). Harvest x20 first, then the arg registers.
         const ctx = this.context;
         const self = ctx.x20;
-        const found = stringsAround(self, args[0], args[1], args[2], args[3]);
+        const found = stringsAround(
+          ctx.x20, ctx.x19, ctx.x21, ctx.x22, ctx.x23, ctx.x8,
+          args[0], args[1], args[2], args[3]);
         const keys = [...new Set(found.filter((s) => s.length <= 32 &&
           /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)))].slice(0, 25);
         const msgs = [...new Set(found.filter((s) => s.length > 32))].slice(0, 4);
