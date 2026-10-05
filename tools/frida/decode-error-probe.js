@@ -828,7 +828,20 @@ function onThrow(context, source) {
     // does not belong to, so the construction is reported as well — cheap, no
     // backtrace — because the one record that must not go missing is the one
     // saying this type was built here.
-    report('built', { n: reported, source, type: name, site: key, module: moduleNameOf(key) });
+    // `frames` here is not decoration: the raw site is a runtime address, and
+    // its module-relative offset is what Ghidra wants. The backtracer is the
+    // rendering that has matched the binary before (`Claude+0x2033ec` for the
+    // bridging thunk at `0x100203274`+), so it is the one to trust for turning
+    // a site into a function. Cheap next to the throw's record, and capped with
+    // everything else at PER_SITE.
+    report('built', {
+      n: reported,
+      source,
+      type: name,
+      site: key,
+      module: moduleNameOf(key),
+      frames: frames(context),
+    });
     deferRead(record, source);
   } catch (error) {
     // Never let the probe disturb the app.
@@ -958,6 +971,8 @@ function reportThrow(context) {
             ...stringsIn(armed.box).map((hit) => ({ at: 'box', ...hit })),
             ...stringsIn(armed.storage).map((hit) => ({ at: 'storage', ...hit })),
           ].slice(0, 8),
+          // Same reason as `built`: the offset is what names the function.
+          frames: frames(context),
           why: 'no String at box, storage or throw; the value may not be this error',
         });
       }
