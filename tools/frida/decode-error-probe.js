@@ -828,12 +828,27 @@ function onThrow(context, source) {
   }
 }
 
+// Errors the app built earlier and is throwing again. A decode failure is not
+// always freshly made at the moment it is used: the app keeps the `any Error`
+// and re-throws it — at the next send, say — and then there is no allocation to
+// arm from and the probe saw nothing, which is exactly how a live run showed one
+// record and silence afterwards. Boxing is the app's, not the runtime's, so the
+// address is stable and the same failure is recognisable when it comes back.
+const knownBoxes = new Map();
+
+function rememberBox(pointer, name, site, path) {
+  const key = pointer ? pointer.toString() : null;
+  if (!key || knownBoxes.size >= 64 || knownBoxes.has(key)) return;
+  knownBoxes.set(key, { name, site, path, reported: false });
+}
+
 function reportThrow(context) {
   const armed = pending;
-  if (!armed) return;
   try {
-    if (armed.thread !== Process.getCurrentThreadId()) return;
-    if (Date.now() - armed.at > PENDING_MS) { pending = null; return; }
+    if (!armed) { reportRepeat(context); return; }
+    if (armed.thread !== Process.getCurrentThreadId()) { reportRepeat(context); return; }
+    if (Date.now() - armed.at > PENDING_MS) pending = null;
+    if (!pending) { reportRepeat(context); return; }
     // The storage the allocation named is where the payload went; the throw's
     // argument should be that same address, but it is the storage that is
     // guaranteed to hold the error, so it is read first.
@@ -871,12 +886,32 @@ function reportThrow(context) {
   }
 }
 
+// A throw with no allocation behind it, of an error this probe has already
+// named. Reported once per box: the point is the *moment* — this is the failure
+// being used, not merely built — and that is the record whose absence made a
+// live run look like the send was failing for some other reason entirely.
+function reportRepeat(context) {
+  const thrown = cleanPointer(context.x0);
+  const known = thrown ? knownBoxes.get(thrown.toString()) : null;
+  if (!known || known.reported) return;
+  known.reported = true;
+  report('repeat-throw', {
+    type: known.name,
+    site: known.site,
+    path: known.path,
+    throwSite: context.lr ? String(context.lr) : null,
+    valuePointer: describeAddress(thrown),
+    why: 'built earlier and thrown again; this throw decodes nothing new',
+  });
+}
+
 // `name`/`site` come from the allocation that built the error, `valuePointer`
 // and `frames` from the throw that carried it. `extra` carries what only the
 // throw can say: whether its argument was the error's own storage, and which of
 // the two the value was read from.
 function emit(source, name, site, context, valuePointer, extra = {}) {
   const path = readSwiftString(valuePointer);
+  rememberBox(cleanPointer(context.x0) || valuePointer, name, site, path);
   const pathRaw = readBytesAt(valuePointer, 64);
   // The thrown value is not always the type whose fields are known. The app's
   // reporting layer re-throws through `ClaudeTelemetry.ReportedError<T>`, a

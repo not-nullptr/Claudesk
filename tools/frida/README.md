@@ -165,6 +165,13 @@ moment it happens, bounded to the first few sites:
 | `built {n, type, site, module}` | the filtered type was built here; cheap, no backtrace, so the carrying throw can fail to arrive without taking the record with it |
 | `skipped {site, module, main}` | an allocation of the filtered type was turned away by the app-image test, with both module names |
 | `unread-throw {type, site, throwSite, storage, thrown, paired}` | the record was armed and a throw arrived, but neither address held a `String` — so either the value was not this error, or it is not where the layout says |
+| `repeat-throw {type, site, path, throwSite}` | a throw of an error the probe named earlier, with no allocation behind it — the app kept the `any Error` and threw it again, so this is the failure being *used* rather than *built* |
+
+`repeat-throw` is the one that matters when only the first press produces a
+record. A decode failure is not always freshly made where it is used: the app
+keeps the error and re-throws it, so the moment the user sees the failure has no
+allocation to arm from. The box is the app's, not the runtime's, so its address
+is stable and the same error is recognisable when it comes back.
 
 The value is not always the type whose fields are known, either: the app
 re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic wrapper
