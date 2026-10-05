@@ -1,6 +1,7 @@
 import http from "node:http";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { readFileSync } from "node:fs";
 import {
   connectMethods,
   connectRequestMessages,
@@ -878,10 +879,22 @@ async function handleCodeRoutes(request, response, url) {
     }
     return true;
   }
+  // A one-shot switch to bisect the create reply on device without a rebuild:
+  //   full (default) | nostatus (drop connection/worker status) | owned
+  //   | owned0 | camel | status200. CLAUDE_MOBILE_SESSION_CREATE_MODE, or the
+  // file /data/session-mode read per request.
+  function sessionCreateMode() {
+    try {
+      const value = readFileSync("/data/session-mode", "utf8").trim();
+      if (value) return value;
+    } catch { /* no override file */ }
+    return process.env.CLAUDE_MOBILE_SESSION_CREATE_MODE || "full";
+  }
+
   if (path === "/v1/code/sessions" && method === "POST") {
     try {
       const body = await readJson(request).catch(() => ({}));
-      const resource = await codeEngine.createSession({
+      let resource = await codeEngine.createSession({
         title: body.title ?? body.name ?? null,
         model: body.model ?? body.config?.model ?? null,
         permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
@@ -894,6 +907,17 @@ async function handleCodeRoutes(request, response, url) {
         // by-id environment read finds the record it was created against.
         environmentId: body.environment_id ?? body.environmentId ?? null,
       });
+      const mode = sessionCreateMode();
+      if (mode === "nostatus") {
+        delete resource.connection_status;
+        delete resource.worker_status;
+      } else if (mode === "owned") {
+        resource = { owned: resource };
+      } else if (mode === "owned0") {
+        resource = { owned: { _0: resource } };
+      } else if (mode === "camel") {
+        resource = camelKeys(resource);
+      }
       console.log(`[mobile-code]   create sources=${JSON.stringify(body.config?.sources ?? null)}`);
       // The create reply decides whether the app can hold the new session at
       // all: `revision` has to be an ISO date, and every date the app decodes
@@ -901,8 +925,8 @@ async function handleCodeRoutes(request, response, url) {
       // proves by itself whether it emits `"revision":"2026-…"` or the bare `0`
       // that predates the wireDate fix — without needing the app-side decode
       // error to say which build is in the container.
-      console.log(`[mobile-code]   create reply=${JSON.stringify(resource).slice(0, 2000)}`);
-      sendJson(response, 201, resource);
+      console.log(`[mobile-code]   create mode=${mode} reply=${JSON.stringify(resource).slice(0, 2000)}`);
+      sendJson(response, mode === "status200" ? 200 : 201, resource);
     } catch (error) {
       await fail(error);
     }
