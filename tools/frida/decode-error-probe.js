@@ -478,6 +478,20 @@ function readSwiftString(address) {
   return null;
 }
 
+// A `String` whose `_countAndFlags` is zero: an empty string, whose `_object` is
+// the shared empty-string singleton. Readable and non-null, so this is
+// deliberately narrower than "both words are zero" — that is an uninitialised
+// slot, not an empty string, and the two lead to opposite conclusions about an
+// error whose `path` would be there.
+function emptyStringAt(address) {
+  const bytes = readBytesAt(address, 16);
+  if (!bytes) return false;
+  if (u64At(bytes, 0) !== 0n) return false;
+  const object = u64At(bytes, 8);
+  if (object === 0n) return false;
+  return Boolean(readBytesAt(ptr(object.toString()), 8));
+}
+
 // `error: Error` sits at value+32, not +24. The field order is path, isFailure,
 // sampleRate, error, recoveredCount, and `sampleRate` is a *Double*, so the one
 // byte of `isFailure` is padded out to the eight that `sampleRate` needs:
@@ -847,7 +861,7 @@ function deferRead(record, source) {
     if (hit) {
       pending = null;
       emit(source, record.name, record.site, null, hit.pointer,
-        { paired: false, readFrom: hit.from });
+        { paired: false, readFrom: hit.from, path: hit.text });
       return;
     }
     if (index + 1 < DEFER_MS.length) setTimeout(() => attempt(index + 1), DEFER_MS[index]);
@@ -877,8 +891,27 @@ function readableValue(record, thrown) {
     if (!candidate) continue;
     const text = readSwiftString(candidate);
     if (text) return { text, pointer: candidate, from };
+    // An empty `String` is an answer, not an absence: `_countAndFlags` is zero
+    // and `_object` is the shared empty-string singleton, so every shape the
+    // reader knows fails and a `path` of "" used to be indistinguishable from a
+    // word that holds no String at all. Those are different findings — "this
+    // error names no route" against "this is not the error".
+    if (emptyStringAt(candidate)) return { text: '', pointer: candidate, from, empty: true };
   }
   return null;
+}
+
+// Every word offset of `pointer` that reads as a Swift `String`, for a record
+// where the single offset the layout predicts held nothing.
+function stringsIn(pointer, limit = 64) {
+  const found = [];
+  if (!pointer) return found;
+  for (let at = 0; at < limit; at += 8) {
+    const text = readSwiftString(pointer.add(at));
+    if (text) found.push({ at, text });
+    else if (emptyStringAt(pointer.add(at))) found.push({ at, text: '' });
+  }
+  return found;
 }
 
 function reportThrow(context) {
@@ -907,6 +940,14 @@ function reportThrow(context) {
           storage: describeAddress(armed.storage),
           thrown: describeAddress(thrown),
           paired: Boolean(thrown && armed.storage && thrown.equals(armed.storage)),
+          // What is actually there, so that "no String" is a reading rather
+          // than a shrug: the box's own words, named, and every word offset in
+          // it and in the storage that does read as a `String`.
+          boxWords: describedWords(readBytesAt(armed.box, 32) || new Uint8Array(0)),
+          candidates: [
+            ...stringsIn(armed.box).map((hit) => ({ at: 'box', ...hit })),
+            ...stringsIn(armed.storage).map((hit) => ({ at: 'storage', ...hit })),
+          ].slice(0, 8),
           why: 'no String at box, storage or throw; the value may not be this error',
         });
       }
@@ -915,7 +956,7 @@ function reportThrow(context) {
     const paired = Boolean(thrown && armed.storage && thrown.equals(armed.storage));
     pending = null;
     emit('swift_willThrow', armed.name, armed.site, context, hit.pointer,
-      { paired, readFrom: hit.from });
+      { paired, readFrom: hit.from, path: hit.text });
   } catch (error) {
     console.log(`${TAG}: hook error: ${error.message}`);
   }

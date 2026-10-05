@@ -69,9 +69,9 @@ const ObjC = { available: false };
 
 const build = new Function(
   "Process", "ptr", "ObjC",
-  `${block}\nreturn { readSwiftString, smallString, textOf, u64At, readBytesAt, readPointerAt };`,
+  `${block}\nreturn { readSwiftString, smallString, textOf, u64At, readBytesAt, readPointerAt, emptyStringAt };`,
 );
-const { readSwiftString } = build(Process, ptr, ObjC);
+const { readSwiftString, emptyStringAt } = build(Process, ptr, ObjC);
 
 // ------------------------------------------------------- string encodings
 // A small string: `_object`'s high nibble is 0xE and the count rides under it.
@@ -118,6 +118,24 @@ assert.equal(read(nativeString("bound_sessions", 16, 24)), "bound_sessions");
 // Garbage must not be dressed up as a string.
 assert.equal(read(new Uint8Array([0xff, 0xfe, 0xfd, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), null);
 assert.equal(read(new Uint8Array(16)), null);
+
+// An empty `String` reads as *nothing* through the reader — count zero, and the
+// object behind it is the shared empty-string singleton, so every shape fails.
+// That is why the probe asks separately, and why the answer has to be "empty",
+// not "absent": an error whose `path` is "" names no route, which is a different
+// finding from a word that holds no String at all.
+function emptyString() {
+  const object = new Uint8Array(8);          // the singleton's storage
+  const address = put(object);
+  const value = new Uint8Array(16);
+  let hi = BigInt(address);
+  for (let i = 0; i < 8; i += 1) { value[8 + i] = Number(hi & 0xffn); hi >>= 8n; }
+  return value;
+}
+assert.equal(read(emptyString()), null, "the reader cannot see an empty String");
+assert.equal(emptyStringAt(makePointer(put(emptyString()))), true, "and it is recognised as empty");
+assert.equal(emptyStringAt(makePointer(put(new Uint8Array(16)))), false, "two zero words are uninitialised, not empty");
+assert.equal(emptyStringAt(makePointer(0xdead0000n)), false, "an unreadable address is not an empty String");
 // An unreadable address is null, not a throw.
 assert.equal(readSwiftString(makePointer(0xdead0000n)), null);
 
