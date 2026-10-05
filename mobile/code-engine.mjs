@@ -271,7 +271,9 @@ export function createCodeEngine({
       const entry = payload?.entry ?? payload;
       log.log(`[mobile-code] relay onOnEvent sid=${desktopId.slice(0, 12)}`
         + ` type=${entry?.type ?? entry?.message?.type ?? "?"}`
-        + ` uuid=${String(entry?.uuid ?? "-").slice(0, 8)}`);
+        + ` uuid=${String(entry?.uuid ?? "-").slice(0, 8)}`
+        + ` keys=${Object.keys(payload || {}).join(",")}`
+        + ` payload=${JSON.stringify(payload).slice(0, 700)}`);
     }
     const event = { method, payload };
     for (const callback of listeners.get(desktopId) || []) {
