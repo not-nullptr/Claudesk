@@ -19,9 +19,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "decode-error-probe.js"), "utf8");
 
 // The block under test runs from the field reader to the error-name walk, and
-// is contiguous in the probe.
+// is contiguous in the probe. It ends where the code that needs Frida's symbol
+// and mapping tables begins, so the boundary is a function name and not a
+// comment — the reader is exercised here, the reporting around it is not.
 const start = source.indexOf("function readBytesAt");
-const end = source.indexOf("// `error: Error` sits at value+24");
+const end = source.indexOf("function underlyingError(");
 assert.ok(start > 0 && end > start, "the field-reader block is still in the probe");
 const block = source.slice(start, end);
 

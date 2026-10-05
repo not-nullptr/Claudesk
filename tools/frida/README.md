@@ -170,9 +170,19 @@ address the struct was read from, and `pathWords` is the two words there, each
 named: a `String` word can only point at a writable object or at a
 `__TEXT,__const` literal, so a `path` of `null` whose words resolve to `[r-x
 file]` code or to an `[rw- anon]` heap page is self-evidently a wrong pointer
-rather than a string the reader failed on. `underlying` names the type of the
-`error` the wrapper was built around, and the `layout` line's `names` carry the
-same resolution for each candidate metadata.
+rather than a string the reader failed on. `underlying` looks inside the error
+the wrapper was built around: `{name, box, text}` — the boxed error's type, the
+box's address, and any `String` in its first 64 bytes. That `path` is a *route*
+(`/v1/code/github/{id}`, not a coding key), so the missing *field* has to come
+from the boxed `DecodingError`, which carries the `CodingKey` it failed on as a
+`String`; `text` is where that shows up. The `layout` line's `names` carry the
+same pointer resolution for each candidate metadata.
+
+The offset is +32 and not +24: the field order is path, isFailure, sampleRate,
+error, recoveredCount, and `sampleRate` is a `Double`, so `isFailure`'s single
+byte is padded out to the eight that `sampleRate` needs. A recorded value shows
+it — the third word was `0x3ff0000000000000`, which is 1.0, so a read at +24
+landed inside the sample rate and returned `null` every single time.
 
 `scanNear` used to be reported as `text` and described as holding the `path`.
 It does not. It follows the *metadata's* words — one of which is the descriptor

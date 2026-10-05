@@ -1198,9 +1198,20 @@ async function handleCodeRoutes(request, response, url) {
   // The app reaches these with GET and POST alike (`get-batch-branch-status` is
   // a POST — it takes a list of refs in the body). Both answer the same empty
   // envelope: an absent PR/branch list is a real state, a 404 is an error.
+  //
+  // `has_more` is not decoration. `GithubBranchListResponse` is `data` plus
+  // `hasMore`, both required (`lastId` and `defaultBranch` are optional), and
+  // the page this handler used to send carried `next_cursor` instead — which
+  // that type does not read. So every one of these routes failed to decode, and
+  // a decode failure here is not an empty list: it is a thrown
+  // `ModelDecodingError` naming the route, which is how session creation in the
+  // mobile Code tab was dying (`path` = `/v1/code/github/{id}`). Logged now,
+  // because a github leg the phone reaches and this handler answers wrongly is
+  // exactly what the silence here used to hide.
   if (path.startsWith("/v1/code/github/")) {
     if (method === "POST") await readJson(request).catch(() => ({}));
-    sendJson(response, 200, { data: [], next_cursor: null });
+    console.log(`[mobile-code]   github ${method} ${path}`);
+    sendJson(response, 200, { data: [], has_more: false, next_cursor: null });
     return true;
   }
   if (path === "/v1/code/shared-sessions" && method === "GET") {

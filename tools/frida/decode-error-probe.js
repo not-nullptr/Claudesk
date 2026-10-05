@@ -478,16 +478,36 @@ function readSwiftString(address) {
   return null;
 }
 
-// `error: Error` sits at value+24 (path 16, isFailure 1, sampleRate 1, padding).
-// An `any Error` is a box whose metadata is at box+0, and a metadata's
-// descriptor is at +8 — the `x0 via 8` shape the layout line already reports.
-function underlyingErrorName(valuePointer) {
+// `error: Error` sits at value+32, not +24. The field order is path, isFailure,
+// sampleRate, error, recoveredCount, and `sampleRate` is a *Double*, so the one
+// byte of `isFailure` is padded out to the eight that `sampleRate` needs:
+// path (0..15), isFailure (16), pad, sampleRate (24..31), error (32..39). A
+// recorded value shows exactly that — the third word is `0x3ff0000000000000`,
+// which is 1.0, so a read at +24 landed inside the sample rate and returned
+// nothing, every time.
+//
+// An `any Error` is a box whose payload starts at box+0. A `DecodingError` puts
+// the `CodingKey` it failed on in that payload, and a `CodingKey` carries its
+// name as a Swift `String` — so the box's own words can name the offending
+// field even when the missing value itself was a number.
+function underlyingError(valuePointer) {
   if (!valuePointer) return null;
-  const box = readPointerAt(valuePointer.add(24));
+  const box = readPointerAt(valuePointer.add(32));
   if (!box) return null;
   const metadata = readPointerAt(box);
-  if (!metadata) return null;
-  return nameStep(metadata, 8, null) || nameStep(metadata, 'direct', null);
+  const name = metadata
+    ? (nameStep(metadata, 8, null) || nameStep(metadata, 'direct', null))
+    : null;
+  const text = [];
+  for (let at = 0; at < 64; at += 8) {
+    const found = readSwiftString(box.add(at));
+    if (found && found.length > 1) text.push({ at, text: found });
+  }
+  return {
+    name: name || null,
+    box: describeAddress(box),
+    text: text.length ? text.slice(0, 6) : null,
+  };
 }
 
 // ------------------------------------------------------------- reading text
@@ -840,7 +860,7 @@ function emit(source, name, site, context, valuePointer, extra = {}) {
     valuePointer: describeAddress(valuePointer),
     pathWords: pathRaw ? describedWords(pathRaw) : null,
     pathCandidates: pathCandidates.length ? pathCandidates.slice(0, 6) : null,
-    underlying: underlyingErrorName(valuePointer),
+    underlying: underlyingError(valuePointer),
     scanNear: textNear(words, 640),
     frames: frames(context),
     ...extra,

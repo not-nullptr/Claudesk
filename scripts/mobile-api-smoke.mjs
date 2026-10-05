@@ -1137,14 +1137,24 @@ try {
   // takes the refs in its body); both must answer the empty envelope, because a
   // 404 on this leg is what surfaced as "Something went wrong" on the detail
   // screen's PR row.
+  //
+  // `has_more` is required and `next_cursor` is not read: the type behind these
+  // legs is `GithubBranchListResponse` = `data` + `hasMore`, so the envelope
+  // without `has_more` that used to be sent here failed to decode and threw
+  // `ModelDecodingError`, taking session creation down with it. Asserted as a
+  // shape rather than a status, because a 200 that cannot decode is the failure
+  // mode this leg actually had.
   for (const method of ["GET", "POST"]) {
     const response = await call("/v1/code/github/get-batch-branch-status", {
       method,
       body: method === "POST" ? { refs: [{ repo: "o/r", ref: "main" }] } : undefined,
     });
     assert.equal(response.status, 200, `github get-batch-branch-status answers to ${method}`);
-    assert.deepEqual(await response.json(), { data: [], next_cursor: null });
+    assert.deepEqual(await response.json(), { data: [], has_more: false, next_cursor: null });
   }
+  // The by-id form of the same family, which is the leg session creation dies on.
+  const branchList = await call("/v1/code/github/some-repo-id");
+  assert.deepEqual(await branchList.json(), { data: [], has_more: false, next_cursor: null });
 
   // The app pushes its own client events to the collection it reads history
   // from. The facade has no upstream to forward them to, but a 404 here broke
