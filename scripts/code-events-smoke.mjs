@@ -18,6 +18,7 @@ import {
   channelMessageForEnvelope,
   channelResource,
   cloudEnvironment,
+  folderEnvironmentId,
   eventEnvelopeForEntry,
   eventEnvelopes,
   olderCursorFor,
@@ -86,7 +87,9 @@ const record = {
 const row = sessionResponse(record, { meta: { unread: true } });
 assert.equal(row.id, "code_d1f2e3a4-0000-1111-2222-333344445555");
 assert.equal(desktopSessionIdFor(row.id), record.sessionId, "the desktop id survives the round trip");
-assert.equal(row.environment_id, BRIDGE_ENVIRONMENT_ID);
+// A session reports the environment of the directory it ran in, so the device's
+// directory rows count it under `/workspace/Claudesk`, not the workspace root.
+assert.equal(row.environment_id, folderEnvironmentId(record.cwd));
 assert.equal(row.environment_kind, "bridge", "enum values are literal, never snake-cased keys");
 // The row's `status` is the lifecycle axis, not the rich SessionStatus the
 // detail record reports.
