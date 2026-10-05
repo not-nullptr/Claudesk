@@ -562,6 +562,13 @@ export function createCodeEngine({
     log.log(`[mobile-code] create ${desktopId} env=${environmentId ?? "-"} cwd=${repoCwd ?? "(default)"} sources=${JSON.stringify(sources ?? [])}`);
     const entry = await updateMeta(desktopId, (state) => {
       state.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
+      // Keep the picker's model/mode at the TOP level too. `sendMessage`'s
+      // `start` reads `meta.model` / `meta.permission_mode` (the draft is only
+      // the create intent), so storing them solely under `draft` made every
+      // session start with Desktop's default model — the composer's pick was
+      // silently replaced on the first send.
+      state.model = model || state.model || null;
+      state.permission_mode = permissionMode || state.permission_mode || null;
       state.cwd = repoCwd || state.cwd || null;
       // Keep the app's own `sources` verbatim: the session DTOs echo it so the
       // phone sees the repository it picked (and the resolved cwd) instead of an

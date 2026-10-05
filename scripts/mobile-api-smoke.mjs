@@ -996,6 +996,15 @@ try {
     "start runs in the picked folder environment's directory",
   );
 
+  // The composer's model must reach `start`; stored only under the create draft
+  // it was dropped and Desktop fell back to its default model on every send.
+  const modelSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: { config: { model: "stub-haiku" } },
+  })).json()).session;
+  await sseStream(codePath(modelSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].model, "stub-haiku", "the picked model reaches start");
+
   // The build under test sends its turns through `POST /events` (a `type:"user"`
   // client event), not `/messages/stream`. The facade must dispatch it to
   // Desktop, or the session never exists and every read 404s.
@@ -1024,7 +1033,7 @@ try {
 
   // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }
