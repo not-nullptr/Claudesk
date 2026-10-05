@@ -1239,6 +1239,46 @@ async function handleCodeRoutes(request, response, url) {
   // that type does not read. So every one of these routes failed to decode, and
   // a decode failure here is not an empty list: it is a thrown
   // `ModelDecodingError` naming the route, which is how session creation in the
+  // --- repositories: the "Add repository" menu --------------------------------
+  // The app will not start a session without a repository, and there is no
+  // GitHub here, so each folder under the repos root is advertised as one.
+  // `RepoListResponse` is `repos, sourceWarnings, ssoRequiredOrgIds, sources,
+  // nextCursor, isComplete` and each `GitHubRepo` is `name, owner{login},
+  // defaultBranch, sourceURL?, gheConfigurationId?` (snake_case on the wire).
+  // A folder named like a repo is enough for the picker; the session ignores the
+  // source and runs in the environment's cwd.
+  const reposAllMatch = path.match(/^\/api\/organizations\/[0-9a-f-]{36}\/code\/repos\/all$/i);
+  if (reposAllMatch && method === "GET") {
+    const root = (process.env.CLAUDE_MOBILE_REPOS_ROOT || "/workspace").replace(/\/$/, "");
+    let folders = [];
+    try {
+      const { readdir } = await import("node:fs/promises");
+      folders = (await readdir(root, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+        .map((entry) => entry.name)
+        .sort();
+    } catch (error) {
+      console.log(`[mobile-code]   repos/all readdir(${root}) failed: ${error.message}`);
+    }
+    const repos = folders.map((name) => ({
+      name,
+      owner: { login: "local" },
+      default_branch: "main",
+      source_url: `file://${root}/${name}`,
+      ghe_configuration_id: null,
+    }));
+    console.log(`[mobile-code]   repos/all -> ${repos.length} local repo(s) under ${root}: ${folders.join(", ")}`);
+    sendJson(response, 200, {
+      repos,
+      source_warnings: [],
+      sso_required_org_ids: [],
+      sources: [],
+      next_cursor: "",
+      is_complete: true,
+    });
+    return true;
+  }
+
   // mobile Code tab was dying (`path` = `/v1/code/github/{id}`). Logged now,
   // because a github leg the phone reaches and this handler answers wrongly is
   // exactly what the silence here used to hide.
