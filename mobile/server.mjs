@@ -1272,7 +1272,11 @@ async function handleCodeRoutes(request, response, url) {
       repos,
       source_warnings: [],
       sso_required_org_ids: [],
-      sources: [],
+      // `RepoSource` is an enum — `.gitHubDotCom` (no payload) or
+      // `.enterprise(configurationId)`. The picker groups repos under a source,
+      // so an empty list showed "No repositories" however full `repos` was;
+      // declaring the github.com source is what makes it list them.
+      sources: [{ gitHubDotCom: {} }],
       next_cursor: "",
       is_complete: true,
     });
