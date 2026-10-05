@@ -727,6 +727,12 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     "permission_mode_policy",
   ].includes(rest);
   if (isNoOpObject && request.method === "GET") {
+    // The Code tab gates starting a session on GitHub being connected and shows
+    // "Connect to GitHub to start a session" otherwise. There is no upstream
+    // GitHub here, but a repo-less cloud session does not need one, so report
+    // connected to clear the gate. Set CLAUDE_MOBILE_GITHUB_CONNECTED=0 to get
+    // the truthful `false` back.
+    const githubConnected = process.env.CLAUDE_MOBILE_GITHUB_CONNECTED !== "0";
     const defaults = {
       "memory/settings": {
         is_memory_enabled: false,
@@ -742,13 +748,13 @@ async function handleOptionalEmptyRoutes(request, response, url) {
       // — observed on-device at +7 s every launch. `connected` is kept because
       // the mobile-API spec documents it; the decoder ignores keys it has no
       // property for, so carrying both satisfies either shape.
-      "sync/auth/status": { github: false, connected: false },
+      "sync/auth/status": { github: githubConnected, connected: githubConnected },
       // `CodeGitHubAuthStatus` — the Code tab's GitHub gate. The app GETs this
       // and used to fall through to a 404. `ghe_connections: []` is a truthful
       // "no enterprise GitHub connections" (wire casing is snake_case: the
       // shared decoder sets .convertFromSnakeCase) and `github: false` says no
       // github.com connection.
-      "sync/github/auth": { github: false, ghe_connections: [] },
+      "sync/github/auth": { github: githubConnected, ghe_connections: [] },
       "notification/preferences": { preferences: {}, effective_push: {} },
       "cowork_settings": { skip_approvals_enabled: false, auto_mode_enabled: false },
       "permission_mode_policy": {
