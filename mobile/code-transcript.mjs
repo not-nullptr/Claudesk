@@ -16,12 +16,13 @@ import { readFileSync } from "node:fs";
 import { describeTool, resultText, trimInput } from "./blocks.mjs";
 import { isHumanEntry } from "./transcript.mjs";
 
-// The environment by-id decode fails the same silent way the repo list did
-// (Sentry only). CLAUDE_MOBILE_ENV_MODE, or the file /data/env-mode read per
-// request, selects a shape to bisect the failing field without a restart:
+// The environment decode once failed the silent way the repo list did (Sentry
+// only); the fix was the flat `config` shape (see environmentConfig below).
+// CLAUDE_MOBILE_ENV_MODE, or the file /data/env-mode read per request, still
+// selects a shape to bisect a field without a restart:
 //   default  as built        nobridge  omit bridge_info
-//   date0    drop ms from created_at     cfgflat  config without the `_0` level
-//   minimal  only kind/id/name           wrapped  { "environment": <record> }
+//   date0    drop ms from created_at     minimal  only kind/id/name
+//   kindold  snake-case kind            wrapped  { "environment": <record> }
 function environmentMode() {
   try {
     const fromFile = readFileSync("/data/env-mode", "utf8").trim();
@@ -94,20 +95,32 @@ function bridgeInfoFor({ name, online, cliVersion }) {
   };
 }
 
-// `EnvironmentConfiguration` is a Swift enum with associated values, so its
-// synthesised Codable is a keyed container holding ONE key — the case name —
-// whose value is a nested keyed container of the case's associated values,
-// keyed by label or `_0` when unlabelled (SE-0295; Apple's own example:
-// `case upc(Int, Int, Int, Int)` encodes as `{"upc":{"_0":8,"_1":…}}`). The
-// payload therefore sits under `_0`, not directly under the case name. Missing
-// that level throws `keyNotFound(_0)`, which fails the whole
-// `EnvironmentConfiguration`, then the whole `EnvironmentResource`, and reaches
-// the app as ModelDecodingError(kind: unexpected_schema) — naming neither the
-// field nor the level. Set CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE=direct to
-// emit the old (wrong) flat shape for comparison.
-const CONFIG_SHAPE = process.env.CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE || "boxed";
-function environmentCase(caseName, payload) {
-  return CONFIG_SHAPE === "direct" ? { [caseName]: payload } : { [caseName]: { _0: payload } };
+// `EnvironmentConfiguration` is a Swift enum with associated values, but its
+// Codable is CUSTOM, not SE-0295-synthesised. The proof is its declared
+// `EnvironmentConfiguration.CodingKeys`, which has exactly ONE case —
+// `environmentType` (dumped from the binary; see docs/mobile-code-re-findings.md).
+// A synthesised enum would key on the case names (`anthropic`/`byoc`/`paired`);
+// a single `environmentType` key means the decoder discriminates on a **flat**
+// `environment_type` and decodes the payload struct from the SAME dictionary:
+//
+//   "config": { "environment_type": "anthropic", "cwd": …, "init_script": … }
+//   "config": { "environment_type": "bridge",    "machine_name": …, … }
+//
+// So the payload is NOT nested under the case name, and NOT under `_0` — it sits
+// flat beside the `environment_type` discriminator. Getting this wrong throws
+// `keyNotFound(environmentType)`, which fails the whole `EnvironmentResource` and
+// reaches the app as ModelDecodingError(kind: unexpected_schema) — naming neither
+// the field nor the level. The `environmentType` inside the payload is a
+// `ConfigType` (`anthropic | byoc | bridge | unknown`, no `paired`), so the
+// `paired` case is selected by `"bridge"`, not `"paired"`.
+//
+// CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE=boxed / direct re-emit the older, wrong
+// nested shapes for comparison.
+const CONFIG_SHAPE = process.env.CLAUDE_MOBILE_ENVIRONMENT_CONFIG_SHAPE || "flat";
+function environmentConfig(caseName, payload) {
+  if (CONFIG_SHAPE === "boxed") return { [caseName]: { _0: payload } };
+  if (CONFIG_SHAPE === "direct") return { [caseName]: payload };
+  return payload; // flat: environment_type discriminator beside the payload
 }
 
 export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
@@ -117,14 +130,12 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
     name,
     created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
-    // `config` is `EnvironmentConfiguration`, an enum with associated values,
-    // so a flat `{environment_type: …}` at `config`'s top level does not decode:
-    // the payload nests under the case name and, within that, under the
-    // associated value's key (`_0`) — see environmentCase above.
-    // `environmentType` inside the payload is a `ConfigType` — `anthropic |
-    // byoc | bridge | unknown`, a case set with NO `paired` member — so the
-    // paired payload carries `bridge`, the same axis value its `kind` reports.
-    config: environmentCase("paired", {
+    // `config` is `EnvironmentConfiguration.paired`, decoded FLAT off the
+    // `environment_type` discriminator (see environmentConfig above). The
+    // payload's own `environment_type` is a `ConfigType` — `anthropic | byoc |
+    // bridge | unknown`, a case set with NO `paired` member — so the paired
+    // payload carries `bridge`, the same axis value its `kind` reports.
+    config: environmentConfig("paired", {
       environment_type: "bridge",
       machine_name: name,
       directory: "/workspace",
@@ -136,12 +147,11 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
 }
 
 // The anthropicCloud record that fills the picker's "Cloud environments"
-// section. Its `config` is the `EnvironmentConfiguration.anthropic` case, so —
-// like the bridge record — the payload nests under the case name and the inner
-// `environment_type` literal is "anthropic". `bridgeInfo` is null: the app only
-// reads it for `kind == bridge`. The `state`/`online` axis is the same Desktop
-// health the bridge record uses, so a Desktop that is down is shown as unknown
-// here too rather than as a usable cloud.
+// section. Its `config` is the `EnvironmentConfiguration.anthropic` case, again
+// decoded FLAT off `environment_type`; the payload's `environment_type` literal
+// is "anthropic". The `state`/`online` axis is the same Desktop health the
+// bridge record uses, so a Desktop that is down is shown as unknown here too
+// rather than as a usable cloud.
 export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cliVersion = null } = {}) {
   const record = {
     kind: ENVIRONMENT_KIND.anthropicCloud,
@@ -149,27 +159,24 @@ export function cloudEnvironment({ name = "Claudesk Desktop", online = true, cli
     name,
     created_at: ENVIRONMENT_CREATED_AT,
     state: online ? "active" : "unknown",
-    config: environmentCase("anthropic", {
+    config: environmentConfig("anthropic", {
       environment_type: "anthropic",
       cwd: "/workspace",
       init_script: "",
       environment: {},
       languages: [],
-      // `networkConfig`’s optionality is not recoverable from the metadata;
-      // a well-formed, permissive value decodes whether it is `CCRNetworkConfig`
-      // or `CCRNetworkConfig?`, while `null` would fail the former.
+      // `CCRNetworkConfig` = `{ allowedHosts: [String], allowDefaultHosts: Bool }`,
+      // both non-optional, and `networkConfig` itself optional.
       network_config: { allowed_hosts: [], allow_default_hosts: true },
     }),
-    // `bridgeInfo` sits on every `EnvironmentResource`; the app classifies the
-    // row by `kind` and only reads `bridgeInfo` for the bridge kind. Emitting
-    // the same Desktop descriptor here is ignored by a cloud row but decodes if
-    // the property is non-optional — `null` would fail that case.
+    // `bridgeInfo` sits on every `EnvironmentResource` and is optional; the app
+    // classifies the row by `kind` and only reads it for a bridge row, so a
+    // well-formed descriptor here is simply ignored on the cloud row.
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
   };
   const mode = environmentMode();
   if (mode === "nobridge") delete record.bridge_info;
   else if (mode === "date0") record.created_at = String(record.created_at).replace(/\.\d+Z$/, "Z");
-  else if (mode === "cfgflat" && CONFIG_SHAPE !== "direct") record.config = { anthropic: record.config.anthropic._0 };
   else if (mode === "minimal") { delete record.bridge_info; delete record.created_at; delete record.state; }
   else if (mode === "kindold") record.kind = "anthropic_cloud";
   else if (mode === "nocfg") delete record.config;

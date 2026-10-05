@@ -886,11 +886,15 @@ async function handleCodeRoutes(request, response, url) {
         model: body.model ?? body.config?.model ?? null,
         permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
         cwd: body.cwd ?? null,
+        // The repository the picker was created against (`config.sources`); the
+        // session's project cwd is that repository's workspace folder.
+        sources: body.config?.sources ?? null,
         // Which environment the picker chose. Both ids the facade advertises
         // run on the same Desktop; the session records it so its detail screen's
         // by-id environment read finds the record it was created against.
         environmentId: body.environment_id ?? body.environmentId ?? null,
       });
+      console.log(`[mobile-code]   create sources=${JSON.stringify(body.config?.sources ?? null)}`);
       // The create reply decides whether the app can hold the new session at
       // all: `revision` has to be an ISO date, and every date the app decodes
       // must be a string. Logging it here means a capture from a running build

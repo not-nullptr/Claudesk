@@ -448,10 +448,92 @@ picker's cloud section stayed empty. The edit path already accepted `_0`
 (`mobile/server.mjs`, `editObject`); the response builders did not. Fixed in
 `mobile/code-transcript.mjs` (`environmentCase`).
 
+### SUPERSEDED — `config` is FLAT, not `_0`-nested (2026-10-05)
+
+The `_0` correction above is **wrong**, and so was everything before it that
+nested the payload under the case name. `EnvironmentConfiguration`'s Codable is
+**custom**, not SE-0295-synthesised, and it is keyed off a **flat
+`environment_type`**. The proof is the type's own declared `CodingKeys`, dumped
+straight from the binary with `ipsw macho info --swift`:
+
+```
+enum ClaudeCodeApi.EnvironmentConfiguration.CodingKeys {
+  case environmentType          // <-- exactly ONE case
+}
+```
+
+A synthesised enum would key on its case names (`anthropic | byoc | paired`). A
+single `environmentType` case means the decoder reads `environment_type` as a
+**discriminator** and decodes the payload struct from the **same dictionary** —
+flat. So the wire shape is:
+
+```json
+"config": { "environment_type": "anthropic", "cwd": …, "init_script": …, … }
+"config": { "environment_type": "bridge",    "machine_name": …, … }
+```
+
+`environment_type` is a `ConfigType` (`anthropic | byoc | bridge | unknown`,
+**no** `paired`), so the `paired` case is selected by `"bridge"`. Both the list
+and the by-id read failed identically under every nested mode tried
+(`boxed`/`direct`) precisely because none of them emitted this flat shape.
+
+The full environment schema, verbatim from the same dump (`ipsw macho info
+--swift /workspace/ipa-work/extracted/Payload/Claude.app/Claude`):
+
+```
+struct EnvironmentResource {
+  let kind: EnvironmentKind                 // anthropicCloud | byoc | bridge | unknown
+  let environmentId: AnthropicTagged<CodeEnvironmentTag, String>   // wire: bare String
+  let name: String
+  let createdAt: Foundation.Date            // ISO-8601
+  let state: EnvironmentState               // active | unknown
+  let config: EnvironmentConfiguration?     // flat, see above
+  let bridgeInfo: BridgeEnvironmentInfo?
+}
+struct EnvironmentListResponse {
+  let environments: IdentifiedArray<EnvironmentResource>   // wire: JSON array
+  let hasMore: Bool
+  let firstId: AnthropicTagged<CodeEnvironmentTag, String>?
+  let lastId:  AnthropicTagged<CodeEnvironmentTag, String>?
+}
+struct BridgeEnvironmentInfo {
+  let maxSessions: Int?; let machineName: String?; let directory: String?
+  let branch: String?; let gitRepoUrl: String?
+  let online: Bool?; let spawnMode: BridgeSpawnMode?   // singleSession|worktree|sameDir
+  let cliVersion: String?
+}
+struct AnthropicEnvironmentConfiguration {
+  let environmentType: ConfigType
+  let cwd: String?; let initScript: String?
+  let environment: [String: String]         // dictionary, {} is fine
+  let languages: [EnvironmentLanguage]      // [] is fine
+  let networkConfig: CCRNetworkConfig?      // { allowedHosts: [String], allowDefaultHosts: Bool }
+}
+struct PairedEnvironmentConfiguration {
+  let environmentType: ConfigType
+  let machineName: String?; let directory: String?; let branch: String?; let gitRepoUrl: String?
+}
+```
+
+`AnthropicTagged<Tag, B>` is `struct { var rawValue: B }` + `RawRepresentable` +
+`ClaudeCodable.TrimmedRawRepresentable`, and has **no** synthesised `CodingKeys`
+in the dump (unlike the real DTOs) — so it decodes as a single value (bare
+string), the way `SessionResource.Origin` (also `TrimmedRawRepresentable`)
+already does. `EnvironmentKind`/`EnvironmentState` conform to `LossyRawRepresentable`
+(unknown values fall back to `.unknown`, no throw). Fixed in
+`mobile/code-transcript.mjs` (`environmentConfig`).
+
+> Tooling note: `docs/mobile-code-decodable-types.txt` only lists conformance
+> names. The **fields and their types** come from `ipsw` (`blacktop/ipsw` release
+> binary, run locally), which pre-caches Swift metadata and prints a full type
+> dump — far faster than hand-parsing `__swift5_fieldmd` (the record layout is
+> not the naive `[name][type][flags]` my first attempts assumed).
+
 Enum raw values recovered for the session responses: `SessionListStatusFilter` =
 `active | paused | archived | provision_failed`; `SessionStatusBucket` =
 `blocked | review_ready | waiting | completed | failed | unknown`;
-`EnvironmentKind` = `anthropic_cloud | byoc | bridge | unknown`.
+`EnvironmentKind` = `anthropicCloud | byoc | bridge | unknown` (the earlier
+`anthropic_cloud` snake reading was wrong).
 
 ## The model selector, and how to tell a synthesized `Codable` from a custom one
 

@@ -234,14 +234,14 @@ const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2
 assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
 assert.equal(environment.bridge_info.spawn_mode, "sameDir");
-// `config` is a Swift enum with associated values, so its payload nests under
-// the case name — a flat `config` at this level fails to decode the resource.
-assert.deepEqual(Object.keys(environment.config), ["paired"]);
-// The inner `environmentType` is a `ConfigType` — anthropic | byoc | bridge |
+// `config` is `EnvironmentConfiguration`, decoded FLAT off the `environment_type`
+// discriminator (its declared CodingKeys hold only `environmentType`), so the
+// payload sits beside `environment_type`, not nested under a case name or `_0`.
+// The payload's `environmentType` is a `ConfigType` — anthropic | byoc | bridge |
 // unknown, with NO `paired` case — so the paired payload reports `bridge`. A
 // literal `"paired"` fails the whole `EnvironmentConfiguration` and drops the
 // row (and, all-or-nothing, every other row of the list).
-assert.equal(environment.config.paired._0.environment_type, "bridge");
+assert.equal(environment.config.environment_type, "bridge");
 assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 
 // ---- the cloud environment offered as the picker's "Cloud environments" row --
@@ -252,11 +252,7 @@ assert.equal(bridgeEnvironment({ online: false }).state, "unknown");
 const cloud = cloudEnvironment({ name: "Claudesk Desktop" });
 assert.equal(cloud.kind, "anthropicCloud");
 assert.equal(cloud.environment_id, CLOUD_ENVIRONMENT_ID);
-assert.deepEqual(Object.keys(cloud.config), ["anthropic"], "the case name is the only key");
-// The case name's value is the nested container of associated values, keyed
-// `_0` for the single unlabelled payload (SE-0295).
-assert.deepEqual(Object.keys(cloud.config.anthropic), ["_0"]);
-assert.equal(cloud.config.anthropic._0.environment_type, "anthropic");
+assert.equal(cloud.config.environment_type, "anthropic");
 // `bridgeInfo` is not *read* for a cloud row (the app classifies by `kind`),
 // but it is still *decoded* whatever the kind, and the list decodes
 // all-or-nothing. A struct-typed property fails to decode only when the value
@@ -269,7 +265,7 @@ assert.ok(Number.isFinite(Date.parse(cloud.created_at)), "createdAt is a non-nul
 // The same "never null an unconfirmed-optional field" rule applies to the
 // anthropic config's network settings; a null here would fail a non-optional
 // `CCRNetworkConfig` and drop the row.
-assert.deepEqual(cloud.config.anthropic._0.network_config, { allowed_hosts: [], allow_default_hosts: true });
+assert.deepEqual(cloud.config.network_config, { allowed_hosts: [], allow_default_hosts: true });
 assert.equal(cloud.state, "active");
 assert.equal(cloudEnvironment({ online: false }).state, "unknown");
 // The two advertised records are distinct ids, so a session can name either.

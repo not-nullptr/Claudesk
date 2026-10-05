@@ -300,6 +300,40 @@ export function createCodeEngine({
     return cachedDefaultCwd;
   }
 
+  // The new-session picker attaches the repository the session was created
+  // against as `config.sources` — `[{ type: "git_repository", url, revision }]`.
+  // The url is `https://github.com/<owner>/<name>`, rebuilt by the app from the
+  // GitHubRepo the facade advertised (`/v1/code/github/...`), not the
+  // `file://…` source_url we send, so the only usable part is the last path
+  // segment: the repository name. Map that onto the Desktop workspace folder of
+  // the same name so the session's `cwd` is the repository the user picked.
+  function repoNameFromSources(sources) {
+    if (!Array.isArray(sources)) return null;
+    for (const source of sources) {
+      const url = source && typeof source.url === "string" ? source.url : null;
+      if (!url) continue;
+      const clean = url.replace(/\.git$/, "").replace(/\/+$/, "");
+      const name = clean.split("/").pop();
+      if (name) { try { return decodeURIComponent(name); } catch { return name; } }
+    }
+    return null;
+  }
+
+  async function resolveRepoCwd(sources) {
+    const name = repoNameFromSources(sources);
+    if (!name) return null;
+    const listing = await workspaceFolders();
+    const folders = Array.isArray(listing?.folders) ? listing.folders : [];
+    const hit = folders.find((folder) =>
+      folder && typeof folder.name === "string" && folder.name.toLowerCase() === name.toLowerCase());
+    if (hit?.path) return hit.path;
+    // The bridge could not list (or did not carry it) — still give Desktop a
+    // concrete path rather than falling back to the workspace root, so a session
+    // started for "Claudesk" runs in the Claudesk folder.
+    const root = typeof listing?.root === "string" && listing.root ? listing.root : "/workspace";
+    return `${root.replace(/\/+$/, "")}/${name}`;
+  }
+
   async function fetchTranscript(desktopId) {
     return (await desktop.ipc(SURFACE, "getTranscript", ipcArgs.getTranscript(desktopId))) || [];
   }
@@ -417,7 +451,7 @@ export function createCodeEngine({
     };
   }
 
-  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, environmentId = null } = {}) {
+  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, environmentId = null, sources = null } = {}) {
     const desktopId = randomUUID();
     try {
       const session = await fetchSession(desktopId).catch(() => null);
@@ -436,9 +470,14 @@ export function createCodeEngine({
     // the row's environment is stable across reads (sessionResource reports the
     // bridge default for an unset one — see environmentForSession).
     const environment_id = typeof environmentId === "string" && environmentId ? environmentId : null;
+    // A repository chosen in the picker (`config.sources`) decides the project
+    // cwd; an explicit `cwd` still wins, and no repository leaves the previous
+    // default in place. Resolved before the meta write so the very first
+    // `sendMessage`'s `start` call runs in the repository folder.
+    const repoCwd = cwd || (sources ? await resolveRepoCwd(sources) : null);
     await updateMeta(desktopId, (entry) => {
       entry.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
-      entry.cwd = cwd || entry.cwd || null;
+      entry.cwd = repoCwd || entry.cwd || null;
       if (environment_id) entry.environment_id = environment_id;
       if (title) entry.title = String(title).slice(0, 200);
     });
