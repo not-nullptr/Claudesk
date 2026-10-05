@@ -35,9 +35,15 @@ function objJson(obj, pretty) {
     if (data.isNull()) return null;
     const text = new ObjC.Object(data).bytes().readUtf8String();
     if (!pretty) return text;
-    const value = JSON.parse(text);
-    for (const key of DROP) delete value[key];
-    return JSON.stringify(value, null, 2);
+    try {
+      const value = JSON.parse(text);
+      for (const key of DROP) delete value[key];
+      return JSON.stringify(value, null, 2);
+    } catch (error) {
+      // Still print it — the exception `value` (the route) is what we grep for,
+      // and losing it because pretty-printing choked hid it before.
+      return text;
+    }
   } catch (error) {
     return null;
   }
