@@ -28,6 +28,7 @@ const log = (...parts) => console.log(`${TAG}: ${parts.join(' ')}`);
 
 const CLASSIFIER_OFFSET = 0x1112d54;  // FUN_101112d54
 const CONSTRUCTOR_OFFSET = 0x11138a8; // FUN_1011138a8
+const DESCRIPTION_OFFSET = 0x10f39cc; // FUN_1010f39cc — owns "unexpected_schema"
 
 // A read on an unmapped page throws and is caught; that is far cheaper than
 // Process.findRangeByAddress, which this used to call on every single read and
@@ -151,6 +152,7 @@ const WANT = /environment|cloud-local|7de9bafa|environment_id|environmentId|crea
 
 let calls = 0;
 const MAX_CALLS = 300;
+const scratch = Memory.alloc(16);
 function hook(base, offset, label) {
   const target = base.add(offset);
   log(`${label} @ ${target}`);
@@ -160,6 +162,17 @@ function hook(base, offset, label) {
         if (calls >= MAX_CALLS) return;
         calls += 1;
         const found = stringsAround(args[0], args[1], args[2], args[3]);
+        // A Swift String passed by value arrives as two register words, not a
+        // pointer, so a String handed straight to this function (the route) has
+        // no memory of its own to scan. Rebuild it from adjacent arg pairs.
+        for (let i = 0; i + 1 < args.length && i < 5; i += 1) {
+          if (args[i] && args[i + 1] && !args[i].isNull() && !args[i + 1].isNull()) {
+            scratch.writePointer(args[i]);
+            scratch.add(8).writePointer(args[i + 1]);
+            const text = readSwiftString(scratch);
+            if (text && text.length > 2) found.push(text);
+          }
+        }
         log(`${label} #${calls} x0=${args[0]} x1=${args[1]} x2=${args[2]} x3=${args[3]} strings=${JSON.stringify(found.slice(0, 10))}`);
         const want = found.filter((s) => WANT.test(s));
         if (want.length) log(`*** MATCH *** ${label} #${calls} ${JSON.stringify(want)}`);
@@ -191,6 +204,10 @@ function install() {
   if (!module) { log('Claude module not found'); return; }
   hook(module.base, CLASSIFIER_OFFSET, 'classifier');
   hook(module.base, CONSTRUCTOR_OFFSET, 'constructor');
+  // 0x1010f39cc: the function that owns the `unexpected_schema` string and calls
+  // the classifier. Its arguments carry the ModelDecodingError's route, so a
+  // call that names the environment is the one to read.
+  hook(module.base, DESCRIPTION_OFFSET, 'desc');
   log('installed — now press send');
 }
 
