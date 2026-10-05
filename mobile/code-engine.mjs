@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { DesktopError } from "./desktop-client.mjs";
 import { SESSION_STATUS, codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
-import { eventEnvelopes, pageEvents, sessionResource, sessionResponse } from "./code-transcript.mjs";
+import { eventEnvelopes, folderDirectoryFromEnvironmentId, pageEvents, sessionResource, sessionResponse } from "./code-transcript.mjs";
 import { createCodeEventTranslator, isCodeRecord } from "./code-events.mjs";
 
 const SURFACE = "LocalSessions";
@@ -512,21 +512,26 @@ export function createCodeEngine({
     // the row's environment is stable across reads (sessionResource reports the
     // bridge default for an unset one — see environmentForSession).
     const environment_id = typeof environmentId === "string" && environmentId ? environmentId : null;
-    // A repository chosen in the picker (`config.sources`) decides the project
-    // cwd. A top-level `cwd` (an explicit caller argument) wins over it, and a
-    // `config.cwd` — the directory the app picked directly, or the environment
-    // default it echoes — is the fallback, so a repo pick is never overridden by
-    // a default directory. No repository and no cwd leaves the previous default
-    // in place. Resolved before the meta write so the very first `sendMessage`'s
-    // `start` call runs in the repository folder.
+    // Where the session should run, most specific pick first:
+    //   * a top-level `cwd` — an explicit caller argument;
+    //   * a repository in `config.sources` — the "Add repository" menu;
+    //   * the selected environment's directory — the remote folder picker
+    //     advertises one bridge environment per workspace folder, and the app
+    //     carries the picked one as `environment_id`;
+    //   * `config.cwd` — a directory the app sent directly, or the environment
+    //     default it echoes, so a pick above is never overridden by a default.
+    // No pick at all leaves the previous default in place. Resolved before the
+    // meta write so the very first `sendMessage`'s `start` call runs there.
+    const envCwd = folderDirectoryFromEnvironmentId(environmentId);
     const repoCwd = cwd
       || (sources ? await resolveRepoCwd(sources) : null)
+      || envCwd
       || (typeof configCwd === "string" && configCwd ? configCwd : null);
     // The picker's effect is invisible on the phone beyond the toast, so leave a
-    // line naming the request's sources and the cwd they resolved to. A create
-    // that runs in the workspace root with sources present is the one case this
-    // cannot explain from the code alone.
-    log.log(`[mobile-code] create ${desktopId} cwd=${repoCwd ?? "(default)"} sources=${JSON.stringify(sources ?? [])}`);
+    // line naming the request's sources, environment and the cwd they resolved
+    // to. A create that runs in the workspace root with a pick present is the one
+    // case this cannot explain from the code alone.
+    log.log(`[mobile-code] create ${desktopId} env=${environmentId ?? "-"} cwd=${repoCwd ?? "(default)"} sources=${JSON.stringify(sources ?? [])}`);
     const entry = await updateMeta(desktopId, (state) => {
       state.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
       state.cwd = repoCwd || state.cwd || null;

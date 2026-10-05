@@ -26,7 +26,18 @@ export async function startFakeClaudesk() {
   const uploads = [];
   const calls = [];
   const clients = new Set();
-  const state = { down: false, chunkDelayMs: 5, titleDelayMs: 0, titleResult: undefined, codeWorkspaceFolder: "/workspace" };
+  const state = {
+    down: false,
+    chunkDelayMs: 5,
+    titleDelayMs: 0,
+    titleResult: undefined,
+    codeWorkspaceFolder: "/workspace",
+    // What `/api/remote/folders` lists at the workspace root. The real bridge
+    // returns the directories under the mounted workspace; the facade advertises
+    // each as a bridge environment (the remote folder picker) and maps a repo
+    // source onto the folder of the same name.
+    workspaceFolders: [{ name: "Claudesk", path: "/workspace/Claudesk" }],
+  };
 
   const models = [
     {
@@ -394,6 +405,18 @@ export async function startFakeClaudesk() {
       return json(200, {
         model_selector_config: [{ id: "chat", models }, { id: "cowork", models }],
         model_selector_state: [{ id: "chat", model: "stub-sonnet" }],
+      });
+    }
+    // The workspace folder listing the facade reads to advertise the remote
+    // folder picker and to resolve a repository by name.
+    if (request.method === "GET" && url.pathname === "/api/remote/folders") {
+      const root = state.codeWorkspaceFolder;
+      const path = url.searchParams.get("path") || root;
+      const folders = path === root ? state.workspaceFolders : [];
+      calls.push({ route: "folders", path });
+      return json(200, {
+        ok: true,
+        value: { root, path, parent: path === root ? null : root, folders, truncated: false },
       });
     }
     // Uploads are raw bodies, like the real bridge's streaming route.

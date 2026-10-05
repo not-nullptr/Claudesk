@@ -23,6 +23,8 @@ import {
   channelMessageForEnvelope,
   channelResource,
   cloudEnvironment,
+  folderDirectoryFromEnvironmentId,
+  folderEnvironment,
   isRenderableEntry,
   sseFrameForEntry,
 } from "./code-transcript.mjs";
@@ -1140,9 +1142,34 @@ async function handleCodeRoutes(request, response, url) {
   const environmentsMatch = path.match(environmentsBase);
   if (environmentsMatch && method === "GET") {
     const online = await desktopReady();
+    const cliVersion = desktopVersion();
+    // The base bridge record represents the paired *device* (its default
+    // directory is the workspace root). Each workspace folder is additionally
+    // advertised as its own bridge environment: a bridge environment is one
+    // working directory on a machine (singular `directory` beside
+    // `branch`/`git_repo_url`), and the app's remote folder picker's rows are
+    // `Folder { id: CodeEnvironmentTag, name }` — a directory *is* an
+    // environment. Same `machine_name`, so the app groups them under the one
+    // device and lists them as that device's directories.
+    // CLAUDE_MOBILE_ENVIRONMENT_FOLDERS=0 withholds them.
+    const folderEnvironments = [];
+    if ((process.env.CLAUDE_MOBILE_ENVIRONMENT_FOLDERS ?? "1") !== "0") {
+      const listing = await codeEngine.workspaceFolders();
+      const folders = Array.isArray(listing?.folders) ? listing.folders : [];
+      for (const folder of folders) {
+        if (!folder || typeof folder.path !== "string" || !folder.path) continue;
+        folderEnvironments.push(folderEnvironment({
+          name: folder.name,
+          directory: folder.path,
+          online,
+          cliVersion,
+        }));
+      }
+    }
     const environments = [
-      cloudEnvironment({ online, cliVersion: desktopVersion() }),
-      bridgeEnvironment({ online, cliVersion: desktopVersion() }),
+      cloudEnvironment({ online, cliVersion }),
+      bridgeEnvironment({ online, cliVersion }),
+      ...folderEnvironments,
     ];
     // The picker's cloud section stays empty on device even though this list is
     // answered and the app demonstrably receives both records (it resolves the
@@ -1150,10 +1177,11 @@ async function handleCodeRoutes(request, response, url) {
     // the advertised set is selectable for a one-shot experiment: with
     // CLAUDE_MOBILE_ENVIRONMENT_MODE=cloud-only the bridge is withheld, which
     // tells apart "the picker auto-selects the bridge and never offers the cloud
-    // row" from "cloud rows are suppressed outright".
+    // row" from "cloud rows are suppressed outright". `cloud-only`/`bridge-only`
+    // keep the folder environments on the bridge side.
     const mode = process.env.CLAUDE_MOBILE_ENVIRONMENT_MODE || "both";
     const advertised = mode === "cloud-only" ? environments.slice(0, 1)
-      : mode === "bridge-only" ? environments.slice(1)
+      : mode === "bridge-only" ? [environments[1], ...folderEnvironments]
       : environments;
     // The app scopes this read to an organization id BOTH in the path and in the
     // `X-Organization-Uuid` header, and can narrow the result with
@@ -1236,6 +1264,20 @@ async function handleCodeRoutes(request, response, url) {
     if (id === CLOUD_ENVIRONMENT_ID) {
       const record = cloudEnvironment({ online, cliVersion: desktopVersion() });
       console.log(`[mobile-code]   environments/by-id ${id} -> ${JSON.stringify(record).slice(0, 4000)}`);
+      sendJson(response, 200, wireEnvironment(record));
+      return true;
+    }
+    // A folder environment (one per workspace folder). The path lives in the id,
+    // so the record can be rebuilt without the folder listing.
+    const folderDirectory = folderDirectoryFromEnvironmentId(id);
+    if (folderDirectory) {
+      const record = folderEnvironment({
+        name: folderDirectory.replace(/\/+$/, "").split("/").pop(),
+        directory: folderDirectory,
+        online,
+        cliVersion: desktopVersion(),
+      });
+      console.log(`[mobile-code]   environments/by-id ${id} -> folder ${folderDirectory}`);
       sendJson(response, 200, wireEnvironment(record));
       return true;
     }

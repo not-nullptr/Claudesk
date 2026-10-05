@@ -217,14 +217,16 @@ try {
     { headers: { "x-organization-uuid": org.uuid, "anthropic-version": "ccr-byoc-2025-07-29" } },
   );
   assert.equal(environmentsLeg.status, 200, "the environment list leg answers");
-  // Two records back the same Desktop: the `anthropic_cloud` row the picker's
+  // Records back the same Desktop: the `anthropic_cloud` row the picker's
   // "Cloud environments" section needs (without it that section shows the
   // "Create a cloud environment to get started" onboarding state and a new
-  // session cannot be started), and the paired `bridge` device. `anthropic_cloud`
-  // and `bridge` are the enums' literal raw values, not snake-cased keys.
+  // session cannot be started), the paired `bridge` device, and one `bridge`
+  // environment per workspace folder (the remote folder picker's directories).
+  // `anthropic_cloud` and `bridge` are the enums' literal raw values, not
+  // snake-cased keys.
   const environmentList = await environmentsLeg.json();
   const environments = environmentList.environments;
-  assert.equal(environments.length, 2);
+  assert.equal(environments.length, 3);
   const cloud = environments.find((e) => e.kind === "anthropicCloud");
   const bridge = environments.find((e) => e.kind === "bridge");
   assert.ok(cloud, "the cloud environment the picker requires is offered");
@@ -239,6 +241,17 @@ try {
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
   assert.equal(bridge.config.environment_type, "bridge");
   assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
+  // Each workspace folder is advertised as its own bridge environment, so the
+  // app's remote folder picker (whose rows are `Folder { id: CodeEnvironmentTag }`)
+  // lists the device's directories. They share the device's `machine_name`.
+  const folderEnv = environments.find(
+    (e) => e.kind === "bridge" && e.environment_id !== "anthropic-bridge-local",
+  );
+  assert.ok(folderEnv, "a workspace folder is offered as a bridge environment");
+  assert.equal(folderEnv.name, "Claudesk");
+  assert.equal(folderEnv.bridge_info.directory, "/workspace/Claudesk");
+  assert.equal(folderEnv.config.directory, "/workspace/Claudesk");
+  assert.equal(folderEnv.bridge_info.machine_name, bridge.bridge_info.machine_name, "folders share the device");
   // `first_id`/`last_id` bracket the returned order.
   assert.equal(environmentList.first_id, environments[0].environment_id);
   assert.equal(environmentList.last_id, environments.at(-1).environment_id);
@@ -249,6 +262,13 @@ try {
   );
   assert.equal(cloudById.status, 200);
   assert.equal((await cloudById.json()).kind, "anthropicCloud");
+
+  // The detail screen resolves a folder environment's id back to its record.
+  const folderById = await call(
+    `/v1/environment_providers/private/organizations/${org.uuid}/environments/${encodeURIComponent(folderEnv.environment_id)}`,
+  );
+  assert.equal(folderById.status, 200, "the folder environment's by-id read answers");
+  assert.equal((await folderById.json()).bridge_info.directory, "/workspace/Claudesk");
 
   const experiencesLeg = await call(`/api/organizations/${org.uuid}/experiences`);
   assert.equal(experiencesLeg.status, 200, "the experiences banner leg answers");
@@ -943,9 +963,24 @@ try {
   const cwdDetail = await (await call(codePath(cwdId))).json();
   assert.equal(cwdDetail.session_context.cwd, "/workspace/Chosen", "config.cwd decides the session directory");
 
-  // These three were created only for the cwd assertions; drop them so the list
+  // A folder picked in the remote folder picker arrives as the environment id;
+  // the session runs in that environment's directory and reports the id back.
+  const envCreates = await call("/v1/code/sessions", {
+    method: "POST",
+    body: { title: "Picked a folder", environment_id: folderEnv.environment_id },
+  });
+  const envReply = (await envCreates.json()).session;
+  assert.equal(envReply.environment_id, folderEnv.environment_id, "the reply reports the picked folder environment");
+  await sseStream(codePath(envReply.id, "/messages/stream"), { method: "POST", body: { body: "where am I" } });
+  assert.equal(
+    claudesk.codeIpcCalls("start").at(-1).args[0].cwd,
+    "/workspace/Claudesk",
+    "start runs in the picked folder environment's directory",
+  );
+
+  // These four were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }

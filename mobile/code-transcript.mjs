@@ -77,18 +77,18 @@ export const CLOUD_ENVIRONMENT_ID = "anthropic-cloud-local";
 // already decodes from this facade's ISO-8601 strings. Mirror that here.
 const ENVIRONMENT_CREATED_AT = new Date().toISOString();
 
-function bridgeInfoFor({ name, online, cliVersion }) {
+function bridgeInfoFor({ name, online, cliVersion, directory = "/workspace", branch = "", gitRepoUrl = "" }) {
   return {
     max_sessions: 1,
     machine_name: name,
-    directory: "/workspace",
+    directory,
     // Never null a String. The app's decoder says
     // "Cannot get value of type String -- found null value instead" for a
     // non-optional String that is present as null, and which of these the field
     // metadata really marks optional turned out to be wrong for at least one of
     // them. `""` decodes for `String` and `String?` alike; null does not.
-    branch: "",
-    git_repo_url: "",
+    branch,
+    git_repo_url: gitRepoUrl,
     online,
     spawn_mode: BRIDGE_SPAWN_MODE.sameDir,
     cli_version: cliVersion ?? "",
@@ -143,6 +143,58 @@ export function bridgeEnvironment({ name = "Claudesk Desktop", online = true, cl
       git_repo_url: "",
     }),
     bridge_info: bridgeInfoFor({ name, online, cliVersion }),
+  };
+}
+
+// A bridge environment is "a working directory on a machine" — singular
+// `directory` alongside `branch`/`git_repo_url` in both the `paired` config and
+// `BridgeEnvironmentInfo`, i.e. the shape of one repo checkout. The app's model
+// agrees: its remote folder picker's rows are `Folder { id: CodeEnvironmentTag,
+// name }`, so a "directory" IS an environment, and the device's directories are
+// the bridge environments sharing its `machine_name`. The facade therefore
+// advertises one bridge environment per workspace folder, and the app groups
+// them under the one paired device. The path is carried in the environment id
+// (OPAQUE to the app — it is an `AnthropicTagged<CodeEnvironmentTag, String>`,
+// a bare string) so the by-id read and the session create can recover it.
+export const FOLDER_ENVIRONMENT_PREFIX = "anthropic-bridge-folder-";
+
+export function folderEnvironmentId(directory) {
+  return `${FOLDER_ENVIRONMENT_PREFIX}${Buffer.from(String(directory), "utf8").toString("base64url")}`;
+}
+
+export function folderDirectoryFromEnvironmentId(id) {
+  if (typeof id !== "string" || !id.startsWith(FOLDER_ENVIRONMENT_PREFIX)) return null;
+  try {
+    return Buffer.from(id.slice(FOLDER_ENVIRONMENT_PREFIX.length), "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+// One workspace folder as its own paired-device environment. `deviceName` is the
+// shared `machine_name`, so the app lists every folder under the same device.
+export function folderEnvironment({
+  name,
+  directory,
+  deviceName = "Claudesk Desktop",
+  online = true,
+  cliVersion = null,
+} = {}) {
+  const label = name || String(directory || "").replace(/\/+$/, "").split("/").pop() || "workspace";
+  return {
+    kind: ENVIRONMENT_KIND.bridge,
+    environment_id: folderEnvironmentId(directory),
+    name: label,
+    created_at: ENVIRONMENT_CREATED_AT,
+    state: online ? "active" : "unknown",
+    config: environmentConfig("paired", {
+      environment_type: "bridge",
+      machine_name: deviceName,
+      directory,
+      branch: "",
+      git_repo_url: "",
+    }),
+    bridge_info: bridgeInfoFor({ name: deviceName, online, cliVersion, directory }),
   };
 }
 
@@ -221,11 +273,15 @@ function sourcesFromMeta(meta) {
 // The environment a session reports. Every session runs on the same Desktop, so
 // the id is whichever record the picker created it against (meta.environment_id)
 // and defaults to the bridge record — the kind follows the id, because the
-// detail screen resolves the id back through the environments by-id read.
+// detail screen resolves the id back through the environments by-id read. A
+// folder environment (one bridge environment per workspace folder) is a bridge
+// kind, so any non-nil id other than the cloud one reports the chosen id back
+// rather than collapsing to the base bridge record.
 export function environmentForSession(meta = {}) {
-  return meta.environment_id === CLOUD_ENVIRONMENT_ID
-    ? { id: CLOUD_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.anthropicCloud }
-    : { id: BRIDGE_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.bridge };
+  const id = meta.environment_id;
+  if (id === CLOUD_ENVIRONMENT_ID) return { id, kind: ENVIRONMENT_KIND.anthropicCloud };
+  if (typeof id === "string" && id) return { id, kind: ENVIRONMENT_KIND.bridge };
+  return { id: BRIDGE_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.bridge };
 }
 
 // The list row (ListSessionsResponse.data[]). `SessionResponse` is 23 fields;

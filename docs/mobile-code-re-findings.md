@@ -790,3 +790,51 @@ session's `start` cwd is the folder the user picked. Three fixes were needed:
 off the bridge **spawn mode**, not the repository: the facade advertises the
 paired Desktop as `same-dir`, so the advisory toast is expected for every
 session on it and is independent of which folder the session runs in.
+
+## A device's directories are environments — the native folder picker (2026-10-05)
+
+The app has a **native remote folder picker** for Code, and it is built on
+*environments*, not repositories. The evidence:
+
+```
+RemoteControlFolderPicker { folders: Folders?, picked: CodeEnvironmentTag?, pick: (CodeEnvironmentTag) -> Void }
+Folders   { rows: [Folder], asked: CodeEnvironmentTag }
+Folder    { id: AnthropicTagged<CodeEnvironmentTag>, name: String }      // a folder IS an environment id
+DirectorySelectionRow { environment: EnvironmentResource, activeSessionCount, isAtCapacity, isSelected, onSelect }
+DirectorySummaryRow   { directory: EnvironmentResource }
+EnvironmentStore      { cloudEnvironments, resolvedBridgeEnvironments, connectedDevices, … }
+```
+
+and the localization, in the **ClaudeCodeFeature** bundle: `devices_picker_hint`
+("Shows this device's directories"), `devices_directory_picker_title` ("Choose
+directory"), `device_directory_label`, `device_change_directory_hint`,
+`device_directory_at_capacity_hint`.
+
+The grain of the type agrees: a bridge environment carries a **singular**
+`directory` beside `branch`/`git_repo_url` in both `EnvironmentConfiguration.paired`
+and `BridgeEnvironmentInfo` — the shape of one working directory on a machine
+(optionally a git checkout), not a machine that owns a list of directories. So
+the facade now advertises **one bridge environment per workspace folder**, all
+sharing the device's `machine_name` (the app groups by device and lists them as
+its directories). The folder path is carried in the environment id (an opaque
+`AnthropicTagged<CodeEnvironmentTag, String>`) so the by-id read and the session
+create can recover it without the folder listing:
+
+* `mobile/code-transcript.mjs` — `folderEnvironment` / `folderEnvironmentId`
+  (`anthropic-bridge-folder-<base64url(path)>`) / `folderDirectoryFromEnvironmentId`.
+* `mobile/server.mjs` — the environments list appends one per folder from
+  `/api/remote/folders`; the by-id read rebuilds a folder record from the id.
+* `mobile/code-engine.mjs` — a create whose `environment_id` is a folder
+  environment resolves the session cwd from it (below an explicit `cwd`/`sources`,
+  above a bare `config.cwd`).
+
+`CLAUDE_MOBILE_ENVIRONMENT_FOLDERS=0` withholds the folder environments and
+reverts to the single paired device. This is additive to the repository menu:
+a cloud session still clones a repo, while a bridge/device session runs in a
+directory that already exists, which is why "No repository attached" is a valid
+state.
+
+What is still unverified on device: that this picker is *offered* in the Code
+new-session flow (the types say Code; the wiring into the composer is inferred),
+and how the app groups several bridge environments sharing one `machine_name`.
+
