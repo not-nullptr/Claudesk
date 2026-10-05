@@ -1223,15 +1223,30 @@ const SAMPLE_RATE_ONES = '00 00 00 00 00 00 f0 3f';
 // Code tab. So the scan is asynchronous (one chunk of one range per turn, the
 // thread yields between them), it is bounded, it runs only when asked for, and
 // the largest ranges are walked first because the app's heap is the largest.
-const SCAN_BUDGET = 192 * 1024 * 1024;
+const SCAN_BUDGET = 512 * 1024 * 1024;
+
+// Which ranges to walk. `enumerateMallocRanges` names the malloc zones, which is
+// where every Swift allocation lives; `rw-` is the fallback. Sorting `rw-` by
+// size and starting at the top was the earlier mistake: the app's *largest*
+// writable regions are its graphics buffers, and a sweep of 192 MB of those
+// matched not one `1.0` — a heap of that size is full of them. A Double is the
+// self-check that the scan is in app memory at all.
+function scanRanges() {
+  try {
+    const malloc = Process.enumerateMallocRanges();
+    if (malloc && malloc.length) return malloc;
+  } catch (error) { /* not available on this Frida/platform */ }
+  return Process.enumerateRanges('rw-');
+}
 
 function scanForErrors() {
   const seen = new Map();
   let examined = 0;
   let scanned = 0;
+  let rangesScanned = 0;
   let ranges = [];
   try {
-    ranges = Process.enumerateRanges('rw-').sort((a, b) => b.size - a.size);
+    ranges = scanRanges();
   } catch (error) {
     report('live-errors', { count: 0, why: `cannot enumerate ranges: ${error.message}` });
     return;
@@ -1244,7 +1259,14 @@ function scanForErrors() {
       onesMatched: examined,
       scannedBytes: scanned,
       rangesConsidered: ranges.length,
+      rangesScanned,
       stoppedBecause: why,
+      // `onesMatched: 0` means the sweep never touched app memory — that is what
+      // the first run of this looked like, and it matters, because an empty
+      // `paths` from a sweep of the wrong region is not an empty answer.
+      note: examined === 0
+        ? 'no 1.0 Double anywhere in the swept ranges — this is probably not app memory'
+        : undefined,
       // The headline: every distinct `path` a live ModelDecodingError carries.
       // One entry means one stored error; several mean several real failures.
       paths: [...new Set(errors.map((hit) => hit.path))],
@@ -1258,6 +1280,7 @@ function scanForErrors() {
     if (scanned >= SCAN_BUDGET) { finish('budget-reached'); return; }
     const range = ranges[index];
     index += 1;
+    rangesScanned += 1;
     const size = Math.min(range.size, SCAN_BUDGET - scanned);
     scanned += size;
     let advanced = false;
