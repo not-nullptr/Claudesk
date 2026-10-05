@@ -134,8 +134,9 @@ function hook(base, offset, label) {
 }
 
 function install() {
-  const base = Module.findBaseAddress('Claude');
-  if (base === null) { log('Claude module not found'); return; }
+  const module = Process.findModuleByName('Claude');
+  if (!module) { log('Claude module not found'); return; }
+  const base = module.base;
   hook(base, CLASSIFIER_OFFSET, 'classifier');
   hook(base, CONSTRUCTOR_OFFSET, 'constructor');
   log('installed');
