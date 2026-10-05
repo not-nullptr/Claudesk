@@ -686,7 +686,22 @@ function onThrow(context, source) {
     let path = readSwiftString(primary);
     let valuePointer = primary;
     if (!path) { path = readSwiftString(spare); if (path) valuePointer = spare; }
-    const pathRaw = readBytesAt(valuePointer, 16);
+    const pathRaw = readBytesAt(valuePointer, 64);
+    // The thrown value is not always the type whose fields are known. The app's
+    // reporting layer re-throws through `ClaudeTelemetry.ReportedError<T>`, a
+    // one-field generic wrapper — `underlying: T` — so the decoder's error sits
+    // at whatever offset that field has in the wrapper rather than at zero. So
+    // do not trust a single offset: try every word of the value for a String and
+    // report each hit with the offset it came from. The coding path is one of
+    // them, and where it sits names the wrapper's shape in the same record.
+    const pathCandidates = [];
+    if (valuePointer) {
+      for (let at = 0; at < 64; at += 8) {
+        const text = readSwiftString(valuePointer.add(at));
+        if (text && text.length > 1 && text !== path) pathCandidates.push({ at, text });
+      }
+      pathCandidates.sort((a, b) => b.text.length - a.text.length);
+    }
     // The incidental words, only so a null `path` still carries a trail.
     const words = [context.x0, context.x1, context.x2, context.x3];
     for (const base of [context.x0, context.x2]) {
@@ -708,6 +723,7 @@ function onThrow(context, source) {
       // looks like from here.
       valuePointer: describeAddress(valuePointer),
       pathWords: pathRaw ? describedWords(pathRaw) : null,
+      pathCandidates: pathCandidates.length ? pathCandidates.slice(0, 6) : null,
       underlying: underlyingErrorName(valuePointer),
       scanNear: textNear(words, 640),
       frames: frames(context),

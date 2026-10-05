@@ -125,13 +125,20 @@ frida -H <phone-ip>:27042 -n Gadget -l tools/frida/decode-error-probe.js
 ```
 
 Each hit reports
-`model-decoding-error {n, source, type, site, path, valuePointer, pathWords, underlying, scanNear, frames}`.
+`model-decoding-error {n, source, type, site, path, valuePointer, pathWords, pathCandidates, underlying, scanNear, frames}`.
 `frames` is the throwing call site as `Claude+0x…` (feed it to Ghidra against the
 same binary); `type` is there so a hit is self-evidently the right type.
 
 `path` is the field that answers the question — the coding path naming the
 offending field. It is read straight out of the error's value, as a Swift
-`String`.
+`String`. The value is not always the type whose fields are known, though: the
+app re-throws through `ClaudeTelemetry.ReportedError<T>`, a one-field generic
+wrapper (`underlying: T`, so the decoder's error sits at the wrapper's field
+offset rather than at zero), which is the type the app's own log names —
+`Failed to create session: Error Domain=…ReportedError<ClaudeApiServices.ModelDecodingError>`.
+So every word of the value is tried for a String and the hits land in
+`pathCandidates` with the offset each came from; the coding path is one of them,
+and its offset says where the wrapper put its payload.
 
 Every pointer in the record is resolved where it is reported — module and offset,
 or symbol name, plus the permissions and backing of the mapping it lands in — so
