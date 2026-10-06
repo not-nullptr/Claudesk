@@ -93,7 +93,7 @@ const ipcArgs = {
   // `start` takes one argument named `info`; its validator requires BOTH
   // `cwd` and `message` to be strings. Omitting `cwd` is what made every
   // earlier probe shape fail identically ("Argument \"info\" at position 0").
-  start: (desktopId, { cwd, message, messageUuid, model, title, permissionMode }) => [{
+  start: (desktopId, { cwd, message, messageUuid, model, title, permissionMode, effort }) => [{
     cwd,
     message,
     sessionId: desktopId,
@@ -101,6 +101,10 @@ const ipcArgs = {
     ...(model ? { model } : {}),
     ...(title ? { title } : {}),
     ...(permissionMode ? { permissionMode } : {}),
+    // `start` accepts an effort, so a new session begins at the composer's pick
+    // rather than Desktop's default (which is what "it stays at high" looked
+    // like for a session that was never re-set).
+    ...(effort ? { effort } : {}),
   }],
   // `messageUuid` is the EIGHTH positional argument, not the third: Desktop's
   // implementation is
@@ -566,7 +570,7 @@ export function createCodeEngine({
     };
   }
 
-  async function createSession({ title = null, model = null, permissionMode = null, cwd = null, configCwd = null, environmentId = null, sources = null } = {}) {
+  async function createSession({ title = null, model = null, permissionMode = null, effort = null, cwd = null, configCwd = null, environmentId = null, sources = null } = {}) {
     // Desktop's own LocalSessions ids are `local_<uuid>`; it accepts any
     // `^[A-Za-z0-9_-]+$` id, but its UI resolves a session by the `local_…` id
     // its store uses, so a bare UUID made every mobile-created session render
@@ -611,7 +615,7 @@ export function createCodeEngine({
     // case this cannot explain from the code alone.
     log.log(`[mobile-code] create ${desktopId} env=${environmentId ?? "-"} cwd=${repoCwd ?? "(default)"} sources=${JSON.stringify(sources ?? [])}`);
     const entry = await updateMeta(desktopId, (state) => {
-      state.draft = { title: title || "", model, permission_mode: permissionMode, created_at: nowIso() };
+      state.draft = { title: title || "", model, permission_mode: permissionMode, effort, created_at: nowIso() };
       // Keep the picker's model/mode at the TOP level too. `sendMessage`'s
       // `start` reads `meta.model` / `meta.permission_mode` (the draft is only
       // the create intent), so storing them solely under `draft` made every
@@ -619,6 +623,10 @@ export function createCodeEngine({
       // silently replaced on the first send.
       state.model = model || state.model || null;
       state.permission_mode = permissionMode || state.permission_mode || null;
+      // Same for the effort: `start` takes it, and the DTOs report it back, so
+      // an unremembered pick meant a reopened session read `null` and the
+      // composer showed its default (high).
+      state.effort = effort || state.effort || null;
       state.cwd = repoCwd || state.cwd || null;
       // Keep the app's own `sources` verbatim: the session DTOs echo it so the
       // phone sees the repository it picked (and the resolved cwd) instead of an
@@ -636,6 +644,7 @@ export function createCodeEngine({
       title: title || "",
       model,
       permissionMode,
+      effort,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       isRunning: false,
@@ -686,6 +695,10 @@ export function createCodeEngine({
       }
       if (typeof patch.effort === "string" && patch.effort) {
         await desktop.ipc(SURFACE, "setEffort", ipcArgs.setEffort(desktopId, patch.effort));
+        // Apply it to Desktop AND remember it, so the session DTO reports the
+        // pick back instead of `null` (which the composer renders as its
+        // default). Mirrors the permission_mode handling just below.
+        await updateMeta(desktopId, (entry) => { entry.effort = patch.effort; });
       }
       if (typeof patch.permission_mode === "string" && patch.permission_mode) {
         // Same "Auto → bypass" mapping as `start`, so changing the mode
@@ -743,14 +756,23 @@ export function createCodeEngine({
   // ---------- history ----------
 
   // The HTTP DTO is ListClientEventsResponse: data: [SessionEventEnvelope].
-  // The app builds ClientEventsPage.Row only after decoding these envelopes.
-  async function listEvents(id, { cursor = null, limit = 50, sortOrder = "desc" } = {}) {
+  // The app builds ClientEventsPage.Row only after decoding these envelopes, and
+  // that decode requires the rows to run ASCENDING (`ClientEventsPageOutOfOrder`)
+  // — so ascending is the default here, and `desc` only when the caller asked.
+  // `fromSequence` is the same exclusive floor the stream takes: a catch-up
+  // reads the events strictly above the last sequence it has rendered. Filtered
+  // here alongside the sort so paging and the floor agree.
+  async function listEvents(id, { cursor = null, limit = 50, sortOrder = "asc", fromSequence = null } = {}) {
     const desktopId = desktopSessionIdFor(id);
     if (!desktopId) throw notFound();
     const loaded = await loadSession(desktopId);
-    const page = pageEvents(loaded.envelopes, { cursor, limit });
+    const floor = Number(fromSequence);
+    const envelopes = Number.isSafeInteger(floor) && floor >= 0
+      ? loaded.envelopes.filter((envelope) => Number(envelope.sequence_num) > floor)
+      : loaded.envelopes;
+    const page = pageEvents(envelopes, { cursor, limit });
     return {
-      data: sortOrder === "asc" ? page.data : [...page.data].reverse(),
+      data: sortOrder === "desc" ? [...page.data].reverse() : page.data,
       next_cursor: page.next_cursor,
     };
   }
@@ -825,6 +847,9 @@ export function createCodeEngine({
           message: body,
           messageUuid,
           model: loaded?.session?.model ?? meta?.model ?? undefined,
+          // The composer's effort, same as the model: `start` takes it, and
+          // without it the first turn runs at Desktop's default.
+          effort: loaded?.session?.effort ?? meta?.effort ?? undefined,
           title: meta?.title || body.replace(/\s+/g, " ").trim().slice(0, 60),
           // The composer's permission mode must be set at start, or the first
           // turn runs under Desktop's default and prompts. A facade-level
@@ -920,10 +945,19 @@ export function createCodeEngine({
     abortActiveTurn(desktopId);
     try {
       await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId));
+      log.log(`[mobile-code] interrupt ${desktopId}`);
     } catch (error) {
-      throw asCodeError(error);
+      // Stop is best-effort. Desktop rejects an interrupt when no turn is in
+      // flight — and the app presses Stop exactly when it believes one is, so a
+      // racing or already-finished turn must not turn the Stop leg into a 5xx
+      // (which is what "the stop button does nothing" looks like on the phone).
+      log.error(`[mobile-code] interrupt ${desktopId} failed: ${error.message}`);
     }
+    cache.delete(desktopId);
     bumpRevision(desktopId);
+    // The turn's own events move the session to idle; push the current state so
+    // the row and detail header stop showing a running turn without a poll.
+    notifyState(desktopId);
   }
 
   // ---------- permissions ----------

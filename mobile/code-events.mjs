@@ -202,16 +202,23 @@ export function createCodeEventTranslator({ sessionId = null, startSequence = 1,
       }
       const frames = [];
       const entry = entryPayload(payload);
-      const sequence = seen.get(entry?.uuid) ?? nextSequence;
+      // A permission prompt is a `control_request`, not a transcript entry: the
+      // history page is built from transcript positions, so it has no row for
+      // the prompt. If the prompt consumed its own sequence the stream's numbers
+      // would run ahead of the page's, and a client that merges the two — or
+      // resumes from the last sequence it saw on the stream — would find a hole
+      // it can never fill (the missed turn never comes back until a full
+      // reload). Sit the prompt on the sequence of the entry before it and do
+      // NOT advance, so stream and page agree at every entry boundary.
+      const sequence = entry?.uuid && seen.has(entry.uuid)
+        ? seen.get(entry.uuid)
+        : method === "onOnToolPermissionRequest" ? Math.max(1, nextSequence - 1)
+          : nextSequence;
       for (const frame of frameFromPayload(method, payload, sequence)) {
         // Count each distinct entry once, so `resumeFrom()` stays a floor the
         // client can resume at even if Desktop replays rows on reconnect.
         if (entry?.uuid && !seen.has(entry.uuid)) {
           seen.set(entry.uuid, nextSequence);
-          nextSequence += 1;
-        } else if (method === "onOnToolPermissionRequest") {
-          // A control_request carries no transcript UUID; still consume its
-          // sequence so the next entry does not reuse the number.
           nextSequence += 1;
         }
         frames.push(frame);

@@ -354,4 +354,33 @@ assert.equal(channelEmptyPage("pull_requests").source, "unspecified");
 const channel = channelResource("code_d1");
 assert.ok("storage" in channel && "name" in channel);
 
+// ---- a permission prompt must not put a hole in the stream's numbering ------
+// The history page is built from transcript POSITIONS; a permission prompt is
+// not a transcript entry and has no row there. If its frame consumed a sequence
+// the live stream would run ahead of the page, and a client that resumes from
+// its last stream sequence would ask for a number history can never reach —
+// every event after the prompt silent until a full reload. The prompt now sits
+// on the entry before it and the counter does not move.
+const numbered = createCodeEventTranslator();
+const mkEntry = (uuid) => ({
+  uuid, type: "assistant",
+  message: { role: "assistant", content: [{ type: "text", text: uuid }] },
+});
+numbered.seed(eventEnvelopes([mkEntry("h1"), mkEntry("h2")]));
+const liveOne = numbered.accept({ method: "onOnEvent", payload: { entry: mkEntry("h3") } })[0];
+assert.equal(liveOne.data.sequence_num, "3");
+const promptAfter = numbered.accept({
+  method: "onOnToolPermissionRequest",
+  payload: { requestId: "req-hole", sessionId: "s1", toolName: "Bash" },
+})[0];
+assert.equal(promptAfter.data.sequence_num, "3", "a control frame sits on the entry before it");
+const liveTwo = numbered.accept({ method: "onOnEvent", payload: { entry: mkEntry("h4") } })[0];
+assert.equal(liveTwo.data.sequence_num, "4", "the next entry is not pushed past a hole");
+// Stream and history now agree at the tail: what the client has seen (4) is
+// exactly the last history position, so resuming from the next sequence (5)
+// replays anything it missed and nothing is skipped.
+const historyTail = eventEnvelopes([mkEntry("h1"), mkEntry("h2"), mkEntry("h3"), mkEntry("h4")]).length;
+assert.equal(historyTail, 4);
+assert.equal(numbered.resumeFrom(), 5, "the resume floor is the next history position");
+
 console.log("code-events-smoke: ok");

@@ -358,7 +358,10 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
       // own pick (persisted from its `set_permission_mode` control request) is
       // the only truth, and the composer confirms its selection from it.
       permission_mode: record?.permissionMode ?? meta?.permission_mode ?? null,
-      effort_level: record?.effort ?? null,
+      // `record.effort` is on Desktop's session object only while it runs; the
+      // facade's own meta is the durable copy, so a reopened session reports the
+      // pick back (else the composer showed its default, "high").
+      effort_level: record?.effort ?? meta?.effort ?? null,
       origin: null,
       memory_mode: null,
     },
@@ -402,7 +405,7 @@ export function sessionResource(record, { meta = {}, revision = null, pendingApp
       custom_system_prompt: null,
       append_system_prompt: null,
       model: record?.model ?? null,
-      effort_level: record?.effort ?? null,
+      effort_level: record?.effort ?? meta?.effort ?? null,
       memory_mode: null,
     },
     permission_mode: record?.permissionMode ?? meta?.permission_mode ?? "default",

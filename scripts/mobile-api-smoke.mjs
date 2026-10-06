@@ -703,6 +703,49 @@ try {
   assert.equal((await (await call(statePath)).json()).thinking, undefined, "another model has no selection yet");
   await call(statePath, { method: "PUT", body: { model: "stub-sonnet" } });
 
+  // The app's real body is the `ModelSelectorEdit` form the Desktop renderer
+  // sends too (`{set: …}` / `{unchanged: …}`), not the flat one above. An
+  // `unchanged` edit must read as "nothing to apply": storing it as the
+  // selection emits a `ThinkingState` the app cannot decode, and since the
+  // states array is all-or-nothing that takes the whole selector down and resets
+  // every composer to its default effort — permanently, because it is persisted.
+  await call(statePath, {
+    method: "PATCH",
+    body: { model: { unchanged: true }, thinking: { unchanged: true } },
+  });
+  assert.deepEqual(
+    (await (await call(statePath)).json()).thinking,
+    { effort: "xhigh", mode: "auto" },
+    "an unchanged edit is a no-op, not a stored selection",
+  );
+  // `thinking_by_model` arrives behind the same edit wrapper; before the unwrap
+  // it was dropped whole, so a per-model pick never round-tripped.
+  const wrappedPick = await (await call(statePath, {
+    method: "PATCH",
+    body: { thinking_by_model: { set: [{ id: "stub-sonnet", thinking: { effort: "max", mode: "on" } }] } },
+  })).json();
+  assert.deepEqual(wrappedPick.thinking, { effort: "max", mode: "on" }, "a wrapped thinking_by_model applies");
+  assert.deepEqual(wrappedPick.thinking_by_model, [{ id: "stub-sonnet", thinking: { effort: "max", mode: "on" } }]);
+  // A pick whose `model` is `{unchanged:true}` still has to land somewhere — it
+  // files under the surface's effective model, so it survives a reload on the
+  // Code surface too, which never writes its own `model`.
+  const codeStatePath = `/api/organizations/${org.uuid}/model_selector_state/code`;
+  const codePick = await (await call(codeStatePath, {
+    method: "PATCH",
+    body: { model: { unchanged: true }, thinking: { set: { effort: "max", mode: "on" } } },
+  })).json();
+  assert.equal(codePick.id, "code");
+  assert.deepEqual(codePick.thinking, { effort: "max", mode: "on" }, "a model-less pick on the code surface persists");
+  const codeBoot = (await (await call(
+    `/api/bootstrap/${org.uuid}/app_start?growthbook_format=sdk&include_system_prompts=false`,
+  )).json()).model_selector_state.find((entry) => entry.id === "code");
+  assert.deepEqual(codeBoot.thinking, { effort: "max", mode: "on" }, "bootstrap reports the code surface pick");
+  // Put the chat surface back to the pick the send leg below asserts on.
+  await call(statePath, {
+    method: "PUT",
+    body: { model: "stub-sonnet", thinking: { effort: "xhigh", mode: "auto" } },
+  });
+
   claudesk.resetCalls();
   const savedPickUuid = "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1";
   await send(savedPickUuid, {
@@ -1008,10 +1051,25 @@ try {
   // it was dropped and Desktop fell back to its default model on every send.
   const modelSession = (await (await call("/v1/code/sessions", {
     method: "POST",
-    body: { config: { model: "stub-haiku" } },
+    body: { config: { model: "stub-haiku", effort_level: "max" } },
   })).json()).session;
   await sseStream(codePath(modelSession.id, "/messages/stream"), { method: "POST", body: { body: "hi" } });
   assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].model, "stub-haiku", "the picked model reaches start");
+  // The effort pick must reach `start` and be echoed back. Unremembered, the
+  // session DTO reported `effort_level: null` and the composer showed "high".
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].effort, "max", "the picked effort reaches start");
+  assert.equal(
+    (await (await call(codePath(modelSession.id))).json()).session_context.effort_level,
+    "max",
+    "a session reports the effort it started with",
+  );
+  await call(codePath(modelSession.id), { method: "PATCH", body: { effort: "low" } });
+  assert.equal(
+    (await (await call(codePath(modelSession.id))).json()).session_context.effort_level,
+    "low",
+    "a mid-session effort change is remembered",
+  );
+  assert.equal(claudesk.codeIpcCalls("setEffort").at(-1).args[1], "low", "the change reaches Desktop");
 
   // The picked permission mode must reach `start` too, or the first turn
   // prompts even though the composer says "Bypass permissions".
@@ -1134,6 +1192,19 @@ try {
   assert.equal(Number(oldest.data[0].sequence_num), Number(olderPage.data.at(-1).sequence_num) - 1);
   assert.equal(oldest.next_cursor, null);
 
+  // Foreground catch-up. The app re-reads the page after it was suspended and
+  // requires an ASCENDING run (its ClientEventsPage decoder throws
+  // `ClientEventsPageOutOfOrder` otherwise) — so no `sort_order` must default to
+  // ascending, not newest-first — and `from_sequence_num` is the last sequence
+  // it has seen, so the read is strictly above it.
+  const ascending = await (await call(codePath(createdResource.id, "/events?limit=50"))).json();
+  assert.deepEqual(ascending.data.map((event) => Number(event.sequence_num)),
+    ascending.data.map((_, index) => index + 1), "the page read defaults to ascending");
+  const catchUpFloor = Number(ascending.data.at(-2).sequence_num);
+  const aboveFloor = await (await call(codePath(createdResource.id, `/events?from_sequence_num=${catchUpFloor}&limit=50`))).json();
+  assert.deepEqual(aboveFloor.data.map((event) => Number(event.sequence_num)), [catchUpFloor + 1],
+    "catch-up returns only the events above the resume floor");
+
   await sseStream(codePath(createdResource.id, "/messages/stream"), {
     method: "POST", body: { body: "List the files [tool]" },
   });
@@ -1181,6 +1252,8 @@ try {
     assert.deepEqual(streamed.map((record) => record.data), [...withTool.data].reverse(), "history and SSE agree byte-for-byte");
   } finally { await streamReader.cancel(); }
 
+  // `from_sequence_num` is the last sequence seen, exclusive: the app reads
+  // events "ascending above a floor" (strictly greater), so from=1 resumes at 2.
   const resumedResponse = await call(codePath(createdResource.id, "/events/stream?from_sequence_num=1"));
   const resumedReader = resumedResponse.body.getReader();
   try {
@@ -1208,8 +1281,14 @@ try {
     const liveSent = liveSend.filter((record) => record.event === "client_event");
     assert.deepEqual(followed.map((record) => record.data), liveSent.map((record) => record.data));
     assert.deepEqual(followed.map((record) => record.data.sequence_num), [1, 2, 3].map((n) => String(lastSequence + n)));
+    // No `sort_order`: the page defaults to ASCENDING, the order the app's
+    // `ClientEventsPage` decoder enforces (newest-first makes its catch-up throw
+    // `ClientEventsPageOutOfOrder` and drop everything since it last synced).
     const finalHistory = await (await call(codePath(createdResource.id, "/events?limit=3"))).json();
-    assert.deepEqual([...finalHistory.data].reverse(), followed.map((record) => record.data));
+    assert.deepEqual(finalHistory.data, followed.map((record) => record.data));
+    // Ascending is by sequence number, contiguous.
+    assert.deepEqual(finalHistory.data.map((event) => Number(event.sequence_num)),
+      followed.map((record) => Number(record.data.sequence_num)));
   } finally { await followReader.cancel(); }
 
   // The same initial frame is needed when a Desktop session has no history.
@@ -1332,6 +1411,30 @@ try {
   // Stop goes to LocalSessions.interrupt with the unprefixed id.
   const stopped = await call(codePath(createdResource.id, "/interrupt"), { method: "POST", body: {} });
   assert.equal(stopped.status, 200);
+  assert.equal(claudesk.codeIpcCalls("interrupt").at(-1).args[0], codeDesktopId);
+
+  // The Stop the phone's composer actually sends: an SDK `control_request` with
+  // subtype `interrupt` (SDKControlInterruptRequest) in the `POST /events`
+  // collection — not the REST /interrupt leg above. Both flat and case-keyed
+  // `request` encodings reach LocalSessions.interrupt.
+  const beforeControlStops = claudesk.codeIpcCalls("interrupt").length;
+  for (const request of [
+    { subtype: "interrupt" },
+    { interrupt: { subtype: "interrupt" } },
+  ]) {
+    await call(codePath(createdResource.id, "/events"), {
+      method: "POST",
+      body: { session_id: createdResource.id, events: [{ payload: { type: "control_request", request_id: "ctrl-stop", request } }] },
+    });
+  }
+  // `stop_task` cancels a background task; the only stop this facade can drive
+  // is the session's turn, so it maps to the same call.
+  await call(codePath(createdResource.id, "/events"), {
+    method: "POST",
+    body: { session_id: createdResource.id, events: [{ payload: { type: "control_request", request_id: "ctrl-task", request: { subtype: "stop_task", task_id: "t1" } } }] },
+  });
+  assert.equal(claudesk.codeIpcCalls("interrupt").length, beforeControlStops + 3,
+    "a Stop control_request reaches LocalSessions.interrupt");
   assert.equal(claudesk.codeIpcCalls("interrupt").at(-1).args[0], codeDesktopId);
 
   // A permission prompt: the session goes to requires_action, the prompt is

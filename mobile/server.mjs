@@ -162,8 +162,14 @@ async function selectedModel() {
 // `encode(to:)` pair chose. Both a flat `{effort, mode}` and a re-derived
 // `type` tag are guesses at that, and a wrong guess fails the decode of the
 // whole model selector.
+// One object is *never* a selection: a `ModelSelectorEdit` (`{set: …}` /
+// `{unchanged: …}` / `{value: …}`). Those arrive on the write side and must be
+// unwrapped before they reach here; if an older bridge ever stored one, it is
+// not a `ThinkingState` the app can decode, so drop it rather than echo it back
+// and take the whole selector down with it.
 function cleanThinking(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if ("set" in value || "value" in value || "unchanged" in value) return undefined;
   return { ...value };
 }
 
@@ -187,12 +193,31 @@ function surfaceKeys(surface) {
     : { model: `${surface}_model`, byModel: `${surface}_thinking_by_model` };
 }
 
-// A PUT body is a ModelSelectorStateBody: `model` and `thinking` are each a
-// ModelSelectorEdit — a `{set, unchanged}` payload enum — and Swift nests the
-// payload, so accept the bare value, the case wrapper and the `_0` alike.
+// The effective model for a surface: what the app last selected for it, else the
+// fallback the bootstrap advertises. saveSurfaceSelection and surfaceSelectorState
+// must resolve it identically, or a pick filed under one model is read back under
+// another.
+function effectiveModel(surface, saved, fallbackModel) {
+  const selected = saved?.[surfaceKeys(surface).model];
+  return (typeof selected === "string" && selected) || fallbackModel || "";
+}
+
+// A PUT body is a ModelSelectorStateBody: `model`, `thinking` and
+// `thinking_by_model` are each a ModelSelectorEdit — a `{set, unchanged}`
+// payload enum. `unchanged` means "nothing to apply" and must never be read as
+// the payload: a `{unchanged: …}` stored as a selection is not a `ThinkingState`
+// the app can decode, and because the states array is all-or-nothing that takes
+// every surface's model selector down and snaps each composer back to its
+// default. `set`/`value` carry the payload, which Swift nests (accept the bare
+// value, the case wrapper and the `_0` alike).
+function editUnchanged(edit) {
+  return Boolean(edit) && typeof edit === "object" && !Array.isArray(edit)
+    && "unchanged" in edit && !("set" in edit) && !("value" in edit);
+}
+
 function editValue(edit) {
   if (typeof edit === "string") return edit;
-  if (!edit || typeof edit !== "object") return undefined;
+  if (editUnchanged(edit) || !edit || typeof edit !== "object") return undefined;
   const inner = "set" in edit ? edit.set : "value" in edit ? edit.value : undefined;
   if (typeof inner === "string") return inner;
   if (inner && typeof inner === "object" && "_0" in inner) return editValue(inner._0);
@@ -200,10 +225,19 @@ function editValue(edit) {
 }
 
 function editObject(edit) {
-  if (!edit || typeof edit !== "object") return undefined;
+  if (editUnchanged(edit) || !edit || typeof edit !== "object") return undefined;
   const inner = "set" in edit ? edit.set : "value" in edit ? edit.value : edit;
   if (!inner || typeof inner !== "object") return undefined;
   return "_0" in inner ? inner._0 : inner;
+}
+
+// The same unwrap for a container edit: `thinking_by_model` carries the
+// IdentifiedArray itself, so `editObject` (which expects an object payload)
+// cannot be used and used to drop the whole per-model store.
+function editContainer(edit) {
+  if (editUnchanged(edit) || !edit || typeof edit !== "object") return undefined;
+  const inner = "set" in edit ? edit.set : "value" in edit ? edit.value : edit;
+  return inner && typeof inner === "object" && "_0" in inner ? inner._0 : inner;
 }
 
 // `thinking_by_model` is an `IdentifiedArray<ModelThinkingDefault>`: an ARRAY of
@@ -235,7 +269,7 @@ function thinkingDefaultsWire(byModel) {
 async function surfaceSelectorState(surface, fallbackModel) {
   const saved = await store.readJsonFile("model-selection.json", null);
   const keys = surfaceKeys(surface);
-  const model = (typeof saved?.[keys.model] === "string" && saved[keys.model]) || fallbackModel || "";
+  const model = effectiveModel(surface, saved, fallbackModel);
   const byModel = thinkingDefaultsFor(saved?.[keys.byModel]);
   const thinking = cleanThinking(byModel[model]);
   return {
@@ -246,21 +280,29 @@ async function surfaceSelectorState(surface, fallbackModel) {
   };
 }
 
-async function saveSurfaceSelection(surface, body) {
+async function saveSurfaceSelection(surface, body, fallbackModel = "") {
   const saved = (await store.readJsonFile("model-selection.json", null)) || {};
   const keys = surfaceKeys(surface);
   const next = { ...saved };
   const model = editValue(body?.model);
   if (model) next[keys.model] = model;
   const byModel = { ...thinkingDefaultsFor(saved[keys.byModel]) };
-  for (const [id, value] of Object.entries(thinkingDefaultsFor(body?.thinking_by_model))) {
+  // `thinking_by_model` arrives behind the same ModelSelectorEdit wrapper as the
+  // rest of the body (`{set: [{id, thinking}]}`), not as the bare array the wire
+  // read uses. Without unwrapping it the whole per-model store was dropped — one
+  // of the ways a picker change failed to survive a reload.
+  for (const [id, value] of Object.entries(thinkingDefaultsFor(editContainer(body?.thinking_by_model) ?? {}))) {
     const pick = cleanThinking(value);
     if (pick) byModel[id] = pick;
   }
   const thinking = cleanThinking(editObject(body?.thinking));
   if (thinking) {
-    if (surface === "chat") next.thinking = thinking;
-    if (next[keys.model]) byModel[next[keys.model]] = thinking;
+    // File the pick under the surface's effective model. The app may send
+    // `model` as `{unchanged:true}` (so `editValue` yields nothing), and a
+    // surface whose model was never explicitly written had no key to file under
+    // — previously that dropped the pick entirely.
+    const current = effectiveModel(surface, next, fallbackModel);
+    if (current) byModel[current] = thinking;
   }
   if (Object.keys(byModel).length) next[keys.byModel] = byModel;
   await store.writeJsonFile("model-selection.json", next);
@@ -855,12 +897,41 @@ function permissionModeFromControl(payload) {
   return typeof mode === "string" && mode ? mode : null;
 }
 
+// The subtype of an SDK `control_request`, whichever shape the app encoded its
+// `request` in: flat (`{subtype:"interrupt"}`) or discriminated by case
+// (`{interrupt:{subtype:"interrupt"}}`). `setPermissionMode` is spelled both
+// ways too. Returns null when the element is not a control request.
+function controlRequestSubtype(payload) {
+  if (!payload?.request && payload?.type !== "control_request") return null;
+  const request = payload?.request ?? payload ?? {};
+  const subtype = request.subtype
+    ?? (request.interrupt ? "interrupt" : null)
+    ?? (request.stopTask ? "stop_task" : request.stop_task ? "stop_task" : null)
+    ?? request.setPermissionMode?.subtype
+    ?? request.set_permission_mode?.subtype
+    ?? null;
+  return typeof subtype === "string" ? subtype : null;
+}
+
 // Returns true when the element was a control message, so the caller does not
 // also try to read it as a user turn.
 async function applyCodeControlMessage(sessionId, payload) {
   if (payload?.request || payload?.type === "control_request") {
-    // Any other control request (initialize, interrupt, set_permission_mode …)
-    // is not this facade's to act on here, but it is still not a user message.
+    // The composer's Stop button is not a REST call: the app sends an SDK
+    // `control_request` with subtype `interrupt` (SDKControlInterruptRequest) in
+    // the same `POST /events` collection as its user turns. Ignoring it here is
+    // why Stop did nothing — the request was read as a control message, dropped,
+    // and the turn kept running. `stop_task` (SDKControlStopTaskRequest) cancels
+    // a background task; Desktop's `LocalSessions.interrupt` is the only stop
+    // this facade can drive, so it maps there too.
+    const subtype = controlRequestSubtype(payload);
+    if (subtype === "interrupt" || subtype === "stop_task") {
+      await codeEngine.interrupt(sessionId);
+      console.log(`[mobile-code]   control_request ${subtype} -> interrupt`);
+    }
+    // Every other control request (initialize, set_permission_mode, elicitation,
+    // read_file …) is not this facade's to act on here, but it is still not a
+    // user message.
     return true;
   }
   if (payload?.response || payload?.type === "control_response") {
@@ -1019,6 +1090,10 @@ async function handleCodeRoutes(request, response, url) {
         title: body.title ?? body.name ?? null,
         model: body.model ?? body.config?.model ?? null,
         permissionMode: body.permission_mode ?? body.config?.permission_mode ?? null,
+        // `CreateSessionRequestConfig.effortLevel` (the app's `CreateSessionParams`
+        // carries it too); the composer's pick, so the first turn runs at it
+        // rather than Desktop's default.
+        effort: body.config?.effort_level ?? body.config?.effortLevel ?? body.effort_level ?? null,
         // `CreateSessionRequestConfig.cwd` is where the app puts a directly
         // picked directory (the device folder picker); a top-level `cwd` is
         // still accepted for older callers.
@@ -1145,10 +1220,20 @@ async function handleCodeRoutes(request, response, url) {
   const eventsMatch = path.match(/^\/v1\/code\/sessions\/([^/]+)\/events$/);
   if (eventsMatch && method === "GET") {
     try {
+      // The app's `ClientEventsPage` decodes the rows as an ASCENDING run and
+      // throws `ClientEventsPageOutOfOrderError` ("events page not ascending
+      // above sequence_num") otherwise. It sends `sort_order=asc|desc` when it
+      // has a preference but omits it on the reads that rely on the server
+      // default — so the default must be the ascending order its decoder
+      // enforces, not newest-first.
+      const sortOrder = url.searchParams.get("sort_order");
       const page = await codeEngine.listEvents(eventsMatch[1], {
         cursor: url.searchParams.get("cursor"),
         limit: Number(url.searchParams.get("limit")) || 50,
-        sortOrder: url.searchParams.get("sort_order") || "desc",
+        sortOrder: String(sortOrder || "").toLowerCase() === "desc" ? "desc" : "asc",
+        // The stream's resume parameter, accepted on the page read too: a
+        // catch-up asks for the events above the last sequence it saw.
+        fromSequence: url.searchParams.get("from_sequence_num"),
       });
       console.log(`[mobile-code] events page: ${page.data.length} events has_more=${Boolean(page.next_cursor)}`);
       sendJson(response, 200, page);
@@ -1705,7 +1790,11 @@ async function streamCodeWatch(request, response, url, sessionId) {
 
 // Both history and event: client_event carry SessionEventEnvelope. Sequence
 // numbers are positive decimal strings; from_sequence_num is the last seen
-// sequence (exclusive), with 0 meaning the beginning.
+// sequence (EXCLUSIVE) — the app reads events "ascending above a floor", i.e.
+// strictly greater, so replaying the boundary event fails its stream contract.
+// 0 means the beginning. What actually broke catch-up was a HOLE, not this
+// bound: a permission prompt used to consume its own sequence and push the live
+// stream ahead of the history page, which is fixed in code-events.mjs.
 async function streamCodeEvents(request, response, url, sessionId) {
   const desktopId = codeSessionDesktopId(sessionId);
   if (!desktopId) {
@@ -1897,24 +1986,11 @@ async function streamChannelTimeline(request, response, url, channelId) {
     sendErrorEnvelope(response, 404, "not_found", "channel not found");
     return;
   }
-  let envelopes = [];
-  try {
-    envelopes = (await codeEngine.getSession(sessionId)).loaded.envelopes;
-  } catch (error) {
-    sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
-      error?.message || "could not read the transcript");
-    return;
-  }
-  response.writeHead(200, SSE_HEADERS);
-  response.flushHeaders();
-  for (const envelope of envelopes) {
-    const message = channelMessageForEnvelope(envelope, { channelId: sessionId });
-    if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
-  }
-  // A prompt that was already open before this client connected.
-  if (codeEngine.permissionsFor(sessionId).length) {
-    sendSseRecord(response, CHANNEL_REQUIRES_ACTION_EVENT, requiresActionEvent(sessionId, codeEngine.permissionsFor(sessionId)));
-  }
+  // Subscribe BEFORE the asynchronous snapshot. Reading the transcript first
+  // and listening afterwards dropped every turn that landed in the gap, which on
+  // a reconnect is exactly the turn the app came back to see — so it kept its
+  // stale transcript until a full reload.
+  let pending = [];
   const emit = (record) => {
     // A prompt opening (or closing) is not a channel message; it is the
     // `session_requires_action` status event the approval card reads.
@@ -1927,16 +2003,65 @@ async function streamChannelTimeline(request, response, url, channelId) {
       if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
     }
   };
-  const unsubscribe = codeEngine.listen(desktopId, emit);
-  const keepalive = setInterval(() => {
-    if (!response.writableEnded) response.write(": keepalive\n\n");
-  }, 15000);
+  const unsubscribe = codeEngine.listen(desktopId, (record) => {
+    if (pending) pending.push(record);
+    else emit(record);
+  });
+  let keepalive;
+  let closed = false;
   const done = () => {
+    closed = true;
     clearInterval(keepalive);
     unsubscribe?.();
   };
   request.on("close", done);
   response.on("close", done);
+  let envelopes = [];
+  try {
+    envelopes = (await codeEngine.getSession(sessionId)).loaded.envelopes;
+  } catch (error) {
+    done();
+    if (!response.destroyed) {
+      sendErrorEnvelope(response, error?.status || 502, error?.type || "api_error",
+        error?.message || "could not read the transcript");
+    }
+    return;
+  }
+  if (closed) return;
+  response.writeHead(200, SSE_HEADERS);
+  response.flushHeaders();
+  // The buffered and snapshot views of one message can share an id but differ
+  // (an assistant message streams in place), so equality is by content: a
+  // buffered record whose message is byte-identical to the snapshot one is a
+  // duplicate, anything else is a real update the app must see.
+  const snapshot = new Map();
+  for (const envelope of envelopes) {
+    const message = channelMessageForEnvelope(envelope, { channelId: sessionId });
+    if (!message) continue;
+    snapshot.set(message.id, JSON.stringify(message));
+    sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
+  }
+  // A prompt that was already open before this client connected.
+  if (codeEngine.permissionsFor(sessionId).length) {
+    sendSseRecord(response, CHANNEL_REQUIRES_ACTION_EVENT, requiresActionEvent(sessionId, codeEngine.permissionsFor(sessionId)));
+  }
+  const buffered = pending;
+  pending = null;
+  for (const record of buffered) {
+    if (record?.method === "onOnToolPermissionRequest" || record?.method === "onOnSessionStateChanged") {
+      emit(record);
+      continue;
+    }
+    for (const frame of codeEngine.framesFor(desktopId, record)) {
+      const message = channelMessageForEnvelope(frame.data, { channelId: sessionId });
+      if (message && snapshot.get(message.id) !== JSON.stringify(message)) {
+        sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
+      }
+    }
+  }
+  keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(": keepalive\n\n");
+  }, 15000);
   console.log(`[mobile-code] channel timeline ${sessionId}: ${envelopes.length} events`);
 }
 
@@ -2063,7 +2188,7 @@ async function handleConversationRoutes(request, response, url) {
     }
     if (["PUT", "POST", "PATCH"].includes(request.method)) {
       const body = await readJson(request).catch(() => ({}));
-      await saveSurfaceSelection(surface, body);
+      await saveSurfaceSelection(surface, body, fallbackModel);
       sendJson(response, 200, await surfaceSelectorState(surface, fallbackModel));
       return true;
     }
