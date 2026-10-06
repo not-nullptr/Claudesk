@@ -32,6 +32,7 @@ for (const [i, variant] of variants.entries()) {
   const output = result.sources.get(`changed-chunk-${i}.js`);
   assert.ok(output.includes('icon:"Download"'), "the file pane must gain the streaming download button");
   assert.ok(output.includes('/api/remote/files/download?path='), "the button must target the streaming endpoint");
+  assert.ok(output.includes('target="_blank"'), "a refused download must not replace the app");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   for (const protocol of ["app:", "https:"]) for (const gateway of [false, true]) for (const available of [false, true]) {
     const context = { window: { location: { protocol } },

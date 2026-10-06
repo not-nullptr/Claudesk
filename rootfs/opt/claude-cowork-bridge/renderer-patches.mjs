@@ -109,11 +109,14 @@ function filePaneDownloadPatch(node, ancestors, source, button) {
   const scope = [...ancestors].reverse().find(parent => functionTypes.has(parent.type));
   const fileView = scope ? fileViewVariable(scope) : undefined;
   if (!factory || !fileView || !button) return;
+  // A new tab keeps a refused download (or a JSON error) from replacing the
+  // app, and gives the browser's own download manager a real navigation target.
   const handler = `()=>{const filePath=${fileView}&&${fileView}.path;`
     + 'if(typeof filePath!="string"||filePath==="")return;'
     + 'const link=document.createElement("a");'
     + 'link.href="/api/remote/files/download?path="+encodeURIComponent(filePath);'
-    + 'link.rel="noopener";document.body.append(link);link.click();link.remove();}';
+    + 'link.target="_blank";link.rel="noopener noreferrer";'
+    + 'document.body.append(link);link.click();link.remove();}';
   const injected = `${fileView}&&${fileView}.path?${factory}(${button},`
     + `{variant:"ghost",iconOnly:!0,icon:"Download","aria-label":"Download file",onClick:${handler}}):null`;
   const original = source.slice(node.start, node.end);

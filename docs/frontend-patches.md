@@ -22,10 +22,14 @@ trailing actions fragment: a two-element `children` array holding a
 session-scoped search button and a session-scoped anchor control, on the right
 side of a logical expression that gates on the pane kind (`"file"`). The patch
 splices one addition into that array — an official ghost icon button (`icon`
-`Download`) whose click streams the pane's absolute path from the bridge's
+`Download`) whose click opens the pane's path in a new tab against the bridge's
 `/api/remote/files/download` route. This replaces the pane's own download, which
-writes the reader's UTF-8 contents and is lossy for binary. It is always applied,
-independent of the Gateway setting, and must also match exactly once.
+writes the reader's UTF-8 contents and is lossy for binary. The path is used
+verbatim: absolute paths are served as-is, and a relative path (an agent's
+`folder/file.zip`) is resolved inside the allowed read roots by the route, not
+against the bridge process's cwd. Opening a new tab keeps a refused download from
+replacing the app. It is always applied, independent of the Gateway setting, and
+must also match exactly once.
 
 The inserted code must name three mangled locals — the pane's `fileView`
 selector, the element factory the array already calls, and the ghost icon-only

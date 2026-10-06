@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readContainedFile, sessionFileReadLimit } from "../bridge/downloads.mjs";
+import { readContainedFile, resolveDownloadTarget, sessionFileReadLimit } from "../bridge/downloads.mjs";
 
 const MiB = 1024 * 1024;
 
@@ -69,7 +69,26 @@ try {
   assert.equal((await read(tmpdir(), MiB)).failure, "outside");
   assert.equal((await read(fixtureRoot, MiB)).failure, "outside");
 
-  process.stdout.write("session-file-smoke: read limit and guard checks passed\n");
+  // The download route also serves agent paths that are relative to the
+  // workspace ("folder/file.zip"): those must resolve inside a root, while an
+  // absolute path and containment are unchanged.
+  const nested = join(fixtureRoot, "folder");
+  await mkdir(nested);
+  await writeFile(join(nested, "file.zip"), "zip bytes");
+  const download = (target) => resolveDownloadTarget([fixtureRoot], target, {
+    allowRoot: false,
+    missingMessage: "download file was not found",
+    outsideMessage: "path is outside the allowed read roots",
+  });
+  assert.ok((await download("folder/file.zip")).endsWith(join("folder", "file.zip")),
+    "a relative download path resolves against the read root");
+  assert.ok((await download(small)).endsWith("small.txt"),
+    "an absolute download path is unchanged");
+  await assert.rejects(download("absent.txt"), /download file was not found/);
+  await assert.rejects(download("../../etc/passwd"), /outside the allowed read roots/,
+    "a relative path that climbs out of the root is refused");
+
+  process.stdout.write("session-file-smoke: read limit, guard and download-path checks passed\n");
 } finally {
   await rm(fixtureRoot, { force: true, recursive: true });
 }

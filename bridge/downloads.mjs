@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, extname, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 
 export async function resolveContainedRealPath(
   root,
@@ -118,6 +118,32 @@ export async function readContainedFile(roots, target, { maxBytes, ...options } 
   };
 }
 
+/**
+ * An agent often names a file relative to its working directory (`folder/f.zip`)
+ * rather than absolutely. `resolveWithinRoots` would resolve that against the
+ * bridge's own cwd, land outside every root, and answer 403. Resolve a relative
+ * target against each root in turn instead — the roots are the mounted workspace
+ * and any operator-declared read roots, which is the base the agent ran in. An
+ * absolute target is unchanged, and every candidate still goes through
+ * `resolveWithinRoots`, so containment and symlink checks are identical.
+ */
+export async function resolveDownloadTarget(roots, target, options = {}) {
+  if (isAbsolute(target)) return resolveWithinRoots(roots, target, options);
+  let missing;
+  for (const root of roots) {
+    try {
+      return await resolveWithinRoots([root], join(root, target), options);
+    } catch (error) {
+      if (error.statusCode === 404) missing = error;
+      else if (error.statusCode !== 403) throw error;
+    }
+  }
+  throw missing ?? Object.assign(
+    new Error(options.outsideMessage || "path is outside the allowed read roots"),
+    { statusCode: 403 },
+  );
+}
+
 /** Like resolveWithinRoots, but answers null instead of throwing. */
 export async function resolveContainedPath(roots, target, options = {}) {
   try {
@@ -167,7 +193,7 @@ export function createDownloadHandler({
       if (typeof requestedPath !== "string" || !requestedPath || requestedPath.length > 4096) {
         throw new ApiError(400, "download path is invalid");
       }
-      const filePath = await resolveWithinRoots(downloadRoots, requestedPath, {
+      const filePath = await resolveDownloadTarget(downloadRoots, requestedPath, {
         allowRoot: false,
         missingMessage: "download file was not found",
         outsideMessage: "path is outside the allowed read roots",

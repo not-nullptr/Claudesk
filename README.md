@@ -221,8 +221,10 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 ### 文件面板下载
 
 点击消息中的文件路径会打开官方文件面板。文件面板顶栏在“Files settings”左侧新增一个官方样式的下载图标
-（复用官方按钮与 `Download` 图标），点击后从 `GET /api/remote/files/download?path=...` 流式下载该文件的原始字节，
-因此二进制文件（如 `.ipa`）不会被官方面板读取器的 UTF-8 文本转换破坏。
+（复用官方按钮与 `Download` 图标），点击后在新标签页从 `GET /api/remote/files/download?path=...` 流式下载该文件的原始字节，
+因此二进制文件（如 `.ipa`）不会被官方面板读取器的 UTF-8 文本转换破坏；下载失败也不会替换当前页面。
+当文件路径是相对路径（如 `folder/file.zip`）时，该路由会在允许的读取根目录（`/workspace` 及额外根目录）内解析它，
+而不是相对 Bridge 进程的当前目录。
 该按钮由前端补丁注入，选择器只定位文件面板的顶栏动作片段，始终启用且只匹配一次；详见
 [Frontend 补丁维护](docs/frontend-patches.md)。面板自身的“Download file”菜单仍按官方行为保留。
 
