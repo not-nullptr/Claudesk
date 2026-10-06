@@ -91,6 +91,9 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
+      # Display name for the signed-in user in the remote UI (the sidebar user
+      # menu and the time-based home greeting). Empty keeps Desktop's own value.
+      CLAUDE_REMOTE_USER_NAME: "${CLAUDE_REMOTE_USER_NAME:-}"
       COWORK_REMOTE_WORKSPACE_ROOT: "/workspace"
       # Extra roots (colon- or comma-separated) the authenticated remote
       # download route may serve from, on top of the always-allowed workspace.

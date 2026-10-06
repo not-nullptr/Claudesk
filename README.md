@@ -179,6 +179,16 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 
 Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/workspace`，不会在访问页面的手机或电脑上执行。即使启用高权限开关，Bridge 也不公开远程控制、SSH、云端 teleport、PR mutation 或自动 commit/stash/discard 等方法。
 
+### 界面显示
+
+`CLAUDE_REMOTE_USER_NAME` 设置远程 WebUI 显示的用户名：侧栏用户菜单的标识，以及首页问候语里的称呼
+（如 “Good evening, Ada”）。不设置时沿用 Desktop 自己的值（本镜像里是容器应用用户 `app`）。
+
+官方首页问候语由服务端下发 `personalized_greeting` 数据，而不是渲染器内的本地文案；当前 Gateway 不提供
+它，渲染器便一直显示官方的 “You’re here!” 占位。Bridge 在响应未携带 `personalized_greeting` 时按访问者
+本地时间补上同一结构的 `chat` 问候（早晨/下午/晚上），因此无论是否设置用户名，首页都不再停留在占位文案；
+Gateway 自行下发的问候语不会被覆盖。
+
 ### 资源与网络
 
 `CLAUDE_COWORK_VM_MEMORY_GB`、`CLAUDE_COWORK_VM_CPU_COUNT`、`CLAUDE_COWORK_VM_IDLE_MINUTES` 和 `CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES` 控制 Cowork VM 资源与空闲回收；生产默认值分别为 `2`、`1`、`30`、`10`。`CLAUDE_DESKTOP_MEMORY_LIMIT` 和 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT` 默认分别为 `3g` 与 `256m`。

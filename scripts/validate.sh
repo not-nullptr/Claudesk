@@ -18,6 +18,7 @@ node tools/frida/swift-string-harness.mjs
 node scripts/security-smoke.mjs
 node scripts/session-file-smoke.mjs
 node scripts/bridge-parity-smoke.mjs
+node scripts/greeting-smoke.mjs
 node scripts/account-settings-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/renderer-patches-smoke.mjs

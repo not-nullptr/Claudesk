@@ -24,6 +24,13 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Name the remote UI shows as the signed-in user. Desktop derives it from the
+// OS app user ("app" in this image), which is what the sidebar user menu prints
+// next to the provider label; the upstream gateway also sends no
+// personalized_greeting, so the home greeting sits on the renderer's bare
+// "You're here!" placeholder. Setting this replaces the footer identity and is
+// folded into the time-based greeting below. Unset keeps Desktop's own value.
+const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().slice(0, 80);
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
 // Roots the remote download route may serve from. The workspace is always
 // allowed, because the web UI's own file browser reads from it; extra roots
@@ -969,7 +976,11 @@ function sanitizeStoreValue(surface, store, value) {
     return { remoteToolsDeviceName: value?.remoteToolsDeviceName ?? null };
   }
   if (surface === "LocalAgentModeSessions" && store === "interactiveAuthStore") {
-    return { principalDisplayName: value?.principalDisplayName ?? null };
+    // Desktop reports the OS app user as the renderer's principal display name,
+    // which the sidebar user menu prints beside the provider label. An operator
+    // name replaces it; unset keeps whatever Desktop reported.
+    const name = remoteUserName || value?.principalDisplayName;
+    return { principalDisplayName: typeof name === "string" && name ? name : null };
   }
   if (surface === "ClaudeVM" && store === "apiReachabilityStore") {
     return { reachability: value?.reachability ?? "unknown" };
@@ -978,6 +989,39 @@ function sanitizeStoreValue(surface, store, value) {
     return {};
   }
   return {};
+}
+
+const bootstrapResponsePath = /^\/edge-api\/bootstrap(?:\/[^/?#]+\/app_start)?$/i;
+
+// The official renderer takes its home greeting from the bootstrap response,
+// not from local code: personalized_greeting is an array of surface objects
+// whose default_slots list {until, text} pairs, and the renderer returns the
+// first slot whose exclusive `until` hour is still ahead of the visitor's clock.
+// The upstream gateway never sends it, so the greeting is stuck on the
+// renderer's "You're here!" placeholder instead of the time-based one the
+// desktop app shows. Supply the same shape for the chat surface and let the
+// renderer's own picker do the work; a greeting the upstream did send is kept.
+const greetingSlots = [
+  { until: 5, phrase: "Good evening" },
+  { until: 12, phrase: "Good morning" },
+  { until: 17, phrase: "Good afternoon" },
+  { until: 24, phrase: "Good evening" },
+];
+
+function injectPersonalizedGreeting(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  const existing = parsed.personalized_greeting;
+  if (Array.isArray(existing) && existing.length > 0) return parsed;
+  return {
+    ...parsed,
+    personalized_greeting: [{
+      surface: "chat",
+      default_slots: greetingSlots.map(({ until, phrase }) => ({
+        until,
+        text: remoteUserName ? `${phrase}, ${remoteUserName}` : phrase,
+      })),
+    }],
+  };
 }
 
 function containsSensitiveCredential(value) {
@@ -1017,9 +1061,13 @@ async function forwardOfficialProtocol(request, response, url) {
     },
     bodyBase64: body.toString("base64"),
   });
-  const responseBody = Buffer.from(result.bodyBase64 || "", "base64");
+  let responseBody = Buffer.from(result.bodyBase64 || "", "base64");
   if ((result.contentType || "").includes("application/json")) {
     const parsed = JSON.parse(responseBody.toString("utf8"));
+    if (bootstrapResponsePath.test(url.pathname)) {
+      const greeting = injectPersonalizedGreeting(parsed);
+      if (greeting !== parsed) responseBody = Buffer.from(JSON.stringify(greeting), "utf8");
+    }
     if (containsSensitiveCredential(parsed)) {
       throw new ApiError(502, "Desktop protocol response contained a forbidden credential field");
     }
