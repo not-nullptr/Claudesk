@@ -1071,9 +1071,50 @@ try {
     "a retried turn is not dispatched twice",
   );
 
+  // The composer's permission mode cannot ride the create/send DTOs (neither
+  // `CreateSessionRequestConfig` nor `SendEventsParams` has such a field), so the
+  // app sends an SDK `set_permission_mode` control request in the same `/events`
+  // batch as its first turn. The facade must apply it BEFORE the turn starts —
+  // Auto mapped to bypass — or the session runs Manual and prompts for Bash.
+  const modeSession = (await (await call("/v1/code/sessions", {
+    method: "POST",
+    body: {},
+  })).json()).session;
+  const modePost = await call(codePath(modeSession.id, "/events"), {
+    method: "POST",
+    body: {
+      session_id: modeSession.id,
+      events: [
+        // Deliberately after the turn: the mode must still be applied before it
+        // starts, so the pick cannot depend on the batch order.
+        { payload: { type: "user", uuid: "88888888-8888-4888-8888-888888888888", message: { role: "user", content: "hi with auto" } } },
+        { payload: { type: "control_request", request_id: "req-mode-1", request: { subtype: "set_permission_mode", mode: "auto" } } },
+      ],
+    },
+  });
+  assert.equal(modePost.status, 200);
+  assert.equal(
+    claudesk.codeIpcCalls("start").at(-1).args[0].permissionMode,
+    "bypassPermissions",
+    "a set_permission_mode control request reaches start, Auto mapped to bypass",
+  );
+  await waitFor(() => claudesk.codeSessions.get(modeSession.id.slice("code_".length))?.isRunning === false, "the auto turn to finish");
+  await call(codePath(modeSession.id, "/events"), {
+    method: "POST",
+    body: {
+      session_id: modeSession.id,
+      events: [{ payload: { type: "control_request", request_id: "req-mode-2", request: { subtype: "set_permission_mode", mode: "auto" } } }],
+    },
+  });
+  assert.equal(
+    claudesk.codeIpcCalls("setPermissionMode").at(-1).args[1],
+    "bypassPermissions",
+    "a mid-session mode pick reaches Desktop mapped",
+  );
+
   // These were created only for the cwd assertions; drop them so the list
   // leg below still sees exactly the one session it drives.
-  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id, autoSession.id, titleSession.id]) {
+  for (const id of [repoReply.id, fileId, cwdId, envReply.id, evSession.id, modelSession.id, permSession.id, autoSession.id, modeSession.id, titleSession.id]) {
     await waitFor(() => claudesk.codeSessions.get(id.slice("code_".length))?.isRunning === false, "the cwd turn to finish");
     await call(codePath(id), { method: "DELETE" });
   }
@@ -1334,6 +1375,44 @@ try {
   assert.equal(respondCall.args.length, 2, "…and no sessionId is sent");
   await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length === 0,
     "the prompt to clear once answered");
+
+  // The app also approves through the SDK control protocol: a `control_response`
+  // posted to `/events` must reach Desktop, mapped to once | deny.
+  await sseStream(codePath(manualCodeId, "/messages/stream"), {
+    method: "POST",
+    body: { body: "Run something else [permission]" },
+  }).catch(() => []);
+  await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length > 0,
+    "the second permission prompt");
+  const secondPrompt = (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts[0];
+  const controlResponse = await call(codePath(manualCodeId, "/events"), {
+    method: "POST",
+    body: {
+      session_id: manualCodeId,
+      events: [{
+        payload: {
+          type: "control_response",
+          uuid: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          response: {
+            subtype: "success",
+            request_id: secondPrompt.request_id,
+            response: { behavior: "allow" },
+            pending_permission_requests: [],
+            pending_user_dialog_requests: [],
+          },
+        },
+      }],
+    },
+  });
+  assert.equal(controlResponse.status, 200, "a control_response is accepted");
+  await waitFor(async () => (await (await call(codePath(manualCodeId, "/pending_prompts"))).json()).prompts.length === 0,
+    "the control_response to clear the prompt");
+  assert.equal(
+    claudesk.codeIpcCalls("respondToToolPermission").at(-1).args[0],
+    secondPrompt.request_id,
+    "the control_response request id reaches Desktop",
+  );
+  assert.equal(claudesk.codeIpcCalls("respondToToolPermission").at(-1).args[1], "once", "…mapped to Desktop's once");
 
   // Detail, patch and delete round out the lifecycle.
   const codePatched = await (await call(codePath(createdResource.id), { method: "PATCH", body: { title: "Renamed" } })).json();

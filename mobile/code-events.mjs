@@ -53,6 +53,50 @@ function entryPayload(payload) {
 }
 
 /**
+ * Desktop's `onOnToolPermissionRequest` payload -> the SDK `control_request`
+ * the app's permission store consumes.
+ *
+ * Desktop's listener payload (validator `ib` in the installed ASAR) is
+ * `{requestId, sessionId, toolName, suggestions?, description?, blockedPath?,
+ * cliToolUseId?, …}`. The app does not read that object; it reads the Claude
+ * Code SDK control protocol off its transcript stream — a `StdoutMessage` with
+ * `type:"control_request"` whose `request` is a `can_use_tool`
+ * `SDKControlPermissionRequest` (`subtype`, `tool_name`, `input`,
+ * `permission_suggestions`, `blocked_path`, `tool_use_id`). Without this
+ * translation the prompt never reaches the app and the session simply sits
+ * blocked. The request id doubles as the event id so a redelivery keeps one
+ * sequence number, the way a transcript UUID does.
+ */
+export function permissionControlEnvelope(payload, sequence, now = new Date()) {
+  const requestId = payload?.requestId ?? payload?.id ?? null;
+  if (!requestId || !Number.isSafeInteger(sequence) || sequence < 1) return null;
+  const request = {
+    subtype: "can_use_tool",
+    tool_name: String(payload.toolName ?? payload.tool_name ?? "tool"),
+  };
+  if (payload.input && typeof payload.input === "object") request.input = payload.input;
+  if (Array.isArray(payload.suggestions) && payload.suggestions.length) {
+    request.permission_suggestions = payload.suggestions;
+  }
+  if (typeof payload.description === "string" && payload.description) {
+    request.description = payload.description;
+  }
+  if (typeof payload.blockedPath === "string" && payload.blockedPath) {
+    request.blocked_path = payload.blockedPath;
+  }
+  const toolUseId = payload.cliToolUseId ?? payload.toolUseId;
+  if (typeof toolUseId === "string" && toolUseId) request.tool_use_id = toolUseId;
+  return {
+    event_id: requestId,
+    sequence_num: String(sequence),
+    event_type: "control_request",
+    source: "assistant",
+    payload: { type: "control_request", uuid: requestId, request_id: requestId, request },
+    created_at: now.toISOString(),
+  };
+}
+
+/**
  * One relayed LocalSessions record -> the session-detail transcript frames.
  *
  * These are wire envelopes for `GET …/events/stream`: a
@@ -63,9 +107,12 @@ function entryPayload(payload) {
  */
 export function frameFromPayload(method, payload, sequence = 1) {
   if (method === "onOnToolPermissionRequest") {
-    // A permission prompt is not a transcript event the pane draws; the route
-    // layer turns it into a session-status change and the prompts endpoint.
-    return [];
+    // A permission prompt is not a transcript entry, but the app still learns
+    // of it from this stream: it decodes the SDK `control_request` and shows
+    // the approval card (`PermissionRequestsStore` -> `PermissionCard`). The
+    // session-status change rides the watch leg (see watchFrameFromPayload).
+    const envelope = permissionControlEnvelope(payload, sequence);
+    return envelope ? [{ event: "client_event", data: envelope }] : [];
   }
   if (method !== "onOnEvent") return [];
   const entry = entryPayload(payload);
@@ -95,6 +142,13 @@ export function frameFromPayload(method, payload, sequence = 1) {
  * @returns {Array<{ event: "upserted" | "deleted", data: object | string | null }>}
  */
 export function watchFrameFromPayload(method, payload, sequence = 1, { sessionId = null, resourceFor = null } = {}) {
+  // A permission prompt blocks the session, and a permission-mode change moves
+  // it; both are state-only updates with no transcript entry behind them. Push
+  // a whole `SessionResource` so the app sees `session_status: requires_action`
+  // (and the new `permission_mode`) live, without waiting for a poll.
+  if (method === "onOnToolPermissionRequest" || method === "onOnSessionStateChanged") {
+    return [{ event: "upserted", data: resourceFor ? resourceFor(sessionId) : null }];
+  }
   if (method !== "onOnEvent") return [];
   const entry = entryPayload(payload);
   if (!entry) return [];
@@ -154,6 +208,10 @@ export function createCodeEventTranslator({ sessionId = null, startSequence = 1,
         // client can resume at even if Desktop replays rows on reconnect.
         if (entry?.uuid && !seen.has(entry.uuid)) {
           seen.set(entry.uuid, nextSequence);
+          nextSequence += 1;
+        } else if (method === "onOnToolPermissionRequest") {
+          // A control_request carries no transcript UUID; still consume its
+          // sequence so the next entry does not reuse the number.
           nextSequence += 1;
         }
         frames.push(frame);

@@ -263,6 +263,33 @@ export function createCodeEngine({
     return () => allListeners.delete(callback);
   }
 
+  // Deliver a record to this session's watchers and to the list screen's
+  // all-sessions watchers. Used for state-only changes (a permission prompt
+  // opened/answered, a permission mode moved) that have no relayed transcript
+  // entry behind them, so the watch leg would otherwise never fire.
+  function notifyRecord(desktopId, record) {
+    for (const callback of listeners.get(desktopId) || []) {
+      try {
+        callback(record);
+      } catch (error) {
+        log.error(`[mobile-code] listener failed: ${error.message}`);
+      }
+    }
+    for (const callback of allListeners) {
+      try {
+        callback(record, desktopId);
+      } catch (error) {
+        log.error(`[mobile-code] listener failed: ${error.message}`);
+      }
+    }
+  }
+
+  // A state-only change with no record of its own; the translator renders it as
+  // a fresh `SessionResource` upsert.
+  function notifyState(desktopId) {
+    notifyRecord(desktopId, { method: "onOnSessionStateChanged", payload: { sessionId: desktopId } });
+  }
+
   function desktopIdOf(payload) {
     return payload?.sessionId ?? payload?.session_id ?? null;
   }
@@ -276,15 +303,10 @@ export function createCodeEngine({
       const desktopId = desktopIdOf(payload);
       if (requestId) permissionRequests.set(requestId, { sessionId: desktopId, payload });
       if (desktopId) {
-        // A prompt blocks the session until it is answered.
+        // A prompt blocks the session until it is answered. Push it to the open
+        // session and to the list (so the row shows requires_action live).
         bumpRevision(desktopId);
-        for (const callback of listeners.get(desktopId) || []) {
-          try {
-            callback({ method, payload });
-          } catch (error) {
-            log.error(`[mobile-code] permission listener failed: ${error.message}`);
-          }
-        }
+        notifyRecord(desktopId, { method, payload });
       }
       return;
     }
@@ -667,9 +689,12 @@ export function createCodeEngine({
       }
       if (typeof patch.permission_mode === "string" && patch.permission_mode) {
         // Same "Auto → bypass" mapping as `start`, so changing the mode
-        // mid-session behaves like picking it before the first message.
+        // mid-session behaves like picking it before the first message. Persist
+        // the app's own value too: a session that has not started yet applies it
+        // on its first turn (see sendMessage), where `permission_mode` is read.
         await desktop.ipc(SURFACE, "setPermissionMode",
           ipcArgs.setPermissionMode(desktopId, FORCED_PERMISSION_MODE ?? desktopPermissionMode(patch.permission_mode)));
+        await updateMeta(desktopId, (entry) => { entry.permission_mode = patch.permission_mode; });
       }
       if (patch.is_archived === true) {
         await desktop.ipc(SURFACE, "archive", ipcArgs.archive(desktopId));
@@ -680,6 +705,39 @@ export function createCodeEngine({
     cache.delete(desktopId);
     bumpRevision(desktopId);
     return (await getSession(id)).resource;
+  }
+
+  /**
+   * Apply the composer's permission mode. The app does not send it on the
+   * create/send DTOs (`CreateSessionRequestConfig` and `SendEventsParams` have
+   * no such field) — it sends an SDK `set_permission_mode` control request over
+   * `POST /events`. A session Desktop has never run only records the pick;
+   * `sendMessage`'s `start` applies it on the first turn. A started session gets
+   * `LocalSessions.setPermissionMode` right away. Either way the mapped value
+   * (`auto` -> `bypassPermissions`, see `desktopPermissionMode`) is what reaches
+   * Desktop, so "Auto" runs without tool prompts.
+   */
+  async function setPermissionMode(id, mode) {
+    const desktopId = desktopSessionIdFor(id);
+    if (!desktopId) throw notFound();
+    const mapped = FORCED_PERMISSION_MODE ?? desktopPermissionMode(mode);
+    if (!mapped) throw new CodeError(`unknown permission mode: ${mode}`, 400, "invalid_request_error");
+    await updateMeta(desktopId, (entry) => { entry.permission_mode = mode; });
+    const loaded = await loadSession(desktopId).catch(() => null);
+    if (loaded?.session) {
+      try {
+        await desktop.ipc(SURFACE, "setPermissionMode", ipcArgs.setPermissionMode(desktopId, mapped));
+      } catch (error) {
+        throw asCodeError(error);
+      }
+      cache.delete(desktopId);
+      bumpRevision(desktopId);
+    }
+    // The app's mode display is confirmed from the session resource
+    // (`DisplaySource.reportedBySession`), so push the new mode to watchers.
+    notifyState(desktopId);
+    log.log(`[mobile-code] permission-mode ${desktopId}: ${mode} -> ${mapped}`);
+    return { permission_mode: mode };
   }
 
   // ---------- history ----------
@@ -899,6 +957,8 @@ export function createCodeEngine({
     permissionRequests.delete(requestId);
     cache.delete(desktopId);
     bumpRevision(desktopId);
+    // The prompt is gone; push the session's new (unblocked) status.
+    notifyState(desktopId);
   }
 
   /**
@@ -961,6 +1021,7 @@ export function createCodeEngine({
     sendMessage,
     suggestTitleAndBranch,
     interrupt,
+    setPermissionMode,
     permissionsFor,
     respondToPermission,
     listen,

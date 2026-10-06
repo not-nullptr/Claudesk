@@ -354,7 +354,10 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
       sources: sourcesFromMeta(meta),
       outcomes: [],
       model: record?.model ?? null,
-      permission_mode: record?.permissionMode ?? null,
+      // Desktop carries the mode once a session has run; before that the app's
+      // own pick (persisted from its `set_permission_mode` control request) is
+      // the only truth, and the composer confirms its selection from it.
+      permission_mode: record?.permissionMode ?? meta?.permission_mode ?? null,
       effort_level: record?.effort ?? null,
       origin: null,
       memory_mode: null,
@@ -402,7 +405,7 @@ export function sessionResource(record, { meta = {}, revision = null, pendingApp
       effort_level: record?.effort ?? null,
       memory_mode: null,
     },
-    permission_mode: record?.permissionMode ?? "default",
+    permission_mode: record?.permissionMode ?? meta?.permission_mode ?? "default",
     bridge_spawn_path: record?.spawnMode ?? BRIDGE_SPAWN_MODE.sameDir,
     // The detail record decodes the two-case ConnectionStatus/WorkerStatus, not
     // the row's wider Session* vocabulary.
@@ -549,6 +552,10 @@ export function eventEnvelopes(entries, { startSequence = 1 } = {}) {
 // non-optional fields are id, inTimeline, serverNotice, attachments and
 // participantAccountIds, so those are always emitted.
 export const CHANNEL_MESSAGE_EVENT = "channel_message_updated";
+// The other `ChannelStreamEvent` case the app acts on: a tool prompt opened or
+// closed. `ChannelMessagesApi.swift` names it in its known-event table; unknown
+// names are skipped, so sending it is safe for clients that ignore it.
+export const CHANNEL_REQUIRES_ACTION_EVENT = "session_requires_action";
 
 export function channelMessageForEnvelope(envelope, { channelId = null, accountId = null } = {}) {
   const payload = envelope?.payload ?? {};

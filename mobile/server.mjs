@@ -18,6 +18,7 @@ import {
   BRIDGE_ENVIRONMENT_ID,
   CLOUD_ENVIRONMENT_ID,
   CHANNEL_MESSAGE_EVENT,
+  CHANNEL_REQUIRES_ACTION_EVENT,
   bridgeEnvironment,
   channelEmptyPage,
   channelMessageForEnvelope,
@@ -835,6 +836,81 @@ function userEventText(message) {
   return "";
 }
 
+// The app's composer does not put the permission mode on the create or send
+// DTOs (`CreateSessionRequestConfig` / `SendEventsParams` have no such field);
+// it sends an SDK `set_permission_mode` control request instead. A tool decision
+// comes back the same way, as a `control_response`. Both travel in the same
+// `POST /events` collection as user messages, one `StdinMessage` per element.
+// The mode is read from the request so the caller can apply it before any turn
+// in the same batch; a `control_response` is dispatched by
+// `applyCodeControlMessage` below.
+function permissionModeFromControl(payload) {
+  if (!payload?.request && payload?.type !== "control_request") return null;
+  const request = payload?.request ?? {};
+  const nested = request.setPermissionMode ?? request.set_permission_mode ?? null;
+  const subtype = request.subtype ?? nested?.subtype ?? null;
+  const mode = request.mode ?? nested?.mode
+    ?? request.permissionMode ?? request.permission_mode ?? null;
+  if (subtype !== "set_permission_mode" && !nested && typeof mode !== "string") return null;
+  return typeof mode === "string" && mode ? mode : null;
+}
+
+// Returns true when the element was a control message, so the caller does not
+// also try to read it as a user turn.
+async function applyCodeControlMessage(sessionId, payload) {
+  if (payload?.request || payload?.type === "control_request") {
+    // Any other control request (initialize, interrupt, set_permission_mode …)
+    // is not this facade's to act on here, but it is still not a user message.
+    return true;
+  }
+  if (payload?.response || payload?.type === "control_response") {
+    const response = payload?.response ?? {};
+    // `ControlResponseType` is a case enum: flat (`response.subtype`) or nested
+    // (`response.success`). Read both so a wire-casing change cannot silently
+    // drop an approval.
+    const success = response.success ?? response;
+    const body = success?.response ?? response.response ?? {};
+    const requestId = success?.request_id ?? response.request_id
+      ?? payload.request_id ?? body.request_id ?? null;
+    const behavior = body.behavior ?? success?.behavior ?? payload.behavior ?? null;
+    if (requestId && (behavior === "allow" || behavior === "deny")) {
+      await codeEngine.respondToPermission(sessionId, requestId, behavior);
+      console.log(`[mobile-code]   control_response ${behavior} ${requestId}`);
+    }
+    return true;
+  }
+  return false;
+}
+
+// `session_requires_action` is a `ChannelStreamEvent` case whose payload is a
+// `ChannelSessionPendingPrompts {sessionId, threadRootId, pendingActions, at}`,
+// one `RequiresActionDetails` per open prompt. The composer's approval card
+// reads it on the channel timeline; a prompt that never arrives here leaves the
+// turn blocked with nothing to tap.
+function requiresActionEvent(sessionId, prompts) {
+  return {
+    session_id: sessionId,
+    thread_root_id: null,
+    pending_actions: (Array.isArray(prompts) ? prompts : []).map((prompt) => {
+      const request = prompt?.payload ?? {};
+      return {
+        tool_name: request.toolName ?? request.tool_name ?? null,
+        request_id: prompt?.request_id ?? request.requestId ?? request.id ?? null,
+        tool_use_id: request.cliToolUseId ?? request.toolUseId ?? null,
+        display_tool_name: request.displayName ?? request.displayToolName ?? null,
+        input: request.input && typeof request.input === "object" ? request.input : null,
+        action_description: request.description ?? null,
+        permission_suggestions: Array.isArray(request.suggestions) ? request.suggestions : null,
+        title: request.title ?? null,
+        description: request.description ?? null,
+        scope: request.scope ?? null,
+        blocked_path: request.blockedPath ?? null,
+      };
+    }),
+    at: new Date().toISOString(),
+  };
+}
+
 async function handleCodeRoutes(request, response, url) {
   const path = url.pathname;
   const method = request.method;
@@ -1086,7 +1162,15 @@ async function handleCodeRoutes(request, response, url) {
   if (promptsMatch && method === "GET") {
     try {
       const prompts = codeEngine.permissionsFor(promptsMatch[1]);
-      sendJson(response, 200, { prompts, permission_suggestions: [] });
+      // `SessionPendingPrompts.swift` carries `session_pending_prompts`,
+      // `permission_suggestions` and `force_run_trigger`; `prompts` is kept as
+      // the alias older callers read. Extra keys are decoded past, not rejected.
+      sendJson(response, 200, {
+        prompts,
+        session_pending_prompts: prompts,
+        permission_suggestions: [],
+        force_run_trigger: null,
+      });
     } catch (error) {
       await fail(error);
     }
@@ -1118,8 +1202,22 @@ async function handleCodeRoutes(request, response, url) {
     const posted = await readJson(request).catch(() => ({}));
     console.log(`[mobile-code]   posted=${JSON.stringify(posted).slice(0, 1500)}`);
     try {
-      for (const event of Array.isArray(posted?.events) ? posted.events : []) {
+      const events = Array.isArray(posted?.events) ? posted.events : [];
+      // The composer sends its permission-mode pick in the same batch as its
+      // first turn. Apply every pick before any turn, whatever the order, or
+      // the first turn starts in Desktop's default (Manual) and prompts.
+      for (const event of events) {
+        const mode = permissionModeFromControl(event?.payload ?? event);
+        if (mode) {
+          await codeEngine.setPermissionMode(eventsPostMatch[1], mode);
+          console.log(`[mobile-code]   control set_permission_mode ${mode}`);
+        }
+      }
+      for (const event of events) {
         const payload = event?.payload ?? event;
+        // A prompt decision is an SDK control message, not a turn; handle it
+        // before the user branch so it is not mistaken for a message.
+        if (await applyCodeControlMessage(eventsPostMatch[1], payload)) continue;
         const message = payload?.message;
         const isUser = payload?.type === "user" || message?.role === "user";
         const text = isUser ? userEventText(message) : "";
@@ -1813,7 +1911,17 @@ async function streamChannelTimeline(request, response, url, channelId) {
     const message = channelMessageForEnvelope(envelope, { channelId: sessionId });
     if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);
   }
+  // A prompt that was already open before this client connected.
+  if (codeEngine.permissionsFor(sessionId).length) {
+    sendSseRecord(response, CHANNEL_REQUIRES_ACTION_EVENT, requiresActionEvent(sessionId, codeEngine.permissionsFor(sessionId)));
+  }
   const emit = (record) => {
+    // A prompt opening (or closing) is not a channel message; it is the
+    // `session_requires_action` status event the approval card reads.
+    if (record?.method === "onOnToolPermissionRequest" || record?.method === "onOnSessionStateChanged") {
+      sendSseRecord(response, CHANNEL_REQUIRES_ACTION_EVENT, requiresActionEvent(sessionId, codeEngine.permissionsFor(sessionId)));
+      return;
+    }
     for (const frame of codeEngine.framesFor(desktopId, record)) {
       const message = channelMessageForEnvelope(frame.data, { channelId: sessionId });
       if (message) sendSseRecord(response, CHANNEL_MESSAGE_EVENT, message);

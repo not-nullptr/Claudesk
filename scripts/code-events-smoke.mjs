@@ -242,7 +242,28 @@ assert.deepEqual(
 );
 assert.equal(watchFrameFromPayload("onOnEvent", { removed: true, entry: next }, 1, { sessionId: "s1" })[0].data, "code_s1");
 const prompt = { requestId: "req-1", sessionId: "s1", toolName: "Bash", input: { command: "ls" } };
-assert.deepEqual(translator.accept({ method: "onOnToolPermissionRequest", payload: prompt }), []);
+// A permission prompt is delivered to the app as an SDK `control_request` on
+// the transcript stream (that is what `PermissionRequestsStore` decodes), not
+// as a transcript entry. It keeps its own sequence but records no UUID.
+const promptFrame = translator.accept({ method: "onOnToolPermissionRequest", payload: prompt })[0];
+assert.equal(promptFrame.event, "client_event");
+assert.equal(promptFrame.data.event_id, "req-1");
+assert.equal(promptFrame.data.event_type, "control_request");
+assert.equal(promptFrame.data.payload.type, "control_request");
+assert.equal(promptFrame.data.payload.request_id, "req-1");
+assert.deepEqual(promptFrame.data.payload.request, {
+  subtype: "can_use_tool",
+  tool_name: "Bash",
+  input: { command: "ls" },
+});
+// The same prompt on the list leg is a whole-session upsert, so the session
+// reports `requires_action` without waiting for a poll.
+const promptWatch = watchFrameFromPayload("onOnToolPermissionRequest", prompt, 1, {
+  sessionId: "s1",
+  resourceFor: () => upsertPayload,
+})[0];
+assert.equal(promptWatch.event, "upserted");
+assert.deepEqual(promptWatch.data, upsertPayload);
 assert.deepEqual(translator.permissions(), [prompt]);
 assert.equal(translator.resolvePermission("req-1"), true);
 assert.deepEqual(translator.permissions(), []);
