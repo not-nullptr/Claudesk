@@ -830,6 +830,8 @@ function validateAccountProfileUpdate(method, pathname, body) {
     "avatar",
     "conversation_preferences",
     "cowork_global_instructions",
+    "cowork_global_instructions_sha256",
+    "cowork_instructions_union",
     "work_function",
   ]);
   const keys = Object.keys(parsed);
@@ -841,6 +843,18 @@ function validateAccountProfileUpdate(method, pathname, body) {
       throw new ApiError(400, `${key} must be a string of at most 10000 characters`);
     }
   }
+  // The profile editor saves the global instructions alongside the hash it has
+  // for them and whether they should apply in Cowork; without these two keys an
+  // instruction change was rejected as a forbidden field.
+  if ("cowork_global_instructions_sha256" in parsed &&
+      (typeof parsed.cowork_global_instructions_sha256 !== "string"
+        || !/^[0-9a-f]{64}$/i.test(parsed.cowork_global_instructions_sha256))) {
+    throw new ApiError(400, "cowork_global_instructions_sha256 must be a SHA-256 hex digest");
+  }
+  if ("cowork_instructions_union" in parsed &&
+      typeof parsed.cowork_instructions_union !== "boolean") {
+    throw new ApiError(400, "cowork_instructions_union must be a boolean");
+  }
   if ("work_function" in parsed &&
       (typeof parsed.work_function !== "string" || parsed.work_function.length > 128)) {
     throw new ApiError(400, "work_function must be a string of at most 128 characters");
@@ -851,15 +865,17 @@ function validateAccountProfileUpdate(method, pathname, body) {
   }
 }
 
-// The official renderer persists account-scoped Claude Code settings with a
-// PATCH to /api/account/settings. The one such setting in the current bundle is
-// the Code tab's "Default transcript view" (`code_default_transcript_view`),
-// which the client writes on its own after the segmented control changes. The
-// bridge previously dropped that path, so the optimistic write rolled back and
-// the control snapped back to Normal.
-const allowedAccountSettings = new Map([
-  ["code_default_transcript_view", new Set(["normal", "thinking", "verbose"])],
-]);
+// The official renderer persists the account's own UI settings with a PATCH to
+// /api/account/settings. That is not one control: the Chat toggles, the Code
+// settings (transcript view, branch prefix, auto-archive, model fallback),
+// onboarding, banners, voice and egress all write different keys, and the set
+// grows with the bundle (the iOS protobuf alone names a dozen-plus, and Desktop
+// adds its own). Enumerating them only ever trailed the bundle — each missed key
+// rolled back with "Account setting is not allowed", so a picker's change did not
+// stick. Validate the body's shape instead: a bounded object of bounded JSON
+// values, with `internal_*` kept out (the renderer strips those itself and they
+// are not settings). The upstream API still sees only keys it knows.
+const accountSettingKeyPattern = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 
 function validateAccountSettingsUpdate(method, pathname, body) {
   if (method !== "PATCH" || pathname !== "/api/account/settings") return;
@@ -874,9 +890,10 @@ function validateAccountSettingsUpdate(method, pathname, body) {
   }
   const keys = Object.keys(parsed);
   if (!keys.length) throw new ApiError(400, "Account setting update is empty");
+  if (keys.length > 64) throw new ApiError(400, "Account setting update has too many fields");
   for (const key of keys) {
-    const values = allowedAccountSettings.get(key);
-    if (!values || !values.has(parsed[key])) {
+    if (key.startsWith("internal_") || !accountSettingKeyPattern.test(key)
+      || !isBoundedJsonValue(parsed[key])) {
       throw new ApiError(400, "Account setting is not allowed");
     }
   }
