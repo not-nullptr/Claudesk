@@ -963,19 +963,4 @@
   });
   globalThis.addEventListener("pageshow", () => connectEvents(true));
   globalThis.addEventListener("online", () => connectEvents(true));
-
-  if ("serviceWorker" in navigator) {
-    addEventListener("load", () => {
-      let reloadingForUpdatedWorker = false;
-      navigator.serviceWorker.addEventListener("controllerchange", () => {
-        if (reloadingForUpdatedWorker) return;
-        reloadingForUpdatedWorker = true;
-        location.reload();
-      });
-      navigator.serviceWorker.register(
-        `/service-worker.js?v=${encodeURIComponent(config.release.patchRelease)}`,
-        { updateViaCache: "none" },
-      ).then((registration) => registration.update()).catch(() => {});
-    });
-  }
 })();

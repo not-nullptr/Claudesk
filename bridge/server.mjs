@@ -1694,9 +1694,6 @@ async function serveStatic(response, pathname) {
   if ([".css", ".html", ".js"].includes(extname(filePath))) {
     const source = body.toString("utf8");
     const marker = "__CLAUDESK_RELEASE__";
-    if (pathname === "/service-worker.js" && !source.includes(marker)) {
-      throw new ApiError(500, "service worker release marker is missing");
-    }
     body = Buffer.from(source.replaceAll(marker, release.patchRelease), "utf8");
   }
   const fileExtension = extname(filePath);
@@ -1865,7 +1862,6 @@ const localStaticFiles = new Set([
   "/remote-preload.js",
   "/remote-folder-picker.js",
   "/remote-shell.css",
-  "/service-worker.js",
 ]);
 
 const server = http.createServer(async (request, response) => {

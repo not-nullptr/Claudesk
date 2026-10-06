@@ -58,15 +58,9 @@ project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 node "$project_dir/scripts/verify-renderer-markers.mjs" "$tmp_dir"
 
 curl -fsS "$base_url/remote-preload.js?v=$release" > "$tmp_dir/remote-preload.js"
-curl -fsS "$base_url/service-worker.js?v=$release" > "$tmp_dir/service-worker.js"
 node --check "$tmp_dir/remote-preload.js"
 grep -F 'async function bridgeRequest(path, body, { retryable = false } = {})' \
   "$tmp_dir/remote-preload.js" >/dev/null
-grep -F "const RELEASE = \"$release\"" "$tmp_dir/service-worker.js" >/dev/null
-# The Service Worker template expression is intentionally matched literally.
-# shellcheck disable=SC2016
-grep -F 'const CACHE_NAME = `claude-official-remote-${RELEASE}`' \
-  "$tmp_dir/service-worker.js" >/dev/null
 grep -F 'eventStreamGeneration' "$tmp_dir/remote-preload.js" >/dev/null
 if grep -F 'setInterval(connectEvents' "$tmp_dir/remote-preload.js" >/dev/null \
   || grep -F '/api/remote/files/reveal' "$tmp_dir/remote-preload.js" >/dev/null; then

@@ -55,7 +55,7 @@ flowchart LR
 | `http://NAS_IP:15821/` | 局域网/Tailnet 直接访问 Chat、Cowork | 仅可信网络；不继承 Authelia |
 | `https://claude-home.172906573.xyz:28443/` | 安装 PWA、跨网络访问 | 由现有 Nginx Proxy Manager + Authelia 保护 |
 
-`15821` 是本 Compose 的唯一公开端口（容器内 `8080`）。HTTPS 入口需要把主机名解析到 NAS，并沿用现有 Authelia 两因素规则。浏览器可以直接使用 HTTP，但标准 PWA 安装和 Service Worker 需要 HTTPS。
+`15821` 是本 Compose 的唯一公开端口（容器内 `8080`）。HTTPS 入口需要把主机名解析到 NAS，并沿用现有 Authelia 两因素规则。浏览器可以直接使用 HTTP，但标准 PWA 安装需要 HTTPS。
 
 ## 前置条件
 
@@ -260,7 +260,7 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 1. **页面打不开**：先确认 `docker compose ps` 中两个服务为 healthy，再从 NAS 本机执行 `curl -fsS http://127.0.0.1:15821/api/health`。
 2. **Cowork 不可用**：检查 `/dev/kvm`、`/dev/vhost-vsock` 权限和 `claude-desktop` healthcheck；不要先关闭 seccomp。
 3. **模型列表为空**：确认 `CLAUDE_INFERENCE_MODELS_JSON` 是合法 JSON，模型 ID 与 Gateway 实际接受的路由一致。
-4. **PWA 无法安装**：HTTP LAN 入口可浏览但不能提供标准 Service Worker；改用 Authelia 保护的 HTTPS 主机名。
+4. **PWA 无法安装**：HTTP LAN 入口可浏览但不能安装 PWA；改用 Authelia 保护的 HTTPS 主机名。
 5. **配置泄露风险**：不要执行会打印渲染后环境变量的 `docker compose config`，因为其中可能包含 API Key。
 
 ## 持久化数据
