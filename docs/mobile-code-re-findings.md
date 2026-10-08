@@ -936,3 +936,17 @@ session whose first turn has completed and whose title still looks like its firs
 user message, then renames it with `LocalSessions.updateSession` — the exact
 generator and rename Desktop would have used. Only sessions created after the
 bridge starts are titled, so a restart never backfills (and pays for) history.
+
+The first cut of that poller named nothing (2026-10-08). Its "still looks like
+the first message" test was a strict `firstMessage.startsWith(title)`, which real
+sessions never satisfy: Desktop cuts the title at a word boundary and appends a
+`…` when the cut lands mid-token (usually a URL — "clone … into…"), and Claude
+Code's *first user entry* is not the typed message but that message preceded by
+an injected `<system-reminder>` block (worktree/environment), so the title is not
+a prefix of the raw text. It also required the transcript to hold **exactly one**
+user turn, discarding any session first seen after a follow-up. The poller now
+strips a leading `<system-reminder>`, ignores a trailing truncation ellipsis, and
+drops the one-turn rule — a session is a candidate for as long as its title is
+Desktop's copy of the first message, and is left alone the moment the user or the
+agent has chosen a real one (`titleSource` `user`/`tool`, or a title that no
+longer starts the message).

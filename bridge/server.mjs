@@ -1987,37 +1987,63 @@ realtimeHeartbeat.unref();
 // custom prompt, no pinned model, just Desktop's generator invoked at the point
 // Desktop's gate would have. Only sessions started after the bridge came up are
 // considered, so a restart does not backfill (and pay for) the entire history.
+//
+// A session is a candidate while its title still reads as Desktop's copy of the
+// first message — the injected `<system-reminder>` block stripped and a trailing
+// truncation ellipsis ignored, both of which the first cut of this poller missed
+// (so it named nothing). Once anything but that (or a user/agent rename) is
+// there, the session is left alone.
 const codeTitleSessionIds = new Set(); // desktop session ids already handled
 const codeTitleStartedAt = Date.now();
 let codeTitlePollInFlight = false;
 const TITLE_DEVICE_ORG = "00000000-0000-4000-8000-000000000001";
 
-// Every non-empty user-message text in a transcript, in order. Used both to
-// find the first message and to prove the session has had exactly ONE user turn
-// — the trigger is "the first turn just finished", and a session with a
-// history is not that, however its title happens to read.
+// A user entry's own text, with Claude Code's injected context blocks removed.
+// The first user message of a Code session is not just what the user typed:
+// it opens with a `<system-reminder>` block (worktree, environment, skills).
+// Desktop builds the title from the human part only, so leaving the reminder in
+// made every such title look unrelated to "the first message" and the poller
+// skipped the session it exists to name.
+function userEntryText(content) {
+  const raw = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.filter((block) => block?.type === "text").map((block) => block.text || "").join("")
+      : "";
+  let text = raw;
+  for (;;) {
+    const leading = text.match(/^\s*<system-reminder>[\s\S]*?<\/system-reminder>\s*/);
+    if (!leading) break;
+    text = text.slice(leading[0].length);
+  }
+  return text.replace(/\s+/g, " ").trim();
+}
+
+// Every non-empty user-message text in a transcript, in order; the first is the
+// session's opening message, which is what Desktop's title is cut from.
 function userMessageTexts(entries) {
   const texts = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry !== "object" || entry.isMeta || entry.isSynthetic) continue;
     if (entry.type !== "user" && entry.message?.role !== "user") continue;
-    const content = entry.message?.content;
-    const text = typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content.filter((block) => block?.type === "text").map((block) => block.text || "").join("")
-        : "";
-    const normalized = text.replace(/\s+/g, " ").trim();
+    const normalized = userEntryText(entry.message?.content);
     if (normalized) texts.push(normalized);
   }
   return texts;
 }
 
+// Desktop cuts the code title to fit and, when the cut lands mid-token (usually
+// a URL), ends it with an ellipsis — "can you clone … into…". Strip that before
+// the prefix test, or such a session never looks untitled. A title the user or
+// the agent chose does not start the first message, which is the only thing
+// this needs to tell apart.
 function titleLooksLikeFirstMessage(title, firstMessage) {
   const current = String(title || "").replace(/\s+/g, " ").trim();
   if (!current) return true;
-  // Desktop sets the code title to the (usually truncated) first message.
-  return current === firstMessage || firstMessage.startsWith(current);
+  const first = String(firstMessage || "").replace(/\s+/g, " ").trim();
+  if (!first) return false;
+  const cut = current.replace(/\s*(?:…|\.\.\.)\s*$/, "").trim() || current;
+  return current === first || first.startsWith(current) || first.startsWith(cut);
 }
 
 async function generateCodeTitle(firstMessage) {
@@ -2073,17 +2099,26 @@ async function titleCodeSessions() {
       }
       const userTexts = userMessageTexts(entries);
       if (userTexts.length === 0) continue; // no first turn yet — look again
-      codeTitleSessionIds.add(id);
-      // Exactly one user turn: a fresh session whose first turn just finished.
-      // A session with more is not one we should rename.
-      if (userTexts.length !== 1) continue;
       const firstMessage = userTexts[0];
+      // Fresh read before deciding: a session still running (or gone) is left
+      // for the next tick rather than marked handled.
       const before = await freshSession(id);
       if (!before || before.isRunning || before.isArchived) continue;
+      // Decided: from here the session is either renamed or left alone as-is.
+      codeTitleSessionIds.add(id);
+      // A title that no longer starts the first message was chosen by the user
+      // or the agent; keep it. Everything else — empty, or Desktop's truncated
+      // copy of the first message — is what this poller exists to replace, for
+      // however many turns the session has run since. (The old rule "exactly one
+      // user turn" threw away every session whose first turn had already been
+      // followed up, which is most of them.)
       if (!titleLooksLikeFirstMessage(before.title, firstMessage)) continue;
       try {
         const title = await generateCodeTitle(firstMessage);
-        if (!title) continue;
+        if (!title) {
+          console.log(`[cowork-bridge] no title generated for code session ${id}`);
+          continue;
+        }
         // Re-read after the model call: if the session moved on (another turn,
         // a rename), leave it alone.
         const after = await freshSession(id);
