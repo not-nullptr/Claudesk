@@ -182,11 +182,13 @@ Code 命令只在 Desktop 容器内执行，默认工作根目录是挂载的 `/
 ### 界面显示
 
 `CLAUDE_REMOTE_USER_NAME` 设置远程 WebUI 显示的用户名：侧栏用户菜单的标识，以及首页问候语里的称呼
-（如 “Good evening, Ada”）。不设置时沿用 Desktop 自己的值（本镜像里是容器应用用户 `app`）。
+（如 “Back at it, Ada”）。两处按同一规则解析：优先用它，其次用界面其他地方显示的同一个用户名
+（Desktop 上报的 OS 用户，与侧栏一致，本镜像里是容器应用用户 `app`），再次才是账号自带的名字。
 
 官方首页问候语由服务端下发 `personalized_greeting` 数据，而不是渲染器内的本地文案；当前 Gateway 不提供
-它，渲染器便一直显示官方的 “You’re here!” 占位。Bridge 在响应未携带 `personalized_greeting` 时按访问者
-本地时间补上同一结构的 `chat` 问候（早晨/下午/晚上），因此无论是否设置用户名，首页都不再停留在占位文案；
+它，渲染器便一直显示官方的 “You’re here!” 占位。Bridge 在响应未携带 `personalized_greeting` 时补上官方
+同结构的数据：`chat` 与 `code` 两个 surface，各自按星期几区分时段（`days`，某天缺省时回落到
+`default_slots`），再由渲染器按访问者本地时间挑选；其中的 `{{ NAME }}` 占位符与官方后端一样在服务端展开。
 Gateway 自行下发的问候语不会被覆盖。
 
 ### 资源与网络

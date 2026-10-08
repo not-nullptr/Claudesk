@@ -1001,33 +1001,177 @@ function sanitizeStoreValue(surface, store, value) {
 const bootstrapResponsePath = /^\/edge-api\/bootstrap(?:\/[^/?#]+\/app_start)?$/i;
 
 // The official renderer takes its home greeting from the bootstrap response,
-// not from local code: personalized_greeting is an array of surface objects
-// whose default_slots list {until, text} pairs, and the renderer returns the
-// first slot whose exclusive `until` hour is still ahead of the visitor's clock.
-// The upstream gateway never sends it, so the greeting is stuck on the
-// renderer's "You're here!" placeholder instead of the time-based one the
-// desktop app shows. Supply the same shape for the chat surface and let the
-// renderer's own picker do the work; a greeting the upstream did send is kept.
-const greetingSlots = [
-  { until: 5, phrase: "Good evening" },
-  { until: 12, phrase: "Good morning" },
-  { until: 17, phrase: "Good afternoon" },
-  { until: 24, phrase: "Good evening" },
+// not from local code: personalized_greeting is an array of surface objects,
+// each with per-weekday `days` (a `slots` list) and a `default_slots` list of
+// {until, text} pairs. The renderer picks the day's slots when the weekday
+// matches, else default_slots, then returns the first slot whose exclusive
+// `until` hour is still ahead of the visitor's clock. The upstream gateway
+// never sends any of it, so the home page sits on the renderer's "You're here!"
+// placeholder instead of the time-based greeting the desktop app shows. Supply
+// the official payload for the chat and code surfaces and let the renderer's own
+// picker do the work; a greeting the upstream did send is kept. The official
+// backend expands the {{ NAME }} token server-side before it ships (its payload
+// carries final text like "Back at it, Maddie"); do the same here, addressing
+// the user by the same name the rest of the app shows (see resolveGreetingName).
+const GREETING_NAME_TOKEN = "{{ NAME }}";
+
+const greetingSurfaces = [
+  {
+    surface: "chat",
+    days: [
+      { day: "sun", slots: [
+        { until: 5, text: "What shall we think through?" },
+        { until: 9, text: "Sunday session, {{ NAME }}?" },
+        { until: 12, text: "Welcome, {{ NAME }}" },
+        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 22, text: "{{ NAME }} returns!" },
+        { until: 24, text: "What shall we think through?" },
+      ] },
+      { day: "mon", slots: [
+        { until: 5, text: "Up late, {{ NAME }}?" },
+        { until: 9, text: "Hey there, {{ NAME }}" },
+        { until: 12, text: "Happy Monday, {{ NAME }}" },
+        { until: 18, text: "Afternoon, {{ NAME }}" },
+        { until: 22, text: "Good evening, {{ NAME }}" },
+        { until: 24, text: "Up late, {{ NAME }}?" },
+      ] },
+      { day: "tue", slots: [
+        { until: 5, text: "It’s a late-night jam session." },
+        { until: 9, text: "Happy Tuesday, {{ NAME }}" },
+        { until: 12, text: "Hey there, {{ NAME }}" },
+        { until: 18, text: "Let’s noodle" },
+        { until: 22, text: "Evening, {{ NAME }}" },
+        { until: 24, text: "It’s a late-night jam session." },
+      ] },
+      { day: "wed", slots: [
+        { until: 5, text: "Hello, night owl" },
+        { until: 9, text: "Good morning, {{ NAME }}" },
+        { until: 12, text: "Welcome, {{ NAME }}" },
+        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 22, text: "Evening, how are things?" },
+        { until: 24, text: "Hello, night owl" },
+      ] },
+      { day: "thu", slots: [
+        { until: 5, text: "What shall we think through?" },
+        { until: 9, text: "Good morning, {{ NAME }}" },
+        { until: 12, text: "Happy Thursday, {{ NAME }}" },
+        { until: 18, text: "Afternoon, {{ NAME }}" },
+        { until: 22, text: "{{ NAME }} returns!" },
+        { until: 24, text: "What shall we think through?" },
+      ] },
+      { day: "fri", slots: [
+        { until: 5, text: "Moonlit chat?" },
+        { until: 9, text: "What’s cooking, {{ NAME }}?" },
+        { until: 12, text: "Good morning, {{ NAME }}" },
+        { until: 18, text: "Let’s noodle" },
+        { until: 22, text: "Evening thoughts" },
+        { until: 24, text: "Moonlit chat?" },
+      ] },
+      { day: "sat", slots: [
+        { until: 5, text: "It’s a late-night jam session." },
+        { until: 12, text: "Welcome to the weekend, {{ NAME }}" },
+        { until: 18, text: "Good afternoon, {{ NAME }}" },
+        { until: 22, text: "Evening, {{ NAME }}" },
+        { until: 24, text: "It’s a late-night jam session." },
+      ] },
+    ],
+    default_slots: [
+      { until: 5, text: "What shall we think through?" },
+      { until: 9, text: "Hey, early bird" },
+      { until: 12, text: "What’s cooking, {{ NAME }}?" },
+      { until: 18, text: "Afternoon, {{ NAME }}" },
+      { until: 22, text: "{{ NAME }} returns!" },
+      { until: 24, text: "What shall we think through?" },
+    ],
+  },
+  {
+    surface: "code",
+    days: [
+      { day: "sun", slots: [
+        { until: 5, text: "Night build" },
+        { until: 12, text: "Morning, {{ NAME }}" },
+        { until: 18, text: "Ready when you are" },
+        { until: 22, text: "Hello, world" },
+        { until: 24, text: "Night build" },
+      ] },
+      { day: "mon", slots: [
+        { until: 18, text: "Hello, world" },
+        { until: 22, text: "Hello, {{ NAME }}" },
+        { until: 24, text: "Hello, world" },
+      ] },
+      { day: "tue", slots: [
+        { until: 5, text: "Hello, night owl" },
+        { until: 18, text: "Hello, {{ NAME }}" },
+        { until: 22, text: "Evening, {{ NAME }}" },
+        { until: 24, text: "Hello, night owl" },
+      ] },
+      { day: "wed", slots: [
+        { until: 12, text: "Clean slate" },
+        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 22, text: "Beep boop time?" },
+        { until: 24, text: "Clean slate" },
+      ] },
+      { day: "fri", slots: [
+        { until: 12, text: "What are we building?" },
+        { until: 18, text: "What needs fixing?" },
+        { until: 24, text: "What are we building?" },
+      ] },
+      { day: "sat", slots: [
+        { until: 12, text: "Ready when you are" },
+        { until: 18, text: "What are we building?" },
+        { until: 24, text: "Ready when you are" },
+      ] },
+    ],
+    default_slots: [
+      { until: 12, text: "Back at it, {{ NAME }}" },
+      { until: 18, text: "Afternoon, {{ NAME }}" },
+      { until: 24, text: "Back at it, {{ NAME }}" },
+    ],
+  },
 ];
 
-function injectPersonalizedGreeting(parsed) {
+// Expand the {{ NAME }} token, or, with no name at all, drop it without leaving
+// stray punctuation: a trailing ", {{ NAME }}" disappears whole, and a leading
+// token is removed with the following word capitalized ("{{ NAME }} returns!"
+// becomes "Returns!").
+function greetingText(text, name) {
+  if (!text.includes(GREETING_NAME_TOKEN)) return text;
+  if (name) return text.split(GREETING_NAME_TOKEN).join(name);
+  if (text.startsWith(GREETING_NAME_TOKEN)) {
+    const rest = text.slice(GREETING_NAME_TOKEN.length).replace(/^\s+/, "");
+    return rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
+  return text
+    .replace(`, ${GREETING_NAME_TOKEN}`, "")
+    .replace(GREETING_NAME_TOKEN, "")
+    .replace(/\s+([?!])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// The address the greeting uses, in one place: the operator override, else the
+// name the rest of the app already shows for the signed-in user (the sidebar
+// identity the caller reads from Desktop's auth store), else the account the
+// bootstrap response itself carries, else no name at all. The caller resolves
+// `reported`, so this stays pure and testable.
+function resolveGreetingName({ override, reported, account }) {
+  const display = typeof account?.display_name === "string" ? account.display_name.trim() : "";
+  const full = typeof account?.full_name === "string" ? account.full_name.trim() : "";
+  return override || reported || display || full;
+}
+
+function injectPersonalizedGreeting(parsed, name) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const existing = parsed.personalized_greeting;
   if (Array.isArray(existing) && existing.length > 0) return parsed;
+  const renderSlots = (list) => list.map(({ until, text }) => ({ until, text: greetingText(text, name) }));
   return {
     ...parsed,
-    personalized_greeting: [{
-      surface: "chat",
-      default_slots: greetingSlots.map(({ until, phrase }) => ({
-        until,
-        text: remoteUserName ? `${phrase}, ${remoteUserName}` : phrase,
-      })),
-    }],
+    personalized_greeting: greetingSurfaces.map(({ surface, days, default_slots }) => ({
+      surface,
+      ...(days ? { days: days.map(({ day, slots }) => ({ day, slots: renderSlots(slots) })) } : {}),
+      default_slots: renderSlots(default_slots),
+    })),
   };
 }
 
@@ -1072,7 +1216,17 @@ async function forwardOfficialProtocol(request, response, url) {
   if ((result.contentType || "").includes("application/json")) {
     const parsed = JSON.parse(responseBody.toString("utf8"));
     if (bootstrapResponsePath.test(url.pathname)) {
-      const greeting = injectPersonalizedGreeting(parsed);
+      // Address the user the way the rest of the app does: the sidebar identity
+      // is the name override, else whatever Desktop reports for its OS app user.
+      // Read it from the same store the sidebar reads; if that read fails, the
+      // account in the bootstrap response is the fallback.
+      let reported = "";
+      try {
+        const auth = await desktop.readStore("LocalAgentModeSessions", "interactiveAuthStore");
+        if (typeof auth?.principalDisplayName === "string") reported = auth.principalDisplayName.trim();
+      } catch { /* fall back to the account name in the response */ }
+      const name = resolveGreetingName({ override: remoteUserName, reported, account: parsed.account });
+      const greeting = injectPersonalizedGreeting(parsed, name);
       if (greeting !== parsed) responseBody = Buffer.from(JSON.stringify(greeting), "utf8");
     }
     if (containsSensitiveCredential(parsed)) {
