@@ -16,7 +16,9 @@ const downloadPatchId = "file-pane-download";
 // message ids — content hashes of that copy — pin the component that renders it
 // and appear nowhere else in the renderer graph; its body is replaced with an
 // unconditional null. The ids are matched only as parsed literals, so a comment
-// or string that merely spells them cannot establish the target.
+// or string that merely spells them cannot establish the target. This patch is
+// required like the download button: a bundle that no longer matches must fail
+// candidate preparation rather than silently let the card return.
 const inferenceBannerPatchId = "inference-banner";
 const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
@@ -66,9 +68,7 @@ function checksFileKind(node) {
 }
 // The provider card is the sole component passed to a wrapper call whose body
 // carries both of its message ids; declarations and unrelated helper functions
-// are not arguments, so they are not targets. A missing target is tolerated at
-// the call site: the desired end state is "no card", and an upstream that
-// already dropped it needs no patch.
+// are not arguments, so they are not targets.
 function inferenceBannerTarget(node, ancestors) {
   if (node.type !== "FunctionExpression" && node.type !== "ArrowFunctionExpression") return false;
   if (node.body?.type !== "BlockStatement") return false;
@@ -211,7 +211,7 @@ export function patchRendererSources(sources, gatewayEnabled) {
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
-  const required = [downloadPatchId, ...(gatewayEnabled
+  const required = [downloadPatchId, inferenceBannerPatchId, ...(gatewayEnabled
     ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
     const count = matches.get(id)?.length || 0;

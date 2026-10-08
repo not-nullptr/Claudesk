@@ -57,11 +57,13 @@ the `Open` action, the setup routes). The ids are matched as parsed literals, so
 a comment or a string that merely spells them is not a target. It is applied
 independent of the Gateway setting — the card renders only for a non-first-party
 provider, so the patch is inert when the provider is official, and gating it on a
-separate flag would leave the card in place whenever that flag is off. Unlike the
-required patches, it tolerates a missing target: the goal is "no card", so an
-upstream that already dropped it needs no patch and must not fail preparation.
+separate flag would leave the card in place whenever that flag is off. It is a
+required patch (see below): if an upstream rewording changes the message ids, or
+the component is otherwise restructured, candidate preparation fails and the
+selector must be updated before the new Desktop is promoted, rather than the card
+returning silently.
 
-The code generator splices only the selected comparison. It does not regenerate
+The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and
 `229 == event['keyCode']` both establish IME handling. Comments and strings that
@@ -69,13 +71,10 @@ merely look like code do not establish a capability.
 
 Each required patch must have exactly one target across the renderer graph.
 Missing or ambiguous targets remain errors: no feature is silently disabled and
-no broad replacement is applied to unrelated code. The provider-card removal is
-the deliberate exception — it is applied wherever it matches and skipped when
-absent, because its absent state is already the desired end state rather than a
-lost feature. Diagnostics include the patch ID and match count. The generated
-manifest records original expressions, file hashes and the actual source
-snippets establishing native capabilities. The HTTP smoke test verifies those
-snippets against the served modules.
+no broad replacement is applied to unrelated code. Diagnostics include the
+patch ID and match count. The generated manifest records original expressions,
+file hashes and the actual source snippets establishing native capabilities.
+The HTTP smoke test verifies those snippets against the served modules.
 
 ## Testing
 
