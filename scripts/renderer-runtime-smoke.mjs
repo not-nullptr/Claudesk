@@ -22,6 +22,7 @@ callback.rewindV2; event.keyCode===229; const actions={edit:'onEdit'};
 export function signin(){const code=user.pendingUserCode;const allowed=enabled&&window.location.protocol==='app:';router.replace('/new');return allowed;}
 export function route(){const allowed=typeof window!=='undefined'&&window.location.protocol==='app:';router.replace('/new');return allowed;}
 export function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileView:void 0);g(Dl,{variant:"ghost",iconOnly:!0,icon:"Download"});return e==="file"&&v(p,{children:[g(Kg,{sessionRef:C}),g(Um,{sessionRef:C,anchorRef:oe})]});}
+function bannerModule(){const providerCard=wrap(function({compact:e,fallback:t}){let s=useStore();if(s.hidden)return t??null;return e?h("div",{children:s.provider}):h(Banner,{title:m({defaultMessage:"You’re using {provider}",id:"+8XhcAcHfK"}),body:m({defaultMessage:"Add MCP servers, set a model allowlist, or change providers any time in the Inference configuration menu.",id:"1qPkTh9fMa"})});});}
 `);
   const result = spawnSync(process.execPath, [preparePath, ion, state, releasePath], {
     encoding: "utf8", env: { ...process.env, CLAUDE_DESKTOP_VERSION: release.desktopVersion,
@@ -29,7 +30,7 @@ export function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileVie
   });
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
-  assert.equal(manifest.patches.length, 3);
+  assert.equal(manifest.patches.length, 4);
   const generation = join(state, release.desktopVersion, release.patchRelease);
   const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
   const handler = wrapper.slice(wrapper.indexOf("async function serveIon("),

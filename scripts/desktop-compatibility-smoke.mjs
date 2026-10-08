@@ -32,10 +32,12 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, gateway === "1" ? 3 : 1);
+    assert.equal(manifest.patches.length, gateway === "1" ? 4 : 2);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
+    assert.ok(manifest.patches.some(patch => patch.id === "inference-banner"),
+      "the provider card must be removed in both Gateway modes");
     if (gateway === "1") gatewayManifest = manifest;
     for (const file of manifest.files) {
       const generated = await readFile(join(state,
@@ -79,7 +81,7 @@ try {
       changed.set(`moved/chunk-${i}.js`, compiled.code);
     }
     const patched = patchRendererSources(changed, true);
-    assert.equal(patched.patches.length, 3);
+    assert.equal(patched.patches.length, 4);
     assert.ok(patched.patches.every(patch => patch.path.startsWith("moved/")));
     assert.equal(patched.markers.length, 4);
   }

@@ -46,13 +46,30 @@ optional chaining. Positive and negative protocol comparisons retain their
 polarity. The patch extends desktop eligibility when the existing remote
 Gateway setting is enabled; it preserves surrounding feature conditions.
 
-The code generator splices only the selected comparison. It does not regenerate
+The first-party provider card — the "You're using …" / "Inference configuration"
+banner that advertises the provider switch on the chat and code home surfaces —
+is selected by the two i18n message ids of its copy. Both are content hashes of
+that text and appear nowhere else in the renderer graph, so the only match is the
+component passed to a wrapper call whose body carries them. The patch replaces
+that component's body with `{return null;}`, which removes the card from every
+surface at once without touching its siblings (the unhealthy-inference warning,
+the `Open` action, the setup routes). The ids are matched as parsed literals, so
+a comment or a string that merely spells them is not a target. It is applied
+independent of the Gateway setting — the card renders only for a non-first-party
+provider, so the patch is inert when the provider is official, and gating it on a
+separate flag would leave the card in place whenever that flag is off. It is a
+required patch (see below): if an upstream rewording changes the message ids, or
+the component is otherwise restructured, candidate preparation fails and the
+selector must be updated before the new Desktop is promoted, rather than the card
+returning silently.
+
+The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and
 `229 == event['keyCode']` both establish IME handling. Comments and strings that
 merely look like code do not establish a capability.
 
-Each requested patch must have exactly one target across the renderer graph.
+Each required patch must have exactly one target across the renderer graph.
 Missing or ambiguous targets remain errors: no feature is silently disabled and
 no broad replacement is applied to unrelated code. Diagnostics include the
 patch ID and match count. The generated manifest records original expressions,

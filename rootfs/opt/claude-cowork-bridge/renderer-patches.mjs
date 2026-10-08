@@ -10,6 +10,17 @@ export const markerIds = ["cowork-native-rewind", "code-native-rewind-v2",
 // download route instead. The pane header passes paneName "Files" to its
 // settings menu, so this is the file pane's trailing actions fragment.
 const downloadPatchId = "file-pane-download";
+// The first-party provider card ("You're using …" / "Inference configuration")
+// advertises the provider switch on the chat and code home surfaces. A Gateway
+// deployment fixes the provider, so the card is only noise there. Two i18n
+// message ids — content hashes of that copy — pin the component that renders it
+// and appear nowhere else in the renderer graph; its body is replaced with an
+// unconditional null. The ids are matched only as parsed literals, so a comment
+// or string that merely spells them cannot establish the target. This patch is
+// required like the download button: a bundle that no longer matches must fail
+// candidate preparation rather than silently let the card return.
+const inferenceBannerPatchId = "inference-banner";
+const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -54,6 +65,17 @@ function checksFileKind(node) {
   return contains(node, child => child.type === "BinaryExpression"
     && ["==", "==="].includes(child.operator)
     && (literal(child.left, "file") || literal(child.right, "file")));
+}
+// The provider card is the sole component passed to a wrapper call whose body
+// carries both of its message ids; declarations and unrelated helper functions
+// are not arguments, so they are not targets.
+function inferenceBannerTarget(node, ancestors) {
+  if (node.type !== "FunctionExpression" && node.type !== "ArrowFunctionExpression") return false;
+  if (node.body?.type !== "BlockStatement") return false;
+  const parent = ancestors[ancestors.length - 1];
+  if (parent?.type !== "CallExpression" || !parent.arguments.includes(node)) return false;
+  return inferenceBannerMessageIds.every(id =>
+    contains(node.body, child => literal(child, id)));
 }
 // The file pane's trailing actions, gated by the pane kind (an `==="file"`
 // check on the enclosing logical expression), are a two-element children array
@@ -137,6 +159,10 @@ export function inspectRenderer(source, gatewayEnabled) {
       const patch = filePaneDownloadPatch(node, ancestors, source, button);
       if (patch) patches.push({ id: downloadPatchId, start: node.start, end: node.end, ...patch });
     }
+    if (inferenceBannerTarget(node, ancestors)) {
+      patches.push({ id: inferenceBannerPatchId, start: node.body.start, end: node.body.end,
+        original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
+    }
     let marker;
     if (literal(node, "rewindSession unavailable")) marker = markerIds[0];
     if (property(node, "rewindV2") || key(node, "rewindV2")) marker = markerIds[1];
@@ -185,7 +211,7 @@ export function patchRendererSources(sources, gatewayEnabled) {
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
-  const required = [downloadPatchId, ...(gatewayEnabled
+  const required = [downloadPatchId, inferenceBannerPatchId, ...(gatewayEnabled
     ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
     const count = matches.get(id)?.length || 0;
