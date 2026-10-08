@@ -69,4 +69,37 @@ assert.equal(patchRendererSources(new Map([["only.js", `${native}\n${filePane}`]
 const changedNative = "const error='rewindSession unavailable'; callbacks['rewindV2']; 229 == event['keyCode']; const actions={'edit': 'onEdit'};";
 assert.equal(patchRendererSources(new Map([["changed-native.js", `${changedNative}\n${filePane}`]]), false).markers.length, 4);
 assert.throws(() => patchRendererSources(new Map([["comments.js", `/* ${native} */\n${filePane}`]]), false), /capability .* missing/);
+// The provider card is a call-argument component carrying both of its i18n
+// message ids; its body is blanked so chat and code stop advertising the
+// provider switch. A declaration, a comment or a string that merely names the
+// ids is not a target, and the patch only fires for the Gateway setting.
+const bannerCard = 'const providerCard=wrap(function({compact:e,fallback:t}){'
+  + 'let s=useStore();if(s.hidden)return t??null;'
+  + 'return e?h("div",{children:s.provider})'
+  + ':h(Banner,{title:m({defaultMessage:"You’re using {provider}",id:"+8XhcAcHfK"}),'
+  + 'body:m({defaultMessage:"Add MCP servers, set a model allowlist, or change providers any time in the Inference configuration menu.",id:"1qPkTh9fMa"})});});';
+const bannerDecoy = '// id:"+8XhcAcHfK" 1qPkTh9fMa\n'
+  + 'function declareOnly(){return "+8XhcAcHfK"+"1qPkTh9fMa";}';
+const bannerGuard = 'function signin(){const code=user.pendingUserCode;'
+  + 'const ok=flag&&(window.location.protocol==="app:");router.replace("/new");return ok;}'
+  + 'const route=()=>{const ok=(typeof window!=="undefined")'
+  + '&&(window.location.protocol==="app:");router.replace("/new");return ok;};';
+const bannerInputs = new Map([["banner-chunk.js",
+  `${native}\n${bannerGuard}\n${filePane}\n${bannerCard}\n${bannerDecoy}`]]);
+const bannerOn = patchRendererSources(bannerInputs, true);
+assert.deepEqual(bannerOn.patches.map(patch => patch.id).sort(),
+  ["file-pane-download", "gateway-setup-route-web-guard",
+    "gateway-setup-signin-web-guard", "inference-banner"]);
+const bannerOut = bannerOn.sources.get("banner-chunk.js");
+assert.ok(!bannerOut.includes("model allowlist"), "the provider card copy must be removed");
+assert.ok(bannerOut.includes("const providerCard=wrap(function({compact:e,fallback:t}){return null;})"),
+  "only the card component's body is replaced");
+assert.ok(bannerOut.endsWith(bannerDecoy), "a declaration or string naming the ids is not a target");
+assert.ok(!patchRendererSources(bannerInputs, false).patches
+  .some(patch => patch.id === "inference-banner"), "the card patch tracks the Gateway setting");
+const bannerCompiled = await minify(bannerInputs.get("banner-chunk.js"), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), true).patches
+  .some(patch => patch.id === "inference-banner"), "recompiled card must retain the patch");
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

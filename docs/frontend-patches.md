@@ -46,18 +46,34 @@ optional chaining. Positive and negative protocol comparisons retain their
 polarity. The patch extends desktop eligibility when the existing remote
 Gateway setting is enabled; it preserves surrounding feature conditions.
 
+The first-party provider card — the "You're using …" / "Inference configuration"
+banner that advertises the provider switch on the chat and code home surfaces —
+is selected by the two i18n message ids of its copy. Both are content hashes of
+that text and appear nowhere else in the renderer graph, so the only match is the
+component passed to a wrapper call whose body carries them. The patch replaces
+that component's body with `{return null;}`, which removes the card from every
+surface at once without touching its siblings (the unhealthy-inference warning,
+the `Open` action, the setup routes). The ids are matched as parsed literals, so
+a comment or a string that merely spells them is not a target. This patch tracks
+the Gateway setting like the guards above, and — unlike them — tolerates a
+missing target: the goal is "no card", so an upstream that already dropped it
+needs no patch and must not fail preparation.
+
 The code generator splices only the selected comparison. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and
 `229 == event['keyCode']` both establish IME handling. Comments and strings that
 merely look like code do not establish a capability.
 
-Each requested patch must have exactly one target across the renderer graph.
+Each required patch must have exactly one target across the renderer graph.
 Missing or ambiguous targets remain errors: no feature is silently disabled and
-no broad replacement is applied to unrelated code. Diagnostics include the
-patch ID and match count. The generated manifest records original expressions,
-file hashes and the actual source snippets establishing native capabilities.
-The HTTP smoke test verifies those snippets against the served modules.
+no broad replacement is applied to unrelated code. The provider-card removal is
+the deliberate exception — it is applied wherever it matches and skipped when
+absent, because its absent state is already the desired end state rather than a
+lost feature. Diagnostics include the patch ID and match count. The generated
+manifest records original expressions, file hashes and the actual source
+snippets establishing native capabilities. The HTTP smoke test verifies those
+snippets against the served modules.
 
 ## Testing
 
