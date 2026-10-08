@@ -2128,13 +2128,23 @@ function titleLooksLikeFirstMessage(title, firstMessage) {
   return current === first || first.startsWith(current) || first.startsWith(cut);
 }
 
-async function generateCodeTitle(firstMessage) {
+async function generateCodeTitle(firstMessage, model) {
   const result = await desktop.protocol({
     method: "POST",
     pathname: `/api/organizations/${TITLE_DEVICE_ORG}/dust/generate_session_title`,
     search: "",
     headers: { "content-type": "application/json", accept: "application/json" },
-    bodyBase64: Buffer.from(JSON.stringify({ first_session_message: firstMessage })).toString("base64"),
+    bodyBase64: Buffer.from(JSON.stringify({
+      first_session_message: firstMessage,
+      // Desktop's generator otherwise picks its own small "title" model, which
+      // this gateway does not serve: the direct call comes back HTTP 403
+      // ("Gateway rejected the configured credential") and the CLI fallback
+      // exits 1, so no title is ever produced. Handing it a model the session
+      // already runs on gives its retry a model that works. Chat titles have
+      // always done this (the facade passes the conversation's model); the Code
+      // path did not, which is why only Code sessions went untitled.
+      ...(typeof model === "string" && model ? { model } : {}),
+    })).toString("base64"),
   });
   const body = JSON.parse(Buffer.from(result?.bodyBase64 || "", "base64").toString("utf8"));
   return typeof body?.title === "string" ? body.title.replace(/\s+/g, " ").trim() : "";
@@ -2196,7 +2206,7 @@ async function titleCodeSessions() {
       // followed up, which is most of them.)
       if (!titleLooksLikeFirstMessage(before.title, firstMessage)) continue;
       try {
-        const title = await generateCodeTitle(firstMessage);
+        const title = await generateCodeTitle(firstMessage, before.model ?? session.model);
         if (!title) {
           console.log(`[cowork-bridge] no title generated for code session ${id}`);
           continue;

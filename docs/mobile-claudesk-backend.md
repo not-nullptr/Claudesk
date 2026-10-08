@@ -85,7 +85,11 @@ sessions are never listed, read or modified, and a completion cannot adopt their
 - **Titles.** After a new chat's first message starts, the service asks Desktop to
   write a title (`dust/generate_session_title`, the same call the web UI makes, which
   runs one small model request) and applies it unless the chat was renamed meanwhile.
-  Until then the title is the first message. The app sends an empty rename after a
+  Until then the title is the first message. The request must carry the
+  conversation's `model`: Desktop otherwise resolves its own small title model,
+  which this gateway refuses (HTTP 403), and the generation fails outright — see
+  the Code-side note in [mobile-code-re-findings](mobile-code-re-findings.md).
+  The app sends an empty rename after a
   chat's first turn; that is ignored, because applying it blanked the title in
   Desktop. `CLAUDE_MOBILE_TITLES=0` turns generation off. Chats started before this
   change keep their empty title in Desktop (the phone shows the first message);

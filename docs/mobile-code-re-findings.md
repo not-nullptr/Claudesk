@@ -928,22 +928,48 @@ check never runs or logs. Sessions started in the Desktop/browser UI therefore
 keep their first user message as the title forever. There is no server-side
 toggle: Desktop never asks this stack for feature flags.
 
-The facade already titles the sessions the *phone* creates, via Desktop's own
+The facade titles the sessions the *phone* creates, via Desktop's own
 `/dust/generate_session_title` stub (`Zgr`/`Qgr` run Anthropic's title prompt
-`Rgr` against Desktop's default session model). `bridge/server.mjs` now does the
-same for every other Code session: a 5s poll (`titleCodeSessions`) that titles a
-session whose first turn has completed and whose title still looks like its first
-user message, then renames it with `LocalSessions.updateSession` — the exact
-generator and rename Desktop would have used. Only sessions created after the
-bridge starts are titled, so a restart never backfills (and pays for) history.
+`Rgr` through a spawned CLI one-shot). `bridge/server.mjs` does the same for
+every other Code session: a 5s poll (`titleCodeSessions`) that titles a session
+whose first turn has completed and whose title still looks like its first user
+message, then renames it with `LocalSessions.updateSession`. Only sessions
+created after the bridge starts are titled, so a restart never backfills (and
+pays for) history.
 
-The first cut of that poller named nothing (2026-10-08). Its "still looks like
-the first message" test was a strict `firstMessage.startsWith(title)`, which real
-sessions never satisfy: Desktop cuts the title at a word boundary and appends a
-`…` when the cut lands mid-token (usually a URL — "clone … into…"), and Claude
-Code's *first user entry* is not the typed message but that message preceded by
-an injected `<system-reminder>` block (worktree/environment), so the title is not
-a prefix of the raw text. It also required the transcript to hold **exactly one**
+The generator must be handed a **model** (2026-10-08). With no `model` in the
+request, `$gr` resolves Desktop's own small title model
+(`claude-haiku-4-5-20251001`); this stack's gateway does not serve it, and the
+main-process log shows the whole leg failing:
+
+```
+[title-gen] direct request failed { model: 'claude-haiku-4-5-20251001', kind: 'auth',
+  detail: 'Gateway rejected the configured credential (HTTP 403).', httpStatus: 403 }
+[title-gen] spawning { mode: 'host', model: 'claude-haiku-4-5-20251001' }
+[title-gen] cli failed { kind: 'error', model: 'claude-haiku-4-5-20251001', code: 1 }
+[title-gen] failed { error: 'Error: title-gen CLI exited 1 (error)' }
+```
+
+`$gr` retries once with the caller's model (`retrying with sessionModel`), and
+that retry succeeds — which is why the facade's **Chat** titles always worked
+(`mobile/engine.mjs` passes the conversation's model) while **Code** paths
+(bridge poller, `mobile/code-engine.mjs`) passed none and produced nothing. Both
+now pass the session's model.
+
+Forcing Desktop's own gate would not have helped, twice over: the packaged build
+ignores `CLAUDE_DEV_FORCE_GATES` (`if(!e||a.app.isPackaged) return new Set`), and
+`maybeCheckSessionTitle` drives the CLI's `generate_session_title` **control
+request**, which the embedded REPL does not implement (its dispatcher has no such
+case, so the call reports `unsupported control request` → outcome
+`unavailable`). Even with the gate on, nothing would be offered.
+
+The poller's first cut also matched nothing. Its "still looks like the first
+message" test was a strict `firstMessage.startsWith(title)`, which real sessions
+never satisfy: Desktop cuts the title at a word boundary and appends a `…` when
+the cut lands mid-token (usually a URL — "clone … into…"), and Claude Code's
+*first user entry* is not the typed message but that message preceded by an
+injected `<system-reminder>` block (worktree/environment), so the title is not a
+prefix of the raw text. It also required the transcript to hold **exactly one**
 user turn, discarding any session first seen after a follow-up. The poller now
 strips a leading `<system-reminder>`, ignores a trailing truncation ellipsis, and
 drops the one-turn rule — a session is a candidate for as long as its title is

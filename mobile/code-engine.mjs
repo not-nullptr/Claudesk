@@ -877,22 +877,32 @@ export function createCodeEngine({
     return { messageId: messageUuid, threadRootId: null, createdAt: nowIso() };
   }
 
-  // A title worth overwriting with a generated one: empty, the first-message
-  // fallback this service writes, or the generic placeholder the app sends in
-  // the create body ("New chat"). A real title the user or Desktop chose is
-  // kept.
+  // A title worth overwriting with a generated one: empty, a truncation of the
+  // first message (this service's 60-char fallback, or the app's own
+  // word-boundary cut, which Desktop may end with an ellipsis), or the generic
+  // placeholder the app sends in the create body ("New chat"). A real title the
+  // user or Desktop chose does not start the first message, so it is kept.
   const PLACEHOLDER_TITLE = /^(new chat|new session|untitled( session)?)$/i;
   function isReplaceableTitle(sessionTitle, text) {
     if (!sessionTitle) return true;
-    const fallback = String(text || "").replace(/\s+/g, " ").trim().slice(0, 60);
-    return sessionTitle === fallback || PLACEHOLDER_TITLE.test(sessionTitle.trim());
+    const current = sessionTitle.trim();
+    if (PLACEHOLDER_TITLE.test(current)) return true;
+    const message = String(text || "").replace(/\s+/g, " ").trim();
+    const cut = current.replace(/\s*(?:…|\.\.\.)\s*$/, "").trim() || current;
+    return message.startsWith(current) || message.startsWith(cut);
   }
 
   async function generateTitle(desktopId, text) {
     try {
-      const generated = await desktop.generateTitle({ message: text });
-      const title = String(generated || "").replace(/\s+/g, " ").trim().slice(0, 200);
       const session = await fetchSession(desktopId).catch(() => null);
+      // Desktop's generator defaults to its own small "title" model, which this
+      // gateway does not serve (the direct call is refused and the CLI fallback
+      // exits 1); it only succeeds when it is handed a model the gateway does
+      // serve, and it retries with whatever the caller passes. Chat titles
+      // already pass the conversation's model — pass the session's here, or
+      // every Code session stays untitled.
+      const generated = await desktop.generateTitle({ message: text, model: session?.model ?? undefined });
+      const title = String(generated || "").replace(/\s+/g, " ").trim().slice(0, 200);
       const replaceable = session ? isReplaceableTitle(session.title, text) : false;
       log.log(`[mobile-code] title ${desktopId}: generated=${JSON.stringify(title)}` +
         ` current=${JSON.stringify(session?.title ?? null)} replaceable=${replaceable}`);
