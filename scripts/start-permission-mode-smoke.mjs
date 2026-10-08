@@ -32,9 +32,9 @@ const api = vm.runInNewContext(`${section}\n({ fillStoredStartPermissionMode, st
   Date,
 });
 
-async function start(info) {
+async function start(info, options) {
   const args = [info];
-  await api.fillStoredStartPermissionMode(args);
+  await api.fillStoredStartPermissionMode(args, options);
   return args[0];
 }
 
@@ -50,6 +50,18 @@ assert.equal(info.permissionMode, "bypassPermissions", "a repo-root start inheri
 // A mode the composer chose is never overridden.
 info = await start({ cwd: "/workspace/Claudesk", message: "hi", permissionMode: "plan" });
 assert.equal(info.permissionMode, "plan", "an explicit pick wins");
+
+// The renderer's failsafe while its stored layers have not settled is the
+// literal string "default", which is what a brand-new session's first `start`
+// actually carried. The browser UI's call passes defaultMeansNoChoice, so the
+// stored pick fills in.
+info = await start({ cwd: "/workspace/Claudesk/.claude/worktrees/wt-2", message: "hi", permissionMode: "default" }, { defaultMeansNoChoice: true });
+assert.equal(info.permissionMode, "bypassPermissions", "the renderer's failsafe default is filled from the folder pick");
+
+// The mobile facade's own Manual pick is the same string and must be left
+// alone: it does not set defaultMeansNoChoice.
+info = await start({ cwd: "/workspace/Claudesk", message: "hi", permissionMode: "default" });
+assert.equal(info.permissionMode, "default", "a facade Manual pick is not overridden");
 
 // An absent mode arrives as the transport's undefined sentinel, not a missing
 // key; that still means the composer chose nothing, so the fill applies.

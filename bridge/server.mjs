@@ -1317,16 +1317,17 @@ async function sendSessionMessage(sessionId, message) {
 // Desktop's Code UI resolves a session's permission mode from the layer stored
 // for its *project folder* — `epitaxyPrefs["epitaxy-folder-permission-mode.<account>"]`,
 // keyed by the session's `originCwd` (a worktree session strips back to the repo
-// root). For a brand-new session that folder is not known until the session —
-// and its worktree — exists, so the first `start` goes out with no mode at all:
-// the first turn runs under Desktop's default (Manual) and the picker's choice
-// only reaches Desktop ~1s later as a `setPermissionMode`. A rewind + resend
-// then works because the session record carries the mode by then.
+// root). Those layers only count once the selected folder is in the renderer's
+// trust store (`st`/`ct` in its mode hook); for a brand-new session — especially
+// one whose worktree was just created — that is still false when the first
+// message goes out, so the renderer sends its failsafe `permissionMode:
+// "default"` rather than the stored pick. The first turn then runs Manual and
+// the session keeps `default` until the user re-picks or rewinds and resends.
 //
-// Fill the stored pick in on `start` when the composer passed none, so the first
-// turn already runs with the mode the picker shows. An explicit pick from the
-// composer always wins; this only supplies what the UI would have resolved
-// itself a moment later.
+// Fill the stored pick in on `start` when the composer expressed no real choice
+// (mode absent, or the renderer's failsafe "default"), so the first turn runs
+// with the mode the picker shows. An explicit non-default pick always wins, and
+// a folder with no stored pick is left alone.
 const folderPermissionModeCache = { at: 0, map: null };
 
 function worktreeRepoRoot(path) {
@@ -1356,14 +1357,18 @@ async function storedFolderPermissionModes() {
   return map;
 }
 
-async function fillStoredStartPermissionMode(args) {
+async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = false } = {}) {
   const info = args?.[0];
   if (!info || typeof info !== "object" || Array.isArray(info)) return;
   const passed = info.permissionMode;
-  // An absent mode arrives either as a missing key or as the transport's
-  // undefined sentinel; both mean the composer did not choose one.
+  // No real choice arrives three ways: a missing key, the transport's undefined
+  // sentinel, or the Code UI's failsafe "default" (what it sends while the
+  // folder's stored layers have not settled). That last one is only read as "no
+  // choice" for the browser UI: the mobile facade's own Manual pick travels as
+  // the same string and must be left alone.
   const noChoice = passed === undefined
-    || (passed && typeof passed === "object" && passed[undefinedSentinelKey] === true);
+    || (passed && typeof passed === "object" && passed[undefinedSentinelKey] === true)
+    || (defaultMeansNoChoice && passed === "default");
   if (!noChoice) return;
   const cwd = typeof info.cwd === "string" ? info.cwd : null;
   if (!cwd) return;
@@ -1403,9 +1408,19 @@ async function handleApi(request, response, url) {
     const body = await readJson(request, 72 * 1024 * 1024);
     validateInvocation(body.surface, body.method, body.args ?? []);
     // A new Code session's first turn must carry the picker's permission mode or
-    // it runs Manual (see fillStoredStartPermissionMode).
-    if (codeActionsEnabled && body.surface === "LocalSessions" && body.method === "start") {
-      await fillStoredStartPermissionMode(body.args).catch((error) => {
+    // it runs Manual (see fillStoredStartPermissionMode). The browser UI's
+    // failsafe "default" is read as "no choice" only when the call came from the
+    // browser: the mobile facade's own Manual pick arrives as the same string
+    // and must be left alone. A browser fetch carries Sec-Fetch-* (and Origin /
+    // Referer); the facade's server-side fetch carries none of them.
+    const fromBrowserCodeUi = Boolean(
+      request.headers["sec-fetch-mode"] || request.headers.origin || request.headers.referer,
+    );
+    if (codeActionsEnabled
+      && body.surface === "LocalSessions" && body.method === "start") {
+      await fillStoredStartPermissionMode(body.args, {
+        defaultMeansNoChoice: fromBrowserCodeUi,
+      }).catch((error) => {
         console.log(`[cowork-bridge] start permission-mode fill failed: ${error.message}`);
       });
     }
