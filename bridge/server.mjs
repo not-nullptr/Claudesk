@@ -1314,6 +1314,66 @@ async function sendSessionMessage(sessionId, message) {
   return { value, messageUuid };
 }
 
+// Desktop's Code UI resolves a session's permission mode from the layer stored
+// for its *project folder* — `epitaxyPrefs["epitaxy-folder-permission-mode.<account>"]`,
+// keyed by the session's `originCwd` (a worktree session strips back to the repo
+// root). For a brand-new session that folder is not known until the session —
+// and its worktree — exists, so the first `start` goes out with no mode at all:
+// the first turn runs under Desktop's default (Manual) and the picker's choice
+// only reaches Desktop ~1s later as a `setPermissionMode`. A rewind + resend
+// then works because the session record carries the mode by then.
+//
+// Fill the stored pick in on `start` when the composer passed none, so the first
+// turn already runs with the mode the picker shows. An explicit pick from the
+// composer always wins; this only supplies what the UI would have resolved
+// itself a moment later.
+const folderPermissionModeCache = { at: 0, map: null };
+
+function worktreeRepoRoot(path) {
+  return String(path).replace(/\/\.claude\/worktrees\/[^/]+$/, "");
+}
+
+async function storedFolderPermissionModes() {
+  if (folderPermissionModeCache.map && Date.now() - folderPermissionModeCache.at < 5000) {
+    return folderPermissionModeCache.map;
+  }
+  const map = {};
+  try {
+    const prefs = await desktop.invokeSettings("AppPreferences", "getPreferences", [], "json-undefined-v1");
+    const bucket = prefs?.epitaxyPrefs;
+    for (const [key, value] of Object.entries(bucket || {})) {
+      if (!key.startsWith("epitaxy-folder-permission-mode.")) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      for (const [folder, mode] of Object.entries(value)) {
+        if (typeof mode === "string" && mode) map[folder] = mode;
+      }
+    }
+  } catch (error) {
+    console.log(`[cowork-bridge] stored folder permission modes unavailable: ${error.message}`);
+  }
+  folderPermissionModeCache.at = Date.now();
+  folderPermissionModeCache.map = map;
+  return map;
+}
+
+async function fillStoredStartPermissionMode(args) {
+  const info = args?.[0];
+  if (!info || typeof info !== "object" || Array.isArray(info)) return;
+  const passed = info.permissionMode;
+  // An absent mode arrives either as a missing key or as the transport's
+  // undefined sentinel; both mean the composer did not choose one.
+  const noChoice = passed === undefined
+    || (passed && typeof passed === "object" && passed[undefinedSentinelKey] === true);
+  if (!noChoice) return;
+  const cwd = typeof info.cwd === "string" ? info.cwd : null;
+  if (!cwd) return;
+  const modes = await storedFolderPermissionModes();
+  const mode = modes[cwd] ?? modes[worktreeRepoRoot(cwd)];
+  if (!mode) return;
+  info.permissionMode = mode;
+  console.log(`[cowork-bridge] start ${cwd}: filled permissionMode=${mode} from the stored folder pick`);
+}
+
 async function handleApi(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/remote/folders") {
     const value = await listWorkspaceFolders(workspaceRoot, url.searchParams.get("path") || workspaceRoot);
@@ -1342,6 +1402,13 @@ async function handleApi(request, response, url) {
     // Files go through the streaming upload route instead.
     const body = await readJson(request, 72 * 1024 * 1024);
     validateInvocation(body.surface, body.method, body.args ?? []);
+    // A new Code session's first turn must carry the picker's permission mode or
+    // it runs Manual (see fillStoredStartPermissionMode).
+    if (codeActionsEnabled && body.surface === "LocalSessions" && body.method === "start") {
+      await fillStoredStartPermissionMode(body.args).catch((error) => {
+        console.log(`[cowork-bridge] start permission-mode fill failed: ${error.message}`);
+      });
+    }
     const startedAt = Date.now();
     try {
       let value;
