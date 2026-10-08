@@ -560,7 +560,50 @@ try {
     method: "POST",
     body: {},
   })).json();
-  assert.ok(connectList.data.some((item) => item.chat.uuid === convUuid));
+  assert.ok(connectList.data.some((item) => item.chat?.uuid === convUuid));
+
+  // ---- Cowork: visible and writable through its own surface ----
+  const coworkList = await (await call(`/api/organizations/${org.uuid}/cowork/sessions`)).json();
+  assert.ok(coworkList.some((session) => session.id === coworkUuid), "the Cowork REST list names the session");
+  assert.ok(connectList.data.some((item) => item.coworkSession?.id === coworkUuid), "Recents carries the Cowork session");
+  assert.ok(connectList.surfaces.some((entry) => entry.surface === 2), "Cowork is advertised as a served surface");
+
+  const readCowork = await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/ReadCoworkSession", {
+    method: "POST",
+    body: { sessionId: coworkUuid },
+  });
+  assert.equal(readCowork.status, 200, "a Cowork session reads through ConversationService");
+  const readCoworkBody = await readCowork.json();
+  assert.equal(readCoworkBody.update.conversation.id, coworkUuid);
+  assert.equal(readCoworkBody.meta.sessionStatus, 1);
+
+  // A send continues it through sendMessage, not a Chat start.
+  claudesk.resetCalls();
+  await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction", {
+    method: "POST",
+    body: {
+      header: { conversationId: coworkUuid },
+      sendMessage: { text: "carry on", continueCoworkSessionId: coworkUuid, messageId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" },
+    },
+  });
+  await waitFor(() => claudesk.ipcCalls("sendMessage").length >= 1, "the Cowork send");
+  assert.equal(claudesk.ipcCalls("sendMessage")[0].args[0], `local_${coworkUuid}`);
+  assert.equal(claudesk.ipcCalls("start").length, 0, "an existing Cowork session is not restarted");
+
+  // A brand-new Cowork session starts with sessionType cowork on the paired device.
+  const newCoworkUuid = "78787878-7878-4787-8787-787878787878";
+  claudesk.resetCalls();
+  await call("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction", {
+    method: "POST",
+    body: {
+      header: { conversationId: newCoworkUuid },
+      sendMessage: { text: "start a cowork task", targetDeviceId: "claudesk-desktop", messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+    },
+  });
+  await waitFor(() => claudesk.ipcCalls("start").length >= 1, "the Cowork start");
+  assert.equal(claudesk.ipcCalls("start")[0].args[0].sessionType, "cowork");
+  assert.equal(claudesk.ipcCalls("start")[0].args[0].sessionId, `local_${newCoworkUuid}`);
+  assert.equal(claudesk.ipcCalls("start")[0].args[0].deviceId, "claudesk-desktop");
 
   // ---- the Connect surface sends too, with edit support via the parent id ----
   const connectUuid = "abababab-abab-4bab-8bab-abababababab";

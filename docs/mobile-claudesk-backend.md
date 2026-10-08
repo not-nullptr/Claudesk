@@ -28,11 +28,18 @@ iOS app ──REST/SSE + Connect──▶ mobile service ──HTTP (docker netw
 | stop | `stop` |
 | rename, model | `updateSession({title})`, `setModel` |
 | delete, archive | `delete`, `archive` (Desktop cannot un-archive a Chat session) |
+| Cowork session in Recents | a `LocalAgentModeSessions` row whose `sessionType !== "chat"`, as a `coworkSession` item |
+| opening a Cowork session | `ConversationService/ReadCoworkSession` → the same `BardConversationUpdate` a Chat read returns |
+| sending in Cowork | `PerformAction` → `sendMessage` with `continueCoworkSessionId`; a new one starts with `targetDeviceId` |
 | text/other files | uploaded to `/workspace/RemoteUploads/<id>/` and referenced as `@"path"` at the start of the message |
 | images | the `images` argument as `{name, mimeType, base64}` |
 
-Only Chat sessions are visible or writable from the phone; Cowork and Claude Code
-sessions are never listed, read or modified, and a completion cannot adopt their id.
+Chat and Cowork share one Desktop manager (`LocalAgentModeSessions`) and one
+transcript format, so they are one engine in this service: `engine.mjs` handles
+both, and `sessionType` is the only difference. The two phone surfaces stay
+disjoint — a Chat read never serves a Cowork session and vice versa, and neither
+adopts the other's ids. Claude Code is a different Desktop surface
+(`LocalSessions`) with its own engine (`mobile/code-engine.mjs`).
 
 ## Behaviour to know about
 
@@ -107,13 +114,17 @@ sessions are never listed, read or modified, and a completion cannot adopt their
 
 ## Finding out how Cowork and Claude Code work on the phone
 
-Set `CLAUDE_MOBILE_CAPTURE=1`, recreate the service, open the Cowork and Code tabs
-(start a session, open one, send a message), then read `mobile-data/capture.jsonl`.
-Each line is a request; those the service does not implement include a redacted
-body. The schema already names the pieces (`cowork/sessions`, `cowork/remote_devices`,
-`RecentCoworkSession`, `RecentCodeSession`, `ReadCoworkSession`, and the
-`targetDeviceId`, `continueCoworkSessionId` and `attachedFolders` fields of
-`BardSendMessage`). Turn capture off afterwards.
+Cowork is implemented, but a few shapes are inferred rather than captured (the read
+method name, the `RecentCoworkSession` worker oneof, and whether a new-Cowork
+`start` needs extra arguments — see the notes in `connect.mjs` and `engine.mjs`).
+To correct them, set `CLAUDE_MOBILE_CAPTURE=1`, recreate the service, open the
+Cowork tab (start a session, open one, send a message), then read
+`mobile-data/capture.jsonl`. Each line is a request; those the service does not
+implement include a redacted body. `CLAUDE_MOBILE_COWORK=0` withdraws the whole
+surface if it misbehaves. The schema names the pieces (`cowork/sessions`,
+`cowork/remote_devices`, `RecentCoworkSession`, `RecentCodeSession`,
+`ReadCoworkSession`, and the `targetDeviceId`, `continueCoworkSessionId` and
+`attachedFolders` fields of `BardSendMessage`). Turn capture off afterwards.
 
 ## Tests
 

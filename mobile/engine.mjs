@@ -38,6 +38,16 @@ function isoFrom(ms) {
 
 const sessionIdFor = (uuid) => `local_${uuid}`;
 const conversationUuidFor = (sessionId) => String(sessionId).replace(/^local_/, "");
+// The bridge's discriminator: a Cowork session is any LocalAgentModeSessions row
+// that is not Chat (bridge/server.mjs `isChatSession`). Chat and Cowork share
+// the surface, the transcript format and the start/sendMessage calls, so the
+// phone surface differs only in this flag. Cowork ids are Desktop session ids,
+// seen verbatim when they are not the `local_<uuid>` shape Chat uses.
+const sessionIdPattern = /^[A-Za-z0-9_-]+$/;
+const isCoworkSession = (session) => Boolean(session) && session.sessionType !== "chat";
+
+// CLAUDE_MOBILE_COWORK=0 withdraws the whole Cowork surface without a rebuild.
+const coworkEnabled = () => process.env.CLAUDE_MOBILE_COWORK !== "0";
 
 function textContent(text, closed = true) {
   return [{ type: "text", text, citations: [], is_closed: closed }];
@@ -132,6 +142,7 @@ export function createEngine({
   const cache = new Map(); // conversationUuid -> { base, at }
   const revisions = new Map();
   const listeners = new Map(); // sessionId -> Set<fn(payload)>
+  const coworkDesktopIds = new Map(); // cowork uuid -> Desktop session id
   const notifyTimers = new Map();
   let lastRevision = 0;
   let subscription = null;
@@ -274,6 +285,9 @@ export function createEngine({
   function draftConversation(uuid, entry) {
     return {
       uuid,
+      desktopId: null,
+      session_type: entry.draft.kind === "cowork" ? "cowork" : "chat",
+      cowork: entry.draft.cowork || null,
       name: entry.draft.name || "",
       model: entry.draft.model,
       is_starred: Boolean(entry.is_starred),
@@ -298,6 +312,9 @@ export function createEngine({
     });
     return {
       uuid,
+      desktopId: session.sessionId,
+      session_type: isCoworkSession(session) ? "cowork" : "chat",
+      cowork: entry?.draft?.cowork || null,
       name: session.title || "",
       model: session.model,
       is_starred: Boolean(entry?.is_starred),
@@ -358,13 +375,16 @@ export function createEngine({
     };
   }
 
-  async function loadConversation(uuid, { fresh = false } = {}) {
-    if (!uuidPattern.test(String(uuid))) throw notFound();
+  // `kind` keeps the two phone surfaces apart: a Chat read must never serve a
+  // Cowork session and vice versa, even though Desktop keeps both on one surface.
+  async function loadConversation(uuid, { fresh = false, kind = "chat" } = {}) {
+    if (kind === "chat" && !uuidPattern.test(String(uuid))) throw notFound();
+    if (kind === "cowork" && !sessionIdPattern.test(String(uuid))) throw notFound();
     const hit = cache.get(uuid);
     if (!fresh && hit && (activeTurns.has(uuid) || Date.now() - hit.at < cacheTtlMs)) {
       return applyLive(uuid, { ...hit.base, revision: revisionFor(uuid) });
     }
-    const sessionId = sessionIdFor(uuid);
+    const sessionId = kind === "cowork" ? coworkDesktopIdFor(uuid) : sessionIdFor(uuid);
     let session;
     let entries = [];
     try {
@@ -378,14 +398,47 @@ export function createEngine({
       if (entry?.draft) return applyLive(uuid, draftConversation(uuid, entry));
       throw notFound();
     }
-    // Mobile only ever handles Chat sessions; Code and Cowork stay in Claudesk.
-    if (session.sessionType !== "chat") throw notFound();
+    const wanted = kind === "cowork" ? isCoworkSession(session) : session.sessionType === "chat";
+    if (!wanted) throw notFound();
     const base = project(uuid, session, entries, entry);
     cache.set(uuid, { base, at: Date.now() });
     return applyLive(uuid, base);
   }
 
   const getConversation = (uuid) => loadConversation(uuid);
+  const getCoworkSession = (uuid) => loadConversation(uuid, { kind: "cowork" });
+
+  // Cowork id mapping. A Desktop session id that looks like `local_<uuid>` gets
+  // the same phone uuid Chat uses; anything else is its own uuid, remembered
+  // from the last listing so a read maps back to the exact Desktop id.
+  function coworkUuidFor(desktopId) {
+    const stripped = conversationUuidFor(desktopId);
+    return uuidPattern.test(stripped) ? stripped : String(desktopId);
+  }
+
+  function coworkDesktopIdFor(uuid) {
+    if (coworkDesktopIds.has(uuid)) return coworkDesktopIds.get(uuid);
+    return uuidPattern.test(String(uuid)) ? sessionIdFor(uuid) : String(uuid);
+  }
+
+  // The Desktop session id a projected conversation came from.
+  const desktopIdFor = (conversation) =>
+    conversation.desktopId
+    || (conversation.session_type === "cowork" ? coworkDesktopIdFor(conversation.uuid) : sessionIdFor(conversation.uuid));
+
+  // Which phone surface an id belongs to, for the Connect actions (rename, star,
+  // model, settings) that carry only the id. Chat is tried first because it is
+  // the common case; a Cowork id fails the chat read with 404 and falls through.
+  async function conversationKind(uuid) {
+    if (!coworkEnabled()) return "chat";
+    try {
+      await loadConversation(uuid, { kind: "chat" });
+      return "chat";
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+    return "cowork";
+  }
 
   // ---------- conversations ----------
 
@@ -427,10 +480,11 @@ export function createEngine({
     };
   }
 
-  async function createConversation({ uuid, name, model, isTemporary }) {
+  async function createConversation({ uuid, name, model, isTemporary, kind = "chat", cowork = null }) {
     const id = uuidPattern.test(String(uuid)) ? uuid : randomUUID();
-    // Never adopt an id that belongs to a Code or Cowork session: starting a Chat
-    // session under it would write into that session.
+    // Never adopt an id that belongs to a session of the other kind: starting a
+    // Chat session under a Cowork id would write into that session, and the app
+    // opens each surface through its own path.
     let existing;
     try {
       existing = await desktop.ipc(SURFACE, "getSession", [sessionIdFor(id)]);
@@ -438,26 +492,29 @@ export function createEngine({
       throw asCompletionError(error);
     }
     if (existing) {
-      if (existing.sessionType !== "chat") {
+      const sameKind = kind === "cowork" ? isCoworkSession(existing) : existing.sessionType === "chat";
+      if (!sameKind) {
         throw new CompletionError("conversation id is already in use", 409, "invalid_request_error");
       }
-      return loadConversation(id);
+      return loadConversation(id, { kind });
     }
     const resolved = model || (await defaultModel());
     const entry = await updateMeta(id, (value) => {
       value.draft = {
+        kind,
         name: typeof name === "string" ? name.slice(0, 200) : "",
         model: resolved,
         is_temporary: Boolean(isTemporary),
         created_at: nowIso(),
+        ...(cowork ? { cowork } : {}),
       };
     });
     return draftConversation(id, entry);
   }
 
-  async function updateConversation(uuid, patch) {
-    const conversation = await getConversation(uuid);
-    const sessionId = sessionIdFor(uuid);
+  async function updateConversation(uuid, patch, kind = "chat") {
+    const conversation = await loadConversation(uuid, { kind });
+    const sessionId = desktopIdFor(conversation);
     try {
       // The app sends an empty name after a chat's first turn; applying it would
       // erase the title, so only real names are written.
@@ -490,18 +547,18 @@ export function createEngine({
     }
     cache.delete(uuid);
     bumpRevision(uuid);
-    const updated = await loadConversation(uuid, { fresh: true });
+    const updated = await loadConversation(uuid, { fresh: true, kind });
     notifyBardWatchers(updated);
     return updated;
   }
 
-  async function deleteConversation(uuid) {
-    const conversation = await getConversation(uuid);
+  async function deleteConversation(uuid, kind = "chat") {
+    const conversation = await loadConversation(uuid, { kind });
     abortActiveTurn(uuid);
     notifyBardWatchers({ uuid, deleted: true });
     if (!conversation.draft) {
       try {
-        await desktop.ipc(SURFACE, "delete", [sessionIdFor(uuid)]);
+        await desktop.ipc(SURFACE, "delete", [desktopIdFor(conversation)]);
       } catch (error) {
         throw asCompletionError(error);
       }
@@ -543,9 +600,61 @@ export function createEngine({
       });
     const known = new Set(chats.map((conversation) => conversation.uuid));
     const drafts = Object.entries(state.conversations)
-      .filter(([uuid, entry]) => entry.draft && !known.has(uuid))
+      .filter(([uuid, entry]) => entry.draft && entry.draft.kind !== "cowork" && !known.has(uuid))
       .map(([uuid, entry]) => draftConversation(uuid, entry));
     return [...chats, ...drafts].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+  }
+
+  // ---------- Cowork ----------
+
+  // The non-chat half of LocalAgentModeSessions, as the phone sees it. Ids are
+  // remembered so a later read maps back to the exact Desktop session id.
+  async function listCoworkSessions() {
+    if (!coworkEnabled()) return [];
+    let sessions;
+    try {
+      sessions = (await desktop.ipc(SURFACE, "getAll", [])) || [];
+    } catch (error) {
+      throw asCompletionError(error);
+    }
+    const state = await loadMeta();
+    const rows = sessions
+      .filter((session) => isCoworkSession(session)
+        && sessionIdPattern.test(String(session.sessionId ?? "")))
+      .map((session) => {
+        const uuid = coworkUuidFor(session.sessionId);
+        coworkDesktopIds.set(uuid, session.sessionId);
+        const entry = state.conversations[uuid];
+        const initial = String(session.initialMessage || "").replace(/\s+/g, " ").trim();
+        return {
+          uuid,
+          name: session.title || initial.slice(0, 60),
+          preview: initial.slice(0, 120),
+          model: session.model,
+          is_starred: Boolean(entry?.is_starred),
+          is_archived: Boolean(session.isArchived),
+          created_at: isoFrom(session.createdAt),
+          updated_at: isoFrom(session.lastActivityAt),
+          is_running: Boolean(session.isRunning),
+        };
+      });
+    // A conversation the app opened but has not sent in is a local draft until
+    // the first message runs Desktop's start.
+    const known = new Set(rows.map((row) => row.uuid));
+    const drafts = Object.entries(state.conversations)
+      .filter(([uuid, entry]) => entry.draft?.kind === "cowork" && !known.has(uuid))
+      .map(([uuid, entry]) => ({
+        uuid,
+        name: entry.draft.name || "",
+        preview: "",
+        model: entry.draft.model,
+        is_starred: Boolean(entry.is_starred),
+        is_archived: false,
+        created_at: entry.draft.created_at,
+        updated_at: entry.draft.created_at,
+        is_running: false,
+      }));
+    return [...rows, ...drafts].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
   }
 
   // ---------- models ----------
@@ -866,7 +975,7 @@ export function createEngine({
   }
 
   async function dispatch(conversation, plan, assistantUuid, model) {
-    const sessionId = sessionIdFor(conversation.uuid);
+    const sessionId = desktopIdFor(conversation);
     let { text } = plan;
     let images = [];
     let mentions = [];
@@ -903,18 +1012,23 @@ export function createEngine({
         messageUuid: plan.humanUuid,
         model: model || conversation.model,
         title,
-        sessionType: "chat",
+        sessionType: conversation.session_type === "cowork" ? "cowork" : "chat",
         images,
         userSelectedFiles: [],
         userSelectedFolders: [],
         syntheticMessage: false,
         documentFunnelEnabled: false,
+        // Cowork carries the paired device (and any attached folders) the app
+        // picked; Chat has neither.
+        ...(conversation.cowork?.deviceId ? { deviceId: conversation.cowork.deviceId } : {}),
+        ...(conversation.cowork?.attachedFolders?.length
+          ? { attachedFolders: conversation.cowork.attachedFolders } : {}),
         ...(thinkingPick.extendedThinking !== undefined ? { extendedThinkingEnabled: thinkingPick.extendedThinking } : {}),
       }]);
       // start takes no effort level, so it applies once the session exists.
       await applyThinking(sessionId, { effort: thinkingPick.effort });
       if (titles && !conversation.name && text.trim()) {
-        void generateTitle(conversation.uuid, text, model || conversation.model, title);
+        void generateTitle(conversation.uuid, text, model || conversation.model, title, sessionId);
       }
       await updateMeta(conversation.uuid, (entry) => {
         delete entry.draft;
@@ -941,8 +1055,8 @@ export function createEngine({
   // Replaces the provisional title (the first message) with one Desktop writes,
   // as the web UI does for a new chat. Runs in the background; a chat the user
   // renamed in the meantime keeps its name.
-  async function generateTitle(uuid, text, model, placeholder) {
-    const sessionId = sessionIdFor(uuid);
+  async function generateTitle(uuid, text, model, placeholder, desktopId = null) {
+    const sessionId = desktopId || sessionIdFor(uuid);
     try {
       const title = (await desktop.generateTitle({ message: text, model: titleModel || model })).replace(/\s+/g, " ").trim().slice(0, 200);
       if (!title) return;
@@ -976,7 +1090,7 @@ export function createEngine({
   // callers translate those into their wire formats.
   async function* streamAssistantTurn(conversation, { humanMessage, assistantUuid, model, signal, plan }) {
     const uuid = conversation.uuid;
-    const sessionId = sessionIdFor(uuid);
+    const sessionId = desktopIdFor(conversation);
     const humanUuid = humanMessage.uuid;
     const translator = createTurnTranslator({
       sessionId,
@@ -1089,13 +1203,14 @@ export function createEngine({
   // ReadConversation / StreamTimeline snapshots.
   async function connectSendMessage({
     conversationId, messageId, assistantMessageId, parentMessageId, text, model, attachments, effort, thinkingMode,
+    kind = "chat", cowork = null,
   }) {
     let conversation;
     try {
-      conversation = await getConversation(conversationId);
+      conversation = await loadConversation(conversationId, { kind });
     } catch (error) {
       if (error.status !== 404) throw error;
-      conversation = await createConversation({ uuid: conversationId, model });
+      conversation = await createConversation({ uuid: conversationId, model, kind, cowork });
     }
     if (activeTurns.has(conversationId)) return conversation;
     const turn = await prepareTurn({
@@ -1136,6 +1251,31 @@ export function createEngine({
     return conversation;
   }
 
+  // The Cowork send/create leg. `continueCoworkSessionId` names an existing
+  // session; its absence (with a targetDeviceId) means the app is starting one.
+  async function connectSendCoworkMessage({
+    conversationId, continueCoworkSessionId, messageId, assistantMessageId, parentMessageId,
+    text, model, attachments, effort, thinkingMode, deviceId, attachedFolders,
+  }) {
+    const target = continueCoworkSessionId || conversationId;
+    if (!sessionIdPattern.test(String(target ?? ""))) {
+      throw new CompletionError("invalid cowork session id", 400, "invalid_request_error");
+    }
+    return connectSendMessage({
+      conversationId: target,
+      messageId,
+      assistantMessageId,
+      parentMessageId,
+      text,
+      model,
+      attachments,
+      effort,
+      thinkingMode,
+      kind: "cowork",
+      cowork: { deviceId, attachedFolders },
+    });
+  }
+
   // ---------- Recents / Bard projections ----------
 
   function chatPreview(conversation) {
@@ -1161,6 +1301,45 @@ export function createEngine({
         isTemporary: Boolean(conversation.is_temporary),
         currentLeafMessageUuid: conversation.current_leaf_message_uuid || "",
       }));
+  }
+
+  // RecentCoworkSession items for RecentsService/ListRecents. `status` uses
+  // RecentSessionStatus (ARCHIVED | ACTIVE); the worker oneof messages are empty
+  // in the recovered schema, so `running`/`idle` are presence markers only.
+  async function listCoworkRecents({ starredOnly = false, archivedOnly = false } = {}) {
+    const sessions = await listCoworkSessions();
+    return sessions
+      .filter((session) => (archivedOnly ? session.is_archived : !session.is_archived))
+      .filter((session) => !starredOnly || session.is_starred)
+      .map((session) => ({
+        id: session.uuid,
+        title: session.name || "Cowork",
+        createdAt: session.created_at,
+        updatedAt: session.updated_at,
+        isStarred: Boolean(session.is_starred),
+        preview: session.preview,
+        unread: false,
+        revision: session.updated_at,
+        status: session.is_archived ? 2 : 1,
+        ...(session.is_running ? { running: {} } : { idle: {} }),
+      }));
+  }
+
+  // BardReadCoworkSessionResponse: the same BardConversationUpdate a Chat read
+  // returns (the transcript is the same JSONL) plus Cowork metadata.
+  async function readCoworkSession(id) {
+    if (!coworkEnabled()) throw notFound();
+    const conversation = await getCoworkSession(id);
+    return {
+      update: bardSnapshot(conversation),
+      olderCursor: "",
+      meta: {
+        // CoworkSessionStatus: ARCHIVED | ACTIVE.
+        sessionStatus: conversation.is_archived ? 2 : 1,
+        artifacts: [],
+        repositoryNames: [],
+      },
+    };
   }
 
   function registerBardWatcher(conversationUuid, callback) {
@@ -1267,7 +1446,10 @@ export function createEngine({
     mapConversation,
     mapConversationWithMessages,
     listConversations,
+    listCoworkSessions,
     getConversation,
+    getCoworkSession,
+    conversationKind,
     createConversation,
     updateConversation,
     deleteConversation,
@@ -1286,6 +1468,9 @@ export function createEngine({
     registerBardWatcher,
     notifyBardWatchers,
     listRecents,
+    listCoworkRecents,
+    readCoworkSession,
     connectSendMessage,
+    connectSendCoworkMessage,
   };
 }

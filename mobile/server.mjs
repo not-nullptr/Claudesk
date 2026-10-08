@@ -4,6 +4,7 @@ import { gunzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import {
   connectMethods,
+  recentItems,
   connectRequestMessages,
   connectResponseMessages,
   connectStreamingMethods,
@@ -756,13 +757,21 @@ async function handleOptionalEmptyRoutes(request, response, url) {
     sendJson(response, 200, directory);
     return true;
   }
+  // Desktop's non-chat LocalAgentModeSessions, as RecentCoworkSession rows. The
+  // element shape is a best guess (the spec only ever documented an empty list);
+  // it matches what the Connect Recents leg hands the app for the same sessions.
+  if (rest === "cowork/sessions" && request.method === "GET") {
+    const sessions = await engine.listCoworkRecents({}).catch(() => []);
+    console.log(`[mobile-cowork] cowork/sessions -> ${sessions.length} session(s)`);
+    sendJson(response, 200, sessions);
+    return true;
+  }
   const isEmptyList = [
     "projects",
     "published_artifacts",
     "artifacts",
     "composer_notices",
     "members/display_info",
-    "cowork/sessions",
     "skills/list-skills",
     "mcp/remote_servers",
     "notification/channels",
@@ -2416,11 +2425,11 @@ async function handleStreamRecents(request, response) {
     "Connect-Protocol-Version": "1",
   });
   const push = async (replaceHead = false) => {
-    const items = await engine.listRecents({});
+    const items = await recentItems(engine, {});
     const payload = Buffer.from(JSON.stringify({
       update: {
         replaceHead,
-        items: items.map((item) => ({ chat: item })),
+        items,
         removed: [],
         syncToken: `sync-${Date.now()}`,
       },

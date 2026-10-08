@@ -340,9 +340,12 @@ export async function startFakeClaudesk() {
     getSession: ([id]) => (sessions.has(id) ? summary(sessions.get(id)) : undefined),
     getTranscript: ([id]) => sessions.get(id)?.transcript ?? [],
     start: ([info]) => {
-      if (info.sessionType !== "chat") throw new Error("fake bridge only starts chat sessions");
+      if (info.sessionType !== "chat" && info.sessionType !== "cowork") {
+        throw new Error("fake bridge only starts chat and cowork sessions");
+      }
       const session = addSession({
         sessionId: info.sessionId,
+        sessionType: info.sessionType,
         title: info.title,
         model: info.model,
         initialMessage: info.message,
