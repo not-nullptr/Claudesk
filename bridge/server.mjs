@@ -24,6 +24,13 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Model the title generator is asked to use (CLAUDE_TITLE_MODEL). Desktop
+// otherwise resolves its own small title model, which this gateway does not
+// serve, so a title request must carry one; left unset, that is the session's
+// model. Set it to a cheap model so titles do not spend the session's model —
+// one that is also in CLAUDE_INFERENCE_MODELS_JSON, since Desktop drops a model
+// its own list does not know and falls back to the refused one.
+const titleModel = (process.env.CLAUDE_TITLE_MODEL || "").trim();
 // Name the remote UI shows as the signed-in user. Desktop derives it from the
 // OS app user ("app" in this image), which is what the sidebar user menu prints
 // next to the provider label; the upstream gateway also sends no
@@ -1717,7 +1724,7 @@ async function handleApi(request, response, url) {
     let title;
     try {
       title = requireNonEmptyString(
-        await desktop.generateTitle(message, model),
+        await desktop.generateTitle(message, titleModel || model),
         "generated title",
         200,
       );
@@ -2206,7 +2213,7 @@ async function titleCodeSessions() {
       // followed up, which is most of them.)
       if (!titleLooksLikeFirstMessage(before.title, firstMessage)) continue;
       try {
-        const title = await generateCodeTitle(firstMessage, before.model ?? session.model);
+        const title = await generateCodeTitle(firstMessage, titleModel || before.model || session.model);
         if (!title) {
           console.log(`[cowork-bridge] no title generated for code session ${id}`);
           continue;

@@ -953,8 +953,14 @@ main-process log shows the whole leg failing:
 `$gr` retries once with the caller's model (`retrying with sessionModel`), and
 that retry succeeds — which is why the facade's **Chat** titles always worked
 (`mobile/engine.mjs` passes the conversation's model) while **Code** paths
-(bridge poller, `mobile/code-engine.mjs`) passed none and produced nothing. Both
-now pass the session's model.
+(bridge poller, `mobile/code-engine.mjs`) passed none and produced nothing. Every
+title call now passes a model: `CLAUDE_TITLE_MODEL` when it is set, otherwise the
+session's (the conversation's, on Chat). Set `CLAUDE_TITLE_MODEL` to a cheap
+model the gateway serves so titles never spend the session's model; it must also
+appear in `CLAUDE_INFERENCE_MODELS_JSON`, because `$gr` drops a model Desktop's
+own list does not know (`validateSessionModel`) and falls back to the one the
+gateway refuses. It is also the only model the app's pre-create title preview can
+use, since no session exists yet at that point.
 
 Forcing Desktop's own gate would not have helped, twice over: the packaged build
 ignores `CLAUDE_DEV_FORCE_GATES` (`if(!e||a.app.isPackaged) return new Set`), and

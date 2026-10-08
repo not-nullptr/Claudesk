@@ -142,6 +142,9 @@ export function createCodeEngine({
   desktop,
   log = console,
   titles = process.env.CLAUDE_MOBILE_TITLES !== "0",
+  // The model the title generator is asked to use (see CLAUDE_TITLE_MODEL).
+  // Unset, a title request carries the session's own model.
+  titleModel = (process.env.CLAUDE_TITLE_MODEL || "").trim(),
 }) {
   const cache = new Map(); // desktopId -> { base, at }
   const records = new Map(); // desktopId -> Desktop session record (sync mirror of `cache`)
@@ -898,10 +901,10 @@ export function createCodeEngine({
       // Desktop's generator defaults to its own small "title" model, which this
       // gateway does not serve (the direct call is refused and the CLI fallback
       // exits 1); it only succeeds when it is handed a model the gateway does
-      // serve, and it retries with whatever the caller passes. Chat titles
-      // already pass the conversation's model — pass the session's here, or
-      // every Code session stays untitled.
-      const generated = await desktop.generateTitle({ message: text, model: session?.model ?? undefined });
+      // serve, and it retries with whatever the caller passes. Prefer the
+      // configured CLAUDE_TITLE_MODEL, else the session's own model — pass
+      // neither and every Code session stays untitled.
+      const generated = await desktop.generateTitle({ message: text, model: titleModel || session?.model || undefined });
       const title = String(generated || "").replace(/\s+/g, " ").trim().slice(0, 200);
       const replaceable = session ? isReplaceableTitle(session.title, text) : false;
       log.log(`[mobile-code] title ${desktopId}: generated=${JSON.stringify(title)}` +
@@ -934,13 +937,16 @@ export function createCodeEngine({
   // `mobile_code_generate_title_and_branch_failure` when this leg fails). The
   // title comes from the same dust call Chat uses — gated by the titles flag so
   // a disabled generator costs no model request — and the branch is a slug of
-  // it. An empty/short message still yields a usable pair.
+  // it. There is no session yet, so only a configured title model can be handed
+  // to the generator here; without one the request fails and the first message
+  // is the fallback. An empty/short message still yields a usable pair.
   async function suggestTitleAndBranch(text) {
     const message = typeof text === "string" ? text.trim() : "";
     let title = "";
     if (message && titles) {
       try {
-        title = (await desktop.generateTitle({ message })).replace(/\s+/g, " ").trim().slice(0, 200);
+        title = (await desktop.generateTitle({ message, model: titleModel || undefined }))
+          .replace(/\s+/g, " ").trim().slice(0, 200);
       } catch (error) {
         log.error(`[mobile-code] cannot generate a title: ${error.message}`);
       }

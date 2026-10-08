@@ -94,6 +94,9 @@ services:
       # Display name for the signed-in user in the remote UI (the sidebar user
       # menu and the time-based home greeting). Empty keeps Desktop's own value.
       CLAUDE_REMOTE_USER_NAME: "${CLAUDE_REMOTE_USER_NAME:-}"
+      # Model the title generator is asked to use. Empty falls back to the
+      # session's own model; set it to a cheap model the gateway serves.
+      CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
       COWORK_REMOTE_WORKSPACE_ROOT: "/workspace"
       # Extra roots (colon- or comma-separated) the authenticated remote
       # download route may serve from, on top of the always-allowed workspace.
@@ -151,6 +154,9 @@ services:
       CLAUDE_MOBILE_TOOL_BLOCKS: "${CLAUDE_MOBILE_TOOL_BLOCKS:-1}"
       CLAUDE_MOBILE_THINKING: "${CLAUDE_MOBILE_THINKING:-1}"
       CLAUDE_MOBILE_TITLES: "${CLAUDE_MOBILE_TITLES:-1}"
+      # Model the title generator is asked to use. Empty falls back to the
+      # session's own model; set it to a cheap model the gateway serves.
+      CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
       CLAUDE_MOBILE_PLAN: "${CLAUDE_MOBILE_PLAN:-max_20x}"
       # One-shot experiment switch for the new-session environment picker:
       # "both" (default) advertises the cloud record and the bridge record;

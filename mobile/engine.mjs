@@ -121,6 +121,9 @@ export function createEngine({
   toolBlocks = process.env.CLAUDE_MOBILE_TOOL_BLOCKS !== "0",
   thinking = process.env.CLAUDE_MOBILE_THINKING !== "0",
   titles = process.env.CLAUDE_MOBILE_TITLES !== "0",
+  // The model the title generator is asked to use (see CLAUDE_TITLE_MODEL).
+  // Unset, a title request carries the conversation's own model.
+  titleModel = (process.env.CLAUDE_TITLE_MODEL || "").trim(),
 }) {
   let identity = null;
   const activeTurns = new Map(); // conversationUuid -> { abort, assistantUuid }
@@ -941,7 +944,7 @@ export function createEngine({
   async function generateTitle(uuid, text, model, placeholder) {
     const sessionId = sessionIdFor(uuid);
     try {
-      const title = (await desktop.generateTitle({ message: text, model })).replace(/\s+/g, " ").trim().slice(0, 200);
+      const title = (await desktop.generateTitle({ message: text, model: titleModel || model })).replace(/\s+/g, " ").trim().slice(0, 200);
       if (!title) return;
       const session = await desktop.ipc(SURFACE, "getSession", [sessionId]);
       if (!session || (session.title && session.title !== placeholder)) return;
