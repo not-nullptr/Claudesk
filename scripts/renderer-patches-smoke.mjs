@@ -72,7 +72,7 @@ assert.throws(() => patchRendererSources(new Map([["comments.js", `/* ${native} 
 // The provider card is a call-argument component carrying both of its i18n
 // message ids; its body is blanked so chat and code stop advertising the
 // provider switch. A declaration, a comment or a string that merely names the
-// ids is not a target, and the patch only fires for the Gateway setting.
+// ids is not a target, and the removal is independent of the Gateway setting.
 const bannerCard = 'const providerCard=wrap(function({compact:e,fallback:t}){'
   + 'let s=useStore();if(s.hidden)return t??null;'
   + 'return e?h("div",{children:s.provider})'
@@ -95,11 +95,12 @@ assert.ok(!bannerOut.includes("model allowlist"), "the provider card copy must b
 assert.ok(bannerOut.includes("const providerCard=wrap(function({compact:e,fallback:t}){return null;})"),
   "only the card component's body is replaced");
 assert.ok(bannerOut.endsWith(bannerDecoy), "a declaration or string naming the ids is not a target");
-assert.ok(!patchRendererSources(bannerInputs, false).patches
-  .some(patch => patch.id === "inference-banner"), "the card patch tracks the Gateway setting");
+assert.deepEqual(patchRendererSources(bannerInputs, false).patches.map(patch => patch.id).sort(),
+  ["file-pane-download", "inference-banner"],
+  "the card is removed even without the Gateway setting");
 const bannerCompiled = await minify(bannerInputs.get("banner-chunk.js"), {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
-assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), true).patches
+assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), false).patches
   .some(patch => patch.id === "inference-banner"), "recompiled card must retain the patch");
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

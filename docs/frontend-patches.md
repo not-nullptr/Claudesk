@@ -54,10 +54,12 @@ component passed to a wrapper call whose body carries them. The patch replaces
 that component's body with `{return null;}`, which removes the card from every
 surface at once without touching its siblings (the unhealthy-inference warning,
 the `Open` action, the setup routes). The ids are matched as parsed literals, so
-a comment or a string that merely spells them is not a target. This patch tracks
-the Gateway setting like the guards above, and — unlike them — tolerates a
-missing target: the goal is "no card", so an upstream that already dropped it
-needs no patch and must not fail preparation.
+a comment or a string that merely spells them is not a target. It is applied
+independent of the Gateway setting — the card renders only for a non-first-party
+provider, so the patch is inert when the provider is official, and gating it on a
+separate flag would leave the card in place whenever that flag is off. Unlike the
+required patches, it tolerates a missing target: the goal is "no card", so an
+upstream that already dropped it needs no patch and must not fail preparation.
 
 The code generator splices only the selected comparison. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

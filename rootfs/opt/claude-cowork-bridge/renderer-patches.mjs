@@ -159,7 +159,7 @@ export function inspectRenderer(source, gatewayEnabled) {
       const patch = filePaneDownloadPatch(node, ancestors, source, button);
       if (patch) patches.push({ id: downloadPatchId, start: node.start, end: node.end, ...patch });
     }
-    if (gatewayEnabled && inferenceBannerTarget(node, ancestors)) {
+    if (inferenceBannerTarget(node, ancestors)) {
       patches.push({ id: inferenceBannerPatchId, start: node.body.start, end: node.body.end,
         original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
     }
