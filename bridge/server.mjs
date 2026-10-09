@@ -44,6 +44,17 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // "Claude Code web access" gate: without it the Code pill does not navigate to
 // the code surface, it raises the "download the desktop app" upsell instead.
 const webShellGrantedGates = ["bad_moon_rising"];
+// Cowork's "Skip all approvals" row is hidden twice over: the org's
+// `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
+// only an org admin can flip it) and the `cowork_bypass_permissions_mode`
+// rollout flag must be on. A self-hosted, single-user deployment has no admin to
+// turn the first on, so the bridge answers both as enabled. This is a real
+// safety switch — it lets Cowork sessions run with no tool prompts, the same
+// posture as the Code surface's bypass mode — so it defaults on only with the
+// web shell and `CLAUDE_REMOTE_COWORK_SKIP_APPROVALS=0` restores the upstream
+// value.
+const coworkSkipApprovals = process.env.CLAUDE_REMOTE_COWORK_SKIP_APPROVALS === "1"
+  || (webShellEnabled && process.env.CLAUDE_REMOTE_COWORK_SKIP_APPROVALS !== "0");
 // Model the title generator is asked to use (CLAUDE_TITLE_MODEL). Desktop
 // otherwise resolves its own small title model, which this gateway does not
 // serve, so a title request must carry one; left unset, that is the session's
@@ -1048,6 +1059,11 @@ const bootstrapResponsePath = /^\/edge-api\/bootstrap(?:\/[^/?#]+\/app_start)?$/
 // The renderer also refetches its org entitlements from this path; both carry
 // the `current_user_access.features` list the web shell reads for Cowork.
 const currentUserAccessPath = /^\/api\/bootstrap\/[^/?#]+\/current_user_access$/i;
+// The org document that carries the Cowork approval-mode admin settings. The
+// renderer fetches it (react-query key `cowork_settings`) to decide whether to
+// offer "Automatically approve" (`auto_mode_enabled`) and "Skip all approvals"
+// (`skip_approvals_enabled`).
+const coworkSettingsPath = /^\/api\/organizations\/[0-9a-f-]+\/cowork_settings$/i;
 
 // The official renderer takes its home greeting from the bootstrap response,
 // not from local code: personalized_greeting is an array of surface objects,
@@ -1276,6 +1292,34 @@ function grantWebShellGates(value) {
   return changed;
 }
 
+// Flip the org's Cowork approval settings so the picker offers "Skip all
+// approvals". The renderer reads `skip_approvals_enabled` off this document to
+// build the composer's mode list (ion-dist's `Lv`: the bypass row appears only
+// when it — and the growthbook flag below — are on). Only an absent/false value
+// is raised; an already-true value is left untouched so the rewrite is a no-op
+// once someone flips the real admin setting.
+function grantCoworkSkipApprovals(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.skip_approvals_enabled === true) return false;
+  value.skip_approvals_enabled = true;
+  return true;
+}
+
+// Force the `cowork_bypass_permissions_mode` rollout gate on in the bootstrap's
+// growthbook table. `grantWebShellGates` only adds an absent gate; this one may
+// already be carried (evaluated false), so it is replaced outright to make
+// `T("cowork_bypass_permissions_mode")` read true alongside the settings above.
+function grantCoworkBypassGate(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey("cowork_bypass_permissions_mode");
+  const entry = features[key];
+  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+  if (on) return false;
+  features[key] = { defaultValue: true };
+  return true;
+}
+
 function containsSensitiveCredential(value) {
   if (!value || typeof value !== "object") return false;
   const sensitiveName = /^(?:api_?key|gateway_?api_?key|access_?token|refresh_?token|authorization|password|secret)$/i;
@@ -1338,6 +1382,17 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
+      rewrote = true;
+    }
+    // Cowork's "Skip all approvals" needs both the org settings document and
+    // the rollout gate; grant whichever the renderer reads off this response
+    // (see coworkSkipApprovals).
+    if (coworkSkipApprovals && coworkSettingsPath.test(url.pathname)
+      && grantCoworkSkipApprovals(parsed)) {
+      rewrote = true;
+    }
+    if (coworkSkipApprovals && bootstrapResponsePath.test(url.pathname)
+      && grantCoworkBypassGate(parsed)) {
       rewrote = true;
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");

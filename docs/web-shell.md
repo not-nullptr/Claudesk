@@ -32,6 +32,18 @@ bootstrap response and in `/api/bootstrap/<org>/current_user_access` (see
 existing entry, including a `blocked_by_*` one, is left exactly as upstream set
 it, so this cannot silently override an org policy.
 
+The Cowork approval-mode picker lists **Manual** and **Automatically approve**,
+and offers **Skip all approvals** (`bypassPermissions`) only when two further
+gates hold: the org's `cowork_settings.skip_approvals_enabled` (default false,
+admin-only) and the `cowork_bypass_permissions_mode` growthbook flag. A
+self-hosted, single-user deployment has no org admin to flip the first, so with
+`CLAUDE_REMOTE_COWORK_SKIP_APPROVALS` on (default with the web shell) the bridge
+rewrites the org's `cowork_settings` document and the bootstrap's growthbook
+table to answer both as enabled (`grantCoworkSkipApprovals`,
+`grantCoworkBypassGate`). This is a real safety switch — Skip all approvals runs
+Cowork with no tool prompts — so it is off without the web shell and `…=0`
+restores the upstream value.
+
 ## Status
 
 Working with the flag on:

@@ -38,6 +38,7 @@ node scripts/mobile-api-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
 node scripts/start-permission-mode-smoke.mjs
+node scripts/cowork-skip-approvals-smoke.mjs
 node scripts/model-selector-state-smoke.mjs
 node scripts/realtime-stream-smoke.mjs
 node scripts/renderer-relay-smoke.mjs
