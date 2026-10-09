@@ -137,9 +137,15 @@
     throw new Error("Remote Desktop bridge received an invalid Desktop version");
   }
   const originalUserAgent = globalThis.navigator.userAgent;
-  const desktopUserAgent = /claude(?:nest|gov)?\//i.test(originalUserAgent)
+  // The web shell (config.webShell) is ion-dist's browser chrome; it is selected
+  // by the ABSENCE of the `Claude/<version>` token, so there we keep the browser
+  // user agent. Everything else publishes the Desktop identity, which the
+  // official route selector requires to expose the Cowork surface.
+  const desktopUserAgent = config.webShell
     ? originalUserAgent
-    : `${originalUserAgent} Claude/${desktopVersion}`;
+    : /claude(?:nest|gov)?\//i.test(originalUserAgent)
+      ? originalUserAgent
+      : `${originalUserAgent} Claude/${desktopVersion}`;
   Object.defineProperty(globalThis.navigator, "userAgent", {
     configurable: false,
     enumerable: true,

@@ -26,6 +26,19 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Experimental: render ion-dist's browser (claude.ai) chrome instead of the
+// Desktop chrome. ion-dist picks its shell from the `Claude/<version>` token the
+// preload appends to the user agent; dropping it makes the renderer believe it
+// is a plain browser and use the web shell, while the local IPC data layer this
+// bridge serves is untouched. The web shell gates Cowork behind org
+// entitlements, so enabling this also grants them in the bootstrap/access
+// documents the app reads. See docs/web-shell.md.
+const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
+// Entitlements the web shell checks before offering Cowork and remote control.
+// `dramatic_shrimp` is the (secret) internal flag ion-dist's web-Cowork gate
+// reads; `cowork_remote_control` is its productized twin. Both sit beside the
+// `cowork`/`claude_code_desktop` entitlements the deployment already carries.
+const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // Model the title generator is asked to use (CLAUDE_TITLE_MODEL). Desktop
 // otherwise resolves its own small title model, which this gateway does not
 // serve, so a title request must carry one; left unset, that is the session's
@@ -1027,6 +1040,9 @@ function sanitizeStoreValue(surface, store, value) {
 }
 
 const bootstrapResponsePath = /^\/edge-api\/bootstrap(?:\/[^/?#]+\/app_start)?$/i;
+// The renderer also refetches its org entitlements from this path; both carry
+// the `current_user_access.features` list the web shell reads for Cowork.
+const currentUserAccessPath = /^\/api\/bootstrap\/[^/?#]+\/current_user_access$/i;
 
 // The official renderer takes its home greeting from the bootstrap response,
 // not from local code: personalized_greeting is an array of surface objects,
@@ -1203,6 +1219,30 @@ function injectPersonalizedGreeting(parsed, name) {
   };
 }
 
+// Add the web shell's Cowork entitlements to an access document. The bootstrap
+// response and `/api/bootstrap/<org>/current_user_access` both carry a
+// `current_user_access.features` list of `{feature, status}`; the renderer's
+// feature hook reads `status === "available"`. Only grant a feature that is
+// absent — an existing entry (including a `blocked_by_*` one the upstream set)
+// is left exactly as it is, so this cannot silently override org policy.
+function grantWebShellEntitlements(value) {
+  if (!value || typeof value !== "object") return false;
+  let changed = false;
+  for (const holder of [value.current_user_access, value]) {
+    if (!holder || !Array.isArray(holder.features)) continue;
+    const present = new Set(
+      holder.features.filter((entry) => entry && typeof entry.feature === "string")
+        .map((entry) => entry.feature),
+    );
+    for (const feature of webShellGrantedFeatures) {
+      if (present.has(feature)) continue;
+      holder.features.push({ feature, status: "available" });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function containsSensitiveCredential(value) {
   if (!value || typeof value !== "object") return false;
   const sensitiveName = /^(?:api_?key|gateway_?api_?key|access_?token|refresh_?token|authorization|password|secret)$/i;
@@ -1243,6 +1283,7 @@ async function forwardOfficialProtocol(request, response, url) {
   let responseBody = Buffer.from(result.bodyBase64 || "", "base64");
   if ((result.contentType || "").includes("application/json")) {
     const parsed = JSON.parse(responseBody.toString("utf8"));
+    let rewrote = false;
     if (bootstrapResponsePath.test(url.pathname)) {
       // Address the user the way the rest of the app does: the sidebar identity
       // is the name override, else whatever Desktop reports for its OS app user.
@@ -1254,9 +1295,16 @@ async function forwardOfficialProtocol(request, response, url) {
         if (typeof auth?.principalDisplayName === "string") reported = auth.principalDisplayName.trim();
       } catch { /* fall back to the account name in the response */ }
       const name = resolveGreetingName({ override: remoteUserName, reported, account: parsed.account });
-      const greeting = injectPersonalizedGreeting(parsed, name);
-      if (greeting !== parsed) responseBody = Buffer.from(JSON.stringify(greeting), "utf8");
+      if (injectPersonalizedGreeting(parsed, name) !== parsed) rewrote = true;
     }
+    // The web shell's Cowork surface is gated on org entitlements these
+    // documents carry; grant them only in that mode (see webShellEnabled).
+    if (webShellEnabled
+      && (bootstrapResponsePath.test(url.pathname) || currentUserAccessPath.test(url.pathname))
+      && grantWebShellEntitlements(parsed)) {
+      rewrote = true;
+    }
+    if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");
     if (containsSensitiveCredential(parsed)) {
       throw new ApiError(502, "Desktop protocol response contained a forbidden credential field");
     }
@@ -2105,6 +2153,7 @@ async function serveOfficialIndex(response) {
     codeActionsEnabled,
     developerActionsEnabled,
     gatewaySettingsEnabled,
+    webShell: webShellEnabled,
     initialStores: await initialRemoteStores(),
     listeners: Object.fromEntries(
       [...remoteListenerMethods].map(([surface, methods]) => [surface, [...methods]]),

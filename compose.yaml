@@ -93,6 +93,10 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
+      # Experimental: render ion-dist's browser (claude.ai) chrome with the local
+      # IPC data layer, and grant the org entitlements its Cowork surface checks.
+      # See docs/web-shell.md. Off by default.
+      CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
       # Display name for the signed-in user in the remote UI (the sidebar user
       # menu and the time-based home greeting). Empty keeps Desktop's own value.
       CLAUDE_REMOTE_USER_NAME: "${CLAUDE_REMOTE_USER_NAME:-}"
