@@ -69,6 +69,14 @@ renderer; on a desktop-identified client the flag is already true, so the splice
 is a no-op. The flag must be set on the `claude-desktop` service as well as the
 bridge, because the renderer preparer (cont-init) reads it.
 
+The Code *pill* is a second, independent gate. On a non-desktop client, clicking
+it raises the "download the desktop app" upsell instead of navigating, unless
+`hasClaudeCodeWebAccess` holds — which is `bad_moon_rising` (the "Claude Code web
+access" gate) AND the `claude_code` entitlement. With the flag set, the bridge
+adds `bad_moon_rising` to the bootstrap's `growthbook.features` (addressed by
+ion-dist's Java-style name hash), so the pill navigates to the route above
+instead of upselling.
+
 ## Why it is fenced
 
 The chrome and the surface set are the same switch in ion-dist (`isClaudeApp`),

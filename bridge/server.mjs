@@ -39,6 +39,11 @@ const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
 // reads; `cowork_remote_control` is its productized twin. Both sit beside the
 // `cowork`/`claude_code_desktop` entitlements the deployment already carries.
 const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
+// GrowthBook gates the web shell reads from the bootstrap's `growthbook.features`
+// (ion-dist keys them by a Java-style hash of the name). `bad_moon_rising` is the
+// "Claude Code web access" gate: without it the Code pill does not navigate to
+// the code surface, it raises the "download the desktop app" upsell instead.
+const webShellGrantedGates = ["bad_moon_rising"];
 // Model the title generator is asked to use (CLAUDE_TITLE_MODEL). Desktop
 // otherwise resolves its own small title model, which this gateway does not
 // serve, so a title request must carry one; left unset, that is the session's
@@ -1243,6 +1248,34 @@ function grantWebShellEntitlements(value) {
   return changed;
 }
 
+// ion-dist addresses a GrowthBook feature by `R(name)`: a Java-style 32-bit
+// string hash, or the literal id already carried after a `__gb__` prefix.
+function growthbookKey(name) {
+  if (name.startsWith("__gb__")) return name.slice(6);
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash << 5) - hash + name.charCodeAt(index);
+    hash &= hash;
+  }
+  return ((hash & 0xFFFFFFFF) >>> 0).toString();
+}
+
+// Add the web shell's gates to the bootstrap's growthbook features. As with the
+// entitlements, only a gate the upstream did not already carry is added, so an
+// upstream false is left alone.
+function grantWebShellGates(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  let changed = false;
+  for (const name of webShellGrantedGates) {
+    const key = growthbookKey(name);
+    if (key in features) continue;
+    features[key] = { defaultValue: true };
+    changed = true;
+  }
+  return changed;
+}
+
 function containsSensitiveCredential(value) {
   if (!value || typeof value !== "object") return false;
   const sensitiveName = /^(?:api_?key|gateway_?api_?key|access_?token|refresh_?token|authorization|password|secret)$/i;
@@ -1302,6 +1335,9 @@ async function forwardOfficialProtocol(request, response, url) {
     if (webShellEnabled
       && (bootstrapResponsePath.test(url.pathname) || currentUserAccessPath.test(url.pathname))
       && grantWebShellEntitlements(parsed)) {
+      rewrote = true;
+    }
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
       rewrote = true;
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");
