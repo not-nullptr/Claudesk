@@ -10,6 +10,7 @@ import {
   resolveContainedPath,
   sessionFileReadLimit,
 } from "./downloads.mjs";
+import { createPreviewHandler } from "./preview.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
@@ -50,6 +51,14 @@ const extraDownloadRoots = String(process.env.COWORK_REMOTE_READ_ROOTS || "")
   .filter(Boolean)
   .map((entry) => resolve(entry));
 const downloadRoots = [...new Set([workspaceRoot, ...extraDownloadRoots])];
+// Browser preview of Office/PDF session files. The pane's iframe asks this
+// route, which serves a PDF: Office bytes are converted by the `office-preview`
+// sidecar (LibreOffice, the same engine Desktop's own preview uses) and PDFs are
+// passed through. The bridge never runs the converter, so the sidecar's memory
+// is what a conversion costs; the cap below only bounds what the bridge buffers.
+const officeConverterUrl = (
+  process.env.CLAUDE_OFFICE_PREVIEW_URL || "http://127.0.0.1:8090"
+).replace(/\/$/, "");
 // Largest file the bridge will hand the session reader when Desktop itself
 // refuses. Desktop caps its own reader at 10 MiB (SESSION_FILE_MAX_BYTES) and
 // returns null above it; matching that by default avoids shipping huge bodies
@@ -83,6 +92,18 @@ function cgroupMemoryLimitBytes() {
 const sessionFileMemoryLimitBytes = cgroupMemoryLimitBytes();
 const sessionFileMaxBytes = sessionFileReadLimit({
   requestedBytes: sessionFileCapBytes,
+  memoryLimitBytes: sessionFileMemoryLimitBytes,
+});
+// A preview buffers the whole source document and the PDF it becomes, so the
+// same clamp applies: the configured COWORK_REMOTE_PREVIEW_MAX_BYTES (50 MiB
+// default, matching Desktop) is capped to an eighth of the container's memory,
+// at most 32 MiB. The document itself is converted in the sidecar, which carries
+// its own limit; this only bounds what the bridge holds to stream the result.
+const previewMaxBytes = sessionFileReadLimit({
+  requestedBytes: parseUploadLimit(
+    process.env.COWORK_REMOTE_PREVIEW_MAX_BYTES,
+    50 * 1024 * 1024,
+  ),
   memoryLimitBytes: sessionFileMemoryLimitBytes,
 });
 const artifactsRoot = resolve(
@@ -788,6 +809,12 @@ const handleDownload = createDownloadHandler({
   artifactsRoot,
   mimeTypes,
   downloadRoots,
+});
+const handleFilePreview = createPreviewHandler({
+  ApiError,
+  downloadRoots,
+  maxBytes: previewMaxBytes,
+  converterUrl: officeConverterUrl,
 });
 
 async function readJson(request, maxSize = 1024 * 1024) {
@@ -1561,6 +1588,7 @@ async function handleApi(request, response, url) {
     return;
   }
   if (await handleDownload(request, response, url)) return;
+  if (await handleFilePreview(request, response, url)) return;
 
   if (request.method === "POST" && url.pathname === "/api/remote/ipc") {
     // Official Desktop carries image attachments as base64 in send/start IPC,

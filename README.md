@@ -39,12 +39,14 @@ flowchart LR
   D --> G["Gateway / 本地会话 / Cowork VM"]
   D --> C["/config 会话与设置"]
   W --> X["/workspace 文件与上传"]
+  W -->|127.0.0.1:8090 转成 PDF| O["office-preview（LibreOffice）"]
 ```
 
 关键边界：
 
 - `claude-desktop` 运行官方签名 APT 包、Electron/Xvfb 和 Cowork VM。
-- `cowork-bridge` 只发布浏览器所需的 HTTP API；两个服务共享 `claude-desktop` 的网络命名空间。
+- `cowork-bridge` 只发布浏览器所需的 HTTP API；三个服务共享 `claude-desktop` 的网络命名空间。
+- `office-preview` 是无状态转换器：只接收 POST 上来的字节并返回 PDF，不挂载 `/workspace` 或 `/config`；它单独成容器，避免一次重量级转换拖垮同时服务 Chat/Cowork IPC 的 Bridge。
 - Bridge 到 Desktop 的方法、路径、文件类型和请求头均采用 allowlist；不接受任意 Electron action 或任意文件路径。
 - Chat 与 Cowork 使用同一官方 `LocalAgentModeSessions` 管理器，但按 `sessionType` 隔离；事件通过 `GET /api/events?mode=chat|cowork&sessionId=:id` 推送。
 
@@ -158,6 +160,8 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `COWORK_UPLOAD_MAX_BYTES` | `1073741824` | Web UI 单次上传（附件、拖入文件夹）的总大小上限，字节数，可带 `K`/`M`/`G` 后缀；文件以原始二进制流式写入 `/workspace/RemoteUploads`，不占内存 |
 | `COWORK_REMOTE_READ_ROOTS` | —（仅 `/workspace`） | 已认证的远程下载路由（`GET /api/remote/files/download`）额外可读的根目录，冒号或逗号分隔；`/workspace` 始终允许。路径在 cowork-bridge 容器内解析，宿主机目录还需 bind mount 进容器才可见。列出的路径即可被远程读取，务必配合已认证的 HTTPS 入口 |
 | `COWORK_REMOTE_SESSION_FILE_MAX_BYTES` | `10485760` | 文件面板回退读取的大小上限：Desktop 自身的会话读取器对会话目录之外或超过 10 MiB 的文件返回 null（面板显示“Couldn't read this file”），Bridge 改为从上面的可读根目录重新读取；此值即该回退的上限。可写纯字节数或 `K`/`M`/`G` 后缀（如 `100M`）。响应组装期间文件会被同时持有数份，因此 Bridge 另按容器内存上限的八分之一、最多 32 MiB 收紧；超过有效上限的文件在面板中显示为“Preview isn't available”。要真正提高上限也需同时提高 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`。默认与 Desktop 一致 |
+| `COWORK_REMOTE_PREVIEW_MAX_BYTES` | `52428800` | 浏览器文件面板预览（`GET /api/remote/files/preview`）允许转换的最大 Office 文档大小，字节数，可带 `K`/`M`/`G` 后缀；默认 50 MiB，与 Desktop 自身的预览上限一致。与文件回退读取一样，Bridge 另按容器内存上限的八分之一、最多 32 MiB 收紧；要真正提高上限需同时提高 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`。PDF 直接透传，不受此值限制 |
+| `CLAUDE_OFFICE_PREVIEW_MEMORY_LIMIT` | `1g` | `office-preview` sidecar 的内存上限；LibreOffice 转换需要数百 MB，独立于 Bridge 自身的内存上限 |
 | `CLAUDE_DESKTOP_VERSION` | `2.9939.4` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |
@@ -229,6 +233,23 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 而不是相对 Bridge 进程的当前目录。
 该按钮由前端补丁注入，选择器只定位文件面板的顶栏动作片段，始终启用且只匹配一次；详见
 [Frontend 补丁维护](docs/frontend-patches.md)。面板自身的“Download file”菜单仍按官方行为保留。
+
+### 文件面板预览（Office 与 PDF）
+
+官方文件面板的富预览由 Desktop 主进程渲染：Office 文件在 Cowork VM 内调用 LibreOffice（`soffice`）转成 PDF，
+再放进一个贴在其自身窗口上的原生 Electron 视图显示；浏览器永远不会合成这个视图，所以远程面板里 `.docx`、`.pptx`、
+`.xlsx`、`.pdf` 等一直是空白（`CoworkFilePreview.show` 返回成功，但没有任何可见内容）。
+
+现在改为在浏览器内渲染：前端补丁把文件面板预览组件的输出替换为一个指向
+`GET /api/remote/files/preview?path=...` 的 `<iframe>`，该路由内联返回 PDF——
+Office 文档由 `office-preview` sidecar 用 LibreOffice 转换（与 Desktop 同一引擎，因此观感一致），PDF 直接透传。
+只有 `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls` 会切到 iframe，其它文件（如 html/svg）保留官方原生行为。
+同时 preload 不再转发 `CoworkFilePreview` 的原生调用，避免 Desktop 再建一个原生视图、再跑一次 VM 转换。
+转换结果按内容哈希缓存；路径解析复用下载路由的读取根目录与包含规则，预览无法触达下载也读不到的文件。
+
+保真度要点：Office 转换使用与 Desktop 相同的 LibreOffice，并安装 Calibri/Cambria 的等宽替代字体（Carlito/Caladea），
+尽量保持分页一致；`.xlsx`/`.xls` 采用与 Desktop 相同的“每个工作表一页”导出。大文件超过
+`COWORK_REMOTE_PREVIEW_MAX_BYTES` 时拒绝转换。补丁改动会同步 `patchRelease`，让不可变的渲染器资源 URL 重新加载。
 
 ### Chat 回退与诊断接口
 

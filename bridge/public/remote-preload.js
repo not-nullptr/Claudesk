@@ -697,6 +697,24 @@
     ) {
       return async () => null;
     }
+    // Desktop renders a file preview into a native Electron view over its own
+    // window, which the browser never composites, and converts Office files with
+    // a Cowork-VM LibreOffice run. The renderer patch replaces the pane's preview
+    // with an <iframe> at the bridge's own preview route, so this surface must
+    // stop forwarding: report the feature as available and answer show as a no-op
+    // rather than let Desktop build a native view and convert a file the browser
+    // renders itself.
+    if (surface === "CoworkFilePreview") {
+      if (method === "isEnabled" || method === "isEpitaxyPreviewEnabled"
+        || method === "isOpenInDefaultAppEnabled") return async () => true;
+      if (method === "isVmReady") return async () => true;
+      if (method === "show") return async () => ({ ok: true });
+      if (method === "hide") return async () => true;
+      if (method === "parkAndCapture") return async () => null;
+      if (method === "whenContentReady") {
+        return async () => ({ ready: false, reason: "unobserved" });
+      }
+    }
     if (surface === "LocalSessions") {
       if (method === "getDetectedProjects") {
         return async (...args) => {

@@ -21,6 +21,16 @@ const downloadPatchId = "file-pane-download";
 // candidate preparation rather than silently let the card return.
 const inferenceBannerPatchId = "inference-banner";
 const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
+// The native file preview draws into an Electron view over Desktop's own window,
+// which the browser never composites, so an Office or PDF file showed a blank
+// pane. This patch swaps the preview component's rendered children for an
+// <iframe> at the bridge's own preview route (`/api/remote/files/preview`), which
+// serves the file as a PDF — Office converted by the office-preview sidecar, PDF
+// passed through. It fires only for those extensions; every other file keeps the
+// component's original output. The component is pinned by the one className its
+// container renders, which appears nowhere else in the renderer graph.
+const filePreviewPatchId = "native-file-preview-bridge";
+const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -145,11 +155,70 @@ function filePaneDownloadPatch(node, ancestors, source, button) {
   return { original, replacement: `[${original.slice(1, -1)},${injected}]` };
 }
 
+// The native preview component renders a container div with this exact className
+// and a children array holding the loading spinner, the decline UI and the parked
+// capture image. Selecting the array keeps the splice to the single render point
+// and leaves the component's effects (which the preload stubs) untouched.
+function filePreviewChildrenArray(call) {
+  if (call.type !== "CallExpression") return undefined;
+  const props = call.arguments.map(unwrap).find(argument => argument?.type === "ObjectExpression");
+  if (!props) return undefined;
+  if (!props.properties.some(entry => key(entry, "className")
+    && literal(entry.value, filePreviewStaticClassName))) return undefined;
+  const children = props.properties.find(entry => key(entry, "children"));
+  return children?.value?.type === "ArrayExpression" ? children.value : undefined;
+}
+// A component prop destructured by name, e.g. {filePath:v,cacheBuster:y} -> "v".
+function destructuredPropName(scope, name) {
+  const params = scope?.params?.[0];
+  if (params?.type !== "ObjectPattern") return undefined;
+  const entry = params.properties.find(property => property.type === "Property"
+    && key(property, name));
+  return entry?.value?.type === "Identifier" ? entry.value.name : undefined;
+}
+// The element factory the array's own calls use (a type string as the first
+// argument), read back rather than assumed, so a renamed factory cannot break the
+// emitted iframe.
+function arrayElementFactory(array) {
+  const names = new Set();
+  walk(array, [], node => {
+    if (node.type !== "CallExpression") return;
+    const first = node.arguments[0];
+    if (first?.type !== "Literal" || typeof first.value !== "string") return;
+    const name = identifier(node.callee);
+    if (name) names.add(name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
+}
+function filePreviewPatch(node, ancestors, source, array) {
+  const scope = [...ancestors].reverse().find(parent => functionTypes.has(parent.type));
+  const path = destructuredPropName(scope, "filePath");
+  const cacheBuster = destructuredPropName(scope, "cacheBuster");
+  const factory = arrayElementFactory(array);
+  if (!path || !factory) return;
+  // The bridge route answers with a PDF; cacheBuster re-requests when the file's
+  // content changes. Office and PDF only — any other file keeps the original
+  // children, so html/svg stay on their existing path.
+  const url = `"/api/remote/files/preview?path="+encodeURIComponent(${path})`
+    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "");
+  const iframe = `${factory}("iframe",{src:${url},className:"h-full w-full border-0",`
+    + 'title:"File preview"})';
+  const original = source.slice(array.start, array.end);
+  const condition = `/(?:pdf|docx?|pptx?|xlsx?)$/i.test(${path})`;
+  return { original,
+    replacement: `(${condition}?[${iframe}]:[${original.slice(1, -1)}])` };
+}
+
 export function inspectRenderer(source, gatewayEnabled) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
   // String prefilter is only an optimization; all acceptance uses parsed nodes.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef/.test(source)) return { evidence, patches };
+  // `native-file-preview-error` is the DeclineReason UI's test id; the preview
+  // component's own chunk matches none of the other tokens, so without it the
+  // patch below would never be attempted on the file it targets.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error/.test(source)) {
+    return { evidence, patches };
+  }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const redirectScopes = new Map();
   let button;
@@ -162,6 +231,14 @@ export function inspectRenderer(source, gatewayEnabled) {
     if (inferenceBannerTarget(node, ancestors)) {
       patches.push({ id: inferenceBannerPatchId, start: node.body.start, end: node.body.end,
         original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
+    }
+    const previewArray = filePreviewChildrenArray(node);
+    if (previewArray) {
+      const patch = filePreviewPatch(node, ancestors, source, previewArray);
+      if (patch) {
+        patches.push({ id: filePreviewPatchId, start: previewArray.start, end: previewArray.end,
+          ...patch });
+      }
     }
     let marker;
     if (literal(node, "rewindSession unavailable")) marker = markerIds[0];
@@ -211,8 +288,9 @@ export function patchRendererSources(sources, gatewayEnabled) {
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
-  const required = [downloadPatchId, inferenceBannerPatchId, ...(gatewayEnabled
-    ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
+  const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
+    ...(gatewayEnabled
+      ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
     const count = matches.get(id)?.length || 0;
     if (count !== 1) throw new Error(`renderer patch ${id} expected once, found ${count}`);

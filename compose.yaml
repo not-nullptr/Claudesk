@@ -83,6 +83,8 @@ services:
       claude-desktop:
         condition: service_healthy
         restart: true
+      office-preview:
+        condition: service_started
     environment:
       BRIDGE_HOST: "0.0.0.0"
       BRIDGE_PORT: "8080"
@@ -107,6 +109,12 @@ services:
       # own reader refuses it (Desktop caps at 10 MiB). Default 10485760.
       COWORK_REMOTE_SESSION_FILE_MAX_BYTES: "${COWORK_REMOTE_SESSION_FILE_MAX_BYTES:-10485760}"
       COWORK_UPLOAD_MAX_BYTES: "${COWORK_UPLOAD_MAX_BYTES:-1073741824}"
+      # Office/PDF file preview: the pane's iframe asks the bridge, which streams
+      # a PDF converted by the office-preview sidecar (sharing this network
+      # namespace). Largest file the bridge will convert for preview; accepts a
+      # K/M/G suffix. Default 52428800 (50 MiB), matching Desktop's own cap.
+      CLAUDE_OFFICE_PREVIEW_URL: "http://127.0.0.1:8090"
+      COWORK_REMOTE_PREVIEW_MAX_BYTES: "${COWORK_REMOTE_PREVIEW_MAX_BYTES:-52428800}"
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
@@ -124,6 +132,42 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    restart: unless-stopped
+
+  # Office/PDF preview converter. LibreOffice is the engine Desktop uses for the
+  # same previews (it runs soffice in the Cowork VM). It is kept out of the
+  # bridge so a heavy, occasionally crashy conversion cannot take down the
+  # process that also serves Chat and Cowork IPC, and so the bridge keeps its
+  # tight memory bound. It only ever receives bytes on a POST body and returns a
+  # PDF — it has no access to /workspace or /config.
+  office-preview:
+    build:
+      context: .
+      dockerfile: bridge/office/Dockerfile
+    image: local/claude-office-preview:latest
+    container_name: claude-office-preview
+    # Shares the Desktop/bridge network namespace, so the bridge reaches it at
+    # 127.0.0.1:8090 and it is never exposed on a host port.
+    network_mode: "service:claude-desktop"
+    depends_on:
+      claude-desktop:
+        condition: service_healthy
+        restart: true
+    environment:
+      OFFICE_PREVIEW_HOST: "127.0.0.1"
+      OFFICE_PREVIEW_PORT: "8090"
+      OFFICE_PREVIEW_MAX_BYTES: "${COWORK_REMOTE_PREVIEW_MAX_BYTES:-52428800}"
+    mem_limit: "${CLAUDE_OFFICE_PREVIEW_MEMORY_LIMIT:-1g}"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8090/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   claude-mobile:

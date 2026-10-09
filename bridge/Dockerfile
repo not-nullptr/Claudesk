@@ -5,6 +5,7 @@ WORKDIR /app
 COPY bridge/server.mjs ./server.mjs
 COPY bridge/realtime.mjs ./realtime.mjs
 COPY bridge/downloads.mjs ./downloads.mjs
+COPY bridge/preview.mjs ./preview.mjs
 COPY bridge/uploads.mjs ./uploads.mjs
 COPY bridge/workspace-folders.mjs ./workspace-folders.mjs
 COPY bridge/public ./public

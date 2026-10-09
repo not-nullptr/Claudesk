@@ -46,6 +46,21 @@ optional chaining. Positive and negative protocol comparisons retain their
 polarity. The patch extends desktop eligibility when the existing remote
 Gateway setting is enabled; it preserves surrounding feature conditions.
 
+The native file preview — the component that draws Office and PDF previews into an
+Electron view over Desktop's own window — is selected by the one className its
+container renders (`h-full w-full relative overflow-hidden`) together with a
+`children` array; that className appears nowhere else in the renderer graph. The
+splice rewrites only that children array: for a `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/
+`.xlsx`/`.xls` file it renders an `<iframe>` at the bridge's
+`/api/remote/files/preview` route, and every other file keeps the original output,
+so html/svg stay on their existing native path. The component's chunk carries none
+of the other selectors' tokens, so the string prefilter also accepts its own
+DeclineReason test id (`native-file-preview-error`) to reach it. Like the download
+button, the injected `iframe` names three mangled locals read back from the same
+parsed graph — the element factory the children array's own calls use, and the
+`filePath` and `cacheBuster` props from the component's destructured parameter —
+and the patch is refused if any is missing, ambiguous, or matches more than once.
+
 The first-party provider card — the "You're using …" / "Inference configuration"
 banner that advertises the provider switch on the chat and code home surfaces —
 is selected by the two i18n message ids of its copy. Both are content hashes of
