@@ -39,6 +39,10 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
+      # Read by the renderer preparer (cont-init) as well as the bridge: with the
+      # web shell on it also splices the desktop Code route alias. See
+      # docs/web-shell.md.
+      CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
       CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:?Set CLAUDE_GATEWAY_BASE_URL in .env}"
       CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:?Set CLAUDE_GATEWAY_API_KEY in .env}"
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"

@@ -38,21 +38,36 @@ Working with the flag on:
 
 - the web chrome (wordmark, pill tabs, tall nav rows);
 - Chat, with the real local sessions, model selector and account identity;
-- Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM.
+- Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM;
+- Code — the full local surface (usage dashboard, projects, sessions) with
+  folder browsing, via the route-alias patch below.
 
 Not wired up yet (tracked here so it is not mistaken for done):
 
-- **Code.** The web shell's Code surface is claude.ai's *cloud* Code, which the
-  org reports admin-disabled here, so `/code` lands on `/code/disabled`. The
-  working Code is the Desktop's local `epitaxy` surface, which the web shell
-  remaps away. Reaching it needs either a route rewire or an entitlement that
-  makes the web Code remote into this device.
-- **Device / folder browsing.** Cowork-on-web expects a paired "computer"
-  device (the `DeviceRegistry` / `RemoteControlServing` surfaces) to browse that
-  machine's folders. The bridge does not publish those surfaces yet.
 - **Home greeting.** The web home reads a greeting surface the bridge does not
   populate, so it shows the renderer's "You're here!" fallback instead of the
   time-based greeting the Desktop chrome shows.
+- **Cowork-on-web device model.** Cowork's *web* product also expects a paired
+  "computer" device for browsing that machine's folders. Not needed for Code
+  (folder browsing there goes through the Code file picker), so it is only
+  relevant if the merged Cowork-in-chat surface is ever wanted.
+
+## Code routes
+
+ion-dist resolves its internal code route to the local Code surface (`/code` →
+`/epitaxy`) only when the user agent carries the Desktop token, and to
+claude.ai's *cloud* Code otherwise. The web shell drops that token on purpose, so
+without a change every Code route went to the cloud surface — which the org
+reports admin-disabled, hence `/code/disabled`. The chrome and this alias read
+the *same* predicate, so no user agent satisfies one and not the other.
+
+The `desktop-code-route-alias` renderer patch forces the alias resolver's
+desktop branch (`function za(e,t,n){t=!0;…}`), so the local Code stays reachable
+under the web chrome. It is spliced and required only when
+`CLAUDE_REMOTE_WEB_SHELL=1`, so a default deployment prepares a byte-identical
+renderer; on a desktop-identified client the flag is already true, so the splice
+is a no-op. The flag must be set on the `claude-desktop` service as well as the
+bridge, because the renderer preparer (cont-init) reads it.
 
 ## Why it is fenced
 

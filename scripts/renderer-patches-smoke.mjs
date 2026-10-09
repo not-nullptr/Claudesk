@@ -31,6 +31,14 @@ const previewComponent = 'function NativePreview({sessionId:i,filePath:v,cacheBu
   + 'return s("div",{className:"h-full w-full relative overflow-hidden",children:['
   + 'ready==null?null:s(Spinner,{className:"absolute inset-0 flex items-center justify-center"}),'
   + 'caption&&s("img",{src:caption.src,alt:""})]});}';
+// The route-alias resolver: `za` guards each rule with `!(X.when==="desktop"&&!Y)`,
+// where Y is its `isDesktop` flag. In web-shell mode the patcher forces that
+// branch so the local Code route (/epitaxy) stays reachable.
+const aliasResolver = 'function Ra(e,{isDesktop:t,isDev:n=!1}){let r=e;'
+  + 'for(let i=0;i<4;i++){let i=za(r,t,n);if(i===null)return r===e?null:r;r=i}return r===e?null:r}'
+  + 'function za(e,t,n){for(let r of La)'
+  + 'if(!(r.when==="desktop"&&!t)&&!(r.when==="web"&&t)&&!(r.skipInDev&&n)&&Ia(e,r.from))'
+  + 'return r.to+e.slice(r.from.length);return null}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -45,7 +53,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -54,6 +62,11 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('target="_blank"'), "a refused download must not replace the app");
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
+  const webResult = patchRendererSources(inputs, true, true);
+  assert.equal(webResult.patches.length, 6, "the web shell adds the desktop Code route alias");
+  assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
+    "the alias resolver must take the desktop branch under the web shell");
   for (const protocol of ["app:", "https:"]) for (const gateway of [false, true]) for (const available of [false, true]) {
     const context = { window: { location: { protocol } },
       globalThis: { __CLAUDE_REMOTE_BOOTSTRAP__: { gatewaySettingsEnabled: gateway } },
@@ -84,6 +97,11 @@ for (const [i, variant] of variants.entries()) {
 // duplicated file pane, is refused rather than double-spliced.
 assert.throws(() => patchRendererSources(new Map([["a.js", filePane], ["b.js", filePane]]), false),
   /file-pane-download expected once, found 2/);
+// The web shell requires the alias splice: a renderer with no resolver refuses.
+assert.throws(() => patchRendererSources(new Map([["no-alias.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false, true),
+  /desktop-code-route-alias expected once, found 0/,
+  "the web shell must refuse a renderer without the route-alias resolver");
 assert.equal(patchRendererSources(new Map([["only.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false).patches
   .map(patch => patch.id).join(","), "file-pane-download,inference-banner,native-file-preview-bridge");

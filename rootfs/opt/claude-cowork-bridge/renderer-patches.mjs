@@ -31,6 +31,15 @@ const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 // container renders, which appears nowhere else in the renderer graph.
 const filePreviewPatchId = "native-file-preview-bridge";
 const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
+// A browser-identified renderer resolves its internal code route to claude.ai's
+// cloud Code — which the org reports admin-disabled, so every Code route lands on
+// `/code/disabled` — while the Desktop identity resolves the same route to the
+// local Code surface this bridge drives over the Desktop IPC. The web shell drops
+// the Desktop user-agent token on purpose (to get the browser chrome), and that
+// same predicate also flips this alias. This patch forces the resolver's desktop
+// branch so the local Code stays reachable. Spliced only in web-shell mode: on a
+// desktop-identified client the flag is already true, so there it does nothing.
+const routeAliasPatchId = "desktop-code-route-alias";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -76,6 +85,27 @@ function checksFileKind(node) {
     && ["==", "==="].includes(child.operator)
     && (literal(child.left, "file") || literal(child.right, "file")));
 }
+// The route-alias resolver guards each rule with
+// `!(X.when==="desktop"&&!Y)`, where Y is the `isDesktop` flag it was called
+// with. Read that identifier back from the same graph so the splice names
+// whatever the minifier chose; only a function carrying that exact rule matches,
+// so a stray `when` comparison cannot establish the target.
+function desktopRouteFlagName(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return undefined;
+  let name;
+  walk(node.body, [], child => {
+    if (name || child.type !== "LogicalExpression" || child.operator !== "&&") return;
+    const left = unwrap(child.left);
+    if (left?.type !== "BinaryExpression" || left.operator !== "===") return;
+    if (!property(left.left, "when") || !literal(left.right, "desktop")) return;
+    const right = unwrap(child.right);
+    if (right?.type !== "UnaryExpression" || right.operator !== "!") return;
+    const flag = identifier(right.argument);
+    if (flag) name = flag;
+  });
+  return name;
+}
+
 // The provider card is the sole component passed to a wrapper call whose body
 // carries both of its message ids; declarations and unrelated helper functions
 // are not arguments, so they are not targets.
@@ -209,14 +239,16 @@ function filePreviewPatch(node, ancestors, source, array) {
     replacement: `(${condition}?[${iframe}]:[${original.slice(1, -1)}])` };
 }
 
-export function inspectRenderer(source, gatewayEnabled) {
+export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
   // String prefilter is only an optimization; all acceptance uses parsed nodes.
   // `native-file-preview-error` is the DeclineReason UI's test id; the preview
   // component's own chunk matches none of the other tokens, so without it the
-  // patch below would never be attempted on the file it targets.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error/.test(source)) {
+  // patch below would never be attempted on the file it targets. The route-alias
+  // chunk likewise carries none of them, so its own `when==="desktop"` rule is
+  // listed too.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -231,6 +263,13 @@ export function inspectRenderer(source, gatewayEnabled) {
     if (inferenceBannerTarget(node, ancestors)) {
       patches.push({ id: inferenceBannerPatchId, start: node.body.start, end: node.body.end,
         original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
+    }
+    if (webShellEnabled) {
+      const routeFlag = desktopRouteFlagName(node);
+      if (routeFlag) {
+        patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
+          original: "", replacement: `${routeFlag}=!0;` });
+      }
     }
     const previewArray = filePreviewChildrenArray(node);
     if (previewArray) {
@@ -275,11 +314,11 @@ export function inspectRenderer(source, gatewayEnabled) {
   return { evidence, patches };
 }
 
-export function patchRendererSources(sources, gatewayEnabled) {
+export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false) {
   const matches = new Map();
   const markers = new Map(markerIds.map(id => [id, []]));
   for (const [path, source] of sources) {
-    const result = inspectRenderer(source, gatewayEnabled);
+    const result = inspectRenderer(source, gatewayEnabled, webShellEnabled);
     for (const patch of result.patches) {
       if (!matches.has(patch.id)) matches.set(patch.id, []);
       matches.get(patch.id).push({ path, ...patch });
@@ -289,6 +328,7 @@ export function patchRendererSources(sources, gatewayEnabled) {
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
+    ...(webShellEnabled ? [routeAliasPatchId] : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {

@@ -53,7 +53,8 @@ let sources = new Map();
 for (const file of files) sources.set(file, await readFile(file, "utf8"));
 const officialSources = new Map(sources);
 
-const result = patchRendererSources(sources, process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1");
+const result = patchRendererSources(sources, process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1",
+  process.env.CLAUDE_REMOTE_WEB_SHELL === "1");
 sources = result.sources;
 const patchRecords = result.patches.map(patch => ({
   id: patch.id,
