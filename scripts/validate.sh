@@ -21,6 +21,7 @@ node scripts/office-preview-smoke.mjs
 node scripts/official-index-smoke.mjs
 node scripts/bridge-parity-smoke.mjs
 node scripts/greeting-smoke.mjs
+node scripts/account-smoke.mjs
 node scripts/account-settings-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/renderer-patches-smoke.mjs

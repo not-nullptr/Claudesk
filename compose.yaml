@@ -109,6 +109,17 @@ services:
       # Display name for the signed-in user in the remote UI (the sidebar user
       # menu and the time-based home greeting). Empty keeps Desktop's own value.
       CLAUDE_REMOTE_USER_NAME: "${CLAUDE_REMOTE_USER_NAME:-}"
+      # Web-shell account identity. When CLAUDE_REMOTE_WEB_SHELL is on, these
+      # override the synthetic gateway identity (OS user + "Gateway") on the
+      # account menu and sidebar footer, so the shell reads as a real account.
+      # Each field is applied only when set; empty keeps the upstream value.
+      # See docs/web-shell.md.
+      CLAUDE_REMOTE_ACCOUNT_NAME: "${CLAUDE_REMOTE_ACCOUNT_NAME:-}"
+      CLAUDE_REMOTE_ACCOUNT_EMAIL: "${CLAUDE_REMOTE_ACCOUNT_EMAIL:-}"
+      CLAUDE_REMOTE_ACCOUNT_ORG: "${CLAUDE_REMOTE_ACCOUNT_ORG:-}"
+      CLAUDE_REMOTE_ACCOUNT_PLAN: "${CLAUDE_REMOTE_ACCOUNT_PLAN:-}"
+      CLAUDE_REMOTE_ACCOUNT_AVATAR: "${CLAUDE_REMOTE_ACCOUNT_AVATAR:-}"
+      CLAUDE_REMOTE_DEPLOYMENT_NAME: "${CLAUDE_REMOTE_DEPLOYMENT_NAME:-}"
       # Model the title generator is asked to use. Empty falls back to the
       # session's own model; set it to a cheap model the gateway serves.
       CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"

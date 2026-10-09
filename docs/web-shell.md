@@ -126,6 +126,39 @@ detector accepts `(?:edge-)?api`), so the greeting renders in either chrome.
 Matching the entitlements document (`/api/bootstrap/<org>/current_user_access`)
 is deliberately excluded, so the greeting is never injected into that shape.
 
+## Account identity
+
+The account menu and sidebar footer would otherwise read as a gateway config: a
+gateway deployment fills the Account document with a synthetic identity — the OS
+app user ("app" in this image) and an organization named "Gateway" — because a
+third-party gateway has no real Anthropic account behind it. The claude.ai chrome
+reads that identity from the bootstrap `account`, from `GET /api/account` and
+`/api/account_profile`, from the organization document at
+`/api/organizations/{uuid}`, and (for the footer's provider label) from
+`ManagedConfig.managedRendererConfigStore`, which the bridge otherwise blanks.
+
+With the web shell on and any account value set, the bridge overrides **just the
+identity fields** — name, email, avatar, organization, plan — on those documents
+(`applyAccountIdentity` / `applyOrganizationIdentity`), and surfaces the
+deployment name through the renderer-config store so the footer stops reading
+"Gateway". That last one is the official `deploymentDisplayName`, which the
+bundle itself documents as "Overrides the provider label shown in the sidebar
+footer, user-menu header, and connection-error banner" — no renderer patch is
+needed, only the store value the bridge already controls. Only the fields set are
+overridden: uuids, settings, capabilities and entitlements are left exactly as
+upstream sent them, so Cowork, Code and the time-based greeting keep working. A
+default deployment, and the Desktop shell, never reach any of this — the whole
+path is gated on `webShellEnabled`.
+
+This is **identity only**. There is no login/logout session and no per-user
+separation yet: the account is operator-defined via `CLAUDE_REMOTE_ACCOUNT_NAME`,
+`…_EMAIL`, `…_ORG`, `…_PLAN`, `…_AVATAR` and `CLAUDE_REMOTE_DEPLOYMENT_NAME`, and
+there is no real account, billing or usage upstream to show.
+`resolveAccountIdentity()` is the seam a future auth layer fills with a
+per-session identity; the signed-in account, the sidebar name and the greeting
+all resolve the operator's account name first (`CLAUDE_REMOTE_ACCOUNT_NAME`, else
+the legacy `CLAUDE_REMOTE_USER_NAME`).
+
 ## Why it is fenced
 
 The chrome and the surface set are the same switch in ion-dist (`isClaudeApp`),

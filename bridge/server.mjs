@@ -69,6 +69,88 @@ const titleModel = (process.env.CLAUDE_TITLE_MODEL || "").trim();
 // "You're here!" placeholder. Setting this replaces the footer identity and is
 // folded into the time-based greeting below. Unset keeps Desktop's own value.
 const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().slice(0, 80);
+// Web-shell account identity. The browser chrome reads the signed-in account
+// from the bootstrap `account` document and from GET /api/account(_profile),
+// and reads the sidebar footer's provider label from ManagedConfig's
+// managedRendererConfigStore (which the bridge otherwise blanks). A gateway
+// deployment fills all of those with a synthetic identity — the OS app user and
+// an organization named "Gateway" — so the account menu and footer read as a
+// gateway config rather than a real account. When the web shell is on and any
+// value below is set, the bridge overrides just the identity fields (name,
+// email, avatar, organization, plan) on the documents it already rewrites;
+// uuids, settings, capabilities and entitlements are left exactly as upstream
+// sent them, so Cowork/Code and the time-based greeting keep working. A default
+// deployment, and the Desktop shell, never reach any of this. This is identity
+// only: there is no login/logout session yet — `resolveAccountIdentity` is the
+// seam a future auth layer fills with a per-session identity (see docs/web-shell.md).
+function accountEnv(name, max) {
+  return String(process.env[name] || "").trim().slice(0, max);
+}
+const accountIdentity = {
+  name: accountEnv("CLAUDE_REMOTE_ACCOUNT_NAME", 80),
+  email: accountEnv("CLAUDE_REMOTE_ACCOUNT_EMAIL", 200),
+  organization: accountEnv("CLAUDE_REMOTE_ACCOUNT_ORG", 80),
+  plan: accountEnv("CLAUDE_REMOTE_ACCOUNT_PLAN", 40),
+  avatar: accountEnv("CLAUDE_REMOTE_ACCOUNT_AVATAR", 500),
+  deployment: accountEnv("CLAUDE_REMOTE_DEPLOYMENT_NAME", 60),
+};
+function accountIdentityConfigured(identity) {
+  return Boolean(identity && (identity.name || identity.email || identity.organization
+    || identity.plan || identity.avatar || identity.deployment));
+}
+// Today the one env-configured identity, ignoring any context. A future
+// session/login layer passes a session here and returns that session's identity;
+// keeping the call sites behind this function means only this body changes.
+function resolveAccountIdentity() {
+  return accountIdentity;
+}
+// Set a field only when a non-empty override is given and it differs, so an
+// unset value keeps the upstream's and a no-op returns the same reference.
+function assignIdentityText(target, key, value, max) {
+  const text = typeof value === "string" ? value.slice(0, max) : "";
+  if (!text || target[key] === text) return false;
+  target[key] = text;
+  return true;
+}
+function applyOrganizationIdentity(organization, identity) {
+  if (!organization || typeof organization !== "object" || Array.isArray(organization)) {
+    return organization;
+  }
+  if (!accountIdentityConfigured(identity)) return organization;
+  const next = { ...organization };
+  let changed = false;
+  changed = assignIdentityText(next, "name", identity.organization, 80) || changed;
+  changed = assignIdentityText(next, "plan_display_name", identity.plan, 40) || changed;
+  return changed ? next : organization;
+}
+// Override the identity fields of an Account document, leaving everything else
+// (uuid, settings, memberships' capabilities) untouched. Returns the same
+// reference when nothing changed so the caller can detect a rewrite.
+function applyAccountIdentity(account, identity) {
+  if (!account || typeof account !== "object" || Array.isArray(account)) return account;
+  if (!accountIdentityConfigured(identity)) return account;
+  const next = { ...account };
+  let changed = false;
+  changed = assignIdentityText(next, "display_name", identity.name, 80) || changed;
+  changed = assignIdentityText(next, "full_name", identity.name, 80) || changed;
+  changed = assignIdentityText(next, "email_address", identity.email, 200) || changed;
+  changed = assignIdentityText(next, "avatar", identity.avatar, 500) || changed;
+  const memberships = next.memberships;
+  if ((identity.organization || identity.plan) && Array.isArray(memberships)) {
+    const index = memberships.findIndex((entry) => entry?.organization
+      && typeof entry.organization === "object");
+    if (index >= 0) {
+      const organization = applyOrganizationIdentity(memberships[index].organization, identity);
+      if (organization !== memberships[index].organization) {
+        const updated = [...memberships];
+        updated[index] = { ...memberships[index], organization };
+        next.memberships = updated;
+        changed = true;
+      }
+    }
+  }
+  return changed ? next : account;
+}
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
 // Roots the remote download route may serve from. The workspace is always
 // allowed, because the web UI's own file browser reads from it; extra roots
@@ -610,6 +692,9 @@ const protocolRules = [
   // shell) uses the claude.ai default /api prefix, so allow its bootstrap too.
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
+  // The web shell's claude.ai chrome reads its account from /api/account as
+  // well as its bootstrap; the account identity rewrite below covers both.
+  { methods: new Set(["GET"]), path: /^\/api\/account$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
@@ -1044,16 +1129,28 @@ function sanitizeStoreValue(surface, store, value) {
   }
   if (surface === "LocalAgentModeSessions" && store === "interactiveAuthStore") {
     // Desktop reports the OS app user as the renderer's principal display name,
-    // which the sidebar user menu prints beside the provider label. An operator
-    // name replaces it; unset keeps whatever Desktop reported.
-    const name = remoteUserName || value?.principalDisplayName;
+    // which the sidebar user menu prints beside the provider label. The
+    // operator's account name (else the legacy user-name override) replaces it;
+    // unset keeps whatever Desktop reported, so the name matches the account
+    // document and the greeting.
+    const name = accountIdentity.name || remoteUserName || value?.principalDisplayName;
     return { principalDisplayName: typeof name === "string" && name ? name : null };
   }
   if (surface === "ClaudeVM" && store === "apiReachabilityStore") {
     return { reachability: value?.reachability ?? "unknown" };
   }
   if (surface === "ManagedConfig" && store === "managedRendererConfigStore") {
-    return {};
+    // The web shell reads the sidebar footer's provider label from this store.
+    // A gateway deployment leaves the deployment name unset, so the footer falls
+    // back to the gateway provider label ("Gateway"); surface the operator's
+    // deployment name (and, when it differs, the plan as a subtitle) so the
+    // footer reads as the account's. Non-web-shell, or unset, stays blank as
+    // before — and the rest of the managed configuration is still withheld.
+    if (!webShellEnabled) return {};
+    const name = accountIdentity.deployment || accountIdentity.organization || accountIdentity.plan;
+    if (!name) return {};
+    const subtitle = accountIdentity.plan && accountIdentity.plan !== name ? accountIdentity.plan : null;
+    return { deploymentDisplayName: name, deploymentDisplaySubtitle: subtitle };
   }
   return {};
 }
@@ -1071,6 +1168,13 @@ const currentUserAccessPath = /^\/api\/bootstrap\/[^/?#]+\/current_user_access$/
 // offer "Automatically approve" (`auto_mode_enabled`) and "Skip all approvals"
 // (`skip_approvals_enabled`).
 const coworkSettingsPath = /^\/api\/organizations\/[0-9a-f-]+\/cowork_settings$/i;
+// The account documents the web shell reads its identity from: the bootstrap
+// carries the account under `account`, while these two return the Account object
+// directly. Only rewritten in web-shell mode (see accountIdentity).
+const accountResponsePath = /^\/api\/(?:account|account_profile)$/i;
+// The organization document whose `name`/`plan_display_name` the account menu
+// and org switcher show; same shape as the organization inside memberships.
+const organizationResponsePath = /^\/api\/organizations\/[0-9a-f-]+$/i;
 
 // The official renderer takes its home greeting from the bootstrap response,
 // not from local code: personalized_greeting is an array of surface objects,
@@ -1381,11 +1485,44 @@ async function forwardOfficialProtocol(request, response, url) {
         const auth = await desktop.readStore("LocalAgentModeSessions", "interactiveAuthStore");
         if (typeof auth?.principalDisplayName === "string") reported = auth.principalDisplayName.trim();
       } catch { /* fall back to the account name in the response */ }
-      const name = resolveGreetingName({ override: remoteUserName, reported, account: parsed.account });
+      // The operator's account name wins over the legacy user-name override, so
+      // the greeting, the sidebar name and the account document agree.
+      const name = resolveGreetingName({
+        override: accountIdentity.name || remoteUserName,
+        reported,
+        account: parsed.account,
+      });
       const injected = injectPersonalizedGreeting(parsed, name);
       if (injected !== parsed) {
         parsed = injected;
         rewrote = true;
+      }
+    }
+    // Web shell account identity (see accountIdentity): address the account the
+    // way the operator configured it on every document the chrome reads it from
+    // — the bootstrap's `account`, the Account object the /api/account(/_profile)
+    // routes return, and the organization document. Each helper returns the same
+    // reference when there is nothing to change.
+    if (webShellEnabled && accountIdentityConfigured(accountIdentity)) {
+      const identity = resolveAccountIdentity();
+      if (bootstrapResponsePath.test(url.pathname) && parsed.account) {
+        const account = applyAccountIdentity(parsed.account, identity);
+        if (account !== parsed.account) {
+          parsed = { ...parsed, account };
+          rewrote = true;
+        }
+      } else if (method === "GET" && accountResponsePath.test(url.pathname)) {
+        const account = applyAccountIdentity(parsed, identity);
+        if (account !== parsed) {
+          parsed = account;
+          rewrote = true;
+        }
+      } else if (method === "GET" && organizationResponsePath.test(url.pathname)) {
+        const organization = applyOrganizationIdentity(parsed, identity);
+        if (organization !== parsed) {
+          parsed = organization;
+          rewrote = true;
+        }
       }
     }
     // The web shell's Cowork surface is gated on org entitlements these
