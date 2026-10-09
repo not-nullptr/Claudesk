@@ -156,7 +156,10 @@ separation yet: the account is operator-defined via `CLAUDE_REMOTE_ACCOUNT_NAME`
 there is no real account, billing or usage upstream to show. The account carries
 two avatar fields — the uploaded photo (`avatar_image_url`, which the account
 menu renders) and a preset illustration index (`avatar`, 1..72); `…_AVATAR` sets
-the former, as a URL the browser can load (https, or a `data:` URI).
+the former, as a URL the browser can load (https, or a `data:` URI) **or** a path
+to an image inside the container. A path is served by the bridge at
+`/api/remote/account/avatar`, same-origin; that route returns only the one file
+resolved at startup, so it is not an arbitrary-file-read primitive.
 `resolveAccountIdentity()` is the seam a future auth layer fills with a
 per-session identity; the signed-in account, the sidebar name and the greeting
 all resolve the operator's account name first (`CLAUDE_REMOTE_ACCOUNT_NAME`, else

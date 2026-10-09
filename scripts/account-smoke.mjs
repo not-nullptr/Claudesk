@@ -32,6 +32,7 @@ function load(env = {}) {
       resolve: resolveAccountIdentity,
       applyAccount: applyAccountIdentity,
       applyOrg: applyOrganizationIdentity,
+      avatarIsUrl: avatarValueIsUrl,
     };`, sandbox);
   const r = sandbox.result;
   // Round-trip through this realm's JSON so strict deepEqual sees main-realm
@@ -46,6 +47,7 @@ function load(env = {}) {
     // Raw (unserialized) result for identity checks.
     applyAccountRaw: (account, identity) => r.applyAccount(account, identity),
     applyOrgRaw: (organization, identity) => r.applyOrg(organization, identity),
+    avatarIsUrl: (value) => r.avatarIsUrl(value),
   };
 }
 
@@ -171,6 +173,29 @@ const upstreamAccount = {
   assert.equal(configured.applyAccountRaw(null, configured.identity), null);
   assert.equal(configured.applyAccountRaw("nope", configured.identity), "nope");
   assert.equal(configured.applyOrgRaw(undefined, configured.identity), undefined);
+}
+
+// --- avatar value classification --------------------------------------------
+{
+  const bridge = load({});
+  for (const url of [
+    "https://example.com/a.png",
+    "http://example.com/a.png",
+    "data:image/png;base64,AAAA",
+    "blob:http://example.com/x",
+    "//cdn.example.com/a.png",
+  ]) {
+    assert.equal(bridge.avatarIsUrl(url), true, `${url} is served as a URL`);
+  }
+  for (const path of [
+    "/config/avatar.png",
+    "avatar.png",
+    "./img/me.jpg",
+    "/workspace/x.webp",
+    "C:\\img\\me.png",
+  ]) {
+    assert.equal(bridge.avatarIsUrl(path), false, `${path} is a local path`);
+  }
 }
 
 console.log("account-smoke: ok");

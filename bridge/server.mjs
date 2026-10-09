@@ -1,6 +1,6 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -104,6 +104,11 @@ function accountIdentityConfigured(identity) {
 function resolveAccountIdentity() {
   return accountIdentity;
 }
+// An avatar value is either a URL the browser loads directly, or a path to an
+// image on this container that the bridge serves itself (see accountAvatar).
+function avatarValueIsUrl(value) {
+  return /^(?:https?:|data:|blob:|\/\/)/i.test(value);
+}
 // Set a field only when a non-empty override is given and it differs, so an
 // unset value keeps the upstream's and a no-op returns the same reference.
 function assignIdentityText(target, key, value, max) {
@@ -156,6 +161,43 @@ function applyAccountIdentity(account, identity) {
   return changed ? next : account;
 }
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
+// The account avatar accepts a browser URL (http(s)/data:) or a path to an image
+// on this container. A path is served by the bridge itself, same-origin, at one
+// fixed route that returns only this configured file — the route takes no path
+// or query, so it is not an arbitrary-file-read primitive. A `?v=` of the file's
+// mtime busts caches when the file changes across a restart. An unusable path
+// (missing, not a file, unsupported image type, too large) logs and is dropped,
+// leaving the default illustration.
+const accountAvatarRoute = "/api/remote/account/avatar";
+const accountAvatarMaxBytes = 8 * 1024 * 1024;
+const accountAvatarImageTypes = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".avif": "image/avif",
+  ".svg": "image/svg+xml",
+};
+let accountAvatarFile = "";
+let accountAvatarType = "";
+if (accountIdentity.avatar && !avatarValueIsUrl(accountIdentity.avatar)) {
+  const candidate = resolve(accountIdentity.avatar);
+  const type = accountAvatarImageTypes[extname(candidate).toLowerCase()];
+  try {
+    const info = statSync(candidate);
+    if (!info.isFile()) throw new Error("not a regular file");
+    if (!type) throw new Error("unsupported image extension");
+    if (info.size > accountAvatarMaxBytes) throw new Error("larger than the 8 MiB cap");
+    accountAvatarFile = candidate;
+    accountAvatarType = type;
+    accountIdentity.avatar = `${accountAvatarRoute}?v=${Math.floor(info.mtimeMs)}`;
+    console.log(`[cowork-bridge] web-shell account avatar served from ${candidate}`);
+  } catch (error) {
+    console.warn(`[cowork-bridge] CLAUDE_REMOTE_ACCOUNT_AVATAR path unusable (${candidate}): ${error.message}`);
+    accountIdentity.avatar = "";
+  }
+}
 // Roots the remote download route may serve from. The workspace is always
 // allowed, because the web UI's own file browser reads from it; extra roots
 // come from COWORK_REMOTE_READ_ROOTS so an operator can opt into reading other
@@ -1863,6 +1905,34 @@ async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = fals
 }
 
 async function handleApi(request, response, url) {
+  // The web-shell account avatar, when CLAUDE_REMOTE_ACCOUNT_AVATAR is a local
+  // image path. Serves only the file resolved at startup; any `?v=` is ignored
+  // (it is only a cache-buster), so this is not a path the caller can steer.
+  if (request.method === "GET" && url.pathname === accountAvatarRoute) {
+    if (!accountAvatarFile) {
+      sendJson(response, 404, { ok: false, error: "no account avatar configured" });
+      return;
+    }
+    let image;
+    try {
+      image = readFileSync(accountAvatarFile);
+    } catch {
+      sendJson(response, 500, { ok: false, error: "account avatar unreadable" });
+      return;
+    }
+    response.writeHead(200, {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Length": image.length,
+      "Content-Type": accountAvatarType,
+      // An operator SVG is still an untrusted-active document if opened
+      // directly; neutralize scripts and keep it inline-only.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      "Content-Disposition": "inline",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(image);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/remote/folders") {
     const value = await listWorkspaceFolders(workspaceRoot, url.searchParams.get("path") || workspaceRoot);
     sendJson(response, 200, { ok: true, value });
