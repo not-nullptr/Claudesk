@@ -967,9 +967,6 @@ const protocolRules = [
   // shell) uses the claude.ai default /api prefix, so allow its bootstrap too.
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
-  // The web shell's claude.ai chrome reads its account from /api/account as
-  // well as its bootstrap; the outer bridge rewrites the identity it returns.
-  { methods: new Set(["GET"]), path: /^\/api\/account$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },

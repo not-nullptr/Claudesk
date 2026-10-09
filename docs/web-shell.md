@@ -132,10 +132,12 @@ The account menu and sidebar footer would otherwise read as a gateway config: a
 gateway deployment fills the Account document with a synthetic identity — the OS
 app user ("app" in this image) and an organization named "Gateway" — because a
 third-party gateway has no real Anthropic account behind it. The claude.ai chrome
-reads that identity from the bootstrap `account`, from `GET /api/account` and
-`/api/account_profile`, from the organization document at
-`/api/organizations/{uuid}`, and (for the footer's provider label) from
-`ManagedConfig.managedRendererConfigStore`, which the bridge otherwise blanks.
+reads that identity from the bootstrap `account`, from the profile document
+`GET /api/account_profile` (which is also what the account chip reads its photo
+from; Desktop serves no `GET /api/account` — that path is PUT-only), from the
+organization document at `/api/organizations/{uuid}`, and (for the footer's
+provider label) from `ManagedConfig.managedRendererConfigStore`, which the
+bridge otherwise blanks.
 
 With the web shell on and any account value set, the bridge overrides **just the
 identity fields** — name, email, avatar, organization, plan — on those documents

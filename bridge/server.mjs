@@ -738,9 +738,6 @@ const protocolRules = [
   // shell) uses the claude.ai default /api prefix, so allow its bootstrap too.
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
-  // The web shell's claude.ai chrome reads its account from /api/account as
-  // well as its bootstrap; the account identity rewrite below covers both.
-  { methods: new Set(["GET"]), path: /^\/api\/account$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
@@ -1215,9 +1212,12 @@ const currentUserAccessPath = /^\/api\/bootstrap\/[^/?#]+\/current_user_access$/
 // (`skip_approvals_enabled`).
 const coworkSettingsPath = /^\/api\/organizations\/[0-9a-f-]+\/cowork_settings$/i;
 // The account documents the web shell reads its identity from: the bootstrap
-// carries the account under `account`, while these two return the Account object
-// directly. Only rewritten in web-shell mode (see accountIdentity).
-const accountResponsePath = /^\/api\/(?:account|account_profile)$/i;
+// carries the account under `account`, while GET /api/account_profile returns
+// the profile document (display_name, full_name, email_address, avatar fields)
+// the account chip reads its photo from. Desktop serves no GET /api/account —
+// that path is PUT-only — so it is deliberately not matched here. Only rewritten
+// in web-shell mode (see accountIdentity).
+const accountResponsePath = /^\/api\/account_profile$/i;
 // The organization document whose `name`/`plan_display_name` the account menu
 // and org switcher show; same shape as the organization inside memberships.
 const organizationResponsePath = /^\/api\/organizations\/[0-9a-f-]+$/i;
@@ -1546,8 +1546,8 @@ async function forwardOfficialProtocol(request, response, url) {
     }
     // Web shell account identity (see accountIdentity): address the account the
     // way the operator configured it on every document the chrome reads it from
-    // — the bootstrap's `account`, the Account object the /api/account(/_profile)
-    // routes return, and the organization document. Each helper returns the same
+    // — the bootstrap's `account`, the profile document GET /api/account_profile
+    // returns, and the organization document. Each helper returns the same
     // reference when there is nothing to change.
     if (webShellEnabled && accountIdentityConfigured(accountIdentity)) {
       const identity = resolveAccountIdentity();
