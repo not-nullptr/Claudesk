@@ -54,7 +54,9 @@ Working with the flag on:
 - Chat and Cowork, with the real local sessions: the list, opening a session,
   the model selector and the account identity (opening needs the session-viewer
   patch below);
-- Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM;
+- Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM,
+  and its tool permissions (the question and approval cards) surface in the
+  browser via the permission-wiring patch below;
 - Code — the full local surface (usage dashboard, projects, sessions) with
   folder browsing, via the route-alias patch below;
 - the time-based home greeting ("Evening, {{ NAME }}") — the browser app
@@ -84,6 +86,31 @@ guard and rewrites the zero-argument user-agent call it is initialised from
 (`let x=…()` → `let x=!0`), so it survives minification and changes nothing the
 layout does not already do on a desktop-identified client. Like the route alias,
 it is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
+deployment prepares a byte-identical renderer.
+
+## Cowork tool permissions
+
+Cowork's question and tool-approval cards are fed by the app's pending-permission
+store, and the only thing that wires that store — the session event subscription
+plus the `getAll().pendingToolPermissions` hydration — is a hook called inside the
+Desktop app's root. The app tree mounts the Desktop-only side-effect hosts through
+one slot component that renders them only when the client identifies as the
+Desktop app and `null` otherwise; the web shell drops that identity on purpose, so
+the store was never wired there. The transcript still streamed ("Asking a
+question…"), but no card ever appeared and the session waited forever on its
+first ask — `Tool permission stream closed before response received` once the
+turn was stopped.
+
+The `web-cowork-permission-wiring` renderer patch calls that wiring hook from the
+slot itself, before the identity gate, so the store subscribes and hydrates in
+either shell. The hook is ref-counted and its requests are keyed by request id, so
+the Desktop root's own call — and the duplicate events it already receives — are
+unaffected. The slot is selected by its own `componentName:"DesktopChecks"` label
+and the hook's call is read back from the Desktop root's body (the first element
+of the comma sequence carrying the locale-change effect), so renamed minifier
+output still matches; a second slot, or one that no longer matches, refuses rather
+than splicing the call into the wrong component. Like the other chrome patches it
+is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
 deployment prepares a byte-identical renderer.
 
 ## Code routes

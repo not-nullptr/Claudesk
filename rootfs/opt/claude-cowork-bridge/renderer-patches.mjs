@@ -61,6 +61,26 @@ const sessionViewerReason = "not_desktop_app";
 // user-menu header uses), and the mark remains the no-photo fallback. Spliced
 // only in web-shell mode, like the other chrome patches.
 const accountChipPatchId = "web-account-chip-avatar";
+// Cowork tool permissions — the AskUserQuestion and tool-approval cards — are
+// fed by the app's pending-permission store, and the only thing that wires that
+// store (subscribes to the session event stream and hydrates from
+// `getAll().pendingToolPermissions`) is a hook called inside the Desktop app's
+// root. The app tree mounts the Desktop-only side-effect hosts — account sync,
+// the permission wiring, the Cowork ask pump — through one slot component that
+// renders them only when the client identifies as the Desktop app and null
+// otherwise. The web shell drops the Desktop user-agent token on purpose (to get
+// the browser chrome), so the store is never wired there: the transcript still
+// streams ("Asking a question…"), but no question or approval card ever appears
+// and the session waits forever. This patch calls the wiring hook from the slot
+// component itself — unconditionally, before the identity gate — so the store
+// subscribes and hydrates in either shell. The hook is ref-counted and its
+// requests are keyed by request id, so the Desktop root's own call (and the
+// duplicate events it already receives) are unaffected. The hook's call is read
+// back from the Desktop root's body as the first element of the comma sequence
+// that also carries the locale-change effect; both the hook and the API binding
+// are read back, so a renamed minifier output still matches. Spliced only in
+// web-shell mode.
+const coworkPermissionWiringPatchId = "web-cowork-permission-wiring";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -367,6 +387,42 @@ function filePreviewPatch(node, ancestors, source, array) {
     replacement: `(${condition}?[${iframe}]:[${original.slice(1, -1)}])` };
 }
 
+// The Desktop-only checks slot: the one component rendering a call whose props
+// carry the `componentName:"DesktopChecks"` label. That label is the bundle's own
+// copy and appears nowhere else, and only parsed props are inspected, so a string
+// or comment that merely spells it is not a target.
+function desktopChecksComponent(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
+  let found = false;
+  walk(node.body, [], (child) => {
+    if (found || child.type !== "CallExpression") return;
+    const props = child.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
+    if (props?.properties.some((entry) => key(entry, "componentName")
+      && literal(entry.value, "DesktopChecks"))) found = true;
+  });
+  return found ? node : undefined;
+}
+// The pending-permission store's wiring call (`wiring(api)`), read back from the
+// Desktop root's own body: the call is the first element of the comma sequence
+// that also carries the locale-change effect — a stable property name — so a
+// renamed hook or API binding is tolerated. A lone one-argument identifier call
+// is too common to pin anywhere else; any other sequence carrying the same
+// effect refuses the patch instead of guessing which call wires the store.
+function coworkWiringCall(ast) {
+  const calls = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "SequenceExpression" || !node.expressions.length) return;
+    if (!node.expressions.some((expression) => contains(expression,
+      (child) => property(child, "requestLocaleChange")))) return;
+    const first = unwrap(node.expressions[0]);
+    if (first?.type !== "CallExpression" || first.arguments.length !== 1) return;
+    const callee = identifier(first.callee);
+    const api = identifier(first.arguments[0]);
+    if (callee && api) calls.push({ callee, api });
+  });
+  return calls.length === 1 ? calls[0] : undefined;
+}
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
@@ -376,8 +432,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // patch below would never be attempted on the file it targets. The route-alias
   // chunk likewise carries none of them, so its own `when==="desktop"` rule is
   // listed too. The session layout carries its own `not_desktop_app` reason. The
-  // account chip's chunk is reached by the API field it reads (`avatar_image_url`).
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url/.test(source)) {
+  // account chip's chunk is reached by the API field it reads (`avatar_image_url`);
+  // the Desktop-checks slot by its own component label.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|DesktopChecks/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -417,6 +474,15 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         if (init) {
           patches.push({ id: sessionViewerPatchId, start: init.start, end: init.end,
             original: source.slice(init.start, init.end), replacement: "!0" });
+        }
+      }
+      const wiringHost = desktopChecksComponent(node);
+      if (wiringHost) {
+        const wiring = coworkWiringCall(ast);
+        if (wiring) {
+          patches.push({ id: coworkPermissionWiringPatchId,
+            start: wiringHost.body.start + 1, end: wiringHost.body.start + 1,
+            original: "", replacement: `${wiring.callee}(${wiring.api});` });
         }
       }
     }
@@ -477,7 +543,9 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
-    ...(webShellEnabled ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId] : []),
+    ...(webShellEnabled
+      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId, coworkPermissionWiringPatchId]
+      : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {

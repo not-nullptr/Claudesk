@@ -65,6 +65,25 @@ const accountChip = 'function accountHook(){let{account:e}=ctx();'
 // and no declaring initialiser, so it must not be a target.
 const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
   + 'if(!t.isDesktopApp)return n("not_desktop_app");return null;}';
+// The Desktop-checks slot: the app tree mounts the Desktop-only side-effect hosts
+// — account sync, the pending-permission store's wiring, the Cowork ask pump —
+// through one slot that renders them only when the client identifies as the
+// Desktop app, and null otherwise. The web shell drops that identity on purpose,
+// so the store is never wired there and a Cowork ask waits forever. In web-shell
+// mode the patcher calls the wiring hook from the slot itself, before the gate;
+// the hook's call is read back from the Desktop root's own body as the first
+// element of the comma sequence carrying the locale-change effect.
+const desktopRoot = 'function desktopRoot({children:e}){'
+  + 'const{track:ue}=tracker(),{models:P}=models("cowork");'
+  + 'wirePendingPermissions(api),warm(t,le,ue),'
+  + 'effect(()=>{window.electronIntl?.requestLocaleChange?.(e.locale)},[e]),'
+  + 'effect(()=>{let e=st(build);e&&report?.commitHash?.(e)},[]);'
+  + 'return frame({children:e});}';
+const desktopChecks = 'function desktopChecks(){return isDesktopApp()'
+  + '?wrap(Boundary,{componentName:"DesktopChecks",fallback:null,'
+  + 'children:[el(desktopRoot,{}),el(otherChecks,{})]}):null}';
+const desktopChecksDecoy = 'const label="DesktopChecks";'
+  + 'function notTheSlot(){return render(label);}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -79,7 +98,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -89,8 +108,8 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 8,
-    "the web shell adds the Code route alias, the session Desktop gate and the account-chip avatar");
+  assert.equal(webResult.patches.length, 9,
+    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar and the Cowork permission wiring");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
     "the account chip's avatar slot must be spliced exactly once");
@@ -252,4 +271,41 @@ const previewCompiled = await minify(previewInputs.get("preview-chunk.js"), {
 assert.ok(patchRendererSources(new Map([["new-preview.js", previewCompiled.code]]), false).patches
   .some(patch => patch.id === "native-file-preview-bridge"),
   "recompiled preview must retain the patch");
+// The Cowork permission wiring: the Desktop-checks slot is the only component
+// rendering the Desktop-only side-effect hosts, and the wiring hook's call is
+// read back from the Desktop root's own body (the first element of the comma
+// sequence carrying the locale-change effect), so a renamed hook or API binding
+// is tolerated. In web-shell mode the hook is called from the slot itself,
+// before the identity gate, so the pending-permission store subscribes in the
+// browser too; the Desktop root's own call is left untouched.
+const checksInputs = new Map([["checks-chunk.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}`]]);
+const checksOut = patchRendererSources(checksInputs, false, true).sources.get("checks-chunk.js");
+assert.ok(checksOut.includes("function desktopChecks(){wirePendingPermissions(api);return isDesktopApp()"),
+  "the slot must wire the pending-permission store before its identity gate");
+assert.ok(checksOut.includes("wirePendingPermissions(api),warm(t,le,ue),"),
+  "the Desktop root's own wiring call must be left alone");
+assert.ok(!patchRendererSources(checksInputs, false).sources.get("checks-chunk.js")
+  .includes("function desktopChecks(){wirePendingPermissions(api);"),
+  "the wiring stays off without the web shell");
+assert.throws(() => patchRendererSources(new Map([["no-checks.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}`]]), false, true),
+  /web-cowork-permission-wiring expected once, found 0/,
+  "the web shell must refuse a renderer without the Desktop-checks slot");
+assert.throws(() => patchRendererSources(new Map([["dup-checks.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n`
+    + desktopChecks.replaceAll("desktopChecks", "desktopChecksB").replaceAll("otherChecks", "otherChecksB")]]),
+  false, true), /web-cowork-permission-wiring expected once, found 2/,
+  "a second Desktop-checks slot must refuse rather than double-splice");
+assert.equal(inspectRenderer(desktopChecksDecoy, false, true).patches
+  .filter(patch => patch.id === "web-cowork-permission-wiring").length, 0,
+  "a string that merely spells the slot's label is not a target");
+const checksCompiled = await minify(`${desktopRoot}\n${desktopChecks}`, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(checksCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-cowork-permission-wiring").length, 1,
+  "a mangled Desktop root and slot must still be spliced");
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

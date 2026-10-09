@@ -103,6 +103,27 @@ second photo-less account-view component, or a chip that no longer matches,
 refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.
 
+Cowork tool permissions — the AskUserQuestion and tool-approval cards — are fed
+by the app's pending-permission store, and the only thing that wires that store
+(its subscription to the session event stream plus the
+`getAll().pendingToolPermissions` hydration) is a hook called inside the Desktop
+app's root. The app tree mounts the Desktop-only side-effect hosts (account sync,
+that wiring, the Cowork ask pump) through one slot component that renders them
+only when the client identifies as the Desktop app and `null` otherwise; the web
+shell drops that identity on purpose to get the browser chrome, so the store is
+never wired there — the transcript still streams ("Asking a question…") but no
+card ever appears and the session waits forever. The
+`web-cowork-permission-wiring` patch calls the wiring hook from the slot itself,
+unconditionally and before the identity gate, so the store subscribes in either
+shell; the hook is ref-counted and its requests are keyed by request id, so the
+Desktop root's own call is unaffected. The slot is selected by the
+`componentName:"DesktopChecks"` label its own call carries — a string or comment
+that merely spells it is not a target — and the hook's call is read back from the
+Desktop root's body as the first element of the comma sequence that also carries
+the locale-change effect, so a renamed hook or API binding is tolerated. A second
+slot, or one that no longer matches, refuses rather than splicing the call into
+the wrong component. Spliced only in web-shell mode.
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and
