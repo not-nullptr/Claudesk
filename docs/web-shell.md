@@ -152,6 +152,19 @@ upstream sent them, so Cowork, Code and the time-based greeting keep working. A
 default deployment, and the Desktop shell, never reach any of this — the whole
 path is gated on `webShellEnabled`.
 
+The sidebar's bottom-left chip reads its name and label from those documents,
+but its avatar slot is a second, independent gate: the shipped component behind
+it still reads the account profile and then renders the deployment mark,
+discarding the photo it just read — so a configured `…_AVATAR` produced no image
+request and the Claude mark stayed. The `web-account-chip-avatar` renderer patch
+makes that slot the account avatar when a photo is present (mark otherwise),
+reading the Avatar component, its factory and the chip's own size back from the
+same renderer graph; like the other chrome patches it is spliced only in
+web-shell mode. Because the prepared renderer is served under an immutable
+`/renderer/<version>/<patchRelease>/…` path, the patch ships with a
+`patchRelease` bump and needs the `claude-desktop` service rebuilt (the preparer
+runs from its init), not just the bridge.
+
 This is **identity only**. There is no login/logout session and no per-user
 separation yet: the account is operator-defined via `CLAUDE_REMOTE_ACCOUNT_NAME`,
 `…_EMAIL`, `…_ORG`, `…_PLAN`, `…_AVATAR` and `CLAUDE_REMOTE_DEPLOYMENT_NAME`, and

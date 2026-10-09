@@ -51,6 +51,16 @@ const routeAliasPatchId = "desktop-code-route-alias";
 // client. Spliced only in web-shell mode.
 const sessionViewerPatchId = "desktop-session-viewer-gate";
 const sessionViewerReason = "not_desktop_app";
+// The web shell's bottom-left account chip leads with an avatar slot, but in this
+// build that component still fetches the account profile and then renders the
+// deployment mark, discarding the photo it just read: with a configured
+// avatar_image_url the chip never sets an image source, so no request is made and
+// the Claude mark stays. This patch makes the slot an account avatar when a photo
+// is present — the account Avatar component and its element factory are read back
+// from the sibling component that builds the same avatar with `src` (the one the
+// user-menu header uses), and the mark remains the no-photo fallback. Spliced
+// only in web-shell mode, like the other chrome patches.
+const accountChipPatchId = "web-account-chip-avatar";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -144,6 +154,85 @@ function flagInitializer(scope, flag) {
     }
   }
   return undefined;
+}
+
+// The account view a component reads from the profile hook:
+// `let{name:i,photoUrl:a,illustration:o}=CB()`. Only a destructuring of a
+// zero-argument call establishes it — an object literal that merely carries a
+// photoUrl property (the hook itself) is not a binding.
+function accountViewBindings(scope) {
+  let bindings;
+  walk(scope.body ?? scope, [], (node) => {
+    if (bindings || node.type !== "VariableDeclarator" || node.id?.type !== "ObjectPattern") return;
+    if (node.init?.type !== "CallExpression" || node.init.arguments.length !== 0) return;
+    const entries = new Map();
+    for (const property of node.id.properties) {
+      if (property.type !== "Property" || property.value?.type !== "Identifier") continue;
+      const name = property.key.name ?? property.key.value;
+      if (typeof name === "string") entries.set(name, property.value.name);
+    }
+    if (!entries.has("photoUrl") || !entries.has("name")) return;
+    // The chip also takes its `size` prop (with a default); read it back so the
+    // avatar renders at the same size the mark did.
+    let size;
+    const params = scope.params?.[0];
+    if (params?.type === "ObjectPattern") {
+      const entry = params.properties.find((property) => property.type === "Property"
+        && key(property, "size"));
+      const value = entry?.value;
+      size = value?.type === "Identifier" ? value.name
+        : value?.type === "AssignmentPattern" ? identifier(value.left) : undefined;
+    }
+    bindings = { photo: entries.get("photoUrl"), name: entries.get("name"), size };
+  });
+  return bindings;
+}
+// The account Avatar component, read back from the sibling components that build
+// an avatar from the same account view with an explicit `src` (the user-menu
+// header's avatar). They pass it as the first argument of the element factory, so
+// this reads the argument, not the factory, and refuses on more than one name.
+function accountAvatarComponent(ast) {
+  const names = new Set();
+  walk(ast, [], (node) => {
+    if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return;
+    if (!accountViewBindings(node)) return;
+    const returned = node.body.body.find((statement) => statement.type === "ReturnStatement")?.argument;
+    if (returned?.type !== "CallExpression") return;
+    const props = returned.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
+    if (!props?.properties.some((entry) => key(entry, "src"))) return;
+    const name = identifier(returned.arguments[0]);
+    if (name) names.add(name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
+}
+// The chip's avatar slot: a component taking `{size, organization}` that reads the
+// account view and then renders a call whose props carry no `src` — the one shape
+// that reads the photo and drops it.
+function accountChipTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
+  const params = node.params?.[0];
+  if (params?.type !== "ObjectPattern") return undefined;
+  const paramKeys = params.properties.filter((property) => property.type === "Property")
+    .map((property) => property.key.name ?? property.key.value);
+  if (!paramKeys.includes("size") || !paramKeys.includes("organization")) return undefined;
+  const bindings = accountViewBindings(node);
+  if (!bindings) return undefined;
+  const returned = node.body.body.find((statement) => statement.type === "ReturnStatement")?.argument;
+  if (returned?.type !== "CallExpression") return undefined;
+  const props = returned.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
+  if (!props) return undefined;
+  if (props.properties.some((entry) => key(entry, "src"))) return undefined;
+  if (!props.properties.some((entry) => key(entry, "size"))) return undefined;
+  return { call: returned, bindings };
+}
+function accountChipPatch({ call, bindings }, source, avatar) {
+  const factory = identifier(call.callee);
+  if (!factory || !avatar || !bindings.photo || !bindings.name) return undefined;
+  const size = bindings.size ? `,size:${bindings.size}` : "";
+  const original = source.slice(call.start, call.end);
+  return { original,
+    replacement: `(${bindings.photo}?${factory}(${avatar},{name:${bindings.name}`
+      + `,src:${bindings.photo}${size},className:"shrink-0"}):${original})` };
 }
 
 // The provider card is the sole component passed to a wrapper call whose body
@@ -287,13 +376,15 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // component's own chunk matches none of the other tokens, so without it the
   // patch below would never be attempted on the file it targets. The route-alias
   // chunk likewise carries none of them, so its own `when==="desktop"` rule is
-  // listed too. The session layout carries its own `not_desktop_app` reason.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app/.test(source)) {
+  // listed too. The session layout carries its own `not_desktop_app` reason. The
+  // account chip's chunk is reached by the API field it reads (`avatar_image_url`).
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const redirectScopes = new Map();
   let button;
+  let avatarComponent;
   walk(ast, [], (node, ancestors) => {
     if (filePaneDownloadTarget(node, ancestors)) {
       button ??= ghostIconButton(ast);
@@ -305,6 +396,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
     }
     if (webShellEnabled) {
+      const chip = accountChipTarget(node);
+      if (chip) {
+        avatarComponent ??= accountAvatarComponent(ast);
+        const patch = accountChipPatch(chip, source, avatarComponent);
+        if (patch) patches.push({ id: accountChipPatchId, start: chip.call.start, end: chip.call.end, ...patch });
+      }
       const routeFlag = desktopRouteFlagName(node);
       if (routeFlag) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
@@ -381,7 +478,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
-    ...(webShellEnabled ? [routeAliasPatchId, sessionViewerPatchId] : []),
+    ...(webShellEnabled ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId] : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {

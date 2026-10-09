@@ -78,6 +78,24 @@ the component is otherwise restructured, candidate preparation fails and the
 selector must be updated before the new Desktop is promoted, rather than the card
 returning silently.
 
+The sidebar's account chip — the bottom-left identity row — leads with an avatar
+slot, but in this build the component behind that slot (`{size, organization}`)
+still reads the account profile and then renders the deployment mark, discarding
+the `photoUrl` it just read: with a configured `avatar_image_url` the chip never
+sets an image source, no request is made and the Claude mark stays. The
+`web-account-chip-avatar` patch makes that slot an account avatar when a photo is
+present and keeps the mark otherwise. It is selected structurally: a component
+taking `{size, organization}` that destructures the account view
+(`{name, photoUrl, …}` from a zero-argument hook call — an object literal that
+merely carries a `photoUrl` property is not a binding) and returns a call whose
+props carry no `src`. The account Avatar component and its element factory are
+read back from the sibling components that build an avatar with an explicit
+`src` (the user-menu header's avatar); the chip's own `size` is read back from its
+parameter destructuring, so the avatar renders at the same size the mark did. A
+second photo-less account-view component, or a chip that no longer matches,
+refuses rather than splicing the avatar into the wrong slot. Spliced only in
+web-shell mode.
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and

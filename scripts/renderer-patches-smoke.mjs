@@ -49,6 +49,18 @@ const sessionLayout = 'function SessionLayout({children:e}){'
   + 'let isDesktopApp=desktopFromUserAgent(),pinned=useStore(x=>x.pinned);'
   + 'return useMemo(()=>{if(!(remote||hub)){if(!isDesktopApp){report("not_desktop_app");return}'
   + 'local||ready||report("cowork_gate_off")}},[]);}';
+// The account chip: reads the account view — its photoUrl binding — and then
+// returns the deployment mark, the one shape that fetches the photo and drops
+// it. The account Avatar component is read back from the sibling that builds an
+// avatar with an explicit src, so a renamed component or a different factory is
+// tolerated. The hook's own object literal carries a photoUrl *property* and
+// must not be mistaken for the binding.
+const accountChip = 'function accountHook(){let{account:e}=ctx();'
+  + 'return{name:e?.full_name||"",photoUrl:profile()?.avatar_image_url||void 0,illustration:profile()?.avatar||void 0}};'
+  + 'function accountAvatar(){let{name:e,photoUrl:t,illustration:n}=accountHook();'
+  + 'return k(Av,{name:e,src:t??illu(n),size:"sm"})}'
+  + 'function chipMark({size:e="sm",organization:t}){let{activeOrganization:n}=ctx(),r=e==="md",'
+  + '{name:i,photoUrl:a,illustration:o}=accountHook();return k(Mark,{size:r?20:16,className:"shrink-0"})}';
 // The Desktop signing gate spells the same reason with a member-expression test
 // and no declaring initialiser, so it must not be a target.
 const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
@@ -67,7 +79,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -77,8 +89,16 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 7, "the web shell adds the Code route alias and the session Desktop gate");
+  assert.equal(webResult.patches.length, 8,
+    "the web shell adds the Code route alias, the session Desktop gate and the account-chip avatar");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
+  assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
+    "the account chip's avatar slot must be spliced exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('(a?k(Av,{name:i,src:a,size:e,className:"shrink-0"}):k(Mark,{size:r?20:16,className:"shrink-0"})'),
+    "the chip must show the account avatar when a photo exists and keep the mark otherwise");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('photoUrl:profile()?.avatar_image_url'),
+    "the hook's photoUrl property must not be mistaken for a binding");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
     "the alias resolver must take the desktop branch under the web shell");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
@@ -137,6 +157,29 @@ assert.throws(() => patchRendererSources(new Map([["no-session-gate.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`]]), false, true),
   /desktop-session-viewer-gate expected once, found 0/,
   "the web shell must refuse a renderer without the session Desktop gate");
+// ...and the account chip's avatar: a renderer whose chip still renders the
+// photo-less mark must be refused rather than ship a shell where a configured
+// pfp never renders (the chip never sets a source, so no image is requested).
+assert.throws(() => patchRendererSources(new Map([["no-chip.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`]]), false, true),
+  /web-account-chip-avatar expected once, found 0/,
+  "the web shell must refuse a renderer without the account-chip avatar");
+// Two chips (or a second photo-less account-view component) must refuse rather
+// than splice the avatar into the wrong slot.
+const accountChipB = accountChip.replaceAll("chipMark", "chipMarkB")
+  .replaceAll("accountHook", "accountHookB").replaceAll("accountAvatar", "accountAvatarB");
+assert.throws(() => patchRendererSources(new Map([["dup-chip.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${accountChipB}`]]), false, true),
+  /web-account-chip-avatar expected once, found 2/);
+// The avatar component and the photo binding are structural read-backs, so the
+// patch survives minification, not just renaming by hand.
+const chipCompiled = await minify(accountChip, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-account-chip-avatar").length, 1,
+  "a mangled account chip must still be spliced once");
 // A guard that merely mentions the reason (with a member-expression test) is not
 // a target, so the signing gate must not be mistaken for the session layout.
 assert.equal(inspectRenderer(signingDecoy, false, true).patches
