@@ -47,6 +47,11 @@ services:
       CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:?Set CLAUDE_GATEWAY_API_KEY in .env}"
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+      # Model Auto permission mode's safety classifier falls back to on this
+      # gateway (exported as ANTHROPIC_DEFAULT_OPUS_MODEL by startapp.sh). A
+      # model the gateway serves; empty keeps the built-in resolution. See
+      # .env.example.
+      CLAUDE_AUTO_MODE_MODEL: "${CLAUDE_AUTO_MODE_MODEL:-}"
     volumes:
       - /vol2/1000/Docker/ClaudeDesktop/config:/config
       - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
