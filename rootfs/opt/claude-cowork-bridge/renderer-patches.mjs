@@ -172,18 +172,7 @@ function accountViewBindings(scope) {
       if (typeof name === "string") entries.set(name, property.value.name);
     }
     if (!entries.has("photoUrl") || !entries.has("name")) return;
-    // The chip also takes its `size` prop (with a default); read it back so the
-    // avatar renders at the same size the mark did.
-    let size;
-    const params = scope.params?.[0];
-    if (params?.type === "ObjectPattern") {
-      const entry = params.properties.find((property) => property.type === "Property"
-        && key(property, "size"));
-      const value = entry?.value;
-      size = value?.type === "Identifier" ? value.name
-        : value?.type === "AssignmentPattern" ? identifier(value.left) : undefined;
-    }
-    bindings = { photo: entries.get("photoUrl"), name: entries.get("name"), size };
+    bindings = { photo: entries.get("photoUrl"), name: entries.get("name") };
   });
   return bindings;
 }
@@ -222,17 +211,23 @@ function accountChipTarget(node) {
   const props = returned.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
   if (!props) return undefined;
   if (props.properties.some((entry) => key(entry, "src"))) return undefined;
-  if (!props.properties.some((entry) => key(entry, "size"))) return undefined;
-  return { call: returned, bindings };
+  const size = props.properties.find((entry) => key(entry, "size"));
+  if (!size) return undefined;
+  return { call: returned, bindings, sizeValue: size.value };
 }
-function accountChipPatch({ call, bindings }, source, avatar) {
+// The mark is drawn at an explicit pixel size (`size:r?20:16`); the Avatar reads
+// its `size` as a design token of its own scale, so passing the token made the
+// photo larger than the slot the row reserves and ate the row's padding. Pin the
+// avatar to the mark's own size expression instead, read back from this call.
+function accountChipPatch({ call, bindings, sizeValue }, source, avatar) {
   const factory = identifier(call.callee);
   if (!factory || !avatar || !bindings.photo || !bindings.name) return undefined;
-  const size = bindings.size ? `,size:${bindings.size}` : "";
+  const pixels = `(${source.slice(sizeValue.start, sizeValue.end)})+"px"`;
   const original = source.slice(call.start, call.end);
   return { original,
     replacement: `(${bindings.photo}?${factory}(${avatar},{name:${bindings.name}`
-      + `,src:${bindings.photo}${size},className:"shrink-0"}):${original})` };
+      + `,src:${bindings.photo},className:"shrink-0"`
+      + `,style:{width:${pixels},height:${pixels}}}):${original})` };
 }
 
 // The provider card is the sole component passed to a wrapper call whose body

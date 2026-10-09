@@ -90,8 +90,11 @@ taking `{size, organization}` that destructures the account view
 merely carries a `photoUrl` property is not a binding) and returns a call whose
 props carry no `src`. The account Avatar component and its element factory are
 read back from the sibling components that build an avatar with an explicit
-`src` (the user-menu header's avatar); the chip's own `size` is read back from its
-parameter destructuring, so the avatar renders at the same size the mark did. A
+`src` (the user-menu header's avatar). The mark is drawn at an explicit pixel size
+(`size:r?20:16`) while the Avatar reads its `size` as a design token of a different
+scale, so the mark's own size expression is read back from the call being replaced
+and the avatar is pinned to it with an inline style — otherwise the photo renders
+larger than the slot the row reserves and eats its padding. A
 second photo-less account-view component, or a chip that no longer matches,
 refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.

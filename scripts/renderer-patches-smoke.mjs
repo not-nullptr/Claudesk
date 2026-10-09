@@ -95,8 +95,9 @@ for (const [i, variant] of variants.entries()) {
   assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
     "the account chip's avatar slot must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes('(a?k(Av,{name:i,src:a,size:e,className:"shrink-0"}):k(Mark,{size:r?20:16,className:"shrink-0"})'),
-    "the chip must show the account avatar when a photo exists and keep the mark otherwise");
+    .includes('(a?k(Av,{name:i,src:a,className:"shrink-0",style:{width:(r?20:16)+"px",height:(r?20:16)+"px"}})'
+      + ':k(Mark,{size:r?20:16,className:"shrink-0"})'),
+    "the chip must show the account avatar at the mark's own pixel size, and keep the mark otherwise");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('photoUrl:profile()?.avatar_image_url'),
     "the hook's photoUrl property must not be mistaken for a binding");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
