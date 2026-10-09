@@ -99,6 +99,16 @@ second photo-less account-view component, or a chip that no longer matches,
 refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.
 
+The chip's caller — a different chunk — is nudged in the same mode
+(`web-account-chip-avatar-gap`): its leading slot reserves a 24-28px box for the
+16-20px mark, so with a photo the label would sit behind the slot's slack. The
+caller's slot span is pinned by the one className it renders (`df-on-rail`),
+with the chip component (a single `size` prop, no `organization`) as its first
+child; the account binding for the conditional is read back from that
+component's own context destructuring, and the label is pulled in
+`marginRight:-2` only when the account carries an `avatar_image_url`. The mark
+branch is untouched, and a caller whose slot is not that span is refused.
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and

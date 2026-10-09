@@ -161,8 +161,11 @@ makes that slot the account avatar when a photo is present (mark otherwise),
 reading the Avatar component, its factory and the mark's own pixel size back from
 the same renderer graph — the Avatar's `size` is a design token of a different
 scale, so the photo is pinned to the mark's exact size instead of the token, or
-it overflows the slot the row reserves and eats the chip's padding. Like the
-other chrome patches it is spliced only in web-shell mode. Because the prepared renderer is served under an immutable
+it overflows the slot the row reserves and eats the chip's padding. The caller's
+leading slot is nudged in the same mode (`web-account-chip-avatar-gap`): the
+label is pulled 2px in with the avatar, because the slot reserves a 24-28px box
+for the 16-20px mark. Like the other chrome patches both are spliced only in
+web-shell mode. Because the prepared renderer is served under an immutable
 `/renderer/<version>/<patchRelease>/…` path, the patch ships with a
 `patchRelease` bump and needs the `claude-desktop` service rebuilt (the preparer
 runs from its init), not just the bridge.
