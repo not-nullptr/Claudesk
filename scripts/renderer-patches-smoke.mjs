@@ -50,27 +50,17 @@ const sessionLayout = 'function SessionLayout({children:e}){'
   + 'return useMemo(()=>{if(!(remote||hub)){if(!isDesktopApp){report("not_desktop_app");return}'
   + 'local||ready||report("cowork_gate_off")}},[]);}';
 // The account chip: reads the account view — its photoUrl binding — and then
-// returns the deployment mark inside the leading slot, the one shape that
-// fetches the photo and drops it. The account Avatar component is read back from
-// the sibling that builds an avatar with an explicit src, so a renamed component
-// or a different factory is tolerated. The hook's own object literal carries a
-// photoUrl *property* and must not be mistaken for the binding. The mark's slot
-// span is read back too, so the label can be pulled in with the avatar.
+// returns the deployment mark, the one shape that fetches the photo and drops
+// it. The account Avatar component is read back from the sibling that builds an
+// avatar with an explicit src, so a renamed component or a different factory is
+// tolerated. The hook's own object literal carries a photoUrl *property* and
+// must not be mistaken for the binding.
 const accountChip = 'function accountHook(){let{account:e}=ctx();'
   + 'return{name:e?.full_name||"",photoUrl:profile()?.avatar_image_url||void 0,illustration:profile()?.avatar||void 0}};'
   + 'function accountAvatar(){let{name:e,photoUrl:t,illustration:n}=accountHook();'
   + 'return k(Av,{name:e,src:t??illu(n),size:"sm"})}'
   + 'function chipMark({size:e="sm",organization:t}){let{activeOrganization:n}=ctx(),r=e==="md",'
   + '{name:i,photoUrl:a,illustration:o}=accountHook();return k(Mark,{size:r?20:16,className:"shrink-0"})}';
-// The chip's caller: the leading slot reserves the mark's box, holds the chip
-// component and is followed by the label. It lives in its own chunk and reads
-// the account binding from its own context destructuring.
-const accountChipCaller = 'function ChipButton({portal:e}){'
-  + 'let{account:t,activeOrganization:n}=ctx(),r=density()==="comfortable"?"md":"sm";'
-  + 'return k("button",{"data-testid":"user-menu-button",children:['
-  + 'k("span",{className:"df-on-rail relative flex w-[var(--df-leading-slot)] shrink-0 items-center justify-center",'
-  + 'children:[k(Chip,{size:r}),n?k("span",{className:"chip-badge",children:n}):null]}),'
-  + 'k("span",{className:"df-footer-suffix items-baseline",children:t?.full_name})]});}';
 // The Desktop signing gate spells the same reason with a member-expression test
 // and no declaring initialiser, so it must not be a target.
 const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
@@ -88,11 +78,8 @@ for (const [i, variant] of variants.entries()) {
   const signin = `function signin(){const code=user.pendingUserCode;const ${gate}=${flag}&&(${variant.comparison});router.replace('/new');return ${gate};}`;
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
-  const inputs = new Map([
-    [`changed-chunk-${i}.js`,
-      `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${signingDecoy}\n${decoy}`],
-    [`chip-caller-${i}.js`, accountChipCaller],
-  ]);
+  const inputs = new Map([[`changed-chunk-${i}.js`,
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -102,8 +89,8 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 9,
-    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar and its label nudge");
+  assert.equal(webResult.patches.length, 8,
+    "the web shell adds the Code route alias, the session Desktop gate and the account-chip avatar");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
     "the account chip's avatar slot must be spliced exactly once");
@@ -111,11 +98,6 @@ for (const [i, variant] of variants.entries()) {
     .includes('(a?k(Av,{name:i,src:a,className:"shrink-0",style:{width:(r?20:16)+"px",height:(r?20:16)+"px"}})'
       + ':k(Mark,{size:r?20:16,className:"shrink-0"})'),
     "the chip must show the account avatar at the mark's own pixel size, and keep the mark otherwise");
-  assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar-gap").length, 1,
-    "the label must be pulled in exactly once, and only with the avatar");
-  assert.ok(webResult.sources.get(`chip-caller-${i}.js`)
-    .includes('k("span",{style:t?.avatar_image_url?{marginRight:-2}:void 0,className:"df-on-rail'),
-    "the slot must pull the label in only when the photo renders");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('photoUrl:profile()?.avatar_image_url'),
     "the hook's photoUrl property must not be mistaken for a binding");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
@@ -191,14 +173,6 @@ assert.throws(() => patchRendererSources(new Map([["dup-chip.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
     + `\n${accountChip}\n${accountChipB}`]]), false, true),
   /web-account-chip-avatar expected once, found 2/);
-// The label nudge rides on the caller's slot markup: a caller whose slot is not
-// a span must refuse rather than shift the label in a slot the read-back cannot
-// vouch for.
-assert.throws(() => patchRendererSources(new Map([
-  ["chip.js", `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}`],
-  ["odd-slot.js", accountChipCaller.replace('k("span",{className:"df-on-rail', 'k("div",{className:"df-on-rail')],
-]), false, true),
-  /web-account-chip-avatar-gap expected once, found 0/);
 // The avatar component and the photo binding are structural read-backs, so the
 // patch survives minification, not just renaming by hand.
 const chipCompiled = await minify(accountChip, {
@@ -207,12 +181,6 @@ const chipCompiled = await minify(accountChip, {
 assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-account-chip-avatar").length, 1,
   "a mangled account chip must still be spliced once");
-const callerCompiled = await minify(accountChipCaller, {
-  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
-});
-assert.equal(inspectRenderer(callerCompiled.code, false, true).patches
-  .filter(patch => patch.id === "web-account-chip-avatar-gap").length, 1,
-  "a mangled chip caller must still be nudged once");
 // A guard that merely mentions the reason (with a member-expression test) is not
 // a target, so the signing gate must not be mistaken for the session layout.
 assert.equal(inspectRenderer(signingDecoy, false, true).patches

@@ -61,14 +61,6 @@ const sessionViewerReason = "not_desktop_app";
 // user-menu header uses), and the mark remains the no-photo fallback. Spliced
 // only in web-shell mode, like the other chrome patches.
 const accountChipPatchId = "web-account-chip-avatar";
-// The chip's leading slot reserves 24-28px for a mark drawn at 16-20px, so an
-// account avatar leaves the slot's slack between itself and the label. With the
-// avatar spliced in, pull the label in by the operator-tuned offset below; the
-// mark branch keeps upstream's spacing untouched. Spliced with the chip above
-// and required with it, so a restructured slot refuses rather than mis-shifting
-// every row.
-const accountChipGapPatchId = "web-account-chip-avatar-gap";
-const accountChipGapPx = 2;
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -222,45 +214,6 @@ function accountChipTarget(node) {
   const size = props.properties.find((entry) => key(entry, "size"));
   if (!size) return undefined;
   return { call: returned, bindings, sizeValue: size.value };
-}
-// The caller's leading slot: the span that reserves `--df-leading-slot` and holds
-// the chip component (a call with a single `size` prop, no `organization`) as its
-// first child. It lives in a different chunk than the chip component itself, so
-// it is anchored by its own className and reads the caller's account binding for
-// the conditional. A slot that is not a span, whose child is not the chip, or
-// that already carries a style is refused.
-function accountChipSlotTarget(node, ancestors) {
-  if (node.type !== "CallExpression" || !literal(node.arguments[0], "span")) return undefined;
-  const props = node.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
-  if (!props) return undefined;
-  const className = props.properties.find((entry) => key(entry, "className"));
-  if (className?.value?.type !== "Literal" || typeof className.value.value !== "string") return undefined;
-  if (!className.value.value.includes("df-on-rail")) return undefined;
-  if (props.properties.some((entry) => key(entry, "style"))) return undefined;
-  const children = props.properties.find((entry) => key(entry, "children"));
-  if (children?.value?.type !== "ArrayExpression") return undefined;
-  const chip = children.value.elements[0];
-  if (chip?.type !== "CallExpression") return undefined;
-  const chipProps = chip.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
-  if (!chipProps) return undefined;
-  if (!chipProps.properties.some((entry) => key(entry, "size"))) return undefined;
-  if (chipProps.properties.some((entry) => key(entry, "organization"))) return undefined;
-  const scope = [...ancestors].reverse().find((parent) => functionTypes.has(parent.type));
-  const account = scope ? accountBindingName(scope) : undefined;
-  if (!account) return undefined;
-  return { props, account };
-}
-// The variable a component destructures the account out of its context
-// (`let{account:t,activeOrganization:n}=…`), read back rather than assumed.
-function accountBindingName(scope) {
-  let name;
-  walk(scope.body, [], (node) => {
-    if (name || node.type !== "VariableDeclarator" || node.id?.type !== "ObjectPattern") return;
-    const entry = node.id.properties.find((property) => property.type === "Property"
-      && key(property, "account") && property.value?.type === "Identifier");
-    if (entry) name = entry.value.name;
-  });
-  return name;
 }
 // The mark is drawn at an explicit pixel size (`size:r?20:16`); the Avatar reads
 // its `size` as a design token of its own scale, so passing the token made the
@@ -419,9 +372,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // patch below would never be attempted on the file it targets. The route-alias
   // chunk likewise carries none of them, so its own `when==="desktop"` rule is
   // listed too. The session layout carries its own `not_desktop_app` reason. The
-  // account chip's chunk is reached by the API field it reads (`avatar_image_url`)
-  // and its caller's chunk by the slot class it renders (`df-on-rail`).
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|df-on-rail/.test(source)) {
+  // account chip's chunk is reached by the API field it reads (`avatar_image_url`).
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -444,13 +396,6 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         avatarComponent ??= accountAvatarComponent(ast);
         const patch = accountChipPatch(chip, source, avatarComponent);
         if (patch) patches.push({ id: accountChipPatchId, start: chip.call.start, end: chip.call.end, ...patch });
-      }
-      const slot = accountChipSlotTarget(node, ancestors);
-      if (slot) {
-        // The chip renders the avatar; pull the label in only when it does, keyed
-        // off the same account document the caller already reads.
-        patches.push({ id: accountChipGapPatchId, start: slot.props.start + 1, end: slot.props.start + 1,
-          original: "", replacement: `style:${slot.account}?.avatar_image_url?{marginRight:-${accountChipGapPx}}:void 0,` });
       }
       const routeFlag = desktopRouteFlagName(node);
       if (routeFlag) {
@@ -528,8 +473,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
-    ...(webShellEnabled
-      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId, accountChipGapPatchId] : []),
+    ...(webShellEnabled ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId] : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
