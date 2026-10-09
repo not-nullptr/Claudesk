@@ -1367,7 +1367,9 @@ async function forwardOfficialProtocol(request, response, url) {
   });
   let responseBody = Buffer.from(result.bodyBase64 || "", "base64");
   if ((result.contentType || "").includes("application/json")) {
-    const parsed = JSON.parse(responseBody.toString("utf8"));
+    // `let`: the greeting is injected by returning a new document (unlike the
+    // mutating grant* helpers below), so the rewrite must capture the return.
+    let parsed = JSON.parse(responseBody.toString("utf8"));
     let rewrote = false;
     if (bootstrapResponsePath.test(url.pathname)) {
       // Address the user the way the rest of the app does: the sidebar identity
@@ -1380,7 +1382,11 @@ async function forwardOfficialProtocol(request, response, url) {
         if (typeof auth?.principalDisplayName === "string") reported = auth.principalDisplayName.trim();
       } catch { /* fall back to the account name in the response */ }
       const name = resolveGreetingName({ override: remoteUserName, reported, account: parsed.account });
-      if (injectPersonalizedGreeting(parsed, name) !== parsed) rewrote = true;
+      const injected = injectPersonalizedGreeting(parsed, name);
+      if (injected !== parsed) {
+        parsed = injected;
+        rewrote = true;
+      }
     }
     // The web shell's Cowork surface is gated on org entitlements these
     // documents carry; grant them only in that mode (see webShellEnabled).

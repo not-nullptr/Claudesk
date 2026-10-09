@@ -175,7 +175,21 @@ assert.ok(
 );
 assert.ok(!bare.bootstrapPath.test("/api/bootstrap/device"), "greeting path does not match /device");
 
-// 8. The user-menu identity: Desktop reports the OS app user, the name override
+// 8. The caller must capture the document injectPersonalizedGreeting returns.
+//    It builds a new object (unlike the in-place grant* helpers), so the old
+//    shape — `if (injectPersonalizedGreeting(parsed, name) !== parsed) rewrote`
+//    — set the rewrite flag but still serialized the original, dropping the
+//    greeting on every response (Web shell regression, fixed here).
+assert.ok(
+  serverSource.includes("parsed = injected"),
+  "forwardOfficialProtocol must apply the returned greeting document",
+);
+assert.ok(
+  !/injectPersonalizedGreeting\(parsed, name\) !== parsed\)\s*rewrote/.test(serverSource),
+  "the greeting document must not be discarded after it is built",
+);
+
+// 9. The user-menu identity: Desktop reports the OS app user, the name override
 //    wins when set, and an unset name keeps what Desktop reported.
 assert.deepEqual(bare.storePlain({ principalDisplayName: "app" }), { principalDisplayName: "app" });
 assert.deepEqual(named.storePlain({ principalDisplayName: "app" }), { principalDisplayName: "Ada" });
