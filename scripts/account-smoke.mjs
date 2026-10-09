@@ -127,6 +127,14 @@ const upstreamAccount = {
   assert.equal(account.display_name, "app", "name is left alone when only org/plan are set");
 }
 {
+  // A pfp is the photo field (`avatar_image_url`), not the preset `avatar`
+  // illustration index the client maps to a built-in SVG.
+  const configured = load({ CLAUDE_REMOTE_ACCOUNT_AVATAR: "https://example.com/a.png" });
+  const account = configured.applyAccount(upstreamAccount, configured.identity);
+  assert.equal(account.avatar_image_url, "https://example.com/a.png");
+  assert.equal(account.avatar, undefined, "the preset illustration index is not written");
+}
+{
   // Nothing to change: an unconfigured identity returns the same reference.
   const bare = load({});
   assert.equal(bare.applyAccountRaw(upstreamAccount, bare.identity), upstreamAccount,

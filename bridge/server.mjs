@@ -134,7 +134,11 @@ function applyAccountIdentity(account, identity) {
   changed = assignIdentityText(next, "display_name", identity.name, 80) || changed;
   changed = assignIdentityText(next, "full_name", identity.name, 80) || changed;
   changed = assignIdentityText(next, "email_address", identity.email, 200) || changed;
-  changed = assignIdentityText(next, "avatar", identity.avatar, 500) || changed;
+  // The profile photo. The account document carries two avatar fields: `avatar`
+  // is a preset illustration index (1..72, mapped client-side to a built-in
+  // SVG), while `avatar_image_url` is the uploaded photo the account menu
+  // renders; a pfp is the latter.
+  changed = assignIdentityText(next, "avatar_image_url", identity.avatar, 500) || changed;
   const memberships = next.memberships;
   if ((identity.organization || identity.plan) && Array.isArray(memberships)) {
     const index = memberships.findIndex((entry) => entry?.organization

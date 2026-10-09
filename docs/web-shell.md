@@ -153,7 +153,10 @@ path is gated on `webShellEnabled`.
 This is **identity only**. There is no login/logout session and no per-user
 separation yet: the account is operator-defined via `CLAUDE_REMOTE_ACCOUNT_NAME`,
 `…_EMAIL`, `…_ORG`, `…_PLAN`, `…_AVATAR` and `CLAUDE_REMOTE_DEPLOYMENT_NAME`, and
-there is no real account, billing or usage upstream to show.
+there is no real account, billing or usage upstream to show. The account carries
+two avatar fields — the uploaded photo (`avatar_image_url`, which the account
+menu renders) and a preset illustration index (`avatar`, 1..72); `…_AVATAR` sets
+the former, as a URL the browser can load (https, or a `data:` URI).
 `resolveAccountIdentity()` is the seam a future auth layer fills with a
 per-session identity; the signed-in account, the sidebar name and the greeting
 all resolve the operator's account name first (`CLAUDE_REMOTE_ACCOUNT_NAME`, else
