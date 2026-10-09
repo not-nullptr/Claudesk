@@ -11,6 +11,7 @@ import {
   sessionFileReadLimit,
 } from "./downloads.mjs";
 import { createPreviewHandler } from "./preview.mjs";
+import { shimOfficialIndex } from "./official-index.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
@@ -2124,11 +2125,14 @@ async function serveOfficialIndex(response) {
     ),
     transport: "official-ion-dist-remote-ipc",
   };
+  // Built once and reused: the exact bytes must survive the splice (see
+  // shimOfficialIndex), so the injection and the post-splice check share it.
+  const bootstrapJson = htmlSafeJson(config);
   const bootstrapInjection = [
     `<link rel="manifest" href="/manifest.webmanifest?v=${release.patchRelease}">`,
     `<link rel="preload" href="/fonts/AnthropicSerif-Text-Regular-CJK.otf?v=${release.patchRelease}" as="font" type="font/otf" crossorigin>`,
     '<meta name="theme-color" content="#f7f6f2">',
-    `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${htmlSafeJson(config)}</script>`,
+    `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${bootstrapJson}</script>`,
     `<script src="/remote-main-menu.js?v=${release.patchRelease}"></script>`,
     `<script src="/remote-preload.js?v=${release.patchRelease}"></script>`,
     `<script src="/remote-folder-picker.js?v=${release.patchRelease}"></script>`,
@@ -2141,22 +2145,15 @@ async function serveOfficialIndex(response) {
     `<link rel="stylesheet" href="/remote-main-menu.css?v=${release.patchRelease}">`,
   ].join("");
   let html = await upstream.text();
-  html = html
-    .replace('<link rel="manifest" href="/manifest.json">', "")
-    .replace('<script type="module"', `${bootstrapInjection}<script type="module"`)
-    .replace(
-      /\b(href|src)="\/(assets|images|audio|i18n|_frame-rt)\//g,
-      `$1="${rendererBase}/$2/`,
-    )
-    .replace("</head>", `${overrideStyles}</head>`);
-  if (!html.includes("__CLAUDE_REMOTE_BOOTSTRAP__")) {
-    throw new ApiError(502, "official ion-dist entry format changed; refusing an unshimmed page");
-  }
-  if (!html.includes(`${rendererBase}/assets/`)) {
-    throw new ApiError(
-      502,
-      "official ion-dist entry changed; refusing a mixed renderer module graph",
-    );
+  try {
+    html = shimOfficialIndex(html, {
+      injection: bootstrapInjection,
+      overrideStyles,
+      rendererBase,
+      bootstrapJson,
+    });
+  } catch (error) {
+    throw new ApiError(502, error.message);
   }
   const body = Buffer.from(html, "utf8");
   response.writeHead(200, {
