@@ -52,8 +52,12 @@ container renders (`h-full w-full relative overflow-hidden`) together with a
 `children` array; that className appears nowhere else in the renderer graph. The
 splice rewrites only that children array: for a `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/
 `.xlsx`/`.xls` file it renders an `<iframe>` at the bridge's
-`/api/remote/files/preview` route, and every other file keeps the original output,
-so html/svg stay on their existing native path. The component's chunk carries none
+`/api/remote/files/preview` route with a `#toolbar=0` fragment — the PDF open
+parameter Chrome's built-in viewer reads off the URL to hide its own toolbar, so
+the pane shows only the document rather than a second set of controls and
+download buttons (that viewer Download would save the converted `….docx.pdf`);
+Firefox and Safari ignore the parameter and keep their viewer chrome. Every other
+file keeps the original output, so html/svg stay on their existing native path. The component's chunk carries none
 of the other selectors' tokens, so the string prefilter also accepts its own
 DeclineReason test id (`native-file-preview-error`) to reach it. Like the download
 button, the injected `iframe` names three mangled locals read back from the same

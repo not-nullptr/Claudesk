@@ -221,9 +221,10 @@ const bannerCompiled = await minify(bannerInputs.get("banner-chunk.js"), {
 assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), true).patches
   .some(patch => patch.id === "inference-banner"), "recompiled card must retain the patch");
 // The preview patch rewrites the native preview's children to an <iframe> at the
-// bridge route, reading the element factory and the filePath/cacheBuster props
-// back from the component. The preview chunk carries none of the other anchors,
-// so its own DeclineReason test id must be enough to trigger inspection.
+// bridge route carrying a `#toolbar=0` fragment (Chrome's viewer reads it and
+// hides its own toolbar), reading the element factory and the filePath/cacheBuster
+// props back from the component. The preview chunk carries none of the other
+// anchors, so its own DeclineReason test id must be enough to trigger inspection.
 const previewProbe = `const id="native-file-preview-error";\n${previewComponent};`;
 assert.ok(inspectRenderer(previewProbe, false).patches.some(patch => patch.id === "native-file-preview-bridge"),
   "the preview chunk's own token must trigger inspection without the other anchors");
@@ -231,7 +232,8 @@ const previewInputs = new Map([["preview-chunk.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]);
 const previewOut = patchRendererSources(previewInputs, false).sources.get("preview-chunk.js");
 assert.ok(previewOut.includes(
-  's("iframe",{src:"/api/remote/files/preview?path="+encodeURIComponent(v)+"&v="+encodeURIComponent(String(y??""))'),
+  's("iframe",{src:"/api/remote/files/preview?path="+encodeURIComponent(v)'
+    + '+"&v="+encodeURIComponent(String(y??""))+"#toolbar=0"'),
   "the preview gains an iframe built from the read-back factory and props");
 assert.ok(previewOut.includes("/(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
   "only Office and PDF switch to the iframe; everything else keeps the native render");

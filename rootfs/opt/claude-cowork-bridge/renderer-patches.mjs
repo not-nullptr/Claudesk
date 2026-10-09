@@ -352,9 +352,13 @@ function filePreviewPatch(node, ancestors, source, array) {
   if (!path || !factory) return;
   // The bridge route answers with a PDF; cacheBuster re-requests when the file's
   // content changes. Office and PDF only — any other file keeps the original
-  // children, so html/svg stay on their existing path.
+  // children, so html/svg stay on their existing path. The `#toolbar=0` fragment
+  // is a PDF open parameter Chrome's viewer reads off the URL: it hides the
+  // viewer's own toolbar, leaving the pane to show only the document instead of
+  // a second set of controls (its Download would save the converted `.docx.pdf`).
   const url = `"/api/remote/files/preview?path="+encodeURIComponent(${path})`
-    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "");
+    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "")
+    + '+"#toolbar=0"';
   const iframe = `${factory}("iframe",{src:${url},className:"h-full w-full border-0",`
     + 'title:"File preview"})';
   const original = source.slice(array.start, array.end);

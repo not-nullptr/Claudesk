@@ -244,6 +244,9 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 `GET /api/remote/files/preview?path=...` 的 `<iframe>`，该路由内联返回 PDF——
 Office 文档由 `office-preview` sidecar 用 LibreOffice 转换（与 Desktop 同一引擎，因此观感一致），PDF 直接透传。
 只有 `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls` 会切到 iframe，其它文件（如 html/svg）保留官方原生行为。
+iframe 的 URL 末尾附加 `#toolbar=0`（Chrome 内置 PDF 阅读器支持的 PDF 打开参数），隐藏浏览器自带的 PDF 工具栏，
+面板里只显示文档本身，也去掉了阅读器自带的下载按钮（它会把转换结果存成 `xxx.docx.pdf`）；
+Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 同时 preload 不再转发 `CoworkFilePreview` 的原生调用，避免 Desktop 再建一个原生视图、再跑一次 VM 转换。
 转换结果按内容哈希缓存；路径解析复用下载路由的读取根目录与包含规则，预览无法触达下载也读不到的文件。
 
