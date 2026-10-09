@@ -25,6 +25,7 @@ node scripts/renderer-patches-smoke.mjs
 node scripts/renderer-runtime-smoke.mjs
 node scripts/updater-smoke.mjs
 node scripts/workspace-folders-smoke.mjs
+node scripts/preload-file-open-smoke.mjs
 node scripts/attachment-mentions-smoke.mjs
 node scripts/upload-stream-smoke.mjs
 node scripts/totp-smoke.mjs

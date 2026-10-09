@@ -585,6 +585,21 @@
     return `/api/remote/files/download?path=${encodeURIComponent(String(path || ""))}${inline ? "&inline=1" : ""}`;
   }
 
+  // Desktop's session file APIs carry the path URI-encoded (its own reader
+  // decodes it). Undo exactly that one layer before the download route
+  // re-encodes it, or a space becomes `%2520` and the route misses the file.
+  // A value that is not valid percent-encoding is left as-is rather than
+  // throwing on a path that merely contains a `%`.
+  function decodeRemoteFilePath(path) {
+    const value = String(path || "");
+    if (!value.includes("%")) return value;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
   let lastArtifactDownload = { artifactId: "", startedAt: 0 };
 
   function downloadRemoteArtifact(artifactId) {
@@ -633,9 +648,17 @@
           return String(name || "download");
         };
       }
+      // Desktop addresses a session-scoped file by session, not by path:
+      // `openLocalFile(sessionId, encodeURIComponent(path), reveal?)`. Read the
+      // file path from the second argument (undoing Desktop's encoding) — the
+      // first is the session id, and using it as a path produced
+      // `?path=local_<uuid>`, which the download route cannot resolve. The
+      // third argument is Desktop's "reveal in folder" variant, which the
+      // remote equivalent serves as a download (as `showInFolder` does) rather
+      // than an inline preview. A plain host path is used verbatim.
       if (method === "openLocalFile") {
-        return async (path) => {
-          openBrowserUrl(workspaceFileUrl(path, true));
+        return async (_sessionId, path, reveal) => {
+          openBrowserUrl(workspaceFileUrl(decodeRemoteFilePath(path), !reveal));
           return true;
         };
       }
