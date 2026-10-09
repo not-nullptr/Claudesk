@@ -37,7 +37,9 @@ it, so this cannot silently override an org policy.
 Working with the flag on:
 
 - the web chrome (wordmark, pill tabs, tall nav rows);
-- Chat, with the real local sessions, model selector and account identity;
+- Chat and Cowork, with the real local sessions: the list, opening a session,
+  the model selector and the account identity (opening needs the session-viewer
+  patch below);
 - Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM;
 - Code — the full local surface (usage dashboard, projects, sessions) with
   folder browsing, via the route-alias patch below.
@@ -51,6 +53,24 @@ Not wired up yet (tracked here so it is not mistaken for done):
   "computer" device for browsing that machine's folders. Not needed for Code
   (folder browsing there goes through the Code file picker), so it is only
   relevant if the merged Cowork-in-chat surface is ever wanted.
+
+## Chat and Cowork sessions
+
+Opening a session is gated separately from listing it. ion-dist's chat/cowork
+session *layout* refuses to open a local session unless the client identifies as
+the Desktop app: when its user-agent check is false it redirects back to the home
+composer (analytics reason `not_desktop_app`) and renders a download upsell in the
+session's place. The web shell drops the Desktop token on purpose, so every
+session — chat and Cowork alike, both listed under `/cowork/<id>` — bounced to the
+home composer on click.
+
+The `desktop-session-viewer-gate` renderer patch forces that check's value to
+`true`. It reads the flag back from the layout's own `if(!x){ …"not_desktop_app"… }`
+guard and rewrites the zero-argument user-agent call it is initialised from
+(`let x=…()` → `let x=!0`), so it survives minification and changes nothing the
+layout does not already do on a desktop-identified client. Like the route alias,
+it is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
+deployment prepares a byte-identical renderer.
 
 ## Code routes
 

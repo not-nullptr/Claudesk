@@ -39,6 +39,20 @@ const aliasResolver = 'function Ra(e,{isDesktop:t,isDev:n=!1}){let r=e;'
   + 'function za(e,t,n){for(let r of La)'
   + 'if(!(r.when==="desktop"&&!t)&&!(r.when==="web"&&t)&&!(r.skipInDev&&n)&&Ia(e,r.from))'
   + 'return r.to+e.slice(r.from.length);return null}';
+// The chat/cowork session layout: a local session is only opened when the client
+// identifies as the Desktop app, so the guard redirects with reason
+// "not_desktop_app" when the user-agent check is false and falls back to the
+// download upsell otherwise. The check is read back from the `if(!x)` guard and
+// its declaring initialiser (the zero-argument call). In web-shell mode the
+// patcher forces that initialiser to true.
+const sessionLayout = 'function SessionLayout({children:e}){'
+  + 'let isDesktopApp=desktopFromUserAgent(),pinned=useStore(x=>x.pinned);'
+  + 'return useMemo(()=>{if(!(remote||hub)){if(!isDesktopApp){report("not_desktop_app");return}'
+  + 'local||ready||report("cowork_gate_off")}},[]);}';
+// The Desktop signing gate spells the same reason with a member-expression test
+// and no declaring initialiser, so it must not be a target.
+const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
+  + 'if(!t.isDesktopApp)return n("not_desktop_app");return null;}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -53,7 +67,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -63,10 +77,16 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 6, "the web shell adds the desktop Code route alias");
+  assert.equal(webResult.patches.length, 7, "the web shell adds the Code route alias and the session Desktop gate");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
     "the alias resolver must take the desktop branch under the web shell");
+  assert.equal(webResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
+    "the session layout Desktop gate must be spliced once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("let isDesktopApp=!0,pinned="),
+    "the session layout must treat the web shell as the Desktop app");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('if(!t.isDesktopApp)return n("not_desktop_app")'),
+    "the signing gate's member-expression test must not be a target");
   for (const protocol of ["app:", "https:"]) for (const gateway of [false, true]) for (const available of [false, true]) {
     const context = { window: { location: { protocol } },
       globalThis: { __CLAUDE_REMOTE_BOOTSTRAP__: { gatewaySettingsEnabled: gateway } },
@@ -93,6 +113,15 @@ for (const [i, variant] of variants.entries()) {
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
+// The session Desktop gate is a structural read-back, so it must survive
+// minification: the flag is renamed, but the `if(!x)` guard and the zero-argument
+// initialiser it points at are unchanged.
+const compiledSession = await minify(`${sessionLayout}\n${signingDecoy}`, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(compiledSession.code, false, true).patches
+  .filter(patch => patch.id === "desktop-session-viewer-gate").length, 1,
+  "a mangled session layout must still be spliced");
 // The download target must be unique: a second file pane fragment, or a
 // duplicated file pane, is refused rather than double-spliced.
 assert.throws(() => patchRendererSources(new Map([["a.js", filePane], ["b.js", filePane]]), false),
@@ -102,6 +131,17 @@ assert.throws(() => patchRendererSources(new Map([["no-alias.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false, true),
   /desktop-code-route-alias expected once, found 0/,
   "the web shell must refuse a renderer without the route-alias resolver");
+// ...and the session Desktop gate: a renderer whose session layout no longer
+// matches must be refused rather than ship a shell where every session bounces.
+assert.throws(() => patchRendererSources(new Map([["no-session-gate.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`]]), false, true),
+  /desktop-session-viewer-gate expected once, found 0/,
+  "the web shell must refuse a renderer without the session Desktop gate");
+// A guard that merely mentions the reason (with a member-expression test) is not
+// a target, so the signing gate must not be mistaken for the session layout.
+assert.equal(inspectRenderer(signingDecoy, false, true).patches
+  .filter(patch => patch.id === "desktop-session-viewer-gate").length, 0,
+  "a member-expression test naming the reason is not the session layout");
 assert.equal(patchRendererSources(new Map([["only.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false).patches
   .map(patch => patch.id).join(","), "file-pane-download,inference-banner,native-file-preview-bridge");

@@ -40,6 +40,17 @@ const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
 // branch so the local Code stays reachable. Spliced only in web-shell mode: on a
 // desktop-identified client the flag is already true, so there it does nothing.
 const routeAliasPatchId = "desktop-code-route-alias";
+// The chat/cowork session layout refuses to open a *local* session unless the
+// client identifies as the Desktop app: when its user-agent check is false it
+// redirects away (reason "not_desktop_app") and renders a download upsell in the
+// session's place. The web shell drops the Desktop user-agent token on purpose to
+// get the browser chrome, so the check is false and every session bounced back to
+// the home composer. This patch forces that check — the identifier read back from
+// the `if(!x){…"not_desktop_app"…}` guard itself, so it survives renaming — to
+// true, which is exactly how the layout already behaves on a desktop-identified
+// client. Spliced only in web-shell mode.
+const sessionViewerPatchId = "desktop-session-viewer-gate";
+const sessionViewerReason = "not_desktop_app";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -104,6 +115,35 @@ function desktopRouteFlagName(node) {
     if (flag) name = flag;
   });
   return name;
+}
+// The session layout's Desktop gate is `if(!x){ …redirect with reason
+// "not_desktop_app"… }`. Read the negated identifier back from that exact guard so
+// the splice names whatever the minifier chose. The reason literal must sit inside
+// the guard's consequent; the Desktop signing gate's own `if(!t.isDesktopApp)
+// return …("not_desktop_app")` has a member-expression test, so `identifier`
+// yields nothing there and it is not a target.
+function sessionViewerFlagName(node) {
+  if (node.type !== "IfStatement") return undefined;
+  if (!contains(node.consequent, child => child.type === "CallExpression"
+    && literal(child.arguments[0], sessionViewerReason))) return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "UnaryExpression" || test.operator !== "!") return undefined;
+  return identifier(test.argument);
+}
+// The flag is initialised once, by a zero-argument call (the user-agent check) in
+// the layout component's own body. Only a direct body declaration is a target, so
+// a shadowed name inside a nested closure cannot be spliced.
+function flagInitializer(scope, flag) {
+  if (scope?.body?.type !== "BlockStatement") return undefined;
+  for (const statement of scope.body.body || []) {
+    if (statement.type !== "VariableDeclaration") continue;
+    for (const declarator of statement.declarations) {
+      if (declarator.id?.type === "Identifier" && declarator.id.name === flag
+        && declarator.init?.type === "CallExpression"
+        && declarator.init.arguments.length === 0) return declarator.init;
+    }
+  }
+  return undefined;
 }
 
 // The provider card is the sole component passed to a wrapper call whose body
@@ -247,8 +287,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // component's own chunk matches none of the other tokens, so without it the
   // patch below would never be attempted on the file it targets. The route-alias
   // chunk likewise carries none of them, so its own `when==="desktop"` rule is
-  // listed too.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"/.test(source)) {
+  // listed too. The session layout carries its own `not_desktop_app` reason.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -269,6 +309,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       if (routeFlag) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
           original: "", replacement: `${routeFlag}=!0;` });
+      }
+      const sessionFlag = sessionViewerFlagName(node);
+      if (sessionFlag) {
+        // The guard lives in the layout component's effect closure, so walk out
+        // to the nearest enclosing scope that actually declares the flag.
+        const init = [...ancestors].reverse()
+          .filter(parent => functionTypes.has(parent.type))
+          .map(scope => flagInitializer(scope, sessionFlag))
+          .find(Boolean);
+        if (init) {
+          patches.push({ id: sessionViewerPatchId, start: init.start, end: init.end,
+            original: source.slice(init.start, init.end), replacement: "!0" });
+        }
       }
     }
     const previewArray = filePreviewChildrenArray(node);
@@ -328,7 +381,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
-    ...(webShellEnabled ? [routeAliasPatchId] : []),
+    ...(webShellEnabled ? [routeAliasPatchId, sessionViewerPatchId] : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
   for (const id of required) {
