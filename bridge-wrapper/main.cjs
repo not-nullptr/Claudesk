@@ -963,6 +963,9 @@ async function serveDeveloperArtifact(response, name) {
 const protocolRules = [
   { methods: new Set(["GET"]), path: /^\/edge-api\/bootstrap$/ },
   { methods: new Set(["GET"]), path: /^\/edge-api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
+  // The Desktop frame bootstraps under /edge-api; a plain browser (the web
+  // shell) uses the claude.ai default /api prefix, so allow its bootstrap too.
+  { methods: new Set(["GET"]), path: /^\/api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },

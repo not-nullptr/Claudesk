@@ -48,10 +48,11 @@ function load(userName) {
        inject: (value, name) => injectPersonalizedGreeting(value, name),
        resolve: resolveGreetingName,
        store: (value) => sanitizeStoreValue("LocalAgentModeSessions", "interactiveAuthStore", value),
+       bootstrapPath: bootstrapResponsePath,
      };`,
     sandbox,
   );
-  const { inject, resolve, store } = sandbox.result;
+  const { inject, resolve, store, bootstrapPath } = sandbox.result;
   // Round-trip through this realm's JSON so strict deepEqual (which also
   // compares prototypes) sees main-realm objects.
   const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -59,6 +60,7 @@ function load(userName) {
     inject: (value, name) => inject(value, name),
     injectPlain: (value, name) => plain(inject(value, name)),
     resolve,
+    bootstrapPath,
     storePlain: (value) => plain(store(value)),
   };
 }
@@ -155,7 +157,25 @@ assert.deepEqual(
 assert.equal(bare.inject(null), null);
 assert.deepEqual(bare.injectPlain([1, 2]), [1, 2]);
 
-// 7. The user-menu identity: Desktop reports the OS app user, the name override
+// 7. The bootstrap path matcher accepts both prefixes ion-dist recognizes: the
+//    Desktop frame's /edge-api and the plain browser (web shell) app's default
+//    /api. It must not match the entitlements document, so the greeting is never
+//    injected into that shape.
+for (const path of [
+  "/edge-api/bootstrap",
+  "/edge-api/bootstrap/00000000-0000-0000-0000-000000000000/app_start",
+  "/api/bootstrap",
+  "/api/bootstrap/00000000-0000-0000-0000-000000000000/app_start",
+]) {
+  assert.ok(bare.bootstrapPath.test(path), `greeting path matches ${path}`);
+}
+assert.ok(
+  !bare.bootstrapPath.test("/api/bootstrap/00000000-0000-0000-0000-000000000000/current_user_access"),
+  "greeting path does not match the entitlements document",
+);
+assert.ok(!bare.bootstrapPath.test("/api/bootstrap/device"), "greeting path does not match /device");
+
+// 8. The user-menu identity: Desktop reports the OS app user, the name override
 //    wins when set, and an unset name keeps what Desktop reported.
 assert.deepEqual(bare.storePlain({ principalDisplayName: "app" }), { principalDisplayName: "app" });
 assert.deepEqual(named.storePlain({ principalDisplayName: "app" }), { principalDisplayName: "Ada" });

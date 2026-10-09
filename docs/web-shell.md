@@ -12,8 +12,10 @@ from the user agent: a `Claude/<version>` token means "Desktop app". The remote
 preload appends that token so the official route selector exposes the Desktop
 surfaces. With `CLAUDE_REMOTE_WEB_SHELL=1` the preload keeps the browser user
 agent (`config.webShell`), so ion-dist renders the web shell — but it still talks
-to the same `/api/remote/*` IPC and `/edge-api/bootstrap` this bridge serves, so
-sessions, models and the account identity are unchanged.
+to the same `/api/remote/*` IPC this bridge serves, so sessions, models and the
+account identity are unchanged. It *bootstraps* under the claude.ai default
+`/api/bootstrap*` rather than the Desktop frame's `/edge-api/bootstrap*`; the
+bridge recognizes both (see the greeting note below).
 
 ## Cowork
 
@@ -54,13 +56,13 @@ Working with the flag on:
   patch below);
 - Cowork — the `Chat | Cowork` toggle appears and drives the local Cowork VM;
 - Code — the full local surface (usage dashboard, projects, sessions) with
-  folder browsing, via the route-alias patch below.
+  folder browsing, via the route-alias patch below;
+- the time-based home greeting ("Evening, {{ NAME }}") — the browser app
+  bootstraps under `/api`, so the bridge now fills the greeting there as well as
+  under the Desktop frame's `/edge-api` (see "Home greeting" below).
 
 Not wired up yet (tracked here so it is not mistaken for done):
 
-- **Home greeting.** The web home reads a greeting surface the bridge does not
-  populate, so it shows the renderer's "You're here!" fallback instead of the
-  time-based greeting the Desktop chrome shows.
 - **Cowork-on-web device model.** Cowork's *web* product also expects a paired
   "computer" device for browsing that machine's folders. Not needed for Code
   (folder browsing there goes through the Code file picker), so it is only
@@ -108,6 +110,21 @@ access" gate) AND the `claude_code` entitlement. With the flag set, the bridge
 adds `bad_moon_rising` to the bootstrap's `growthbook.features` (addressed by
 ion-dist's Java-style name hash), so the pill navigates to the route above
 instead of upselling.
+
+## Home greeting
+
+The home greeting is not local copy: ion-dist reads `personalized_greeting` out
+of its **bootstrap response** (an array of per-surface, per-weekday slots) and
+only falls back to the built-in "You're here!" when that field is absent. The
+bridge fills the official chat/code payload whenever the upstream sends none
+(`injectPersonalizedGreeting`).
+
+Which URL carries it depends on the shell. The Desktop frame bootstraps under
+`/edge-api/bootstrap*`; a plain browser — the web shell — uses the claude.ai
+default `/api/bootstrap*`. The bridge matches **both** prefixes (ion-dist's own
+detector accepts `(?:edge-)?api`), so the greeting renders in either chrome.
+Matching the entitlements document (`/api/bootstrap/<org>/current_user_access`)
+is deliberately excluded, so the greeting is never injected into that shape.
 
 ## Why it is fenced
 

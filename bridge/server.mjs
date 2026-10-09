@@ -606,6 +606,9 @@ const allowedStores = new Map([
 const protocolRules = [
   { methods: new Set(["GET"]), path: /^\/edge-api\/bootstrap$/ },
   { methods: new Set(["GET"]), path: /^\/edge-api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
+  // The Desktop frame bootstraps under /edge-api; a plain browser (the web
+  // shell) uses the claude.ai default /api prefix, so allow its bootstrap too.
+  { methods: new Set(["GET"]), path: /^\/api\/bootstrap\/[0-9a-f-]+\/app_start$/i },
   { methods: new Set(["GET"]), path: /^\/api\/bootstrap(?:\/[^/?#]+\/(?:current_user_access|system_prompts|cowork_sysprompt_map))?$/ },
   { methods: new Set(["GET", "PUT"]), path: /^\/api\/account_profile$/ },
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
@@ -1055,7 +1058,11 @@ function sanitizeStoreValue(surface, store, value) {
   return {};
 }
 
-const bootstrapResponsePath = /^\/edge-api\/bootstrap(?:\/[^/?#]+\/app_start)?$/i;
+// Both bootstrap prefixes ion-dist recognizes: the Desktop frame fetches under
+// /edge-api, while the browser (web shell) app uses the claude.ai default /api,
+// so the greeting below has to be injected into whichever one the shell asks
+// for (its own detector accepts `(?:edge-)?api`).
+const bootstrapResponsePath = /^\/(?:edge-)?api\/bootstrap(?:\/[^/?#]+\/app_start)?$/i;
 // The renderer also refetches its org entitlements from this path; both carry
 // the `current_user_access.features` list the web shell reads for Cowork.
 const currentUserAccessPath = /^\/api\/bootstrap\/[^/?#]+\/current_user_access$/i;
@@ -1072,7 +1079,8 @@ const coworkSettingsPath = /^\/api\/organizations\/[0-9a-f-]+\/cowork_settings$/
 // matches, else default_slots, then returns the first slot whose exclusive
 // `until` hour is still ahead of the visitor's clock. The upstream gateway
 // never sends any of it, so the home page sits on the renderer's "You're here!"
-// placeholder instead of the time-based greeting the desktop app shows. Supply
+// placeholder instead of the time-based greeting the app shows (Desktop and the
+// web shell alike, since both bootstrap paths are matched above). Supply
 // the official payload for the chat and code surfaces and let the renderer's own
 // picker do the work; a greeting the upstream did send is kept. The official
 // backend expands the {{ NAME }} token server-side before it ships (its payload
