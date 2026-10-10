@@ -14,7 +14,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY bridge/office/server.mjs ./server.mjs
+# The whole service is this one module; the wildcard keeps it in step with the
+# other service images and with scripts/docker-copy-smoke.mjs.
+COPY bridge/office/*.mjs ./
 
 ENV NODE_ENV=production \
     OFFICE_PREVIEW_HOST=127.0.0.1 \

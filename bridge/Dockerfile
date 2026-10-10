@@ -2,13 +2,15 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-COPY bridge/server.mjs ./server.mjs
-COPY bridge/realtime.mjs ./realtime.mjs
-COPY bridge/downloads.mjs ./downloads.mjs
-COPY bridge/preview.mjs ./preview.mjs
-COPY bridge/official-index.mjs ./official-index.mjs
-COPY bridge/uploads.mjs ./uploads.mjs
-COPY bridge/workspace-folders.mjs ./workspace-folders.mjs
+# Wildcard on purpose: the bridge's runtime modules are every top-level .mjs in
+# bridge/ (the shared build context has no other .mjs there), and an explicit
+# line-per-module list silently rots — a module added without its own COPY line
+# builds fine and only the running container fails with ERR_MODULE_NOT_FOUND,
+# which is exactly how bridge/notifications.mjs once shipped uncopied.
+# scripts/docker-copy-smoke.mjs pins that this wildcard covers the entry's whole
+# local reference graph, so a future subdirectory or a re-explicitized list
+# cannot regress it quietly.
+COPY bridge/*.mjs ./
 COPY bridge/public ./public
 COPY config/release.json ./release.json
 
