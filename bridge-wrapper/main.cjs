@@ -1131,9 +1131,16 @@ if (codeActionsEnabled) {
 
 // Relay only capability flags backed by an explicitly published remote
 // surface. Native-only features remain absent from the browser snapshot.
+// `desktopHome` is the app's Unified Claude decision for the Chat/Cowork
+// surfaces: the renderer paints the unified home when the snapshot says
+// "supported". It is relayed whenever the app reports one — with no
+// CLAUDE_REMOTE_DESKTOP_HOME configured the status is "unavailable" and the
+// split chrome stays, so the browser follows whatever the 3P configuration
+// decides.
 const relayedBootFeatures = new Set([
   "chatIn3p",
   "chatTab",
+  "desktopHome",
   "yukonSilver",
 ]);
 if (codeActionsEnabled) {

@@ -8,6 +8,7 @@ auth_scheme="${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
 models_json="${CLAUDE_INFERENCE_MODELS_JSON:-}"
 remote_gateway_settings="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
+remote_desktop_home="${CLAUDE_REMOTE_DESKTOP_HOME:-}"
 allowed_egress_hosts_json="${CLAUDE_EGRESS_ALLOWED_HOSTS_JSON:-}"
 vm_memory_gb="${CLAUDE_COWORK_VM_MEMORY_GB:-2}"
 vm_cpu_count="${CLAUDE_COWORK_VM_CPU_COUNT:-1}"
@@ -44,6 +45,18 @@ case "$remote_code_actions" in
         ;;
     *)
         printf '[claude-config] ERROR: CLAUDE_REMOTE_CODE_ACTIONS must be 0 or 1\n' >&2
+        exit 1
+        ;;
+esac
+
+# Official 3P `desktopHome` surface key (Unified Claude). Validated strictly
+# because an unrecognized value fails closed to `off`, which would remove the
+# Chat and Cowork surfaces entirely.
+case "$remote_desktop_home" in
+    ""|standard|simple|no-vm|off)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDE_REMOTE_DESKTOP_HOME must be standard, simple, no-vm or off\n' >&2
         exit 1
         ;;
 esac
@@ -112,6 +125,7 @@ jq -n \
     --arg auth_scheme "$auth_scheme" \
     --arg code "$remote_code_actions" \
     --arg remote "$remote_gateway_settings" \
+    --arg desktop_home "$remote_desktop_home" \
     --argjson models "$models_json" \
     --argjson allowed_egress_hosts "$allowed_egress_hosts_json" \
     '({
@@ -125,7 +139,8 @@ jq -n \
         chatTabEnabled: true,
         coworkTabEnabled: true,
         isClaudeCodeForDesktopEnabled: ($code == "1")
-    } + if $allowed_egress_hosts == null then {} else {coworkEgressAllowedHosts: $allowed_egress_hosts} end)' > "$tmp_file"
+    } + if $desktop_home == "" then {} else {desktopHome: $desktop_home} end
+      + if $allowed_egress_hosts == null then {} else {coworkEgressAllowedHosts: $allowed_egress_hosts} end)' > "$tmp_file"
 
 # The official Desktop builds its top-level Developer menu only when the
 # official user-data setting allowDevTools is enabled.  Keep that setting tied
@@ -265,6 +280,19 @@ if [ "$remote_gateway_settings" = "1" ]; then
                 "$code_tmp" "$config_library/$applied_id.json"
             rm -f "$code_tmp"
             printf '[claude-config] official Code surface enabled from environment\n'
+        fi
+        # Unified Claude follows the environment the same way as the Code flag,
+        # but only while the variable is set: an unset value leaves whatever the
+        # Setup window last wrote to the writable configuration.
+        if [ "$remote_desktop_home" != "" ]; then
+            desktop_home_tmp="$(mktemp "$config_library/.desktop-home.XXXXXX")"
+            jq --arg desktop_home "$remote_desktop_home" \
+                '. + {desktopHome: $desktop_home}' \
+                "$config_library/$applied_id.json" > "$desktop_home_tmp"
+            install -o "$user_id" -g "$group_id" -m 0600 \
+                "$desktop_home_tmp" "$config_library/$applied_id.json"
+            rm -f "$desktop_home_tmp"
+            printf '[claude-config] unified Chat/Cowork home applied from environment\n'
         fi
 
         # `allowedPluginMarketplaces` is a provisioning list. The current
