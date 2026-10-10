@@ -75,6 +75,9 @@ RUN add-pkg \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         "claude-desktop=${CLAUDE_DESKTOP_VERSION}" && \
     test "$(dpkg-query -W -f='${Version}' claude-desktop)" = "${CLAUDE_DESKTOP_VERSION}" && \
+    apt-get download "claude-desktop=${CLAUDE_DESKTOP_VERSION}" && \
+    mv claude-desktop_*.deb /opt/claude-desktop-package.deb && \
+    test -s /opt/claude-desktop-package.deb && \
     printf '%s\n' "${CLAUDE_DESKTOP_VERSION}" \
         > /opt/claude-desktop-image-version && \
     rm -rf /var/lib/apt/lists/*
@@ -124,6 +127,7 @@ RUN node -e 'const r=require("/opt/claude-cowork-bridge/release.json");if(r.desk
         /startapp.sh \
         /opt/claude-headless/x11-run.sh \
         /etc/cont-init.d/18-headless.sh \
+        /etc/cont-init.d/19-claude-package-sync.sh \
         /etc/cont-init.d/25-cowork-bridge-wrapper.sh \
         /etc/cont-init.d/30-claude-config.sh && \
     set-cont-env APP_NAME "Claude Desktop Official Linux" && \
