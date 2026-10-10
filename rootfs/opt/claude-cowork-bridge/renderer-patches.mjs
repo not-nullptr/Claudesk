@@ -112,6 +112,22 @@ const notificationEnableBranch = "{const __claudeskNotifications="
   + "{event_key:\"claudeai.notification.permission.result\",permission:__claudeskPermission})}catch{}"
   + "if(__claudeskResult===\"granted\")return{success:!0,permission:\"granted\"};"
   + "return{success:!1,errorSource:\"browser_or_permissions\",permission:__claudeskPermission}}}";
+// The account popover's identity line. The popover's content mounts when the
+// menu opens, and its title is read from Desktop's interactiveAuthStore through
+// a hook that paints a loading state first and only fills from an async
+// getState() — in the web shell a POST to the bridge and on to Desktop IPC, so
+// the first painted frame showed the deployment label (the hook's fallback
+// branch) and flipped to the account name a frame later. The preload already
+// seeds the same store synchronously at page load (initialStores ->
+// makeStore.getStateSync; see initialRemoteStores in bridge/server.mjs), so the
+// splice reads that seeded snapshot while the async value is still missing. The
+// reader is pinned by its whole shape — a function whose body is a single return
+// of a zero-argument call's `principalDisplayName` — and that property name
+// appears nowhere else in the renderer graph. Spliced only in web-shell mode,
+// like the other chrome patches.
+const accountMenuNamePatchId = "web-account-menu-name";
+const accountNameSyncFallback = 'globalThis["claude.web"]?.LocalAgentModeSessions'
+  + '?.interactiveAuthStore?.getStateSync?.()?.principalDisplayName';
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -305,6 +321,22 @@ function accountChipPatch({ call, bindings, sizeValue }, source, avatar) {
       + `,src:${bindings.photo},className:"shrink-0"`
       + `,style:{width:${pixels},height:${pixels}}}):${original})` };
 }
+// The identity reader's whole body is `return X()?.principalDisplayName` with a
+// zero-argument call. Any other property, a call carrying arguments, a member
+// expression or additional statements refuses, so a lookalike helper cannot
+// establish the target.
+function accountMenuNameRead(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
+  const statements = node.body.body;
+  if (statements.length !== 1 || statements[0].type !== "ReturnStatement") return undefined;
+  const argument = unwrap(statements[0].argument);
+  if (argument?.type !== "MemberExpression" || !property(argument, "principalDisplayName")) {
+    return undefined;
+  }
+  const call = unwrap(argument.object);
+  if (call?.type !== "CallExpression" || call.arguments.length !== 0) return undefined;
+  return identifier(call.callee) ? statements[0].argument : undefined;
+}
 
 // The provider card is the sole component passed to a wrapper call whose body
 // carries both of its message ids; declarations and unrelated helper functions
@@ -488,9 +520,10 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // patch below would never be attempted on the file it targets. The route-alias
   // chunk likewise carries none of them, so its own `when==="desktop"` rule is
   // listed too. The session layout carries its own `not_desktop_app` reason. The
-  // account chip's chunk is reached by the API field it reads (`avatar_image_url`);
+  // account chip's chunk is reached by the API field it reads (`avatar_image_url`),
+  // and the user-menu identity reader in the same chunk by `principalDisplayName`;
   // the Desktop-checks slot by its own component label.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|DesktopChecks|claudeai\.notification\.permission\.result/.test(source)) {
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|claudeai\.notification\.permission\.result/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -513,6 +546,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         avatarComponent ??= accountAvatarComponent(ast);
         const patch = accountChipPatch(chip, source, avatarComponent);
         if (patch) patches.push({ id: accountChipPatchId, start: chip.call.start, end: chip.call.end, ...patch });
+      }
+      const menuName = accountMenuNameRead(node);
+      if (menuName) {
+        const original = source.slice(menuName.start, menuName.end);
+        patches.push({ id: accountMenuNamePatchId, start: menuName.start, end: menuName.end,
+          original, replacement: `(${original}??${accountNameSyncFallback})` });
       }
       const routeFlag = desktopRouteFlagName(node);
       if (routeFlag) {
@@ -606,7 +645,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     ...(webShellEnabled
       ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId,
-          coworkPermissionWiringPatchId, notificationEnablePatchId]
+          coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId]
       : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];

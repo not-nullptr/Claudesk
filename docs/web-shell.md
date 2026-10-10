@@ -271,9 +271,19 @@ reading the Avatar component, its factory and the mark's own pixel size back fro
 the same renderer graph — the Avatar's `size` is a design token of a different
 scale, so the photo is pinned to the mark's exact size instead of the token, or
 it overflows the slot the row reserves and eats the chip's padding. Like the
-other chrome patches it is spliced only in web-shell mode. Because the prepared renderer is served under an immutable
-`/renderer/<version>/<patchRelease>/…` path, the patch ships with a
-`patchRelease` bump and needs the `claude-desktop` service rebuilt (the preparer
+other chrome patches it is spliced only in web-shell mode. The account menu's
+own identity line reads from a different source — Desktop's interactive auth
+store (`principalDisplayName`, which the bridge rewrites the same way as the
+account name) — through a hook that paints a loading state on the popover's
+first frame and only fills from an async store read. In the web shell that read
+is a bridge round trip, so the menu's name line showed the deployment label for
+one frame and then flipped to the account name. The `web-account-menu-name`
+renderer patch makes that reader fall back to the preload's synchronously
+seeded store snapshot (`getStateSync`, already filled from `initialStores` —
+the same mechanism the managed-config store's label uses) while the async value
+is in flight, so the first frame already reads as the account. Because the prepared renderer is served under an immutable
+`/renderer/<version>/<patchRelease>/…` path, these patches ship with a
+`patchRelease` bump and need the `claude-desktop` service rebuilt (the preparer
 runs from its init), not just the bridge.
 
 This is **identity only**. There is no login/logout session and no per-user

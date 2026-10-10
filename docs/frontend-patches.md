@@ -103,6 +103,20 @@ second photo-less account-view component, or a chip that no longer matches,
 refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.
 
+The user menu's identity line is read from Desktop's interactive auth store
+through a hook that paints a loading state on the popover's first frame (the
+menu content mounts on open) and only fills from an async `getState()`. In the
+web shell that read is a bridge round trip, so the menu's title showed the
+deployment label (the hook's fallback branch) for one frame and flipped to the
+account name a frame later. The `web-account-menu-name` patch falls back to the
+preload's synchronously seeded store snapshot (`getStateSync`, filled from the
+bridge's `initialStores`) while the async value is in flight. It is selected
+structurally: a function whose whole body is a single return of a zero-argument
+call's `principalDisplayName` — a different property, a call carrying arguments,
+a member expression or additional statements refuses — and that property name
+appears nowhere else in the renderer graph, so a lookalike helper cannot
+establish the target. Spliced only in web-shell mode.
+
 Cowork tool permissions — the AskUserQuestion and tool-approval cards — are fed
 by the app's pending-permission store, and the only thing that wires that store
 (its subscription to the session event stream plus the

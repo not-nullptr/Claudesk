@@ -61,6 +61,21 @@ const accountChip = 'function accountHook(){let{account:e}=ctx();'
   + 'return k(Av,{name:e,src:t??illu(n),size:"sm"})}'
   + 'function chipMark({size:e="sm",organization:t}){let{activeOrganization:n}=ctx(),r=e==="md",'
   + '{name:i,photoUrl:a,illustration:o}=accountHook();return k(Mark,{size:r?20:16,className:"shrink-0"})}';
+// The user-menu identity reader: one function whose entire body returns the
+// auth-store hook's principal display name. The hook paints its loading state on
+// the popover's first frame (the menu content mounts on open) and only fills
+// from an async store read, so the header's title showed the deployment label
+// and flipped to the account name a frame later. In web-shell mode the patcher
+// falls back to the preload's synchronously seeded store snapshot
+// (getStateSync) while that read is in flight. The reader is pinned by its whole
+// shape, so a different property, a call carrying arguments, a member expression
+// or a body with other statements is not a target.
+const accountMenuName = 'function menuIdentity(){return accountStoreHook()?.principalDisplayName}';
+const accountMenuNameDecoys = '// principalDisplayName\n'
+  + 'function otherProperty(){return accountStoreHook()?.emailAddress}'
+  + 'function callWithArgs(){return accountStoreHook(user)?.principalDisplayName}'
+  + 'function notACall(){return account.principalDisplayName}'
+  + 'function multiStatement(){track();return accountStoreHook(who)?.principalDisplayName}';
 // The Desktop signing gate spells the same reason with a member-expression test
 // and no declaring initialiser, so it must not be a target.
 const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
@@ -117,7 +132,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -127,8 +142,8 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 10,
-    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar, the Cowork permission wiring and the notification-enable bridge");
+  assert.equal(webResult.patches.length, 11,
+    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
     "the push-enablement function must be spliced exactly once");
@@ -149,6 +164,19 @@ for (const [i, variant] of variants.entries()) {
     "the chip must show the account avatar at the mark's own pixel size, and keep the mark otherwise");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('photoUrl:profile()?.avatar_image_url'),
     "the hook's photoUrl property must not be mistaken for a binding");
+  assert.equal(webResult.patches.filter(p => p.id === "web-account-menu-name").length, 1,
+    "the user-menu identity must be spliced exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('return (accountStoreHook()?.principalDisplayName??globalThis["claude.web"]'
+      + '?.LocalAgentModeSessions?.interactiveAuthStore?.getStateSync?.()?.principalDisplayName)'),
+    "the identity must fall back to the preload's seeded store snapshot");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('function otherProperty(){return accountStoreHook()?.emailAddress}')
+    && webResult.sources.get(`changed-chunk-${i}.js`)
+      .includes('function multiStatement(){track();return accountStoreHook(who)?.principalDisplayName}'),
+    "only a zero-argument call's principalDisplayName reader is the identity target");
+  assert.ok(!result.sources.get(`changed-chunk-${i}.js`).includes("getStateSync"),
+    "the identity fallback stays off without the web shell");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function za(e,t,n){t=!0;"),
     "the alias resolver must take the desktop branch under the web shell");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
@@ -230,6 +258,50 @@ const chipCompiled = await minify(accountChip, {
 assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-account-chip-avatar").length, 1,
   "a mangled account chip must still be spliced once");
+// The full web-shell fixture set, reused for the identity-reader refusals below
+// and for the Desktop-checks success case.
+const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`
+  + `\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`;
+// ...and the user-menu identity: a renderer whose identity reader no longer
+// matches must be refused rather than ship a menu whose title flips to the
+// account name a frame after it opens.
+assert.throws(() => patchRendererSources(new Map([["no-menu-name.js", webShellFixtures]]), false, true),
+  /web-account-menu-name expected once, found 0/,
+  "the web shell must refuse a renderer without the user-menu identity reader");
+assert.throws(() => patchRendererSources(new Map([["dup-menu-name.js",
+  `${webShellFixtures}\n${accountMenuName}\n${accountMenuName.replace("menuIdentity", "menuIdentityB")}`]]),
+  false, true),
+  /web-account-menu-name expected once, found 2/,
+  "a second identity reader must refuse rather than double-splice");
+assert.equal(inspectRenderer(accountMenuNameDecoys, false, true).patches
+  .filter(patch => patch.id === "web-account-menu-name").length, 0,
+  "lookalike readers must not be mistaken for the identity target");
+const nameCompiled = await minify(accountMenuName, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(nameCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-account-menu-name").length, 1,
+  "a mangled identity reader must still be spliced once");
+// The fallback reads the preload's snapshot only while the async hook is empty,
+// the live store value wins once it resolves, and an absent preload surface
+// leaves the original reader behavior (and the deployment-label fallback) intact.
+const nameOut = patchRendererSources(
+  new Map([["menu-name.js", `${webShellFixtures}\n${accountMenuName}`]]), false, true)
+  .sources.get("menu-name.js");
+const seededName = { callbacks: {}, event: {}, accountStoreHook: () => null,
+  globalThis: { "claude.web": { LocalAgentModeSessions: { interactiveAuthStore: {
+    getStateSync: () => ({ principalDisplayName: "Ada" }) } } } } };
+vm.runInNewContext(`${nameOut}\nresult=menuIdentity();`, seededName);
+assert.equal(seededName.result, "Ada",
+  "the seeded snapshot must answer while the store hook is still loading");
+const liveName = { callbacks: {}, event: {},
+  accountStoreHook: () => ({ principalDisplayName: "Live" }), globalThis: {} };
+vm.runInNewContext(`${nameOut}\nresult=menuIdentity();`, liveName);
+assert.equal(liveName.result, "Live", "the live store value must win once the hook resolves");
+const bareName = { callbacks: {}, event: {}, accountStoreHook: () => null, globalThis: {} };
+vm.runInNewContext(`${nameOut}\nresult=menuIdentity();`, bareName);
+assert.equal(bareName.result, undefined,
+  "without the preload surface the original reader behavior must remain");
 // ...and the notification-enable bridge: a renderer whose push enablement no
 // longer matches must be refused rather than ship an enable action that dies in
 // a Firebase registration this deployment can never complete.
@@ -336,8 +408,7 @@ assert.ok(patchRendererSources(new Map([["new-preview.js", previewCompiled.code]
 // before the identity gate, so the pending-permission store subscribes in the
 // browser too; the Desktop root's own call is left untouched.
 const checksInputs = new Map([["checks-chunk.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
-    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`]]);
+  `${webShellFixtures}\n${accountMenuName}`]]);
 const checksOut = patchRendererSources(checksInputs, false, true).sources.get("checks-chunk.js");
 assert.ok(checksOut.includes("function desktopChecks(){wirePendingPermissions(api);return isDesktopApp()"),
   "the slot must wire the pending-permission store before its identity gate");
