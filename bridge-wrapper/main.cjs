@@ -1065,9 +1065,19 @@ async function handleNotificationClick(tag, action) {
   if (!previousSink) notificationRelay.navigationSink = routes;
   let responded = false;
   try {
-    if (action === "allow_once" && capture.kind === "permission" && capture.allowOnce
-      && typeof service?.handlePermissionResponse === "function") {
-      await service.handlePermissionResponse(capture.product, capture.requestId, "once");
+    // Answering a permission card through the official response path — the
+    // same vocabulary the app's own notification actions and permission cards
+    // use (once | always | deny). Deny is always offered; "Allow once" only
+    // when the official notification offered it too.
+    const answersPermission = capture.kind === "permission"
+      && typeof service?.handlePermissionResponse === "function"
+      && (action === "deny" || (action === "allow_once" && capture.allowOnce));
+    if (answersPermission) {
+      await service.handlePermissionResponse(
+        capture.product,
+        capture.requestId,
+        action === "deny" ? "deny" : "once",
+      );
       if (typeof service.closePermissionNotification === "function") {
         await service.closePermissionNotification(capture.requestId);
       }
@@ -2530,7 +2540,11 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/notification-click") {
       const body = await readJson(request);
       const tag = typeof body.tag === "string" ? body.tag.slice(0, 200) : "";
-      const action = body.action === "allow_once" ? "allow_once" : "default";
+      // "allow_once" and "deny" answer a permission card; anything else is
+      // a plain click.
+      const action = body.action === "allow_once" || body.action === "deny"
+        ? body.action
+        : "default";
       if (!tag) throw new Error("notification tag is required");
       const now = Date.now();
       if (now - (lastNotificationClickAt.get(tag) || 0) < 500) {

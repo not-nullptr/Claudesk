@@ -155,7 +155,14 @@ The bridge now delivers them itself, in three parts.
   official "enable notifications" affordances have a working permission path.
   While the permission is granted the page also registers a push subscription
   (its service worker shows pushes when no tab is open; clicking one focuses an
-  existing window or opens the route). A record older than a minute is dropped
+  existing window or opens the route). Permission cards are shown through that
+  same registration (`registration.showNotification`) rather than the page's
+  constructor whenever one exists — only the worker's persistent notifications
+  can carry action buttons — so "Allow once" and "Deny" are offered whether the
+  card arrives as a push or over the event stream, and answering from the button
+  goes through the official permission-response path (`once | deny`, the same
+  vocabulary the app's own cards use). A page-shown card without a worker
+  registration (plain-HTTP origin) stays click-to-open only. A record older than a minute is dropped
   (the event relay can replay after a reconnect) and nothing is shown while the
   user is looking at that very session. Notifications carry the official Desktop
   icon (rendered on Windows and Linux; macOS shows the browser icon instead),
@@ -191,9 +198,11 @@ Known limits: a notification whose category the settings disabled is dropped
 everywhere; push delivery needs the bridge-data volume writable (otherwise it
 degrades to in-page notifications until a tab is opened, as before) and needs
 the bridge container to reach the browsers' push services (FCM, Mozilla, ...)
-outbound; the in-page path requires an open Claudesk tab; and page
-notifications cannot show action buttons, so "Allow once" is offered only on
-the pushed notification (the in-page click opens the session instead).
+outbound; the in-page path requires an open Claudesk tab; and action buttons on
+a card need a service-worker registration, so on a plain-HTTP origin (or before
+the worker is installed) a permission card is click-to-open only. Firefox does
+not render notification action buttons at all; macOS drops them for its own
+notification center.
 
 ## Code routes
 

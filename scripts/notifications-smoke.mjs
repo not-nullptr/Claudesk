@@ -405,8 +405,9 @@ assert.equal(clickResult.handled, true);
 assert.deepEqual(clickNavigations, ["idle-click"], "the captured official onClick must run");
 assert.equal(clickResult.route, "/epitaxy/s1", "the click must report the session route");
 
-// A permission click navigates to the session; "Allow once" answers it through
-// the official response path instead.
+// A permission click navigates to the session; "Allow once" and "Deny" answer
+// it through the official response path instead (the same once | always | deny
+// vocabulary the app's own permission cards use).
 clickNavigations.length = 0;
 await wrapperSandbox.click("permission-r1", "default");
 assert.deepEqual(clickNavigations, ["navigate:/epitaxy/s3"]);
@@ -414,6 +415,25 @@ assert.deepEqual(clickResponses, []);
 await wrapperSandbox.click("permission-r1", "allow_once");
 assert.deepEqual(service.responses, [{ product: "ccd", requestId: "r1", action: "once" }],
   "Allow once must answer the permission through the official handler");
+await wrapperSandbox.click("permission-r1", "deny");
+assert.deepEqual(service.responses.at(-1), { product: "ccd", requestId: "r1", action: "deny" },
+  "Deny must answer the permission through the official handler");
+
+// Deny stays available on a card the official notification would not let
+// allow-once (allowOnce false): refusing is always possible, answering with
+// "allow once" is not — such a click falls back to opening the session.
+await service.showPermissionRequestNotificationAsync({
+  product: "ccd", sessionId: "s9", requestId: "r9", toolName: "Bash",
+  description: "rm -rf /", allowOnceAction: false,
+});
+service.responses.length = 0;
+clickNavigations.length = 0;
+const refused = await wrapperSandbox.click("permission-r9", "allow_once");
+assert.equal(refused.responded, false, "a card without allow-once must not be answered with allow once");
+assert.deepEqual(clickNavigations, ["navigate:/epitaxy/s9"], "it opens the session instead");
+await wrapperSandbox.click("permission-r9", "deny");
+assert.deepEqual(service.responses, [{ product: "ccd", requestId: "r9", action: "deny" }],
+  "deny must still answer that card");
 
 // An unknown tag is a no-op (a click for a notification this process never
 // showed), and repeated clicks are rate limited by the endpoint, not here.
@@ -427,12 +447,32 @@ const displaySection = preloadSource.slice(
 );
 assert.ok(displaySection.length > 0, "the notification section must exist in the preload");
 
-function loadPreload({ permission = "granted", focused = false, pathname = "/cowork/s1" } = {}) {
+function loadPreload({
+  permission = "granted",
+  focused = false,
+  pathname = "/cowork/s1",
+  // When set, the harness exposes a service-worker registration, which is the
+  // path an actionable (permission) card takes.
+  serviceWorker = false,
+} = {}) {
   const created = [];
   const closed = [];
   const fetches = [];
   const navigations = [];
   const routeResponses = [];
+  const workerShown = [];
+  const workerClosed = [];
+  let workerShowFails = false;
+  const registration = {
+    showNotification: async (title, options) => {
+      if (workerShowFails) throw new Error("service worker is not ready");
+      workerShown.push({ title, options: JSON.parse(JSON.stringify(options)) });
+    },
+    getNotifications: async (filter) => {
+      workerClosed.push(filter?.tag ?? null);
+      return [{ close: () => workerClosed.push(`closed:${filter?.tag}`) }];
+    },
+  };
   class FakeNotification {
     constructor(title, options) {
       this.title = title;
@@ -452,7 +492,9 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
     listenerRegistry,
     Notification: FakeNotification,
     document: { hasFocus: () => focused, hidden: !focused, addEventListener() {} },
-    navigator: {},
+    navigator: serviceWorker
+      ? { serviceWorker: { addEventListener() {}, getRegistration: async () => registration } }
+      : {},
     location: { pathname, href: `https://claude.example${pathname}`, origin: "https://claude.example" },
     history: {
       state: null,
@@ -490,6 +532,8 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
     + "this.notificationTags=remoteNotificationTags;", sandbox);
   return {
     sandbox, created, closed, fetches, navigations, routeResponses, FakeNotification,
+    workerShown, workerClosed,
+    failWorkerShow: () => { workerShowFails = true; },
     channel: sandbox.channel,
     closeChannel: sandbox.closeChannel,
   };
@@ -587,6 +631,58 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
   assert.equal(created[0].title, "Ready to go");
 }
 
+// A permission card is actionable, and only the service worker's persistent
+// notifications can carry buttons: with a registration the card goes through
+// the worker (answering it from the notification, handled by the worker's click
+// handler); without one it stays a plain clickable notification.
+{
+  const { sandbox, created, channel, workerShown, workerClosed, closeChannel } = loadPreload({ serviceWorker: true });
+  await channel({ title: "repo", body: "Allow Claude to run npm test?", tag: "permission-r1", sessionId: "s3", kind: "permission", allowOnce: true, route: "/epitaxy/s3", at: Date.now() });
+  assert.equal(created.length, 0, "an actionable card must not use the plain constructor when a worker exists");
+  assert.equal(workerShown.length, 1);
+  assert.equal(workerShown[0].title, "repo");
+  const card = workerShown[0].options;
+  assert.deepEqual(card.actions, [
+    { action: "allow_once", title: "Allow once" },
+    { action: "deny", title: "Deny" },
+  ]);
+  assert.equal(card.requireInteraction, true);
+  assert.equal(card.icon, "/desktop-icon.png");
+  assert.deepEqual(card.data, {
+    tag: "permission-r1", route: "/epitaxy/s3", kind: "permission", allowOnce: true,
+  });
+
+  // A finished turn stays on the plain path — only cards are actionable.
+  await channel({ title: "Fix", body: "Claude finished a task", tag: "idle-s1", kind: "idle", route: "/epitaxy/s1", at: Date.now() });
+  assert.equal(created.length, 1);
+  assert.equal(workerShown.length, 1, "only permission cards go through the worker");
+
+  // A close event closes a worker-shown card through getNotifications.
+  closeChannel({ tag: "permission-r1" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(workerClosed, ["permission-r1", "closed:permission-r1"]);
+
+  // Deny-only when the official notification did not offer Allow once.
+  const denyOnly = loadPreload({ serviceWorker: true });
+  await denyOnly.channel({ title: "repo", body: "Allow?", tag: "permission-r2", kind: "permission", allowOnce: false, at: Date.now() });
+  assert.deepEqual(denyOnly.workerShown[0].options.actions, [{ action: "deny", title: "Deny" }]);
+
+  // Without a registration (plain-HTTP origin, worker not installed) the card
+  // falls back to a plain notification: still clickable, no buttons.
+  const noWorker = loadPreload();
+  await noWorker.channel({ title: "repo", body: "Allow?", tag: "permission-r3", kind: "permission", allowOnce: true, at: Date.now() });
+  assert.equal(noWorker.created.length, 1);
+  assert.equal(noWorker.created[0].options.actions, undefined);
+  assert.equal(noWorker.created[0].options.requireInteraction, true);
+
+  // A registration that rejects at show time also falls back rather than
+  // dropping the notification.
+  const failingWorker = loadPreload({ serviceWorker: true });
+  failingWorker.failWorkerShow();
+  await failingWorker.channel({ title: "repo", body: "Allow?", tag: "permission-r4", kind: "permission", allowOnce: true, at: Date.now() });
+  assert.equal(failingWorker.created.length, 1, "a failing worker must fall back to a plain notification");
+}
+
 // --- The service worker -----------------------------------------------------
 // The pushed path runs in a worker context the smoke otherwise never touches:
 // it shows the pushed record with the app icon (and, for permission cards, the
@@ -654,14 +750,24 @@ function dispatchWorkerEvent(worker, type, event) {
   });
   const permission = worker.notifications[1].options;
   assert.equal(permission.requireInteraction, true, "a permission card must not slide away unread");
-  assert.deepEqual(permission.actions, [{ action: "allow_once", title: "Allow once" }]);
+  assert.deepEqual(permission.actions, [
+    { action: "allow_once", title: "Allow once" },
+    { action: "deny", title: "Deny" },
+  ], "a permission card offers answering it straight from the notification");
+
+  // A card whose official notification did not offer Allow once is deny-only,
+  // matching the official web push's deny-only variant.
+  await dispatchWorkerEvent(worker, "push", {
+    data: { json: () => ({ title: "repo", body: "Allow?", tag: "permission-r2", kind: "permission", allowOnce: false }) },
+  });
+  assert.deepEqual(worker.notifications[2].options.actions, [{ action: "deny", title: "Deny" }]);
 
   // A payload without a tag still gets one: `renotify` requires it and a
   // unique tag keeps it out of any other notification's replacement slot.
   await dispatchWorkerEvent(worker, "push", {
     data: { json: () => ({ title: "No tag", body: "x", kind: "generic" }) },
   });
-  const untagged = worker.notifications[2].options;
+  const untagged = worker.notifications[3].options;
   assert.match(untagged.tag, /^claudesk-\d+-/, "an untagged push must still get a tag");
   assert.equal(untagged.data.tag, untagged.tag);
 
@@ -700,6 +806,15 @@ function dispatchWorkerEvent(worker, type, event) {
     body: { tag: "permission-r1", action: "allow_once" },
   });
   assert.equal(worker.opened.length, 1, "answering a permission must not open a window");
+
+  // ...and so does "Deny", which must reach the same official response path.
+  const deny = { action: "deny", notification: { data: { tag: "permission-r1", kind: "permission", allowOnce: true }, close() {} } };
+  await dispatchWorkerEvent(worker, "notificationclick", deny);
+  assert.deepEqual(worker.requests.at(-1), {
+    path: "/api/remote/notifications/click",
+    body: { tag: "permission-r1", action: "deny" },
+  });
+  assert.equal(worker.opened.length, 1, "denying must not open a window");
 }
 
 // --- The bridge's HTTP surface ----------------------------------------------

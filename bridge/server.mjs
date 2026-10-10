@@ -2051,7 +2051,11 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const tag = typeof body.tag === "string" ? body.tag.slice(0, 200) : "";
     if (!tag) throw new ApiError(400, "notification tag is required");
-    const action = body.action === "allow_once" ? "allow_once" : "default";
+    // "allow_once" and "deny" answer a permission card; anything else is
+    // a plain click.
+    const action = body.action === "allow_once" || body.action === "deny"
+      ? body.action
+      : "default";
     sendJson(response, 200, { ok: true, value: await desktop.notificationClick(tag, action) });
     return;
   }

@@ -66,10 +66,14 @@ self.addEventListener("push", (event) => {
   if (kind === "permission" || kind === "ask") {
     options.requireInteraction = true;
   }
-  // Permission cards can be answered straight from the notification, the way
-  // the app's own native notification offers "Allow once".
-  if (options.data.allowOnce && kind === "permission") {
-    options.actions = [{ action: "allow_once", title: "Allow once" }];
+  // Permission cards can be answered straight from the notification. Deny is
+  // always possible; "Allow once" only when the official notification offered
+  // it (a tool that runs on the user's own machine does not). The official web
+  // push had the same deny-only variant.
+  if (kind === "permission") {
+    options.actions = options.data.allowOnce
+      ? [{ action: "allow_once", title: "Allow once" }, { action: "deny", title: "Deny" }]
+      : [{ action: "deny", title: "Deny" }];
   }
   event.waitUntil(self.registration.showNotification(title, options));
 });
@@ -81,7 +85,7 @@ async function reportClick(data, action) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         tag: bounded(data?.tag, 200),
-        action: action === "allow_once" ? "allow_once" : "default",
+        action: action === "allow_once" || action === "deny" ? action : "default",
       }),
       signal: AbortSignal.timeout(3000),
     });
@@ -107,8 +111,12 @@ async function focusOrOpen(route) {
 self.addEventListener("notificationclick", (event) => {
   const data = event.notification?.data ?? {};
   event.notification?.close?.();
-  if (event.action === "allow_once" && data.allowOnce) {
-    event.waitUntil(reportClick(data, "allow_once"));
+  // Answering a permission card ("Allow once" / "Deny") must not steal focus or
+  // navigate, matching the app's own notification actions.
+  const answersPermission = data.kind === "permission"
+    && (event.action === "allow_once" ? data.allowOnce === true : event.action === "deny");
+  if (answersPermission) {
+    event.waitUntil(reportClick(data, event.action === "deny" ? "deny" : "allow_once"));
     return;
   }
   event.waitUntil((async () => {

@@ -861,15 +861,47 @@
   }
 
   function closeRemoteNotification(tag) {
-    const notification = remoteNotificationTags.get(tag);
-    if (!notification) return;
+    const handle = remoteNotificationTags.get(tag);
+    if (!handle) return;
     remoteNotificationTags.delete(tag);
     try {
-      notification.close();
+      handle.close();
     } catch {}
   }
 
-  function showRemoteNotification(record) {
+  // The page's own notifications are not persistent, so they cannot carry
+  // action buttons. A permission card therefore goes through the service
+  // worker's registration (`registration.showNotification`) when one exists —
+  // that path supports actions, and its clicks arrive at the worker's
+  // notificationclick handler, which already answers the card and opens the
+  // session exactly like a pushed notification's. Without a registration
+  // (plain-HTTP origin, or the worker not installed yet) it falls back to a
+  // plain notification: clickable, just without buttons.
+  function notificationServiceWorkerRegistration() {
+    if (!("serviceWorker" in navigator)
+      || typeof navigator.serviceWorker.getRegistration !== "function") {
+      return Promise.resolve(null);
+    }
+    return navigator.serviceWorker.getRegistration("/").catch(() => null);
+  }
+
+  function rememberRemoteNotification(tag, handle) {
+    const previous = remoteNotificationTags.get(tag);
+    if (previous && previous !== handle) {
+      try {
+        previous.close();
+      } catch {}
+    }
+    remoteNotificationTags.set(tag, handle);
+    // The worker path has no onclose callback, so entries for dismissed cards
+    // are only reclaimed here; the map exists to close a still-visible
+    // notification, so dropping the oldest is harmless.
+    while (remoteNotificationTags.size > 32) {
+      remoteNotificationTags.delete(remoteNotificationTags.keys().next().value);
+    }
+  }
+
+  async function showRemoteNotification(record) {
     if (!("Notification" in globalThis) || Notification.permission !== "granted") return false;
     // Relayed events can outlive their moment when no page was connected (the
     // relay queue is drained on reconnect); a stale notification must not pop
@@ -894,34 +926,65 @@
     const tag = typeof record?.tag === "string" && record.tag
       ? record.tag
       : `remote-${Date.now()}`;
+    const options = {
+      body: String(record?.body || "").slice(0, 400),
+      // The official Desktop app icon, served same-origin (and already the
+      // PWA icon). Chrome uses it on Windows and Linux; macOS shows the
+      // browser/app icon instead and ignores this.
+      icon: "/desktop-icon.png",
+      tag,
+      // A replacement for the same tag re-alerts (the platform's default
+      // sound) instead of quietly swapping the text.
+      renotify: true,
+      // Permission and question cards must not slide away unread; a finished
+      // turn may dismiss itself like the desktop notification would.
+      ...(record?.kind === "permission" || record?.kind === "ask"
+        ? { requireInteraction: true }
+        : {}),
+    };
+    // The `in` check keeps the no-worker case on the synchronous path below,
+    // so a plain origin never pays a microtask before its notification shows.
+    if (record?.kind === "permission" && "serviceWorker" in navigator) {
+      const registration = await notificationServiceWorkerRegistration();
+      if (registration) {
+        try {
+          await registration.showNotification(title, {
+            ...options,
+            // The worker's click handler needs the same payload a pushed
+            // notification carries.
+            data: {
+              tag,
+              route: navigateTo || null,
+              kind: "permission",
+              allowOnce: record?.allowOnce === true,
+            },
+            // Deny is always possible; "Allow once" only when the official
+            // notification offered it too (the official web push had the same
+            // deny-only variant).
+            actions: record?.allowOnce === true
+              ? [{ action: "allow_once", title: "Allow once" }, { action: "deny", title: "Deny" }]
+              : [{ action: "deny", title: "Deny" }],
+          });
+          rememberRemoteNotification(tag, {
+            close: () => {
+              void registration.getNotifications({ tag })
+                .then((notifications) => notifications.forEach((item) => item.close()))
+                .catch(() => {});
+            },
+          });
+          return true;
+        } catch {
+          // Fall through to the plain notification.
+        }
+      }
+    }
     let notification;
     try {
-      notification = new Notification(title, {
-        body: String(record?.body || "").slice(0, 400),
-        // The official Desktop app icon, served same-origin (and already the
-        // PWA icon). Chrome uses it on Windows and Linux; macOS shows the
-        // browser/app icon instead and ignores this.
-        icon: "/desktop-icon.png",
-        tag,
-        // A replacement for the same tag re-alerts (the platform's default
-        // sound) instead of quietly swapping the text.
-        renotify: true,
-        // Permission and question cards must not slide away unread; a finished
-        // turn may dismiss itself like the desktop notification would.
-        ...(record?.kind === "permission" || record?.kind === "ask"
-          ? { requireInteraction: true }
-          : {}),
-      });
+      notification = new Notification(title, options);
     } catch {
       return false;
     }
-    const previous = remoteNotificationTags.get(tag);
-    if (previous && previous !== notification) {
-      try {
-        previous.close();
-      } catch {}
-    }
-    remoteNotificationTags.set(tag, notification);
+    rememberRemoteNotification(tag, notification);
     notification.onclick = () => {
       globalThis.focus();
       closeRemoteNotification(tag);
@@ -1038,9 +1101,9 @@
       // browser page cannot do; permission changes are picked up by the sync
       // above on the next focus instead.
       openNotificationSettings: () => undefined,
-      showNotification: (title, body, tag, navigateTo, _notificationType, attribution) => {
+      showNotification: async (title, body, tag, navigateTo, _notificationType, attribution) => {
         try {
-          showRemoteNotification({
+          await showRemoteNotification({
             title,
             body,
             tag,
@@ -1050,7 +1113,7 @@
             at: Date.now(),
           });
         } catch {}
-        return Promise.resolve(true);
+        return true;
       },
     };
   }
@@ -1059,9 +1122,13 @@
   // shows) arrive like any other relayed event. These subscriptions exist
   // regardless of what the renderer subscribes to.
   subscribe("DesktopNotifications", "onNotification", (record) => {
+    // The promise is returned so the smoke can await a display and a failure
+    // can never escape into the event dispatch.
     try {
-      showRemoteNotification(record);
-    } catch {}
+      return Promise.resolve(showRemoteNotification(record)).catch(() => false);
+    } catch {
+      return Promise.resolve(false);
+    }
   });
   subscribe("DesktopNotifications", "onNotificationClosed", (record) => {
     if (typeof record?.tag === "string") closeRemoteNotification(record.tag);
