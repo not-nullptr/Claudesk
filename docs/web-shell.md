@@ -196,13 +196,16 @@ official code decides whether to show at all.
 
 Known limits: a notification whose category the settings disabled is dropped
 everywhere; push delivery needs the bridge-data volume writable (otherwise it
-degrades to in-page notifications until a tab is opened, as before) and needs
-the bridge container to reach the browsers' push services (FCM, Mozilla, ...)
-outbound; the in-page path requires an open Claudesk tab; and action buttons on
-a card need a service-worker registration, so on a plain-HTTP origin (or before
-the worker is installed) a permission card is click-to-open only. Firefox does
-not render notification action buttons at all; macOS drops them for its own
-notification center.
+degrades to in-page notifications until a tab is opened, as before), the bridge
+container to reach the browsers' push services (FCM, Mozilla, ...) outbound,
+and the browser to have a push service at all — Helium ships none, so there the
+push path is unavailable and everything arrives in-page; the in-page path
+requires an open Claudesk tab; and action buttons on a card need a
+service-worker registration, so on a plain-HTTP origin (or before the worker is
+installed) a permission card is click-to-open only. Firefox does not render
+notification action buttons at all; macOS drops them for its own notification
+center. When a card falls back to a button-less notification, or push is
+unavailable, the page says so once on the browser console.
 
 ## Code routes
 

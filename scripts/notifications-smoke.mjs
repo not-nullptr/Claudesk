@@ -452,8 +452,10 @@ function loadPreload({
   focused = false,
   pathname = "/cowork/s1",
   // When set, the harness exposes a service-worker registration, which is the
-  // path an actionable (permission) card takes.
+  // path an actionable (permission) card takes; `workerActive: false` models a
+  // worker that never finished activating.
   serviceWorker = false,
+  workerActive = true,
 } = {}) {
   const created = [];
   const closed = [];
@@ -463,7 +465,9 @@ function loadPreload({
   const workerShown = [];
   const workerClosed = [];
   let workerShowFails = false;
+  const logs = [];
   const registration = {
+    active: workerActive ? {} : null,
     showNotification: async (title, options) => {
       if (workerShowFails) throw new Error("service worker is not ready");
       workerShown.push({ title, options: JSON.parse(JSON.stringify(options)) });
@@ -471,6 +475,12 @@ function loadPreload({
     getNotifications: async (filter) => {
       workerClosed.push(filter?.tag ?? null);
       return [{ close: () => workerClosed.push(`closed:${filter?.tag}`) }];
+    },
+    // A push service that rejects, like a browser without Web Push (Helium
+    // ships none); the sync must log why and keep the page otherwise working.
+    pushManager: {
+      getSubscription: async () => null,
+      subscribe: async () => { throw new Error("test browser has no push service"); },
     },
   };
   class FakeNotification {
@@ -493,8 +503,21 @@ function loadPreload({
     Notification: FakeNotification,
     document: { hasFocus: () => focused, hidden: !focused, addEventListener() {} },
     navigator: serviceWorker
-      ? { serviceWorker: { addEventListener() {}, getRegistration: async () => registration } }
+      ? {
+          serviceWorker: {
+            addEventListener() {},
+            getRegistration: async () => registration,
+            register: async () => registration,
+            ready: Promise.resolve(registration),
+          },
+        }
       : {},
+    console: {
+      debug: () => {},
+      log: () => {},
+      info: (...args) => logs.push({ level: "info", text: args.map(String).join(" ") }),
+      warn: (...args) => logs.push({ level: "warn", text: args.map(String).join(" ") }),
+    },
     location: { pathname, href: `https://claude.example${pathname}`, origin: "https://claude.example" },
     history: {
       state: null,
@@ -510,11 +533,25 @@ function loadPreload({
     Uint8Array,
     URL,
     AbortSignal,
+    // The push sync gates on PushManager being exposed, as a secure-context
+    // browser does.
+    PushManager: class PushManager {},
+    setTimeout,
+    clearTimeout,
     dispatchEvent() {},
     addEventListener() {},
     focus() {},
     fetch: async (path, options = {}) => {
       fetches.push({ path, body: options.body ? JSON.parse(options.body) : null });
+      if (path === "/api/remote/notifications/config") {
+        // A valid uncompressed P-256 point, so notificationKeyBytes accepts it.
+        return {
+          json: async () => ({
+            ok: true,
+            value: { vapidPublicKey: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4" },
+          }),
+        };
+      }
       return {
         json: async () => ({ ok: true, value: { route: routeResponses.shift() ?? null } }),
       };
@@ -532,7 +569,7 @@ function loadPreload({
     + "this.notificationTags=remoteNotificationTags;", sandbox);
   return {
     sandbox, created, closed, fetches, navigations, routeResponses, FakeNotification,
-    workerShown, workerClosed,
+    workerShown, workerClosed, logs,
     failWorkerShow: () => { workerShowFails = true; },
     channel: sandbox.channel,
     closeChannel: sandbox.closeChannel,
@@ -636,7 +673,7 @@ function loadPreload({
 // the worker (answering it from the notification, handled by the worker's click
 // handler); without one it stays a plain clickable notification.
 {
-  const { sandbox, created, channel, workerShown, workerClosed, closeChannel } = loadPreload({ serviceWorker: true });
+  const { sandbox, created, channel, workerShown, workerClosed, closeChannel, logs } = loadPreload({ serviceWorker: true });
   await channel({ title: "repo", body: "Allow Claude to run npm test?", tag: "permission-r1", sessionId: "s3", kind: "permission", allowOnce: true, route: "/epitaxy/s3", at: Date.now() });
   assert.equal(created.length, 0, "an actionable card must not use the plain constructor when a worker exists");
   assert.equal(workerShown.length, 1);
@@ -661,6 +698,18 @@ function loadPreload({
   closeChannel({ tag: "permission-r1" });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(workerClosed, ["permission-r1", "closed:permission-r1"]);
+
+  // The harness's push service rejects like a browser without Web Push
+  // (Helium): the page says so once on the console and keeps working.
+  assert.ok(logs.some((entry) => entry.level === "info" && entry.text.includes("no push subscription")),
+    "a browser without a push service must say why push is unavailable");
+
+  // A worker that never activated: the card falls back, with a warning.
+  const inactiveWorker = loadPreload({ serviceWorker: true, workerActive: false });
+  await inactiveWorker.channel({ title: "repo", body: "Allow?", tag: "permission-r5", kind: "permission", allowOnce: true, at: Date.now() });
+  assert.equal(inactiveWorker.created.length, 1, "an inactive worker must fall back to a plain notification");
+  assert.ok(inactiveWorker.logs.some((entry) => entry.level === "warn" && entry.text.includes("not active")),
+    "the fallback must be visible on the console");
 
   // Deny-only when the official notification did not offer Allow once.
   const denyOnly = loadPreload({ serviceWorker: true });

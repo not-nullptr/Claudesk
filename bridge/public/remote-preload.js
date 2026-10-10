@@ -871,18 +871,42 @@
 
   // The page's own notifications are not persistent, so they cannot carry
   // action buttons. A permission card therefore goes through the service
-  // worker's registration (`registration.showNotification`) when one exists —
-  // that path supports actions, and its clicks arrive at the worker's
-  // notificationclick handler, which already answers the card and opens the
-  // session exactly like a pushed notification's. Without a registration
-  // (plain-HTTP origin, or the worker not installed yet) it falls back to a
-  // plain notification: clickable, just without buttons.
+  // worker's registration (`registration.showNotification`) — that path
+  // supports actions, and its clicks arrive at the worker's notificationclick
+  // handler, which already answers the card and opens the session exactly like
+  // a pushed notification's. A registration is made on demand here rather than
+  // reusing the push sync's: it must not depend on push support (Helium ships
+  // no Web Push service and hangs on subscribe), and it must exist even in a
+  // browser where the sync's PushManager gate stopped it. Without a
+  // registration (plain-HTTP origin, registration failure) a card still shows,
+  // as a plain clickable notification — and says so on the console, because
+  // that difference is otherwise invisible.
+  let notificationRegistrationPromise = null;
   function notificationServiceWorkerRegistration() {
     if (!("serviceWorker" in navigator)
       || typeof navigator.serviceWorker.getRegistration !== "function") {
       return Promise.resolve(null);
     }
-    return navigator.serviceWorker.getRegistration("/").catch(() => null);
+    notificationRegistrationPromise ??= (async () => {
+      try {
+        const existing = await navigator.serviceWorker.getRegistration("/");
+        const registration = existing
+          ?? await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+        if (!registration.active) {
+          // showNotification needs an active worker; a freshly installed one
+          // activates on its own, but a card must not wait forever for it.
+          await Promise.race([
+            navigator.serviceWorker.ready,
+            new Promise((resolve) => setTimeout(resolve, 3000)),
+          ]);
+        }
+        return registration;
+      } catch (error) {
+        console.warn("[claudesk] the notification service worker is unavailable; notifications will not carry buttons:", error);
+        return null;
+      }
+    })();
+    return notificationRegistrationPromise;
   }
 
   function rememberRemoteNotification(tag, handle) {
@@ -946,7 +970,7 @@
     // so a plain origin never pays a microtask before its notification shows.
     if (record?.kind === "permission" && "serviceWorker" in navigator) {
       const registration = await notificationServiceWorkerRegistration();
-      if (registration) {
+      if (registration?.active) {
         try {
           await registration.showNotification(title, {
             ...options,
@@ -973,9 +997,11 @@
             },
           });
           return true;
-        } catch {
-          // Fall through to the plain notification.
+        } catch (error) {
+          console.warn("[claudesk] the notification service worker could not show this card; using a plain notification without buttons:", error);
         }
+      } else if (registration) {
+        console.warn("[claudesk] the notification service worker is not active yet; showing this card without buttons");
       }
     }
     let notification;
@@ -1011,6 +1037,17 @@
     return pushConfigPromise;
   }
 
+  // Some browsers never settle a Push API call — Helium ships no Web Push
+  // service at all and its subscribe() neither resolves nor rejects — so every
+  // push-manager call is raced against a deadline; a wedged promise must not
+  // live for the page's lifetime.
+  function settleWithin(promise, milliseconds, message) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(message)), milliseconds)),
+    ]);
+  }
+
   // Keep the push subscription in step with the browser permission: a granted
   // page subscribes (so notifications arrive with every tab closed), a page
   // whose permission was revoked drops it again. Registration and subscription
@@ -1022,25 +1059,32 @@
     pushSyncPromise = (async () => {
       try {
         if (!("serviceWorker" in navigator) || !("PushManager" in globalThis)) return;
-        // Nothing to install before the user ever granted notifications; a
-        // registration from an earlier grant is reused (and cleaned up below
-        // when the permission is gone).
-        const existingRegistration = await navigator.serviceWorker.getRegistration("/").catch(() => null);
-        if (Notification.permission !== "granted" && !existingRegistration) return;
-        const registration = existingRegistration
-          ?? await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-        const existing = await registration.pushManager.getSubscription().catch(() => null);
-        if (!("Notification" in globalThis) || Notification.permission !== "granted") {
-          if (existing) {
-            await existing.unsubscribe().catch(() => {});
+        const granted = "Notification" in globalThis && Notification.permission === "granted";
+        if (!granted) {
+          // Nothing to install before the user ever granted notifications; a
+          // subscription from an earlier grant is dropped, so the bridge stops
+          // pushing to a browser that no longer wants (or shows) them.
+          const existingRegistration = await navigator.serviceWorker.getRegistration("/").catch(() => null);
+          const subscription = existingRegistration
+            ? await settleWithin(existingRegistration.pushManager.getSubscription(), 10000, "the browser did not answer getSubscription").catch(() => null)
+            : null;
+          if (subscription) {
+            await subscription.unsubscribe().catch(() => {});
             await fetch("/api/remote/notifications/unsubscribe", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ endpoint: existing.endpoint }),
+              body: JSON.stringify({ endpoint: subscription.endpoint }),
             }).catch(() => {});
           }
           return;
         }
+        const registration = await notificationServiceWorkerRegistration();
+        if (!registration) return;
+        const existing = await settleWithin(
+          registration.pushManager.getSubscription(),
+          10000,
+          "the browser did not answer getSubscription",
+        ).catch(() => null);
         const vapidPublicKey = await fetchPushConfig();
         if (!vapidPublicKey) return;
         const expectedKey = notificationKeyBytes(vapidPublicKey);
@@ -1061,10 +1105,14 @@
           }
         }
         if (!subscription) {
-          subscription = await registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: expectedKey,
-          });
+          subscription = await settleWithin(
+            registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: expectedKey,
+            }),
+            15000,
+            "the browser's push service did not answer (this browser may have no Web Push service)",
+          );
         }
         await fetch("/api/remote/notifications/subscribe", {
           method: "POST",
@@ -1074,8 +1122,12 @@
             clientId: remoteNotificationClientId(),
           }),
         }).catch(() => {});
-      } catch {
-        // Push is best-effort; in-page notifications keep working without it.
+      } catch (error) {
+        // Push is best-effort and in-page notifications keep working without
+        // it, but say why once per attempt: a browser with no push service (or
+        // a wedged one) is otherwise indistinguishable from a broken bridge.
+        console.info("[claudesk] no push subscription; notifications will only appear while a Claudesk tab is open:",
+          error instanceof Error ? error.message : error);
       }
     })().finally(() => {
       pushSyncPromise = null;
