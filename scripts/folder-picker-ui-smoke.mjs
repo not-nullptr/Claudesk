@@ -23,7 +23,7 @@ const context = { document: { body, activeElement: new Element("button"),
   createElement(tag) { const element = new Element(tag); created.push(element); return element; } },
   AbortController, fetch: async (url, options) => {
     assert.ok(options.signal);
-    const path = new URL(url, "https://nas.invalid").searchParams.get("path") || "/workspace";
+    const path = new URL(url, "https://claudesk.invalid").searchParams.get("path") || "/workspace";
     requests.push(path);
     if (path === "/outside" || (missing && path === "/workspace/a")) {
       return { ok: false, json: async () => ({ ok: false, error: "Folder unavailable" }) };

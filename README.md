@@ -1,6 +1,6 @@
-# Claude Desktop NAS
+# Claude Desktop Server
 
-在 NAS 上以无头 Docker 容器运行 Anthropic 官方 Linux Claude Desktop，并通过轻量级 Remote IPC Bridge 在浏览器中使用 Chat、Cowork 与可选的 Code/Developer 能力。浏览器看到的是 Claude Desktop 随安装包提供的官方 `ion-dist` 界面；本项目只负责容器化、受限桥接和持久化，不重做消息渲染器。
+在 Linux 服务器上以无头 Docker 容器运行 Anthropic 官方 Linux Claude Desktop，并通过轻量级 Remote IPC Bridge 在浏览器中使用 Chat、Cowork 与可选的 Code/Developer 能力。浏览器看到的是 Claude Desktop 随安装包提供的官方 `ion-dist` 界面；本项目只负责容器化、受限桥接和持久化，不重做消息渲染器。
 
 ## 界面预览
 
@@ -24,7 +24,7 @@
 
 ## 适用场景
 
-- 在 Linux/NAS 上运行官方 Claude Desktop，而不依赖物理桌面。
+- 在 Linux 服务器上运行官方 Claude Desktop，而不依赖物理桌面。
 - 使用局域网或 Tailnet 浏览器访问 Chat 与 Cowork，并保留 Desktop 的本地会话状态。
 - 在可信 HTTPS/Authelia 入口后按需打开 Gateway 设置、Developer、Infrastructure 或 Code 表面。
 - 让同一份 `/config` 和 `/workspace` 数据在容器重启后继续可用。
@@ -54,10 +54,10 @@ flowchart LR
 
 | 入口 | 用途 | 访问边界 |
 | --- | --- | --- |
-| `http://NAS_IP:15821/` | 局域网/Tailnet 直接访问 Chat、Cowork | 仅可信网络；不继承 Authelia |
+| `http://SERVER_IP:15821/` | 局域网/Tailnet 直接访问 Chat、Cowork | 仅可信网络；不继承 Authelia |
 | `https://claude-home.172906573.xyz:28443/` | 安装 PWA、跨网络访问 | 由现有 Nginx Proxy Manager + Authelia 保护 |
 
-`15821` 是本 Compose 的唯一公开端口（容器内 `8080`）。HTTPS 入口需要把主机名解析到 NAS，并沿用现有 Authelia 两因素规则。浏览器可以直接使用 HTTP，但标准 PWA 安装需要 HTTPS。
+`15821` 是本 Compose 的唯一公开端口（容器内 `8080`）。HTTPS 入口需要把主机名解析到服务器，并沿用现有 Authelia 两因素规则。浏览器可以直接使用 HTTP，但标准 PWA 安装需要 HTTPS。
 
 ## 前置条件
 
@@ -170,7 +170,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
 | `CLAUDE_INFERENCE_MODELS_JSON` | — | Desktop 接受的精确模型 ID JSON 数组 |
 | `CLAUDE_HEADLESS` | `1` | 无头启动官方 Desktop |
-| `CLAUDE_DISABLE_GPU` | `1` | NAS 环境默认关闭 GPU |
+| `CLAUDE_DISABLE_GPU` | `1` | 服务器环境默认关闭 GPU |
 
 ### 远程能力开关
 
@@ -201,7 +201,7 @@ Gateway 自行下发的问候语不会被覆盖。
 
 `CLAUDE_COWORK_VM_MEMORY_GB`、`CLAUDE_COWORK_VM_CPU_COUNT`、`CLAUDE_COWORK_VM_IDLE_MINUTES` 和 `CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES` 控制 Cowork VM 资源与空闲回收；生产默认值分别为 `2`、`1`、`30`、`10`。`CLAUDE_DESKTOP_MEMORY_LIMIT` 和 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT` 默认分别为 `3g` 与 `256m`。
 
-`CLAUDE_EGRESS_ALLOWED_HOSTS_JSON` 可限制 Cowork、Code 和 Plugin CLI 的出站目标。空值不额外放宽策略；`["*"]` 表示交给 NAS 防火墙与上游网络控制的 unrestricted egress。
+`CLAUDE_EGRESS_ALLOWED_HOSTS_JSON` 可限制 Cowork、Code 和 Plugin CLI 的出站目标。空值不额外放宽策略；`["*"]` 表示交给服务器防火墙与上游网络控制的 unrestricted egress。
 
 ## 官方远程接口
 
@@ -311,7 +311,7 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 
 常见问题：
 
-1. **页面打不开**：先确认 `docker compose ps` 中两个服务为 healthy，再从 NAS 本机执行 `curl -fsS http://127.0.0.1:15821/api/health`。
+1. **页面打不开**：先确认 `docker compose ps` 中两个服务为 healthy，再从服务器本机执行 `curl -fsS http://127.0.0.1:15821/api/health`。
 2. **Cowork 不可用**：检查 `/dev/kvm`、`/dev/vhost-vsock` 权限和 `claude-desktop` healthcheck；不要先关闭 seccomp。
 3. **模型列表为空**：确认 `CLAUDE_INFERENCE_MODELS_JSON` 是合法 JSON，模型 ID 与 Gateway 实际接受的路由一致。
 4. **PWA 无法安装**：HTTP LAN 入口可浏览但不能安装 PWA；改用 Authelia 保护的 HTTPS 主机名。
@@ -321,11 +321,11 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 
 Compose 默认挂载：
 
-| 容器路径 | NAS 路径 | 内容 |
+| 容器路径 | 宿主机路径 | 内容 |
 | --- | --- | --- |
-| `/config` | `/vol2/1000/Docker/ClaudeDesktop/config` | Claude Desktop 配置、账户与 Chat/Cowork 会话 |
-| `/workspace` | `/vol2/1000/Docker/ClaudeDesktop/workspace` | Code/Cowork 工作区、远程上传与项目文件 |
-| `/data`（仅 cowork-bridge） | `/vol2/1000/Docker/ClaudeDesktop/bridge-data` | 浏览器通知状态：Web Push 订阅、VAPID 密钥与服务端通知偏好；首次启动前请创建该目录并让 `PUID:PGID` 可写 |
+| `/config` | `/opt/claudesk/data/config` | Claude Desktop 配置、账户与 Chat/Cowork 会话 |
+| `/workspace` | `/opt/claudesk/data/workspace` | Code/Cowork 工作区、远程上传与项目文件 |
+| `/data`（仅 cowork-bridge） | `/opt/claudesk/data/bridge-data` | 浏览器通知状态：Web Push 订阅、VAPID 密钥与服务端通知偏好；首次启动前请创建该目录并让 `PUID:PGID` 可写 |
 
 停止 Claude Desktop 后再对 `/config` 做一致性敏感的备份。Cowork VM 与工作数据可能额外占用约 25 GB，长期运行前请检查存储余量。
 

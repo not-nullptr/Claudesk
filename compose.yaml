@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         CLAUDE_DESKTOP_VERSION: "${CLAUDE_DESKTOP_VERSION:-2.31226.1}"
-    image: local/claude-desktop-nas:official-linux
+    image: local/claudesk-desktop:official-linux
     container_name: claude-desktop
     hostname: claude-desktop
     ports:
@@ -53,8 +53,8 @@ services:
       # .env.example.
       CLAUDE_AUTO_MODE_MODEL: "${CLAUDE_AUTO_MODE_MODEL:-}"
     volumes:
-      - /vol2/1000/Docker/ClaudeDesktop/config:/config
-      - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
+      - /opt/claudesk/data/config:/config
+      - /opt/claudesk/data/workspace:/workspace
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/vhost-vsock:/dev/vhost-vsock
@@ -148,12 +148,12 @@ services:
       # push services see in the VAPID token (mailto: or https: URL).
       CLAUDE_REMOTE_PUSH_SUBJECT: "${CLAUDE_REMOTE_PUSH_SUBJECT:-mailto:claudesk@localhost}"
     volumes:
-      - /vol2/1000/Docker/ClaudeDesktop/config:/config:ro
-      - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
+      - /opt/claudesk/data/config:/config:ro
+      - /opt/claudesk/data/workspace:/workspace
       # Notifications state. Create it writable by PUID:PGID on the host (a
       # missing directory is created by Docker as root, which the bridge cannot
       # write to; it then only degrades to in-page notifications).
-      - /vol2/1000/Docker/ClaudeDesktop/bridge-data:/data
+      - /opt/claudesk/data/bridge-data:/data
     mem_limit: "${CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT:-256m}"
     healthcheck:
       test:
@@ -258,7 +258,7 @@ services:
     volumes:
       # Login sessions and lockout state, mobile-only chat metadata, uploads, and
       # conversations from before the Claudesk backend (legacy-conversations/).
-      - /vol2/1000/Docker/ClaudeDesktop/mobile-data:/data
+      - /opt/claudesk/data/mobile-data:/data
     mem_limit: "${CLAUDE_MOBILE_API_MEMORY_LIMIT:-256m}"
     networks:
       - gateway_net

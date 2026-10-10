@@ -96,7 +96,7 @@ COPY config/release.json /opt/claude-cowork-bridge/release.json
 COPY bridge/public/fonts/AnthropicSerif-Text-Regular-CJK.otf \
     /usr/local/share/fonts/claudesk/AnthropicSerif-Text-Regular-CJK.otf
 
-# On this NAS, root inside a container has CAP_DAC_OVERRIDE and dash's `test -x`
+# On this server, root inside a container has CAP_DAC_OVERRIDE and dash's `test -x`
 # reports regular 0644 files as executable.  The upstream init script uses
 # `test -x` to distinguish literal environment files from scripts, so make that
 # decision from the actual mode bits instead.

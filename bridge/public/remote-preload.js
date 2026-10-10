@@ -26,7 +26,7 @@
 
   // SubtleCrypto is also restricted to secure contexts. The official UI only
   // needs digest during its common HTTP bootstrap path; keep the compatibility
-  // surface deliberately narrow and execute the allowlisted hash on the NAS.
+  // surface deliberately narrow and execute the allowlisted hash on the server.
   if (globalThis.crypto && !globalThis.crypto.subtle) {
     Object.defineProperty(globalThis.crypto, "subtle", {
       configurable: true,
@@ -78,7 +78,7 @@
   // Desktop IPC stores. A fresh browser otherwise starts with no folder and
   // the official picker treats the phone as the local machine, recursively
   // uploading the selected directory. Seed only an absent (or legacy browser
-  // upload) selection with the NAS workspace. Preserve any other NAS path the
+  // upload) selection with the server workspace. Preserve any other server path the
   // user has deliberately selected.
   try {
     const storageKey = "ccd-session-store";

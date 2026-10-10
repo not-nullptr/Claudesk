@@ -2,8 +2,8 @@
 set -eu
 
 project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
-state_dir="${CLAUDESK_UPDATE_STATE_DIR:-/vol2/1000/Docker/ClaudeDesktop/update-state}"
-stable_image="local/claude-desktop-nas:official-linux"
+state_dir="${CLAUDESK_UPDATE_STATE_DIR:-/opt/claudesk/data/update-state}"
+stable_image="local/claudesk-desktop:official-linux"
 bridge_image="local/claude-cowork-bridge:latest"
 mkdir -p "$state_dir"
 
@@ -117,8 +117,8 @@ if [ "$candidate" != "$supported_version" ]; then
   exit 0
 fi
 
-candidate_tag="local/claude-desktop-nas:candidate-$candidate"
-rollback_tag="local/claude-desktop-nas:rollback-$current_version"
+candidate_tag="local/claudesk-desktop:candidate-$candidate"
+rollback_tag="local/claudesk-desktop:rollback-$current_version"
 bridge_candidate_tag="local/claude-cowork-bridge:candidate-$candidate"
 bridge_rollback_tag="local/claude-cowork-bridge:rollback-$current_version"
 printf '[monthly-update] building candidate %s\n' "$candidate"
@@ -216,7 +216,7 @@ docker image rm "$candidate_tag" >/dev/null 2>&1 || true
 docker image rm "$bridge_candidate_tag" >/dev/null 2>&1 || true
 
 docker image ls --format '{{.Repository}}:{{.Tag}}' \
-  | awk '/^local\/claude-desktop-nas:(candidate|rollback)-/ { print }' \
+  | awk '/^local\/claudesk-desktop:(candidate|rollback)-/ { print }' \
   | while IFS= read -r image; do
       [ "$image" = "$rollback_tag" ] || docker image rm "$image" || true
     done

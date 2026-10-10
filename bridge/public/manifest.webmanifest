@@ -1,7 +1,7 @@
 {
   "name": "Claude",
   "short_name": "Claude",
-  "description": "Official Claude Desktop interface through the NAS Remote IPC Bridge",
+  "description": "Official Claude Desktop interface through the Remote IPC Bridge",
   "lang": "zh-CN",
   "id": "/",
   "start_url": "/task/new",
