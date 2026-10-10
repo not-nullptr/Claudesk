@@ -92,6 +92,24 @@ layout does not already do on a desktop-identified client. Like the route alias,
 it is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
 deployment prepares a byte-identical renderer.
 
+*Placement* is a second, independent gate in the same area. New sessions are
+placed remotely — claude.ai's cloud Cowork — whenever the renderer does not
+believe it runs as the Desktop app: its placement helper evaluates the platform
+check that requires the `Claude/<version>` user-agent token (the preload's
+`claudeAppBindings` is present, the token is not) before it ever consults the
+account, and a remote placement makes the composer prime a cloud session with
+`POST /api/organizations/<org>/cowork/sessions` — an endpoint only claude.ai
+serves, so the bridge answers 404 and a new chat with manual approvals died on
+that response. The `web-local-session-placement` renderer patch forces the
+platform check (`let i=…()` → `let i=!0`), read back as the zero-argument call
+in the declarator directly after the one carrying the
+`yukon_silver_dramatic_shrimp` literal, so placement follows the account's own
+`dramatic_shrimp_enabled` setting. The bridge declares that setting `false` on
+the bootstrap account document (see Account identity) — the same document the
+app's current-account context reads — so the composer takes the local path this
+bridge backs over the Desktop IPC. Spliced and required only when
+`CLAUDE_REMOTE_WEB_SHELL=1`.
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission
@@ -268,8 +286,10 @@ deployment name through the renderer-config store so the footer stops reading
 bundle itself documents as "Overrides the provider label shown in the sidebar
 footer, user-menu header, and connection-error banner" — no renderer patch is
 needed, only the store value the bridge already controls. Only the fields set are
-overridden: uuids, settings, capabilities and entitlements are left exactly as
-upstream sent them, so Cowork, Code and the time-based greeting keep working. A
+overridden: uuids, capabilities and entitlements are left exactly as upstream
+sent them, so Cowork, Code and the time-based greeting keep working. Settings
+are only touched by the session-placement policy (one flag, see Chat and Cowork
+sessions), never by the identity overrides. A
 default deployment, and the Desktop shell, never reach any of this — the whole
 path is gated on `webShellEnabled`.
 

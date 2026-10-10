@@ -80,7 +80,9 @@ const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().
 // value below is set, the bridge overrides just the identity fields (name,
 // email, avatar, organization, plan) on the documents it already rewrites;
 // uuids, settings, capabilities and entitlements are left exactly as upstream
-// sent them, so Cowork/Code and the time-based greeting keep working. A default
+// sent them, so Cowork/Code and the time-based greeting keep working — the
+// session-placement policy below is the one deliberate exception, flipping a
+// single settings flag. A default
 // deployment, and the Desktop shell, never reach any of this. This is identity
 // only: there is no login/logout session yet — `resolveAccountIdentity` is the
 // seam a future auth layer fills with a per-session identity (see docs/web-shell.md).

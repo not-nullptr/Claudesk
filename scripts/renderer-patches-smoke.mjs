@@ -49,6 +49,24 @@ const sessionLayout = 'function SessionLayout({children:e}){'
   + 'let isDesktopApp=desktopFromUserAgent(),pinned=useStore(x=>x.pinned);'
   + 'return useMemo(()=>{if(!(remote||hub)){if(!isDesktopApp){report("not_desktop_app");return}'
   + 'local||ready||report("cowork_gate_off")}},[]);}';
+// The session-placement helper: after reading the shrimp gate it evaluates the
+// platform check that requires the Desktop user-agent token, and the account's
+// placement settings decide remote vs local. In web-shell mode the check is
+// forced true so placement follows the account (the bridge declares
+// `dramatic_shrimp_enabled` false), keeping new sessions on the local path.
+const sessionPlacement = 'function placeSession(){"use no memo";'
+  + 'let forceLocal=gate("dramatic_shrimp_force_local"),org=orgAvailable(),available=org,'
+  + 'remoteAllowed=rule("yukon_silver_dramatic_shrimp"),isApp=desktopClient(),'
+  + 'internal=flag("yukon_silver_dramatic_shrimp_internal",!1),{account}=useAccount(),'
+  + 'enabled=account?.settings.dramatic_shrimp_enabled,'
+  + 'disabledAt=account?.settings.dramatic_shrimp_disabled_at,'
+  + 'remote=resolveRemote(enabled,disabledAt);'
+  + 'return isApp?{isRemote:remote}:{isRemote:!0,preferenceOverridden:forceLocal}}';
+const sessionPlacementDecoy = 'function notThePlacement(){'
+  + 'let forceLocal=gate("dramatic_shrimp_force_local"),'
+  + 'settings=(account)=>account.settings.dramatic_shrimp_disabled_at,'
+  + 'shrimp=rule("yukon_silver_dramatic_shrimp"),isApp=desktopClient(user);'
+  + 'return isApp&&shrimp}';
 // The account chip: reads the account view — its src binding — and then returns
 // the deployment mark, the one shape that fetches the photo and drops it. The
 // chip takes extra placement props and answers through a comma sequence, like
@@ -149,7 +167,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -159,8 +177,8 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 12,
-    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
+  assert.equal(webResult.patches.length, 13,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
     "the push-enablement function must be spliced exactly once");
@@ -208,6 +226,12 @@ for (const [i, variant] of variants.entries()) {
     "the session layout Desktop gate must be spliced once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("let isDesktopApp=!0,pinned="),
     "the session layout must treat the web shell as the Desktop app");
+  assert.equal(webResult.patches.filter(p => p.id === "web-local-session-placement").length, 1,
+    "the session placement must take the desktop branch exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("isApp=!0,"),
+    "the web shell must place new sessions on the desktop-capable branch");
+  assert.ok(result.sources.get(`changed-chunk-${i}.js`).includes("isApp=desktopClient(),"),
+    "the placement check stays untouched without the web shell");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('if(!t.isDesktopApp)return n("not_desktop_app")'),
     "the signing gate's member-expression test must not be a target");
   for (const protocol of ["app:", "https:"]) for (const gateway of [false, true]) for (const available of [false, true]) {
@@ -245,6 +269,29 @@ const compiledSession = await minify(`${sessionLayout}\n${signingDecoy}`, {
 assert.equal(inspectRenderer(compiledSession.code, false, true).patches
   .filter(patch => patch.id === "desktop-session-viewer-gate").length, 1,
   "a mangled session layout must still be spliced");
+// ...and the session placement: a helper without the exact gate-then-platform
+// sequence refuses rather than splice over the closest-looking call, a
+// platform call carrying arguments is not the sequence, and the splice
+// survives minification like the other structural read-backs.
+assert.throws(() => patchRendererSources(new Map([["no-placement.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
+  /web-local-session-placement expected once, found 0/,
+  "the web shell must refuse a renderer without the placement helper");
+assert.throws(() => patchRendererSources(new Map([["dup-placement.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${sessionPlacement}\n${sessionPlacement.replaceAll("placeSession", "placeSessionB")}\n${accountChip}\n${desktopRoot}`
+    + `\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
+  /web-local-session-placement expected once, found 2/);
+assert.equal(inspectRenderer(sessionPlacementDecoy, false, true).patches
+  .filter(patch => patch.id === "web-local-session-placement").length, 0,
+  "a platform call carrying arguments is not the placement target");
+const placementCompiled = await minify(sessionPlacement, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(placementCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-local-session-placement").length, 1,
+  "a mangled placement helper must still be spliced once");
 // The download target must be unique: a second file pane fragment, or a
 // duplicated file pane, is refused rather than double-spliced.
 assert.throws(() => patchRendererSources(new Map([["a.js", filePane], ["b.js", filePane]]), false),
@@ -264,7 +311,7 @@ assert.throws(() => patchRendererSources(new Map([["no-session-gate.js",
 // photo-less mark must be refused rather than ship a shell where a configured
 // pfp never renders (the chip never sets a source, so no image is requested).
 assert.throws(() => patchRendererSources(new Map([["no-chip.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`]]), false, true),
   /web-account-chip-avatar expected once, found 0/,
   "the web shell must refuse a renderer without the account-chip avatar");
 // Two chips (or a second photo-less account-view component) must refuse rather
@@ -272,7 +319,7 @@ assert.throws(() => patchRendererSources(new Map([["no-chip.js",
 const accountChipB = accountChip.replaceAll("chipMark", "chipMarkB")
   .replaceAll("accountHook", "accountHookB").replaceAll("accountAvatar", "accountAvatarB");
 assert.throws(() => patchRendererSources(new Map([["dup-chip.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${accountChipB}`]]), false, true),
   /web-account-chip-avatar expected once, found 2/);
 // The avatar component and the photo binding are structural read-backs, so the
@@ -290,14 +337,14 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
 // matches must be refused rather than ship a chip whose photo waits for the
 // profile read while the bootstrap account already carries it.
 assert.throws(() => patchRendererSources(new Map([["no-photo-hook.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChipBody}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]),
   false, true),
   /web-account-photo-first-frame expected once, found 0/,
   "the web shell must refuse a renderer without the account view hook");
 // Two view hooks must refuse rather than splice the fallback into the wrong one.
 assert.throws(() => patchRendererSources(new Map([["dup-photo-hook.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${accountChipHook.replaceAll("accountHook", "accountHookB")}`
     + `\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
   /web-account-photo-first-frame expected once, found 2/,
@@ -313,7 +360,7 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
 // The full web-shell fixture set, reused for the identity-reader refusals below
 // and for the Desktop-checks success case.
 const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`
-  + `\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`;
+  + `\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`;
 // ...and the user-menu identity: a renderer whose identity reader no longer
 // matches must be refused rather than ship a menu whose title flips to the
 // account name a frame after it opens.
@@ -383,14 +430,14 @@ assert.equal(barePhoto.result, undefined,
 // longer matches must be refused rather than ship an enable action that dies in
 // a Firebase registration this deployment can never complete.
 assert.throws(() => patchRendererSources(new Map([["no-push-enable.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}`]]), false, true),
   /web-notifications-enable-bridge expected once, found 0/,
   "the web shell must refuse a renderer without the push-enablement function");
 // Two push-enablement functions must refuse rather than splice the branch into
 // the wrong one.
 assert.throws(() => patchRendererSources(new Map([["dup-push-enable.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n`
     + `${pushEnable.replaceAll("pushEnable", "pushEnableB")}`]]), false, true),
   /web-notifications-enable-bridge expected once, found 2/);
@@ -495,11 +542,11 @@ assert.ok(!patchRendererSources(checksInputs, false).sources.get("checks-chunk.j
   .includes("function desktopChecks(){wirePendingPermissions(api);"),
   "the wiring stays off without the web shell");
 assert.throws(() => patchRendererSources(new Map([["no-checks.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}`]]), false, true),
   /web-cowork-permission-wiring expected once, found 0/,
   "the web shell must refuse a renderer without the Desktop-checks slot");
 assert.throws(() => patchRendererSources(new Map([["dup-checks.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n`
     + desktopChecks.replaceAll("desktopChecks", "desktopChecksB").replaceAll("otherChecks", "otherChecksB")]]),
   false, true), /web-cowork-permission-wiring expected once, found 2/,

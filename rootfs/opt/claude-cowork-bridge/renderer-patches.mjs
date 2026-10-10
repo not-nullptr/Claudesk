@@ -51,6 +51,24 @@ const routeAliasPatchId = "desktop-code-route-alias";
 // client. Spliced only in web-shell mode.
 const sessionViewerPatchId = "desktop-session-viewer-gate";
 const sessionViewerReason = "not_desktop_app";
+// Session placement. The renderer places new sessions remotely — claude.ai's
+// cloud Cowork — whenever it does not believe it runs as the Desktop app: its
+// placement helper first evaluates the platform check that requires the
+// `Claude/<version>` user-agent token (the preload's `claudeAppBindings` is
+// present, the token is not, because dropping it is what selects the browser
+// chrome). A remote placement makes the composer prime a cloud session with
+// POST /api/organizations/<org>/cowork/sessions — an endpoint only claude.ai
+// serves, so this bridge answers 404, and a new chat with manual approvals
+// dies on that response. The web shell is the local client here — the bridge
+// backs every session over the Desktop IPC — so the placement must take the
+// branch a desktop-identified client takes, where the account's own
+// `dramatic_shrimp_enabled` setting (declared false by the bridge's account
+// policy) decides between remote and local. The helper is pinned by its two
+// shrimp literals and its account-settings reads; the splice forces the
+// platform check that opens that branch — the zero-argument call in the
+// declarator directly following the one reading the shrimp gate. Spliced only
+// in web-shell mode, like the other chrome patches.
+const localSessionPlacementPatchId = "web-local-session-placement";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -272,6 +290,36 @@ function flagInitializer(scope, flag) {
     }
   }
   return undefined;
+}
+
+// The placement helper: one function carrying the force-local shrimp literal
+// and reading the account's shrimp settings. Its platform check is the
+// zero-argument call in the declarator directly following the declarator whose
+// initialiser calls with the shrimp-gate literal; a function without that
+// exact sequence refuses rather than splice over the wrong call.
+function localSessionPlacementTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
+  let forceLocal = false;
+  let disabledAt = false;
+  walk(node.body, [], (child) => {
+    if (literal(child, "dramatic_shrimp_force_local")) forceLocal = true;
+    if (property(child, "dramatic_shrimp_disabled_at")) disabledAt = true;
+  });
+  if (!forceLocal || !disabledAt) return undefined;
+  let platformCall;
+  walk(node.body, [], (child) => {
+    if (platformCall || child.type !== "VariableDeclaration") return;
+    const declarations = child.declarations;
+    for (let index = 0; index < declarations.length - 1; index += 1) {
+      const gate = declarations[index].init;
+      const platform = declarations[index + 1].init;
+      if (gate?.type !== "CallExpression" || gate.arguments.length !== 1) continue;
+      if (!literal(gate.arguments[0], "yukon_silver_dramatic_shrimp")) continue;
+      if (platform?.type !== "CallExpression" || platform.arguments.length !== 0) continue;
+      if (identifier(platform.callee)) platformCall = platform;
+    }
+  });
+  return platformCall;
 }
 
 // The account view a component reads from the profile hook:
@@ -601,8 +649,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // listed too. The session layout carries its own `not_desktop_app` reason. The
   // account chip's chunk is reached by the API field it reads (`avatar_image_url`),
   // and the user-menu identity reader in the same chunk by `principalDisplayName`;
-  // the Desktop-checks slot by its own component label.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|claudeai\.notification\.permission\.result/.test(source)) {
+  // the Desktop-checks slot by its own component label; the session-placement
+  // helper by the force-local shrimp literal only it carries.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -642,6 +691,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       if (routeFlag) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
           original: "", replacement: `${routeFlag}=!0;` });
+      }
+      const placement = localSessionPlacementTarget(node);
+      if (placement) {
+        const original = source.slice(placement.start, placement.end);
+        patches.push({ id: localSessionPlacementPatchId, start: placement.start,
+          end: placement.end, original, replacement: "!0" });
       }
       const sessionFlag = sessionViewerFlagName(node);
       if (sessionFlag) {
@@ -729,7 +784,8 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     ...(webShellEnabled
-      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId, accountPhotoPatchId,
+      ? [routeAliasPatchId, sessionViewerPatchId, localSessionPlacementPatchId,
+          accountChipPatchId, accountPhotoPatchId,
           coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId]
       : []),
     ...(gatewayEnabled
