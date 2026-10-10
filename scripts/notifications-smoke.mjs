@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createDecipheriv, createECDH, createPublicKey, hkdfSync, verify } from "node:crypto";
+import { spawn } from "node:child_process";
 import http from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 // Browser notifications are wired across three realms: the Desktop main process
@@ -570,6 +572,110 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
   await sandbox.bridge().showNotification("Ready to go", "Claude's all set up.", "vm-ready", "/cowork/abc", "generic", {});
   assert.equal(created.length, 1);
   assert.equal(created[0].title, "Ready to go");
+}
+
+// --- The bridge's HTTP surface ----------------------------------------------
+// The notification-preferences routes stand in for claude.ai's API, which the
+// app fetches directly: they must answer with the document itself, not the
+// bridge's `{ok, value}` envelope — the app parses the body as the document, so
+// an envelope made the settings panel read `data.preferences` off it and crash
+// ("Cannot read properties of undefined (reading 'feature_preference')"). The
+// push routes are this bridge's own API and keep the envelope. Both contracts
+// are exercised over real HTTP against the actual server module, staged the way
+// the image copies it (modules beside release.json) with a fake Desktop behind.
+{
+  const base = await mkdtemp(join(tmpdir(), "claudesk-bridge-stage-"));
+  const stage = join(base, "app");
+  const stateDir = join(base, "state");
+  const fakeDesktop = http.createServer((request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      ok: true,
+      value: request.url?.startsWith("/health") ? {} : [],
+    }));
+  });
+  await new Promise((resolve) => fakeDesktop.listen(0, "127.0.0.1", resolve));
+  const desktopPort = fakeDesktop.address().port;
+  const probe = http.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const bridgePort = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  await cp(fileURLToPath(new URL("../bridge", import.meta.url)), stage, { recursive: true });
+  await copyFile(
+    fileURLToPath(new URL("../config/release.json", import.meta.url)),
+    join(stage, "release.json"),
+  );
+
+  const child = spawn(process.execPath, ["server.mjs"], {
+    cwd: stage,
+    env: {
+      ...process.env,
+      BRIDGE_HOST: "127.0.0.1",
+      BRIDGE_PORT: String(bridgePort),
+      COWORK_INTERNAL_URL: `http://127.0.0.1:${desktopPort}`,
+      COWORK_BRIDGE_STATE_DIR: stateDir,
+      COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "99",
+      CLAUDE_INFERENCE_MODELS_JSON: "[]",
+      CLAUDE_REMOTE_WEB_SHELL: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const bridgeLog = [];
+  child.stdout.on("data", (chunk) => bridgeLog.push(String(chunk)));
+  child.stderr.on("data", (chunk) => bridgeLog.push(String(chunk)));
+  try {
+    const origin = `http://127.0.0.1:${bridgePort}`;
+    let ready = false;
+    for (let attempt = 0; attempt < 100 && !ready; attempt += 1) {
+      try {
+        ready = (await fetch(`${origin}/api/remote/notifications/config`)).ok;
+      } catch {}
+      if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(ready, `the bridge did not start:\n${bridgeLog.join("")}`);
+
+    const organization = "00000000-0000-4000-8000-000000000001";
+    const preferencesUrl = `${origin}/api/organizations/${organization}/notification/preferences`;
+
+    const document = await fetch(preferencesUrl).then((response) => response.json());
+    assert.equal(document.value, undefined,
+      "the preferences route must not wrap the document in the bridge envelope");
+    assert.ok(document.preferences?.feature_preference,
+      "the app reads data.preferences.feature_preference directly");
+    assert.equal(document.preferences.feature_preference.completion.enable_push, true);
+    assert.equal(document.push_reachability.has_active_channel, true);
+
+    const patched = await fetch(preferencesUrl, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        preferences: { feature_preference: { completion: { enable_push: false } } },
+      }),
+    }).then((response) => response.json());
+    assert.equal(patched.preferences.feature_preference.completion.enable_push, false,
+      "the PATCH answer must carry the updated document itself");
+    const reread = await fetch(preferencesUrl).then((response) => response.json());
+    assert.equal(reread.preferences.feature_preference.completion.enable_push, false,
+      "the changed preference must persist across requests");
+
+    const channel = await fetch(
+      `${origin}/api/organizations/${organization}/notification/channels`,
+      { method: "POST" },
+    ).then((response) => response.json());
+    assert.deepEqual(channel, { channel_type: "FCM", client_platform: "web", status: "ACTIVE" },
+      "the channel registration answer is a raw document as well");
+
+    const pushConfig = await fetch(`${origin}/api/remote/notifications/config`)
+      .then((response) => response.json());
+    assert.equal(typeof pushConfig.value?.vapidPublicKey, "string",
+      "the bridge's own push routes keep the {ok, value} envelope");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+    fakeDesktop.close();
+    await rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 }
 
 console.log("notifications-smoke: push format, relay capture, gating and browser display passed");

@@ -942,6 +942,23 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+// A response that stands in for an upstream API the app fetches directly. Those
+// routes must put the document on the wire exactly as the real backend would —
+// not wrapped in the bridge's own `{ok, value}` envelope, which the app parses
+// as the document itself (`data.preferences.feature_preference` would then read
+// off the envelope and crash the settings panel).
+function sendOfficialDocument(response, document) {
+  const body = Buffer.from(JSON.stringify(document), "utf8");
+  response.writeHead(200, {
+    "Cache-Control": "no-store",
+    "Content-Length": body.length,
+    "Content-Type": "application/json; charset=utf-8",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(body);
+}
+
 function sendDesktopReconnectPage(response) {
   const body = Buffer.from(`<!doctype html>
 <html lang="zh-CN">
@@ -1988,12 +2005,12 @@ async function handleApi(request, response, url) {
   // upstream.
   if (notificationPreferencesPath.test(url.pathname)) {
     if (request.method === "GET") {
-      sendJson(response, 200, { ok: true, value: notifications.preferencesDocument() });
+      sendOfficialDocument(response, notifications.preferencesDocument());
       return;
     }
     if (request.method === "PATCH") {
       const body = await readJson(request);
-      sendJson(response, 200, { ok: true, value: await notifications.applyPreferencesPatch(body) });
+      sendOfficialDocument(response, await notifications.applyPreferencesPatch(body));
       return;
     }
   }
@@ -2001,9 +2018,10 @@ async function handleApi(request, response, url) {
     request.method === "POST"
     && notificationChannelsPath.test(url.pathname)
   ) {
-    sendJson(response, 200, {
-      ok: true,
-      value: { channel_type: "FCM", client_platform: "web", status: "ACTIVE" },
+    sendOfficialDocument(response, {
+      channel_type: "FCM",
+      client_platform: "web",
+      status: "ACTIVE",
     });
     return;
   }
