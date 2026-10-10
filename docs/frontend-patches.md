@@ -124,6 +124,25 @@ the locale-change effect, so a renamed hook or API binding is tolerated. A secon
 slot, or one that no longer matches, refuses rather than splicing the call into
 the wrong component. Spliced only in web-shell mode.
 
+The web shell's "enable notifications" actions — the chat card and the settings
+panel's rows — grant the browser permission and then register with claude.ai's
+Firebase Cloud Messaging project, persisting a server-side push preference on
+the way; neither half can work against this deployment (no claude.ai backend
+holds the preference, and the Firebase registration has no project to land in),
+so the action always failed and the toggles never stuck. The
+`web-notifications-enable-bridge` patch gives the renderer's push-enablement
+function a bridge-first branch: when the remote preload's `DesktopNotifications`
+surface exists, asking it for the browser permission is the whole operation, and
+the preference write that follows succeeds against the bridge's local document
+(see `bridge/notifications.mjs`). The function is selected as the one async
+declaration whose body guards `Notification.requestPermission()`, tracks the
+result under the `claudeai.notification.permission.result` analytics key, and
+answers failures with `browser_or_permissions` — all three must sit in the same
+function, so a helper that merely spells one of them is not a target, and the
+splice reads the request object back from `arguments[0]` rather than naming the
+minified binding. A missing or duplicated target refuses. Spliced only in
+web-shell mode.
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and

@@ -61,7 +61,11 @@ Working with the flag on:
   folder browsing, via the route-alias patch below;
 - the time-based home greeting ("Evening, {{ NAME }}") — the browser app
   bootstraps under `/api`, so the bridge now fills the greeting there as well as
-  under the Desktop frame's `/edge-api` (see "Home greeting" below).
+  under the Desktop frame's `/edge-api` (see "Home greeting" below);
+- browser notifications for everything the Desktop app would notify about —
+  finished turns, "needs your input", tool permission cards, AskUserQuestion —
+  including while every tab is closed, via Web Push (see "Notifications"
+  below).
 
 Not wired up yet (tracked here so it is not mistaken for done):
 
@@ -112,6 +116,77 @@ output still matches; a second slot, or one that no longer matches, refuses rath
 than splicing the call into the wrong component. Like the other chrome patches it
 is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
 deployment prepares a byte-identical renderer.
+
+## Notifications
+
+Claude notifies: a finished turn ("Claude finished a task"), a session waiting
+on input, a tool permission card, an AskUserQuestion card, a Cowork VM that
+became ready, scheduled-task outcomes. In the official Desktop app those are
+native notifications from the main process; here the container has no
+notification daemon and nobody at its Xvfb display, so they were invisible —
+and the web shell's own "enable notifications" actions could not help, because
+they register with claude.ai's server-side push (Firebase Cloud Messaging) and
+persist a preference on a backend this deployment does not have.
+
+The bridge now delivers them itself, in three parts.
+
+- **Capture (`bridge-wrapper/main.cjs`).** The wrapper finds the official
+  main-process notification service by shape (its chunk name and export aliases
+  change with every Desktop build) and wraps its show/close methods. The final
+  title and body are not re-derived — the official code computes them inside its
+  own methods — so the native `Notification.prototype.show` is observed and the
+  record it carries is matched back to the in-flight call; a capture that never
+  saw a display record was suppressed by the official side (level off,
+  unsupported platform) and is not relayed. Each shown notification becomes a
+  `DesktopNotifications` event carrying the official tag, title, body, kind,
+  session and route; the official "user is viewing this session" suppression is
+  neutralized host-side (nobody is at the container display) and applied by each
+  browser against its own focused route instead. The wrapper also tracks the
+  captures so a click relayed from a browser notification re-runs the official
+  click handler (opening the session on the host, clearing its pending-prompt
+  bookkeeping) and reports the route it navigated to. Permission notifications
+  keep their "Allow once" action, answered through the official response path.
+- **Display (`bridge/public/remote-preload.js` and `bridge/public/sw.js`).**
+  The preload publishes `claude.web.DesktopNotifications` (status and permission
+  request mapped to the browser's `Notification` permission; `showNotification`
+  creating a real browser notification, clicks focusing the tab and opening the
+  session route) and renders the relayed events itself — so the renderer-driven
+  notifications (VM ready, hub awaiting, ...) work in either shell, and the
+  official "enable notifications" affordances have a working permission path.
+  While the permission is granted the page also registers a push subscription
+  (its service worker shows pushes when no tab is open; clicking one focuses an
+  existing window or opens the route). A record older than a minute is dropped
+  (the event relay can replay after a reconnect) and nothing is shown while the
+  user is looking at that very session.
+- **Delivery (`bridge/notifications.mjs`, `bridge/push.mjs`).** The bridge
+  drains the wrapper's notification queue even when no page is connected, and
+  sends each notification as an RFC 8291 Web Push message (VAPID-signed,
+  aes128gcm — implemented on `node:crypto`, no new dependency) to every browser
+  subscription whose page is not currently connected. Subscriptions, the VAPID
+  key and the notification preferences live in the bridge state directory
+  (`COWORK_BRIDGE_STATE_DIR`, the compose `bridge-data` volume) so a restart
+  neither drops subscriptions nor rotates the key. Push needs a secure context:
+  the HTTPS entry works, a plain-HTTP LAN origin falls back to in-page
+  notifications only.
+
+The settings panel's notification rows ("Response completions", "Code
+notifications", "Code permission requests", "Scheduled tasks") talk to
+`/api/organizations/{org}/notification/preferences` and the channel
+registration route; the bridge answers both locally with the same document
+shape (defaults on — the desktop app notifies by default — persisted when
+toggled) and uses the per-feature `enable_push` flags to gate what is delivered.
+The renderer patch below routes the "enable" action through the bridge's
+`DesktopNotifications` surface instead of Firebase. The notification level
+preferences inside the Desktop app itself are honored as before, because the
+official code decides whether to show at all.
+
+Known limits: a notification whose category the settings disabled is dropped
+everywhere; push delivery needs the bridge-data volume writable (otherwise it
+degrades to in-page notifications until a tab is opened, as before) and needs
+the bridge container to reach the browsers' push services (FCM, Mozilla, ...)
+outbound; the in-page path requires an open Claudesk tab; and page
+notifications cannot show action buttons, so "Allow once" is offered only on
+the pushed notification (the in-page click opens the session instead).
 
 ## Code routes
 

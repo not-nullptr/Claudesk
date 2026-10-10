@@ -81,6 +81,37 @@ const accountChipPatchId = "web-account-chip-avatar";
 // are read back, so a renamed minifier output still matches. Spliced only in
 // web-shell mode.
 const coworkPermissionWiringPatchId = "web-cowork-permission-wiring";
+// The web shell's "enable notifications" actions — the chat card and the
+// settings panel's rows — grant the browser permission and then register with
+// claude.ai's Firebase Cloud Messaging project, persisting a server-side push
+// preference on the way. Neither half can work against this deployment: there
+// is no claude.ai backend to hold the preference, and the Firebase registration
+// has no project to land in, so the action always failed and the toggles never
+// stuck. This bridge delivers notifications itself (the wrapper relays the
+// Desktop main process's notifications, the preload shows them and registers a
+// Web Push subscription — see bridge/notifications.mjs). The patch gives the
+// renderer's enable function a bridge-first branch: when the remote preload's
+// `DesktopNotifications` surface exists, asking it for the browser permission
+// is the whole operation and the preference write that follows now succeeds
+// against the bridge's local document. The function is matched by the exact
+// analytics key it tracks, the `browser_or_permissions` result it returns, and
+// the `Notification.requestPermission` call it guards, so an unrelated function
+// cannot match. Spliced only in web-shell mode, like the other chrome patches.
+const notificationEnablePatchId = "web-notifications-enable-bridge";
+const notificationPermissionEventKey = "claudeai.notification.permission.result";
+const notificationPermissionDeniedSource = "browser_or_permissions";
+const notificationEnableBranch = "{const __claudeskNotifications="
+  + "globalThis[\"claude.web\"]?.DesktopNotifications;"
+  + "if(__claudeskNotifications?.requestAuthorization){"
+  + "const __claudeskRequest=arguments[0]||{};"
+  + "let __claudeskResult=\"error\";"
+  + "try{__claudeskResult=await __claudeskNotifications.requestAuthorization()}catch{}"
+  + "const __claudeskPermission=__claudeskResult===\"denied\"?\"denied\":"
+  + "__claudeskResult===\"granted\"?\"granted\":\"default\";"
+  + "try{__claudeskRequest.track&&__claudeskRequest.track("
+  + "{event_key:\"claudeai.notification.permission.result\",permission:__claudeskPermission})}catch{}"
+  + "if(__claudeskResult===\"granted\")return{success:!0,permission:\"granted\"};"
+  + "return{success:!1,errorSource:\"browser_or_permissions\",permission:__claudeskPermission}}}";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 function property(node, name) {
@@ -146,6 +177,31 @@ function desktopRouteFlagName(node) {
   });
   return name;
 }
+// The push-enablement function (`kK` in the shared chunk) is the one async
+// declaration that guards `Notification.requestPermission()`, tracks the
+// permission result under its own analytics key, and answers failures with
+// `browser_or_permissions`. All three must sit inside the same function body, so
+// a helper that merely spells one of the literals cannot establish the target.
+// It must be a (non-arrow) declaration: the spliced branch reads the request
+// object back from `arguments[0]` instead of naming the minified binding.
+function notificationEnableTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.async !== true
+    || node.body?.type !== "BlockStatement") return undefined;
+  let requestsPermission = false;
+  let tracksResult = false;
+  let deniedSource = false;
+  walk(node.body, [], child => {
+    if (child.type === "CallExpression") {
+      const callee = unwrap(child.callee);
+      if (callee?.type === "MemberExpression" && property(callee, "requestPermission")
+        && identifier(callee.object) === "Notification") requestsPermission = true;
+    }
+    if (literal(child, notificationPermissionEventKey)) tracksResult = true;
+    if (literal(child, notificationPermissionDeniedSource)) deniedSource = true;
+  });
+  return requestsPermission && tracksResult && deniedSource ? node : undefined;
+}
+
 // The session layout's Desktop gate is `if(!x){ …redirect with reason
 // "not_desktop_app"… }`. Read the negated identifier back from that exact guard so
 // the splice names whatever the minifier chose. The reason literal must sit inside
@@ -434,7 +490,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // listed too. The session layout carries its own `not_desktop_app` reason. The
   // account chip's chunk is reached by the API field it reads (`avatar_image_url`);
   // the Desktop-checks slot by its own component label.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|DesktopChecks/.test(source)) {
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|DesktopChecks|claudeai\.notification\.permission\.result/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -484,6 +540,11 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
             start: wiringHost.body.start + 1, end: wiringHost.body.start + 1,
             original: "", replacement: `${wiring.callee}(${wiring.api});` });
         }
+      }
+      const enableTarget = notificationEnableTarget(node);
+      if (enableTarget) {
+        patches.push({ id: notificationEnablePatchId, start: enableTarget.body.start + 1,
+          end: enableTarget.body.start + 1, original: "", replacement: notificationEnableBranch });
       }
     }
     const previewArray = filePreviewChildrenArray(node);
@@ -544,7 +605,8 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     ...(webShellEnabled
-      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId, coworkPermissionWiringPatchId]
+      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId,
+          coworkPermissionWiringPatchId, notificationEnablePatchId]
       : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];

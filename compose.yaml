@@ -142,9 +142,18 @@ services:
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+      # Browser notifications: Web Push subscriptions, the VAPID key they are
+      # bound to and the notification-preferences the settings panel writes, all
+      # kept here so a restart does not drop every subscription. Contact address
+      # push services see in the VAPID token (mailto: or https: URL).
+      CLAUDE_REMOTE_PUSH_SUBJECT: "${CLAUDE_REMOTE_PUSH_SUBJECT:-mailto:claudesk@localhost}"
     volumes:
       - /vol2/1000/Docker/ClaudeDesktop/config:/config:ro
       - /vol2/1000/Docker/ClaudeDesktop/workspace:/workspace
+      # Notifications state. Create it writable by PUID:PGID on the host (a
+      # missing directory is created by Docker as root, which the bridge cannot
+      # write to; it then only degrades to in-page notifications).
+      - /vol2/1000/Docker/ClaudeDesktop/bridge-data:/data
     mem_limit: "${CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT:-256m}"
     healthcheck:
       test:

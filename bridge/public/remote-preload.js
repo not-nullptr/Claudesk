@@ -737,6 +737,7 @@
     return (...args) => invoke(surface, method, args);
   }
 
+
   const root = Object.create(null);
   const surfaceNames = new Set([
     ...Object.keys(config.methods || {}),
@@ -754,8 +755,319 @@
     for (const store of config.stores?.[surface] || []) {
       api[store] = makeStore(surface, store);
     }
+    // The relayed-notification surface also carries the method set the
+    // official renderer calls directly.
+    if (surface === "DesktopNotifications") {
+      Object.assign(api, createDesktopNotificationsBridge());
+    }
     root[surface] = Object.freeze(api);
   }
+  if (!root.DesktopNotifications) {
+    root.DesktopNotifications = Object.freeze(createDesktopNotificationsBridge());
+  }
+
+  // BEGIN browser notifications
+  // The official Desktop decides when to notify (a finished turn, a tool
+  // permission, an AskUserQuestion card, ...) and renders that decision as a
+  // native notification inside the container — where nobody can see it. The
+  // wrapper relays every notification the official code actually shows; this
+  // preload turns those into real browser notifications, mirroring the official
+  // behavior: nothing is shown while the user is looking at that very session,
+  // a click focuses the tab and opens the session (running the same official
+  // click handler through the bridge), and a close event closes the matching
+  // browser notification. The same surface is published as
+  // `claude.web.DesktopNotifications`, so the official renderer paths that call
+  // it directly also work in a browser. With notifications granted, the page
+  // also registers a push subscription (see /sw.js) so the bridge can deliver
+  // notifications while no tab is open.
+
+  const remoteNotificationTags = new Map();
+  const notificationClientStorageKey = "ccd-notification-client";
+  let pushSyncAt = 0;
+  let pushSyncPromise = null;
+
+  function browserNotificationStatus() {
+    if (!("Notification" in globalThis)) return "denied";
+    switch (Notification.permission) {
+      case "granted": return "authorized";
+      case "denied": return "denied";
+      default: return "notDetermined";
+    }
+  }
+
+  function remoteNotificationClientId() {
+    try {
+      let id = globalThis.localStorage.getItem(notificationClientStorageKey);
+      if (!id || !/^[A-Za-z0-9-]{1,64}$/.test(id)) {
+        id = typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `client-${Math.floor(Math.random() * 1e9)}`;
+        globalThis.localStorage.setItem(notificationClientStorageKey, id);
+      }
+      return id;
+    } catch {
+      return "";
+    }
+  }
+
+  function notificationKeyBytes(encoded) {
+    const padded = encoded.replaceAll("-", "+").replaceAll("_", "/");
+    const binary = atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  }
+
+  function navigateToRemoteRoute(route) {
+    if (typeof route !== "string" || !route.startsWith("/") || route.startsWith("//")) return false;
+    let target;
+    try {
+      target = new URL(route, globalThis.location.href);
+    } catch {
+      return false;
+    }
+    if (target.origin !== globalThis.location.origin) return false;
+    if (
+      target.pathname === globalThis.location.pathname
+      && target.search === globalThis.location.search
+    ) return true;
+    // Push the same route the app's own navigation would and let its router
+    // react to the popstate, the way the artifact download route already does.
+    globalThis.history.pushState(
+      globalThis.history.state,
+      "",
+      `${target.pathname}${target.search}`,
+    );
+    globalThis.dispatchEvent(new PopStateEvent("popstate", { state: globalThis.history.state }));
+    return true;
+  }
+
+  // Run the official click handler through the bridge: it navigates the
+  // Desktop renderer (inert here) and clears its pending-prompt bookkeeping,
+  // and its answer tells us where the notification pointed.
+  async function relayNotificationClick(tag, action) {
+    if (typeof tag !== "string" || !tag) return null;
+    try {
+      const response = await fetch("/api/remote/notifications/click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tag, action }),
+        signal: AbortSignal.timeout(2500),
+      });
+      const payload = await response.json().catch(() => ({}));
+      const route = payload?.value?.route;
+      return typeof route === "string" && route.startsWith("/") ? route : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function closeRemoteNotification(tag) {
+    const notification = remoteNotificationTags.get(tag);
+    if (!notification) return;
+    remoteNotificationTags.delete(tag);
+    try {
+      notification.close();
+    } catch {}
+  }
+
+  function showRemoteNotification(record) {
+    if (!("Notification" in globalThis) || Notification.permission !== "granted") return false;
+    // Relayed events can outlive their moment when no page was connected (the
+    // relay queue is drained on reconnect); a stale notification must not pop
+    // up after the fact.
+    const at = Number(record?.at);
+    if (Number.isFinite(at) && at > 0 && Date.now() - at > 60000) return false;
+    const sessionId = typeof record?.sessionId === "string" ? record.sessionId : "";
+    const navigateTo = typeof record?.navigateTo === "string"
+      ? record.navigateTo
+      : typeof record?.route === "string" ? record.route : "";
+    if (document.hasFocus()) {
+      const path = globalThis.location.pathname;
+      // The official Desktop suppresses a notification while the user is
+      // viewing that session; here the browser's focused route is the
+      // equivalent. Sessionless nudges (rate limits, ...) only surface while
+      // the page is in the background, as the web app does.
+      if (sessionId && path.includes(sessionId)) return false;
+      if (navigateTo && path === navigateTo.split("?")[0]) return false;
+      if (!sessionId && !navigateTo) return false;
+    }
+    const title = String(record?.title || "Claude").slice(0, 200);
+    const tag = typeof record?.tag === "string" && record.tag
+      ? record.tag
+      : `remote-${Date.now()}`;
+    let notification;
+    try {
+      notification = new Notification(title, {
+        body: String(record?.body || "").slice(0, 400),
+        tag,
+      });
+    } catch {
+      return false;
+    }
+    const previous = remoteNotificationTags.get(tag);
+    if (previous && previous !== notification) {
+      try {
+        previous.close();
+      } catch {}
+    }
+    remoteNotificationTags.set(tag, notification);
+    notification.onclick = () => {
+      globalThis.focus();
+      closeRemoteNotification(tag);
+      void (async () => {
+        const route = await relayNotificationClick(tag, "default");
+        if (route) navigateToRemoteRoute(route);
+        else if (navigateTo) navigateToRemoteRoute(navigateTo);
+      })();
+    };
+    notification.onclose = () => {
+      if (remoteNotificationTags.get(tag) === notification) remoteNotificationTags.delete(tag);
+    };
+    return true;
+  }
+
+  let pushConfigPromise = null;
+  function fetchPushConfig() {
+    pushConfigPromise ??= fetch("/api/remote/notifications/config", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((payload) => (
+        typeof payload?.value?.vapidPublicKey === "string" ? payload.value.vapidPublicKey : ""
+      ))
+      .catch(() => "");
+    return pushConfigPromise;
+  }
+
+  // Keep the push subscription in step with the browser permission: a granted
+  // page subscribes (so notifications arrive with every tab closed), a page
+  // whose permission was revoked drops it again. Registration and subscription
+  // are idempotent; the throttle keeps focus events from re-posting constantly.
+  function syncPushSubscription({ force = false } = {}) {
+    if (pushSyncPromise) return pushSyncPromise;
+    if (!force && Date.now() - pushSyncAt < 5 * 60 * 1000) return Promise.resolve();
+    pushSyncAt = Date.now();
+    pushSyncPromise = (async () => {
+      try {
+        if (!("serviceWorker" in navigator) || !("PushManager" in globalThis)) return;
+        // Nothing to install before the user ever granted notifications; a
+        // registration from an earlier grant is reused (and cleaned up below
+        // when the permission is gone).
+        const existingRegistration = await navigator.serviceWorker.getRegistration("/").catch(() => null);
+        if (Notification.permission !== "granted" && !existingRegistration) return;
+        const registration = existingRegistration
+          ?? await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+        const existing = await registration.pushManager.getSubscription().catch(() => null);
+        if (!("Notification" in globalThis) || Notification.permission !== "granted") {
+          if (existing) {
+            await existing.unsubscribe().catch(() => {});
+            await fetch("/api/remote/notifications/unsubscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ endpoint: existing.endpoint }),
+            }).catch(() => {});
+          }
+          return;
+        }
+        const vapidPublicKey = await fetchPushConfig();
+        if (!vapidPublicKey) return;
+        const expectedKey = notificationKeyBytes(vapidPublicKey);
+        let subscription = existing;
+        if (subscription) {
+          // A subscription is bound to the key that created it; after the
+          // bridge state is reset the old one can never be delivered to, so it
+          // is replaced rather than kept.
+          const appliedKey = subscription.options?.applicationServerKey
+            ? new Uint8Array(subscription.options.applicationServerKey)
+            : null;
+          const sameKey = appliedKey
+            && appliedKey.length === expectedKey.length
+            && expectedKey.every((byte, index) => byte === appliedKey[index]);
+          if (!sameKey) {
+            await subscription.unsubscribe().catch(() => {});
+            subscription = null;
+          }
+        }
+        if (!subscription) {
+          subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: expectedKey,
+          });
+        }
+        await fetch("/api/remote/notifications/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subscription: subscription.toJSON(),
+            clientId: remoteNotificationClientId(),
+          }),
+        }).catch(() => {});
+      } catch {
+        // Push is best-effort; in-page notifications keep working without it.
+      }
+    })().finally(() => {
+      pushSyncPromise = null;
+    });
+    return pushSyncPromise;
+  }
+
+  function createDesktopNotificationsBridge() {
+    return {
+      getAuthorizationStatus: async () => browserNotificationStatus(),
+      requestAuthorization: async () => {
+        if (!("Notification" in globalThis)) return "denied";
+        let result;
+        try {
+          result = await Notification.requestPermission();
+        } catch {
+          return "error";
+        }
+        if (result === "granted") void syncPushSubscription({ force: true });
+        return result === "granted" ? "granted" : result === "denied" ? "denied" : "error";
+      },
+      // The official handler opens the OS notification settings, which a
+      // browser page cannot do; permission changes are picked up by the sync
+      // above on the next focus instead.
+      openNotificationSettings: () => undefined,
+      showNotification: (title, body, tag, navigateTo, _notificationType, attribution) => {
+        try {
+          showRemoteNotification({
+            title,
+            body,
+            tag,
+            navigateTo,
+            sessionId: attribution?.sessionId,
+            kind: "generic",
+            at: Date.now(),
+          });
+        } catch {}
+        return Promise.resolve(true);
+      },
+    };
+  }
+
+  // The wrapper's relayed notifications (the ones the official main process
+  // shows) arrive like any other relayed event. These subscriptions exist
+  // regardless of what the renderer subscribes to.
+  subscribe("DesktopNotifications", "onNotification", (record) => {
+    try {
+      showRemoteNotification(record);
+    } catch {}
+  });
+  subscribe("DesktopNotifications", "onNotificationClosed", (record) => {
+    if (typeof record?.tag === "string") closeRemoteNotification(record.tag);
+  });
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      const data = event.data;
+      if (data?.type === "claudesk-notification-navigate" && typeof data.route === "string") {
+        navigateToRemoteRoute(data.route);
+      }
+    });
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void syncPushSubscription();
+  });
+  globalThis.addEventListener("focus", () => void syncPushSubscription());
+  void syncPushSubscription();
+  // END browser notifications
 
   // BrowserNavigation.requestMainMenuPopup normally opens Electron's native
   // Windows application menu. The browser controller renders the live,
@@ -907,6 +1219,10 @@
     const { mode, sessionId } = currentRemoteRoute();
     const params = new URLSearchParams({ mode });
     if (sessionId) params.set("sessionId", sessionId);
+    // Identifies this browser to the bridge, so a push is only sent to
+    // subscriptions whose page is not connected (and not double-shown).
+    const clientId = remoteNotificationClientId();
+    if (clientId) params.set("clientId", clientId);
     return { key: params.toString(), url: `/api/events?${params.toString()}` };
   }
 

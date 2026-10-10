@@ -84,6 +84,25 @@ const desktopChecks = 'function desktopChecks(){return isDesktopApp()'
   + 'children:[el(desktopRoot,{}),el(otherChecks,{})]}):null}';
 const desktopChecksDecoy = 'const label="DesktopChecks";'
   + 'function notTheSlot(){return render(label);}';
+// The push-enablement function: guards Notification.requestPermission, tracks the
+// permission result under its own analytics key and answers failures with
+// browser_or_permissions. In web-shell mode the patcher splices a bridge-first
+// branch so the settings rows and the chat card work against this deployment's
+// notification relay instead of claude.ai's Firebase project.
+const pushEnable = 'async function pushEnable({accountUuid:e,isClaudeElectronApp:t,onTokenReceived:n,track:r,background:i}){'
+  + 'if(!("Notification"in window))return{success:!1,errorSource:"browser_or_permissions"};'
+  + 'try{let a=await Notification.requestPermission();'
+  + 'r&&r({event_key:"claudeai.notification.permission.result",permission:a});'
+  + 'if(a==="granted"){if(t||!e)return{success:!1,errorSource:"internal"};return{success:!0}}'
+  + 'return{success:!1,errorSource:"browser_or_permissions",permission:a}}'
+  + 'catch{return{success:!1,errorSource:"internal"}}}';
+// The same analytics key and result literal without the permission call (or
+// without the async declaration) must not be mistaken for the target.
+const pushEnableDecoy = 'function pushEnableDecoy(){'
+  + 'const text="claudeai.notification.permission.result";'
+  + 'return{errorSource:"browser_or_permissions",note:text};}'
+  + 'const pushEnableArrow=async()=>({errorSource:"browser_or_permissions",'
+  + 'note:Notification.requestPermission,key:"claudeai.notification.permission.result"});';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -98,7 +117,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 5);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -108,9 +127,20 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 9,
-    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar and the Cowork permission wiring");
+  assert.equal(webResult.patches.length, 10,
+    "the web shell adds the Code route alias, the session Desktop gate, the account-chip avatar, the Cowork permission wiring and the notification-enable bridge");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
+  assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
+    "the push-enablement function must be spliced exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('if(__claudeskNotifications?.requestAuthorization){'),
+    "the push enablement must consult the remote DesktopNotifications bridge first");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('return{success:!1,errorSource:"internal"}}'),
+    "the original Firebase path must remain after the bridge-first branch");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('function pushEnableDecoy(){const text='),
+    "a function without the permission call must not be spliced");
   assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
     "the account chip's avatar slot must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
@@ -200,6 +230,33 @@ const chipCompiled = await minify(accountChip, {
 assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-account-chip-avatar").length, 1,
   "a mangled account chip must still be spliced once");
+// ...and the notification-enable bridge: a renderer whose push enablement no
+// longer matches must be refused rather than ship an enable action that dies in
+// a Firebase registration this deployment can never complete.
+assert.throws(() => patchRendererSources(new Map([["no-push-enable.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}`]]), false, true),
+  /web-notifications-enable-bridge expected once, found 0/,
+  "the web shell must refuse a renderer without the push-enablement function");
+// Two push-enablement functions must refuse rather than splice the branch into
+// the wrong one.
+assert.throws(() => patchRendererSources(new Map([["dup-push-enable.js",
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n`
+    + `${pushEnable.replaceAll("pushEnable", "pushEnableB")}`]]), false, true),
+  /web-notifications-enable-bridge expected once, found 2/);
+// A decoy that merely spells the analytics key and the result literal (with the
+// permission call elsewhere) is not a target.
+assert.equal(inspectRenderer(pushEnableDecoy, false, true).patches
+  .filter(patch => patch.id === "web-notifications-enable-bridge").length, 0,
+  "only the function that guards requestPermission is the push-enablement target");
+// The target is a structural read-back, so it survives minification.
+const pushEnableCompiled = await minify(pushEnable, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(pushEnableCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-notifications-enable-bridge").length, 1,
+  "a mangled push-enablement function must still be spliced once");
 // A guard that merely mentions the reason (with a member-expression test) is not
 // a target, so the signing gate must not be mistaken for the session layout.
 assert.equal(inspectRenderer(signingDecoy, false, true).patches
@@ -280,7 +337,7 @@ assert.ok(patchRendererSources(new Map([["new-preview.js", previewCompiled.code]
 // browser too; the Desktop root's own call is left untouched.
 const checksInputs = new Map([["checks-chunk.js",
   `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
-    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}`]]);
+    + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`]]);
 const checksOut = patchRendererSources(checksInputs, false, true).sources.get("checks-chunk.js");
 assert.ok(checksOut.includes("function desktopChecks(){wirePendingPermissions(api);return isDesktopApp()"),
   "the slot must wire the pending-permission store before its identity gate");

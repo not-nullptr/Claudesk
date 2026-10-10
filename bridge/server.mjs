@@ -12,6 +12,7 @@ import {
 } from "./downloads.mjs";
 import { createPreviewHandler } from "./preview.mjs";
 import { shimOfficialIndex } from "./official-index.mjs";
+import { createNotificationController } from "./notifications.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
@@ -704,6 +705,10 @@ const remoteListenerMethods = new Map([
   ["CoworkScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
+  // Not a `claude.web` surface on the Desktop side: the wrapper publishes the
+  // notifications the official app decides to show, for the remote preload to
+  // render in the browser (see bridge/notifications.mjs for the push side).
+  ["DesktopNotifications", new Set(["onNotification", "onNotificationClosed"])],
 ]);
 
 if (codeActionsEnabled) {
@@ -745,6 +750,12 @@ const protocolRules = [
   { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
   { methods: new Set(["PATCH"]), path: /^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i },
 ];
+
+// Notification settings endpoints answered by the bridge itself (see the
+// notification controller); deliberately outside `protocolRules` so they are
+// never forwarded to the upstream API.
+const notificationPreferencesPath = /^\/api\/organizations\/[0-9a-f-]+\/notification\/preferences$/i;
+const notificationChannelsPath = /^\/api\/organizations\/[0-9a-f-]+\/notification\/channels$/i;
 
 const officialAssetPrefixes = [
   "/_frame-rt/",
@@ -898,6 +909,19 @@ class DesktopInternalClient {
     });
     return body.value;
   }
+
+  async drainNotifications() {
+    const body = await this.request("/notifications");
+    return Array.isArray(body.value) ? body.value : [];
+  }
+
+  async notificationClick(tag, action) {
+    const body = await this.request("/notification-click", {
+      method: "POST",
+      body: JSON.stringify({ tag, action }),
+    });
+    return body.value;
+  }
 }
 
 const desktop = new DesktopInternalClient();
@@ -959,7 +983,24 @@ function isDocumentNavigation(request) {
   return String(request.headers.accept || "").includes("text/html");
 }
 
-const realtime = createRealtimeController({ desktop, isChatSession, ApiError });
+// Browser notifications: push subscriptions, the local notification-preferences
+// document the settings panel reads, and the always-on drain of the wrapper's
+// notification queue. Created before the realtime controller because each one
+// needs a late-bound view of the other (the push side must know whether a page
+// is connected, the event relay must know whether a category is enabled).
+const notifications = createNotificationController({
+  desktop,
+  stateDir: process.env.COWORK_BRIDGE_STATE_DIR || "/data",
+  hasRecentRealtimeClient: () => realtime.hasRecentClient(),
+  pushSubject: process.env.CLAUDE_REMOTE_PUSH_SUBJECT || "mailto:claudesk@localhost",
+});
+
+const realtime = createRealtimeController({
+  desktop,
+  isChatSession,
+  ApiError,
+  eventAllowed: (payload) => notifications.notificationAllowed(payload),
+});
 const uploads = createUploadHandler({
   ApiError,
   workspaceRoot,
@@ -1938,8 +1979,62 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, value });
     return;
   }
+  // The notification settings panel talks to claude.ai's server-side push
+  // preferences (per-feature `enable_push`) and registers its push channel
+  // there. This deployment has no such backend — the toggles would never stick
+  // and an "enable" would fall through to a Firebase registration that cannot
+  // succeed. Answer both locally so the settings are real: they persist in the
+  // bridge state and gate which notifications are delivered. Never forwarded
+  // upstream.
+  if (notificationPreferencesPath.test(url.pathname)) {
+    if (request.method === "GET") {
+      sendJson(response, 200, { ok: true, value: notifications.preferencesDocument() });
+      return;
+    }
+    if (request.method === "PATCH") {
+      const body = await readJson(request);
+      sendJson(response, 200, { ok: true, value: await notifications.applyPreferencesPatch(body) });
+      return;
+    }
+  }
+  if (
+    request.method === "POST"
+    && notificationChannelsPath.test(url.pathname)
+  ) {
+    sendJson(response, 200, {
+      ok: true,
+      value: { channel_type: "FCM", client_platform: "web", status: "ACTIVE" },
+    });
+    return;
+  }
+
   if (protocolRules.some((rule) => rule.path.test(url.pathname))) {
     await forwardOfficialProtocol(request, response, url);
+    return;
+  }
+
+  // Browser notifications (see bridge/notifications.mjs and the "Desktop
+  // notifications → browser relay" section of bridge-wrapper/main.cjs).
+  if (request.method === "GET" && url.pathname === "/api/remote/notifications/config") {
+    sendJson(response, 200, { ok: true, value: await notifications.config() });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/remote/notifications/subscribe") {
+    const body = await readJson(request);
+    sendJson(response, 200, { ok: true, value: await notifications.registerSubscription(body.subscription) });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/remote/notifications/unsubscribe") {
+    const body = await readJson(request);
+    sendJson(response, 200, { ok: true, value: await notifications.removeSubscription(body) });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/remote/notifications/click") {
+    const body = await readJson(request);
+    const tag = typeof body.tag === "string" ? body.tag.slice(0, 200) : "";
+    if (!tag) throw new ApiError(400, "notification tag is required");
+    const action = body.action === "allow_once" ? "allow_once" : "default";
+    sendJson(response, 200, { ok: true, value: await desktop.notificationClick(tag, action) });
     return;
   }
 
@@ -2543,6 +2638,9 @@ const localStaticFiles = new Set([
   "/remote-preload.js",
   "/remote-folder-picker.js",
   "/remote-shell.css",
+  // The notification service worker must be served from the root scope so it
+  // can control the app page and its notifications.
+  "/sw.js",
 ]);
 
 const server = http.createServer(async (request, response) => {
@@ -2605,6 +2703,7 @@ const desktopEventPoller = setInterval(() => void realtime.pollDesktopEvents(), 
 desktopEventPoller.unref();
 const realtimeHeartbeat = setInterval(() => realtime.heartbeat(), 15000);
 realtimeHeartbeat.unref();
+notifications.start();
 
 // --- Code session titles -----------------------------------------------------
 // Desktop names its own Code sessions through a "stale-name check" that runs

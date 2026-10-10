@@ -8,6 +8,23 @@ const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = requ
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
 const { app, BrowserWindow, ipcMain, Menu, webContents } = require("electron");
 
+// The official Desktop computes each notification's final title and body inside
+// its own (minified) notification service, so the relay below cannot re-derive
+// them from the service call arguments. Observe the native notification
+// instead: `show()` runs synchronously inside the official show methods and the
+// instance carries the exact strings that were about to be displayed. The
+// observation must not change display behavior, so every failure path here is
+// swallowed. See "Desktop notifications → browser relay" below.
+if (typeof require("electron").Notification?.prototype?.show === "function") {
+  const originalNotificationShow = require("electron").Notification.prototype.show;
+  require("electron").Notification.prototype.show = function relayObservedNotificationShow(...args) {
+    try {
+      recordNativeNotificationDisplay(this);
+    } catch {}
+    return originalNotificationShow.apply(this, args);
+  };
+}
+
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.COWORK_BRIDGE_INTERNAL_PORT || 9222);
 const ION_ROOT = resolve("/usr/lib/claude-desktop/resources/ion-dist");
@@ -538,6 +555,10 @@ const relayedListeners = new Map([
   ["CoworkScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
+  // Not a `claude.web` surface: the wrapper itself publishes the notifications
+  // the official Desktop decides to show, for the remote preload to render in
+  // the browser (see the notification relay section below).
+  ["DesktopNotifications", new Set(["onNotification", "onNotificationClosed"])],
 ]);
 
 // Renderer events must be pushed into the main process as they happen. Pulling
@@ -645,6 +666,442 @@ function attachRelayConsole(contents) {
     registeredRelayContentsIds.delete(contents.id);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Desktop notifications → browser relay
+//
+// Every notification the official Desktop decides to show — a finished turn,
+// "Claude needs your input", a tool permission or AskUserQuestion card, and the
+// renderer-driven ones behind `claude.web.DesktopNotifications` — ends in a
+// native Electron Notification created by the main process. This container has
+// no desktop notification daemon (and nobody at its Xvfb display), so those
+// notifications are never displayed anywhere; the browser is the only surface a
+// user has. Relay each one the official code actually shows over the existing
+// event queue, keeping the official title/body/tag and, on a click, running the
+// same official click handler so the session is opened and bookkeeping cleared.
+// The remote preload renders the relayed records as real browser notifications
+// (and pushes them when no tab is open); see bridge/public/remote-preload.js.
+//
+// The service is found by shape (like findOfficialBootFeatures) because its
+// chunk name and export aliases change with every Desktop build. The final
+// display strings are not re-derived: the official code computes them inside
+// its own methods, so instead the native Notification.prototype.show is
+// observed and the record it carries is matched back to the in-flight call.
+// A capture is settled when the official method returns (or its promise
+// resolves): no display record by then means the official side suppressed the
+// notification (level off, unsupported platform, ...) and nothing is relayed.
+// ---------------------------------------------------------------------------
+
+const notificationRelay = {
+  service: null,
+  registry: null,
+  pending: [],
+  recent: new Map(),
+  pushQueue: [],
+  navigationSink: null,
+  shown: 0,
+  clicks: 0,
+  discovery: "pending",
+};
+const lastNotificationClickAt = new Map();
+
+function boundedNotificationText(value, maxLength) {
+  return typeof value === "string" ? value.slice(0, maxLength) : "";
+}
+
+function notificationRoute(service, product, sessionId) {
+  if (typeof sessionId !== "string" || !sessionId) return null;
+  try {
+    const route = service?.getPermissionSessionRoute?.(product, sessionId);
+    if (typeof route === "string" && route.startsWith("/")) return route;
+  } catch {}
+  return product === "ccd"
+    ? `/epitaxy/${encodeURIComponent(sessionId)}`
+    : `/cowork/${encodeURIComponent(sessionId)}`;
+}
+
+function finishNotificationCapture(capture, display) {
+  if (capture.finalized) return;
+  capture.finalized = true;
+  const index = notificationRelay.pending.indexOf(capture);
+  if (index >= 0) notificationRelay.pending.splice(index, 1);
+  const service = notificationRelay.service;
+  const payload = {
+    id: capture.tag,
+    tag: capture.tag,
+    title: display.title || capture.fallbackTitle || "Claude",
+    body: display.body || capture.fallbackBody || "",
+    kind: capture.kind,
+    product: capture.product || null,
+    sessionId: capture.sessionId || null,
+    requestId: capture.requestId || null,
+    allowOnce: capture.allowOnce === true,
+    route: notificationRoute(service, capture.product, capture.sessionId),
+    at: Date.now(),
+  };
+  notificationRelay.shown += 1;
+  notificationRelay.recent.set(capture.tag, capture);
+  while (notificationRelay.recent.size > 64) {
+    notificationRelay.recent.delete(notificationRelay.recent.keys().next().value);
+  }
+  enqueueRelayedEvent({
+    surface: "DesktopNotifications",
+    method: "onNotification",
+    payload,
+  });
+  notificationRelay.pushQueue.push(payload);
+  if (notificationRelay.pushQueue.length > 200) {
+    notificationRelay.pushQueue.splice(0, notificationRelay.pushQueue.length - 200);
+  }
+}
+
+function settleNotificationCapture(capture) {
+  // The official call finished. The three synchronous producers show their
+  // Notification before returning; the permission path awaits a git lookup
+  // first, and its promise is settled here. Either way, a capture that never
+  // saw a display record was suppressed and must not be relayed.
+  if (!capture.finalized) {
+    capture.suppressed = true;
+    const index = notificationRelay.pending.indexOf(capture);
+    if (index >= 0) notificationRelay.pending.splice(index, 1);
+  }
+}
+
+function beginNotificationCapture(capture) {
+  notificationRelay.pending.push(capture);
+  return capture;
+}
+
+function recordNativeNotificationDisplay(notification) {
+  let title;
+  let body;
+  try {
+    title = boundedNotificationText(notification?.title, 500);
+    body = boundedNotificationText(notification?.body, 1000);
+  } catch {
+    return;
+  }
+  if (!title && !body) return;
+  const display = { title, body };
+  const pending = notificationRelay.pending;
+  // Prefer the newest capture whose permission-card description appears in the
+  // body: the permission path resolves asynchronously, so several notifications
+  // can be in flight and the newest capture is not necessarily this one.
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    const capture = pending[index];
+    if (capture.description && body.includes(capture.description)) {
+      finishNotificationCapture(capture, display);
+      return;
+    }
+  }
+  // Synchronous producers hit this path while their capture is the newest.
+  const newest = pending.at(-1);
+  if (newest) {
+    finishNotificationCapture(newest, display);
+    return;
+  }
+  // A notification nobody captured (some other main-process call site). Relay
+  // it generically rather than dropping it.
+  finishNotificationCapture({
+    tag: `electron-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    kind: "generic",
+    product: null,
+    sessionId: null,
+    requestId: null,
+    allowOnce: false,
+  }, display);
+}
+
+function relayNotificationClosed(tag) {
+  if (typeof tag !== "string" || !tag) return;
+  // The capture stays clickable: a browser click can already be in flight when
+  // a close (e.g. the session was opened) arrives, and it should still run the
+  // official handler exactly once. The map is capacity-bounded.
+  enqueueRelayedEvent({
+    surface: "DesktopNotifications",
+    method: "onNotificationClosed",
+    payload: { tag, at: Date.now() },
+  });
+}
+
+function wrapNotificationService(service, registry) {
+  const originalShowNotification = service.showNotification.bind(service);
+  const originalShowIdle = service.showIdleNotification.bind(service);
+  const originalShowPermission =
+    service.showPermissionRequestNotificationAsync?.bind(service);
+  const originalShowAsk = service.showAskUserQuestionNotification.bind(service);
+
+  // Nobody is looking at this container's display, so the official
+  // "user is viewing this session" suppression must not run here: the browser
+  // client applies the same rule against its own focused route instead.
+  service.isUserViewingSession = () => false;
+
+  // The navigation registry is wrapped so a relayed click can learn which route
+  // the official onClick handler navigated the host renderer to, and send that
+  // route back to the browser; the host navigation itself is harmless.
+  if (registry && typeof registry.getDispatcher === "function") {
+    const originalGetDispatcher = registry.getDispatcher.bind(registry);
+    const wrappedDispatchers = new WeakMap();
+    registry.getDispatcher = (contents) => {
+      const dispatcher = originalGetDispatcher(contents);
+      if (!dispatcher || typeof dispatcher.dispatchNavigate !== "function") return dispatcher;
+      if (!wrappedDispatchers.has(dispatcher)) {
+        const originalNavigate = dispatcher.dispatchNavigate.bind(dispatcher);
+        wrappedDispatchers.set(dispatcher, originalNavigate);
+        dispatcher.dispatchNavigate = (route, ...rest) => {
+          const sink = notificationRelay.navigationSink;
+          if (sink && typeof route === "string" && route.startsWith("/")) {
+            sink.push(route.slice(0, 500));
+          }
+          return originalNavigate(route, ...rest);
+        };
+      }
+      return dispatcher;
+    };
+  }
+
+  service.showNotification = function relayedShowNotification(title, body, tag, onClick, notificationType, attribution) {
+    const capture = beginNotificationCapture({
+      tag: boundedNotificationText(tag, 200) || `notification-${Date.now()}`,
+      kind: "generic",
+      notificationType: boundedNotificationText(notificationType, 64) || "generic",
+      product: null,
+      sessionId: typeof attribution?.sessionId === "string" ? attribution.sessionId : null,
+      requestId: null,
+      allowOnce: false,
+      onClick: typeof onClick === "function" ? onClick : null,
+      fallbackTitle: boundedNotificationText(title, 500),
+      fallbackBody: boundedNotificationText(body, 1000),
+    });
+    try {
+      return originalShowNotification(title, body, tag, onClick, notificationType, attribution);
+    } finally {
+      settleNotificationCapture(capture);
+    }
+  };
+
+  service.showIdleNotification = function relayedShowIdleNotification(options) {
+    const input = options && typeof options === "object" ? options : {};
+    const product = input.product === "ccd" ? "ccd" : "cowork";
+    const sessionId = typeof input.sessionId === "string" ? input.sessionId : "";
+    const titleFallback = boundedNotificationText(input.sessionTitle, 200)
+      || (product === "cowork" ? "Cowork" : "Claude Code");
+    const capture = beginNotificationCapture({
+      tag: `idle-${sessionId}`,
+      kind: "idle",
+      product,
+      sessionId,
+      requestId: null,
+      allowOnce: false,
+      onClick: typeof input.onClick === "function" ? input.onClick : null,
+      fallbackTitle: titleFallback,
+      fallbackBody: typeof input.body === "string" && input.body
+        ? boundedNotificationText(input.body, 1000)
+        : input.kind === "turn_complete"
+          ? "Claude finished a task"
+          : "Claude is waiting for your input",
+    });
+    try {
+      return originalShowIdle(input);
+    } finally {
+      settleNotificationCapture(capture);
+    }
+  };
+
+  if (originalShowPermission) {
+    service.showPermissionRequestNotificationAsync = function relayedShowPermissionAsync(options) {
+      const input = options && typeof options === "object" ? options : {};
+      const product = input.product === "ccd" ? "ccd" : "cowork";
+      const requestId = typeof input.requestId === "string" ? input.requestId : "";
+      const capture = beginNotificationCapture({
+        tag: `permission-${requestId}`,
+        kind: "permission",
+        product,
+        sessionId: typeof input.sessionId === "string" ? input.sessionId : null,
+        requestId,
+        description: boundedNotificationText(input.description, 500),
+        allowOnce: input.allowOnceAction !== false && input.runsOnUserMachine !== true,
+        onClick: null,
+        fallbackTitle: boundedNotificationText(input.cwd, 200).split("/").filter(Boolean).pop() || "Claude Code",
+        fallbackBody: typeof input.body === "string" && input.body
+          ? boundedNotificationText(input.body, 1000)
+          : input.description
+            ? `Allow Claude to ${boundedNotificationText(input.toolName, 64) || "continue"} ${input.description}?`
+            : "Claude needs your permission to continue",
+      });
+      let result;
+      try {
+        result = originalShowPermission(input);
+      } catch (error) {
+        settleNotificationCapture(capture);
+        throw error;
+      }
+      if (result && typeof result.then === "function") {
+        return result.finally(() => settleNotificationCapture(capture));
+      }
+      settleNotificationCapture(capture);
+      return result;
+    };
+  }
+
+  service.showAskUserQuestionNotification = function relayedShowAsk(options) {
+    const input = options && typeof options === "object" ? options : {};
+    const product = input.product === "ccd" ? "ccd" : "cowork";
+    const capture = beginNotificationCapture({
+      tag: `ask-question-${boundedNotificationText(input.requestId, 200)}`,
+      kind: "ask",
+      product,
+      sessionId: typeof input.sessionId === "string" ? input.sessionId : null,
+      requestId: typeof input.requestId === "string" ? input.requestId : null,
+      allowOnce: false,
+      onClick: typeof input.onClick === "function" ? input.onClick : null,
+      fallbackTitle: boundedNotificationText(input.sessionTitle, 200)
+        || (product === "cowork" ? "Cowork" : "Claude Code"),
+      fallbackBody: boundedNotificationText(input.questionText, 1000) || "Claude is asking you a question",
+    });
+    try {
+      return originalShowAsk(input);
+    } finally {
+      settleNotificationCapture(capture);
+    }
+  };
+
+  for (const [method, tagOf] of [
+    ["closeNotification", (tag) => tag],
+    ["closeIdleNotificationForSession", (sessionId) => `idle-${sessionId}`],
+    ["closePermissionNotification", (requestId) => `permission-${requestId}`],
+    ["closeNotificationIfShownThisRun", (tag) => (
+      service.shownNotificationTags?.has?.(tag) ? tag : null
+    )],
+  ]) {
+    const original = service[method];
+    if (typeof original !== "function") continue;
+    service[method] = function relayedClose(...args) {
+      let tag = null;
+      try {
+        tag = tagOf(...args);
+      } catch {}
+      const result = original.apply(service, args);
+      if (typeof tag === "string" && tag) relayNotificationClosed(tag);
+      return result;
+    };
+  }
+  const originalCloseAsk = service.closeAskUserQuestionNotification;
+  if (typeof originalCloseAsk === "function") {
+    service.closeAskUserQuestionNotification = function relayedCloseAsk(requestId) {
+      let tag = null;
+      try {
+        tag = service.activeAskUserQuestionNotifications?.get?.(requestId) ?? null;
+      } catch {}
+      const result = originalCloseAsk.call(service, requestId);
+      if (typeof tag === "string" && tag) relayNotificationClosed(tag);
+      return result;
+    };
+  }
+
+  notificationRelay.service = service;
+  notificationRelay.registry = registry ?? null;
+  notificationRelay.discovery = "wrapped";
+}
+
+function looksLikeNotificationService(value) {
+  // An object, not a class: wrapping a class would set a static and leave the
+  // instance every call site uses untouched.
+  return value !== null && typeof value === "object"
+    && typeof value.showNotification === "function"
+    && typeof value.showIdleNotification === "function"
+    && typeof value.showAskUserQuestionNotification === "function"
+    && typeof value.isLevelOff === "function";
+}
+
+function findNotificationServiceAndRegistry() {
+  let service = null;
+  let registry = null;
+  for (const loadedModule of Object.values(require.cache)) {
+    const exports = loadedModule?.exports;
+    if (!exports || typeof exports !== "object") continue;
+    for (const value of Object.values(exports)) {
+      if (!service && looksLikeNotificationService(value)) service = value;
+      if (!registry && value !== null && typeof value === "object"
+        && typeof value.getDispatcher === "function"
+        && typeof value.dispatchNavigate !== "function") {
+        registry = value;
+      }
+    }
+  }
+  return { service, registry };
+}
+
+function ensureNotificationRelayReady() {
+  if (notificationRelay.service) return true;
+  const { service, registry } = findNotificationServiceAndRegistry();
+  if (!service) {
+    notificationRelay.discovery = "waiting";
+    return false;
+  }
+  try {
+    wrapNotificationService(service, registry);
+  } catch (error) {
+    notificationRelay.discovery = `failed: ${error instanceof Error ? error.message : String(error)}`;
+    console.warn("[cowork-wrapper] could not wrap the Desktop notification service:", error);
+    return false;
+  }
+  return true;
+}
+
+// A click relayed from a browser notification: run the same official handler
+// the native notification would have run (navigate + bookkeeping, or answer a
+// permission for "Allow once"), and report the route it navigated to so the
+// browser can open the same session.
+async function handleNotificationClick(tag, action) {
+  const capture = notificationRelay.recent.get(tag);
+  if (!capture) return { handled: false, route: null, responded: false };
+  ensureNotificationRelayReady();
+  const service = notificationRelay.service;
+  const routes = [];
+  const previousSink = notificationRelay.navigationSink;
+  // Only one click is captured at a time; a concurrent click still runs its
+  // official handler, it just cannot claim the other's navigation.
+  if (!previousSink) notificationRelay.navigationSink = routes;
+  let responded = false;
+  try {
+    if (action === "allow_once" && capture.kind === "permission" && capture.allowOnce
+      && typeof service?.handlePermissionResponse === "function") {
+      await service.handlePermissionResponse(capture.product, capture.requestId, "once");
+      if (typeof service.closePermissionNotification === "function") {
+        await service.closePermissionNotification(capture.requestId);
+      }
+      responded = true;
+    } else if (capture.kind === "permission" && capture.sessionId) {
+      const route = notificationRoute(service, capture.product, capture.sessionId);
+      if (route && typeof service?.focusAppAndNavigate === "function") {
+        service.focusAppAndNavigate(route);
+      }
+    } else if (capture.kind === "ask" && typeof service?.closeAskUserQuestionNotification === "function") {
+      if (typeof capture.onClick === "function") capture.onClick();
+      // Mirror the native click cleanup for the ask card.
+      try {
+        service.activeAskUserQuestionNotifications?.delete?.(capture.requestId);
+        service.askUserQuestionBySession?.get?.(capture.sessionId)?.delete?.(capture.requestId);
+      } catch {}
+    } else if (typeof capture.onClick === "function") {
+      capture.onClick();
+    }
+  } catch (error) {
+    console.warn("[cowork-wrapper] relayed notification click failed:", error);
+  } finally {
+    if (notificationRelay.navigationSink === routes) {
+      notificationRelay.navigationSink = previousSink;
+    }
+  }
+  notificationRelay.clicks += 1;
+  return {
+    handled: true,
+    responded,
+    route: routes.at(-1) || capture.route || notificationRoute(service, capture.product, capture.sessionId),
+  };
+}
+// --- end desktop notification relay ---
 
 if (developerActionsEnabled) {
   relayedListeners.get("LocalAgentModeSessions").add(
@@ -2010,6 +2467,12 @@ const server = http.createServer(async (request, response) => {
             monitor: coworkVmIdleState,
             scheduleGuardMinutes: coworkVmScheduleGuardMinutes,
           },
+          notifications: {
+            clicks: notificationRelay.clicks,
+            discovery: notificationRelay.discovery,
+            pending: notificationRelay.pending.length,
+            shown: notificationRelay.shown,
+          },
           platform: process.platform,
           renderer: rendererManifest,
           version: app.getVersion(),
@@ -2051,6 +2514,34 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === "GET" && url.pathname === "/events") {
       sendJson(response, 200, { ok: true, value: await drainRelayedEvents() });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/notifications") {
+      // The always-on consumer for Web Push delivery. The relayed-event queue
+      // above is only drained while a browser SSE subscription exists; pushes
+      // must also be delivered when no tab is open, so notifications are
+      // queued separately and drained here regardless of clients. A stale
+      // backlog is bounded at enqueue time and dropped by age on display.
+      ensureNotificationRelayReady();
+      const value = notificationRelay.pushQueue.splice(0);
+      sendJson(response, 200, { ok: true, value });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/notification-click") {
+      const body = await readJson(request);
+      const tag = typeof body.tag === "string" ? body.tag.slice(0, 200) : "";
+      const action = body.action === "allow_once" ? "allow_once" : "default";
+      if (!tag) throw new Error("notification tag is required");
+      const now = Date.now();
+      if (now - (lastNotificationClickAt.get(tag) || 0) < 500) {
+        sendJson(response, 200, { ok: true, value: { handled: false, duplicate: true } });
+        return;
+      }
+      lastNotificationClickAt.set(tag, now);
+      while (lastNotificationClickAt.size > 200) {
+        lastNotificationClickAt.delete(lastNotificationClickAt.keys().next().value);
+      }
+      sendJson(response, 200, { ok: true, value: await handleNotificationClick(tag, action) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/invoke") {
@@ -2114,6 +2605,18 @@ server.listen(PORT, HOST, () => {
 });
 
 app.whenReady().then(() => {
+  // The official main bundle has not been evaluated yet when this file loads;
+  // find and wrap its notification service as soon as it exists. A bounded
+  // poll also covers a slower first window creation on cold starts.
+  let notificationDiscoveryAttempts = 0;
+  const notificationDiscoveryPoll = setInterval(() => {
+    notificationDiscoveryAttempts += 1;
+    if (ensureNotificationRelayReady() || notificationDiscoveryAttempts >= 600) {
+      clearInterval(notificationDiscoveryPoll);
+    }
+  }, 500);
+  notificationDiscoveryPoll.unref();
+
   if (coworkHostBashEnabled) {
     console.warn("[cowork-wrapper] container-host Bash enabled; Cowork VM startup bypassed");
     return;

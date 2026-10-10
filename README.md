@@ -161,6 +161,8 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `COWORK_REMOTE_READ_ROOTS` | —（仅 `/workspace`） | 已认证的远程下载路由（`GET /api/remote/files/download`）额外可读的根目录，冒号或逗号分隔；`/workspace` 始终允许。路径在 cowork-bridge 容器内解析，宿主机目录还需 bind mount 进容器才可见。列出的路径即可被远程读取，务必配合已认证的 HTTPS 入口 |
 | `COWORK_REMOTE_SESSION_FILE_MAX_BYTES` | `10485760` | 文件面板回退读取的大小上限：Desktop 自身的会话读取器对会话目录之外或超过 10 MiB 的文件返回 null（面板显示“Couldn't read this file”），Bridge 改为从上面的可读根目录重新读取；此值即该回退的上限。可写纯字节数或 `K`/`M`/`G` 后缀（如 `100M`）。响应组装期间文件会被同时持有数份，因此 Bridge 另按容器内存上限的八分之一、最多 32 MiB 收紧；超过有效上限的文件在面板中显示为“Preview isn't available”。要真正提高上限也需同时提高 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`。默认与 Desktop 一致 |
 | `COWORK_REMOTE_PREVIEW_MAX_BYTES` | `52428800` | 浏览器文件面板预览（`GET /api/remote/files/preview`）允许转换的最大 Office 文档大小，字节数，可带 `K`/`M`/`G` 后缀；默认 50 MiB，与 Desktop 自身的预览上限一致。与文件回退读取一样，Bridge 另按容器内存上限的八分之一、最多 32 MiB 收紧；要真正提高上限需同时提高 `CLAUDE_COWORK_BRIDGE_MEMORY_LIMIT`。PDF 直接透传，不受此值限制 |
+| `COWORK_BRIDGE_STATE_DIR` | `/data` | 浏览器通知的可变状态目录：Web Push 订阅、绑定的 VAPID 密钥、设置面板写下的通知偏好。compose 已挂载 `bridge-data` 卷到此目录（宿主机目录需可由 `PUID:PGID` 写入；不可写时推送订阅不能跨重启保留，退化为页面内通知）。 |
+| `CLAUDE_REMOTE_PUSH_SUBJECT` | `mailto:claudesk@localhost` | Web Push 的 VAPID 令牌里给推送服务看的联系方式（`mailto:` 地址或本部署的 `https:` URL）。 |
 | `CLAUDE_OFFICE_PREVIEW_MEMORY_LIMIT` | `1g` | `office-preview` sidecar 的内存上限；LibreOffice 转换需要数百 MB，独立于 Bridge 自身的内存上限 |
 | `CLAUDE_DESKTOP_VERSION` | `2.9939.4` | 构建时固定安装的官方 Desktop 精确版本 |
 | `CLAUDE_GATEWAY_BASE_URL` | — | Gateway origin；通常不要附加 `/v1` |
@@ -254,6 +256,20 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 尽量保持分页一致；`.xlsx`/`.xls` 采用与 Desktop 相同的“每个工作表一页”导出。大文件超过
 `COWORK_REMOTE_PREVIEW_MAX_BYTES` 时拒绝转换。补丁改动会同步 `patchRelease`，让不可变的渲染器资源 URL 重新加载。
 
+### 浏览器通知
+
+官方 Desktop 决定何时通知（回合结束、“需要你的输入”、工具许可与 AskUserQuestion 卡片等），并在主进程里弹出原生通知——
+容器里既没有通知守护进程、也没有人看 Xvfb 桌面，所以这些通知以前哪里都看不到。Bridge 现在把它们端到端送到浏览器：
+`bridge-wrapper/main.cjs` 按结构找到官方通知服务并包住它的显示/关闭方法（最终标题与正文从原生 `Notification.prototype.show`
+观察得来，不复制官方文案；官方判定为“已抑制”的通知不会转发），改由每个浏览器按自己聚焦的会话应用“正在查看就不提醒”的规则；
+`bridge/public/remote-preload.js` 把每条记录渲染成真正的浏览器通知并发布 `claude.web.DesktopNotifications`，点击通知会经过 Bridge
+执行官方的点击处理（打开对应会话、清理待答卡片），许可类通知保留 “Allow once” 按钮；`bridge/notifications.mjs` 与
+`bridge/push.mjs` 负责 Web Push：即使所有标签页都已关闭，也会用 RFC 8291（VAPID + aes128gcm，仅用 `node:crypto` 实现）把通知推到
+已订阅的浏览器，点击后聚焦已有窗口或直接打开会话路由。设置面板的通知开关（“回复完成”“Code 通知”“Code 许可请求”等）改由 Bridge
+本地保存并按类别放行通知；Desktop 自身的通知级别设置照旧生效。Push 需要安全上下文：HTTPS 入口可用，纯 HTTP 局域网入口退化为
+“页面开着才提醒”。订阅、VAPID 密钥与这些偏好保存在 Bridge 状态目录（compose 的 `bridge-data` 卷，见
+`COWORK_BRIDGE_STATE_DIR`）；该目录不可写时只损失跨标签页/重启的推送，页面内通知不受影响。详见 [Web shell 文档](docs/web-shell.md)。
+
 ### Chat 回退与诊断接口
 
 - `GET /api/chat/models`
@@ -309,6 +325,7 @@ Compose 默认挂载：
 | --- | --- | --- |
 | `/config` | `/vol2/1000/Docker/ClaudeDesktop/config` | Claude Desktop 配置、账户与 Chat/Cowork 会话 |
 | `/workspace` | `/vol2/1000/Docker/ClaudeDesktop/workspace` | Code/Cowork 工作区、远程上传与项目文件 |
+| `/data`（仅 cowork-bridge） | `/vol2/1000/Docker/ClaudeDesktop/bridge-data` | 浏览器通知状态：Web Push 订阅、VAPID 密钥与服务端通知偏好；首次启动前请创建该目录并让 `PUID:PGID` 可写 |
 
 停止 Claude Desktop 后再对 `/config` 做一致性敏感的备份。Cowork VM 与工作数据可能额外占用约 25 GB，长期运行前请检查存储余量。
 

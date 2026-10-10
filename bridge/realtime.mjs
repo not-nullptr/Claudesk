@@ -24,7 +24,15 @@ function summarizeSession(session) {
   };
 }
 
-export function createRealtimeController({ desktop, isChatSession, ApiError }) {
+export function createRealtimeController({
+  desktop,
+  isChatSession,
+  ApiError,
+  // Optional gate for relayed Desktop events. The notification controller uses
+  // it to drop notifications whose category the settings panel turned off, so
+  // a disabled category never reaches an open tab either.
+  eventAllowed = () => true,
+}) {
   const clients = new Map();
   const transcripts = new Map();
   let latestSessions = null;
@@ -34,6 +42,10 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
   let eventPollInFlight = false;
   let eventRevision = 0;
   const lastSessionEvent = new Map();
+  let lastClientSeenAt = 0;
+  // clientId → last seen, for browsers whose SSE connection has ended (the
+  // push side must not deliver to a page that is still open).
+  const recentClientIds = new Map();
 
   function send(response, event, data) {
     if (response.destroyed || response.writableEnded) return false;
@@ -160,6 +172,7 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
       const events = await desktop.pollEvents();
       for (const event of events) {
         eventRevision++;
+        if (event.surface === "DesktopNotifications" && !eventAllowed(event.payload)) continue;
         const sessionId = event.payload?.sessionId;
         if (sessionId) {
           lastSessionEvent.set(sessionId, Date.now());
@@ -180,6 +193,8 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
   function open(request, response, url) {
     const mode = url.searchParams.get("mode") || "chat";
     const sessionId = url.searchParams.get("sessionId") || null;
+    const rawClientId = url.searchParams.get("clientId") || "";
+    const clientId = /^[A-Za-z0-9-]{1,64}$/.test(rawClientId) ? rawClientId : "";
     if (!new Set(["chat", "cowork", "code"]).has(mode)) {
       throw new ApiError(400, "invalid realtime mode");
     }
@@ -195,7 +210,9 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
       "X-Content-Type-Options": "nosniff",
     });
     response.write(": connected\n\n");
-    clients.set(response, { mode, sessionId });
+    lastClientSeenAt = Date.now();
+    if (clientId) recentClientIds.set(clientId, Date.now());
+    clients.set(response, { mode, sessionId, clientId });
     send(response, "hello", {
       ok: true,
       transport: "server-sent-events",
@@ -224,10 +241,32 @@ export function createRealtimeController({ desktop, isChatSession, ApiError }) {
     }
   }
 
+  // True while some page is (or was very recently) connected: that page renders
+  // relayed notifications itself, and a push as well would double them. With a
+  // client id the answer is per browser (a subscription whose page is open
+  // elsewhere gets no push; every other browser still does). The grace window
+  // covers a tab that just closed between a notification being queued and
+  // delivered.
+  function hasRecentClient(clientId, maxAgeMs = 30000) {
+    const now = Date.now();
+    if (typeof clientId === "string" && clientId) {
+      for (const subscription of clients.values()) {
+        if (subscription.clientId === clientId) return true;
+      }
+      const seenAt = recentClientIds.get(clientId);
+      return seenAt !== undefined && now - seenAt <= maxAgeMs;
+    }
+    return clients.size > 0 || now - lastClientSeenAt <= maxAgeMs;
+  }
+
   function heartbeat() {
     pruneClosedClients();
     for (const response of clients.keys()) response.write(`: heartbeat ${Date.now()}\n\n`);
+    const now = Date.now();
+    for (const [clientId, seenAt] of recentClientIds) {
+      if (now - seenAt > 5 * 60 * 1000) recentClientIds.delete(clientId);
+    }
   }
 
-  return { heartbeat, open, pollDesktopEvents, pollState };
+  return { hasRecentClient, heartbeat, open, pollDesktopEvents, pollState };
 }
