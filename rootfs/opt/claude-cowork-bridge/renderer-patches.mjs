@@ -52,26 +52,33 @@ const routeAliasPatchId = "desktop-code-route-alias";
 const sessionViewerPatchId = "desktop-session-viewer-gate";
 const sessionViewerReason = "not_desktop_app";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
-// build that component still fetches the account profile and then renders the
-// deployment mark, discarding the photo it just read: with a configured
+// build that component still reads the account view and then renders the
+// deployment mark, discarding the `src` it just read: with a configured
 // avatar_image_url the chip never sets an image source, so no request is made and
-// the Claude mark stays. This patch makes the slot an account avatar when a photo
-// is present — the account Avatar component and its element factory are read back
-// from the sibling component that builds the same avatar with `src` (the one the
-// user-menu header uses), and the mark remains the no-photo fallback. Spliced
-// only in web-shell mode, like the other chrome patches.
+// the Claude mark stays. In this build the chip takes extra placement props and
+// answers through a comma sequence, so the target is the component whose
+// destructured props include `size` and `organization`, whose body binds the
+// account view (`{name, src}` from a zero-argument hook call — an object literal
+// that merely carries a `src` property is not a binding), and whose returned last
+// expression renders a call without `src`. This patch makes the slot an account
+// avatar when a photo is present — the account Avatar component and its element
+// factory are read back from the sibling component that builds the same avatar
+// with `src` (the one the user-menu header uses), and the mark remains the
+// no-photo fallback. Spliced only in web-shell mode, like the other chrome
+// patches.
 const accountChipPatchId = "web-account-chip-avatar";
 // The account view hook that feeds that slot (and the user-menu header's avatar)
-// takes its photo from the account-profile query alone, while the bootstrap
+// takes its photo from the account-profile query alone — in this build the view's
+// `src` is the profile read resolved through a helper call — while the bootstrap
 // account document the same hook already destructures for the name carries the
 // very same `avatar_image_url` (the bridge puts it there when it applies the
 // operator identity). The profile read is a separate bridge round trip that only
 // starts after the bootstrap lands, so the chip painted the deployment mark for
 // as long as that read took and only then began the image request. This patch
-// makes `photoUrl` fall back to the in-hand account value, so the avatar paints
-// on the hook's first non-empty frame and the image download runs alongside the
-// profile read; the profile value still wins once it arrives. Spliced only in
-// web-shell mode, like the other chrome patches.
+// makes `src` fall back to the in-hand account value, so the avatar paints on the
+// hook's first non-empty frame and the image download runs alongside the profile
+// read; the profile value still wins once it arrives. Spliced only in web-shell
+// mode, like the other chrome patches.
 const accountPhotoPatchId = "web-account-photo-first-frame";
 // Cowork tool permissions — the AskUserQuestion and tool-approval cards — are
 // fed by the app's pending-permission store, and the only thing that wires that
@@ -142,6 +149,13 @@ const accountNameSyncFallback = 'globalThis["claude.web"]?.LocalAgentModeSession
   + '?.interactiveAuthStore?.getStateSync?.()?.principalDisplayName';
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
+// A minified component body may answer through a comma sequence
+// (`a?.has_icon,U(gateId,!1),render(...)`); the rendered expression is its last
+// element.
+function renderedExpression(node) {
+  return node?.type === "SequenceExpression" && node.expressions.length
+    ? renderedExpression(node.expressions.at(-1)) : node;
+}
 function property(node, name) {
   node = unwrap(node);
   return node?.type === "MemberExpression"
@@ -261,9 +275,9 @@ function flagInitializer(scope, flag) {
 }
 
 // The account view a component reads from the profile hook:
-// `let{name:i,photoUrl:a,illustration:o}=CB()`. Only a destructuring of a
-// zero-argument call establishes it — an object literal that merely carries a
-// photoUrl property (the hook itself) is not a binding.
+// `let{name:i,src:a}=iQ()`. Only a destructuring of a zero-argument call
+// establishes it — an object literal that merely carries a `src` property (the
+// hook itself) is not a binding.
 function accountViewBindings(scope) {
   let bindings;
   walk(scope.body ?? scope, [], (node) => {
@@ -275,8 +289,8 @@ function accountViewBindings(scope) {
       const name = property.key.name ?? property.key.value;
       if (typeof name === "string") entries.set(name, property.value.name);
     }
-    if (!entries.has("photoUrl") || !entries.has("name")) return;
-    bindings = { photo: entries.get("photoUrl"), name: entries.get("name") };
+    if (!entries.has("src") || !entries.has("name")) return;
+    bindings = { photo: entries.get("src"), name: entries.get("name") };
   });
   return bindings;
 }
@@ -284,12 +298,15 @@ function accountViewBindings(scope) {
 // an avatar from the same account view with an explicit `src` (the user-menu
 // header's avatar). They pass it as the first argument of the element factory, so
 // this reads the argument, not the factory, and refuses on more than one name.
+// The rendered component is the last element of the returned expression, so a
+// comma sequence cannot hide it.
 function accountAvatarComponent(ast) {
   const names = new Set();
   walk(ast, [], (node) => {
     if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return;
     if (!accountViewBindings(node)) return;
-    const returned = node.body.body.find((statement) => statement.type === "ReturnStatement")?.argument;
+    const returned = renderedExpression(node.body.body
+      .find((statement) => statement.type === "ReturnStatement")?.argument);
     if (returned?.type !== "CallExpression") return;
     const props = returned.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
     if (!props?.properties.some((entry) => key(entry, "src"))) return;
@@ -298,9 +315,10 @@ function accountAvatarComponent(ast) {
   });
   return names.size === 1 ? [...names][0] : undefined;
 }
-// The chip's avatar slot: a component taking `{size, organization}` that reads the
-// account view and then renders a call whose props carry no `src` — the one shape
-// that reads the photo and drops it.
+// The chip's avatar slot: a component whose destructured props include `size`
+// and `organization` (this build adds placement props beside them), that reads
+// the account view and then renders a call whose props carry no `src` — the one
+// shape that reads the photo and drops it.
 function accountChipTarget(node) {
   if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
   const params = node.params?.[0];
@@ -310,7 +328,8 @@ function accountChipTarget(node) {
   if (!paramKeys.includes("size") || !paramKeys.includes("organization")) return undefined;
   const bindings = accountViewBindings(node);
   if (!bindings) return undefined;
-  const returned = node.body.body.find((statement) => statement.type === "ReturnStatement")?.argument;
+  const returned = renderedExpression(node.body.body
+    .find((statement) => statement.type === "ReturnStatement")?.argument);
   if (returned?.type !== "CallExpression") return undefined;
   const props = returned.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
   if (!props) return undefined;
@@ -320,12 +339,13 @@ function accountChipTarget(node) {
   return { call: returned, bindings, sizeValue: size.value };
 }
 // The account view hook: a zero-parameter function that destructures `account`
-// from a zero-argument context call, reads the profile document, and returns the
-// view object holding `name`, `photoUrl` and `illustration` — the photo a read of
-// the profile's own `avatar_image_url`. Minified names, extra declarations and
-// the profile call's arguments are tolerated; a function that merely returns an
-// object with a photoUrl property, or reads the field without binding the
-// account that carries it, is not a target. The splice reads the account
+// from a zero-argument context call, reads the profile document (`{data,
+// isLoading}` from one call) and returns the view object holding `name`, `src`
+// and `isLoading` — the photo a call resolved from that profile read, which must
+// name the data binding it read. Minified names, extra declarations and the
+// profile call's arguments are tolerated; a function that merely returns an
+// object with a `src` property, binds no account, or answers `src` outside a
+// call over the profile document is not a target. The splice reads the account
 // binding's own name back from the destructuring.
 function accountPhotoRead(node) {
   if (!functionTypes.has(node.type) || node.params?.length) return undefined;
@@ -336,24 +356,34 @@ function accountPhotoRead(node) {
     || returned.argument?.type !== "ObjectExpression") return undefined;
   const properties = returned.argument.properties;
   const entry = name => properties.find(candidate => key(candidate, name));
-  const photo = entry("photoUrl");
-  if (!photo || !entry("name") || !entry("illustration")) return undefined;
-  if (!contains(photo.value, child => property(child, "avatar_image_url"))) return undefined;
+  const photo = entry("src");
+  if (!photo || !entry("name") || !entry("isLoading")) return undefined;
+  if (photo.value?.type !== "CallExpression") return undefined;
   let account;
+  let profileData;
   for (const statement of statements.slice(0, -1)) {
     if (statement.type !== "VariableDeclaration") continue;
     for (const declarator of statement.declarations) {
-      if (declarator.id?.type !== "ObjectPattern"
-        || declarator.init?.type !== "CallExpression"
-        || declarator.init.arguments.length !== 0) continue;
+      if (declarator.id?.type !== "ObjectPattern") continue;
+      const bindings = new Map();
       for (const binding of declarator.id.properties) {
-        if (binding.type !== "Property" || !key(binding, "account")) continue;
-        const name = identifier(binding.value);
-        if (name) account = name;
+        if (binding.type === "Property" && binding.value?.type === "Identifier") {
+          const name = binding.key.name ?? binding.key.value;
+          if (typeof name === "string") bindings.set(name, binding.value.name);
+        }
       }
+      if (declarator.init?.type === "CallExpression"
+        && declarator.init.arguments.length === 0
+        && bindings.has("account")) account = bindings.get("account");
+      if (bindings.has("data") && bindings.has("isLoading")) profileData = bindings.get("data");
     }
   }
-  if (!account) return undefined;
+  if (!account || !profileData) return undefined;
+  // The photo call must consume the profile document it resolved from, so a
+  // helper that merely spells a call is not a target.
+  if (!photo.value.arguments.some(argument => identifier(argument) === profileData)) {
+    return undefined;
+  }
   return { start: photo.value.start, end: photo.value.end, account };
 }
 // The mark is drawn at an explicit pixel size (`size:r?20:16`); the Avatar reads

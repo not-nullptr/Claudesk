@@ -22,23 +22,32 @@ function run(script, args, env = {}) {
 }
 try {
   let gatewayManifest;
-  for (const gateway of ["0", "1"]) {
-    const state = join(temporary, `renderer-${gateway}`);
+  let webShellManifest;
+  // Both Gateway modes without the web shell (the plain Desktop client), plus
+  // the web shell itself — the deployment's actual mode, which adds the chrome
+  // patches (route alias, session Desktop gate, account chip avatar, account
+  // photo fallback, identity seed, permission wiring, notification enable).
+  // A selector that drifts against a new official bundle must fail here, not
+  // in production.
+  for (const [gateway, webShell] of [["0", "0"], ["1", "0"], ["1", "1"]]) {
+    const state = join(temporary, `renderer-${gateway}${webShell === "1" ? "-web" : ""}`);
     const result = run("rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs",
       [resolve(ionRoot), state, releasePath], {
         CLAUDE_DESKTOP_VERSION: release.desktopVersion,
         CLAUDE_REMOTE_GATEWAY_SETTINGS: gateway,
+        CLAUDE_REMOTE_WEB_SHELL: webShell,
       });
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, gateway === "1" ? 4 : 2);
+    assert.equal(manifest.patches.length, webShell === "1" ? 12 : gateway === "1" ? 5 : 3);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
     assert.ok(manifest.patches.some(patch => patch.id === "inference-banner"),
       "the provider card must be removed in both Gateway modes");
-    if (gateway === "1") gatewayManifest = manifest;
+    if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
+    if (webShell === "1") webShellManifest = manifest;
     for (const file of manifest.files) {
       const generated = await readFile(join(state,
         release.desktopVersion, release.patchRelease, file.path), "utf8");
@@ -48,19 +57,25 @@ try {
       assert.equal(syntax.status, 0, syntax.stderr);
     }
   }
-  // Exercise the real official targets through another compiler pass, rather
-  // than just testing handwritten examples that resemble current minification.
-  const paths = new Set([...gatewayManifest.patches.map(patch => patch.path),
-    ...gatewayManifest.markers.flatMap(marker => marker.matches.map(match => match.path))]);
+  // Serve of the marker evidence and of every patched module comes from the
+  // web-shell generation, the strongest of the three preparations.
+  const paths = new Set([...gatewayManifest.patches, ...webShellManifest.patches]
+    .map(patch => patch.path)
+    .concat(gatewayManifest.markers.flatMap(marker =>
+      marker.matches.map(match => match.path))));
   const originals = new Map(await Promise.all([...paths].map(async path =>
     [path, await readFile(join(ionRoot, path), "utf8")])));
   const orderedPaths = [...paths].sort();
-  await writeFile(join(temporary, "health.json"), JSON.stringify({ renderer: gatewayManifest }));
+  await writeFile(join(temporary, "health.json"), JSON.stringify({ renderer: webShellManifest }));
   await writeFile(join(temporary, "renderer-assets.txt"), orderedPaths.join("\n"));
   for (const [i, path] of orderedPaths.entries()) {
-    const prepared = gatewayManifest.files.some(file => file.path === path);
-    const sourcePath = prepared ? join(temporary, "renderer-1", release.desktopVersion,
-      release.patchRelease, path) : join(ionRoot, path);
+    const gatewayPrepared = gatewayManifest.files.some(file => file.path === path);
+    const webShellPrepared = webShellManifest.files.some(file => file.path === path);
+    const sourcePath = gatewayPrepared
+      ? join(temporary, "renderer-1", release.desktopVersion, release.patchRelease, path)
+      : webShellPrepared
+        ? join(temporary, "renderer-1-web", release.desktopVersion, release.patchRelease, path)
+        : join(ionRoot, path);
     await writeFile(join(temporary, `renderer-${i + 1}.js`), await readFile(sourcePath, "utf8"));
   }
   assert.equal(run("scripts/verify-renderer-markers.mjs", [temporary]).status, 0);
@@ -70,6 +85,12 @@ try {
   await writeFile(evidenceFile, correctEvidence.replaceAll(firstEvidence.evidence[0], "/* altered */"));
   assert.notEqual(run("scripts/verify-renderer-markers.mjs", [temporary]).status, 0,
     "HTTP smoke verifier must reject altered module content");
+  // Exercise the real official targets through another compiler pass, rather
+  // than just testing handwritten examples that resemble current minification.
+  // The web-shell chrome anchors are covered by the unminified
+  // preparation above and by renderer-patches-smoke's minified fixtures; heavy
+  // multi-pass compression rewrites the route-alias resolver beyond any
+  // structural read-back, so only the always-on and Gateway targets run here.
   for (const compress of [false, { passes: 2 }]) {
     const changed = new Map(originals);
     for (const [i, patch] of gatewayManifest.patches.entries()) {
@@ -81,7 +102,7 @@ try {
       changed.set(`moved/chunk-${i}.js`, compiled.code);
     }
     const patched = patchRendererSources(changed, true);
-    assert.equal(patched.patches.length, 4);
+    assert.equal(patched.patches.length, 5);
     assert.ok(patched.patches.every(patch => patch.path.startsWith("moved/")));
     assert.equal(patched.markers.length, 4);
   }

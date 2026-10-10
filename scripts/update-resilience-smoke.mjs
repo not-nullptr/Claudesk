@@ -16,17 +16,31 @@ const guards = 'function signin(){const code=user.pendingUserCode;let changedFla
 const filePane = 'function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileView:void 0);'
   + 'g(Dl,{variant:"ghost",iconOnly:!0,icon:"Download"});'
   + 'return e==="file"&&v(p,{children:[g(Kg,{sessionRef:C}),g(Um,{sessionRef:C,anchorRef:oe})]});}';
+// The provider-card and native-preview targets are required patches like the
+// download button, so the fragment carries all three; every rejection case below
+// still contains them and only drifts in its own anchor.
+const bannerCard = 'function bannerModule(){const providerCard=wrap(function({compact:e,fallback:t}){'
+  + 'let s=useStore();if(s.hidden)return t??null;'
+  + 'return e?h("div",{children:s.provider})'
+  + ':h(Banner,{title:m({defaultMessage:"You’re using {provider}",id:"+8XhcAcHfK"}),'
+  + 'body:m({defaultMessage:"Add MCP servers, set a model allowlist, or change providers any time in the Inference configuration menu.",id:"1qPkTh9fMa"})});});}';
+const previewComponent = 'function NativePreview({sessionId:i,filePath:v,cacheBuster:y}){'
+  + 'const ready=useState(null);'
+  + 'return s("div",{className:"h-full w-full relative overflow-hidden",children:['
+  + 'ready==null?null:s(Spinner,{className:"absolute inset-0 flex items-center justify-center"}),'
+  + 'caption&&s("img",{src:caption.src,alt:""})]});}';
+const alwaysOn = `${bannerCard}\n${previewComponent}`;
 function prepare(version = release.desktopVersion) {
   return spawnSync(process.execPath, [join(root,
     "rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs"), ion, state, releasePath], {
     encoding: "utf8", env: { ...process.env, CLAUDE_DESKTOP_VERSION: version,
-      CLAUDE_REMOTE_GATEWAY_SETTINGS: "1" },
+      CLAUDE_REMOTE_GATEWAY_SETTINGS: "1", CLAUDE_REMOTE_WEB_SHELL: "0" },
   });
 }
 try {
   await mkdir(ion);
   const source = join(ion, "renamed-bundle.js");
-  await writeFile(source, `${native}\n${guards}\n${filePane}`);
+  await writeFile(source, `${native}\n${guards}\n${filePane}\n${alwaysOn}`);
   const first = prepare();
   assert.equal(first.status, 0, first.stderr);
   const pointer = await readFile(join(state, "current.json"), "utf8");
@@ -34,8 +48,10 @@ try {
     "renamed-bundle.js");
   const generated = await readFile(generatedPath, "utf8");
   assert.ok(generated.includes("changedFlag=enabled&&("), "minifier renaming must survive");
-  for (const badSource of [`${native}\n${filePane}`, `${native}\n${guards}\n${guards}\n${filePane}`,
-    `${guards}\n${filePane}`, `${native}\nlet changedFlag=enabled&&window.location.protocol==="file:";\n${filePane}`]) {
+  for (const badSource of [`${native}\n${filePane}\n${alwaysOn}`,
+    `${native}\n${guards}\n${guards}\n${filePane}\n${alwaysOn}`,
+    `${guards}\n${filePane}\n${alwaysOn}`,
+    `${native}\nlet changedFlag=enabled&&window.location.protocol==="file:";\n${filePane}\n${alwaysOn}`]) {
     await writeFile(source, badSource);
     assert.notEqual(prepare().status, 0, "missing/ambiguous/changed anchors must reject");
     assert.equal(await readFile(join(state, "current.json"), "utf8"), pointer);

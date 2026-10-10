@@ -83,17 +83,19 @@ selector must be updated before the new Desktop is promoted, rather than the car
 returning silently.
 
 The sidebar's account chip — the bottom-left identity row — leads with an avatar
-slot, but in this build the component behind that slot (`{size, organization}`)
-still reads the account profile and then renders the deployment mark, discarding
-the `photoUrl` it just read: with a configured `avatar_image_url` the chip never
-sets an image source, no request is made and the Claude mark stays. The
+slot, but in this build the component behind that slot still reads the account
+view and then renders the deployment mark, discarding the `src` it just read:
+with a configured `avatar_image_url` the chip never sets an image source, no
+request is made and the Claude mark stays. The
 `web-account-chip-avatar` patch makes that slot an account avatar when a photo is
 present and keeps the mark otherwise. It is selected structurally: a component
-taking `{size, organization}` that destructures the account view
-(`{name, photoUrl, …}` from a zero-argument hook call — an object literal that
-merely carries a `photoUrl` property is not a binding) and returns a call whose
-props carry no `src`. The account Avatar component and its element factory are
-read back from the sibling components that build an avatar with an explicit
+whose destructured props include `size` and `organization` (this build adds
+placement props beside them), that destructures the account view
+(`{name, src}` from a zero-argument hook call — an object literal that
+merely carries a `src` property is not a binding) and whose returned expression
+— the last element of a comma sequence, like the shipping chip's — renders a call
+whose props carry no `src`. The account Avatar component and its element factory
+are read back from the sibling components that build an avatar with an explicit
 `src` (the user-menu header's avatar). The mark is drawn at an explicit pixel size
 (`size:r?20:16`) while the Avatar reads its `size` as a design token of a different
 scale, so the mark's own size expression is read back from the call being replaced
@@ -104,25 +106,27 @@ refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.
 
 The account view hook behind that slot (and the user-menu header's avatar) takes
-its photo only from the account-profile query, but the bootstrap account
+its photo only from the account-profile query — in this build the view's `src`
+is the profile read resolved through a helper call — but the bootstrap account
 document it already destructures for the name carries the same
 `avatar_image_url` — the bridge puts it there when it applies the operator
 identity. The profile read is a separate bridge round trip that only starts
 after the bootstrap lands, so the chip painted the deployment mark for as long
 as that read took and only then began the image request. The
-`web-account-photo-first-frame` patch makes the hook's `photoUrl` fall back to
+`web-account-photo-first-frame` patch makes the hook's `src` fall back to
 the in-hand account value, so the avatar paints on its first non-empty frame and
 the image download runs alongside the profile read; the profile value still
 wins when it arrives. It is selected structurally: a zero-parameter function
-that destructures `account` from a zero-argument context call and returns the
-view object carrying `name`, `photoUrl` and `illustration`, with the photo a
-read of the profile's own `avatar_image_url`. The account binding's name is
-read back from the destructuring and spliced into the fallback, so renaming
+that destructures `account` from a zero-argument context call, reads the
+profile document (`{data, isLoading}` from one call) and returns the
+view object carrying `name`, `src` and `isLoading`, with the photo a call that
+consumes the profile data binding it resolved from. The account binding's name
+is read back from the destructuring and spliced into the fallback, so renaming
 tolerates minification; a function that merely returns an object with a
-photoUrl property, or reads the field without binding the account that carries
-it, refuses rather than splicing the fallback onto the wrong reader. A required
-patch (see below), like the chip avatar it feeds. Spliced only in web-shell
-mode.
+`src` property, binds no account, or answers `src` outside a call over the
+profile document, refuses rather than splicing the fallback onto the wrong
+reader. A required patch (see below), like the chip avatar it feeds. Spliced
+only in web-shell mode.
 
 The user menu's identity line is read from Desktop's interactive auth store
 through a hook that paints a loading state on the popover's first frame (the

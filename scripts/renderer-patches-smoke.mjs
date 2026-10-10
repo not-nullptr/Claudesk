@@ -49,34 +49,35 @@ const sessionLayout = 'function SessionLayout({children:e}){'
   + 'let isDesktopApp=desktopFromUserAgent(),pinned=useStore(x=>x.pinned);'
   + 'return useMemo(()=>{if(!(remote||hub)){if(!isDesktopApp){report("not_desktop_app");return}'
   + 'local||ready||report("cowork_gate_off")}},[]);}';
-// The account chip: reads the account view — its photoUrl binding — and then
-// returns the deployment mark, the one shape that fetches the photo and drops
-// it. The account Avatar component is read back from the sibling that builds an
-// avatar with an explicit src, so a renamed component or a different factory is
-// tolerated. The hook's own object literal carries a photoUrl *property* and
-// must not be mistaken for the binding.
+// The account chip: reads the account view — its src binding — and then returns
+// the deployment mark, the one shape that fetches the photo and drops it. The
+// chip takes extra placement props and answers through a comma sequence, like
+// the shipping bundle. The account Avatar component is read back from the
+// sibling that builds an avatar with an explicit src, so a renamed component or
+// a different factory is tolerated. The hook's own object literal carries a src
+// *property* and must not be mistaken for the binding.
 // The account view hook is also the shape the photo fallback reads: it
 // destructures the account already in hand from the current-account context
 // (the bootstrap account, which in the web shell already carries the avatar
-// URL) and the profile read, and its photoUrl chains off the profile document.
-// The fallback splice must leave the property in place for the chip's binding
-// scan, so the hook keeps its object literal.
+// URL) and the profile read (`{data, isLoading}`), and its src is a call over
+// the profile data binding. The fallback splice must leave the property in
+// place for the chip's binding scan, so the hook keeps its object literal.
 const accountChipHook = 'function accountHook(){let{account:e}=ctx(),'
-  + '{data:t,isLoading:n}=prof({additionalPermittedStatusCode:404});'
-  + 'return{name:e?.full_name||"",photoUrl:t?.avatar_image_url||void 0,'
-  + 'illustration:t?.avatar||void 0,isLoading:n}};';
-const accountChipBody = 'function accountAvatar(){let{name:e,photoUrl:t,illustration:n}=accountHook();'
-  + 'return k(Av,{name:e,src:t??illu(n),size:"sm"})}'
-  + 'function chipMark({size:e="sm",organization:t}){let{activeOrganization:n}=ctx(),r=e==="md",'
-  + '{name:i,photoUrl:a,illustration:o}=accountHook();return k(Mark,{size:r?20:16,className:"shrink-0"})}';
+  + '{data:t,isLoading:n}=prof({additionalPermittedStatusCode:404}),r=org();'
+  + 'return{name:e?.full_name||"",src:photo(t,r),isLoading:n}};';
+const accountChipBody = 'function accountAvatar(){let{name:e,src:t}=accountHook();'
+  + 'return k(Av,{name:e,src:t,size:"sm"})}'
+  + 'function chipMark({size:e="sm",organization:t,placement:n,anyOrgHasIcon:r=!0}){'
+  + 'let{activeOrganization:i}=ctx(),a=t??i,o=e==="md",{name:s,src:c}=accountHook();'
+  + 'return a?.has_icon,U(gateId,!1),k(Mark,{size:o?20:16,className:"shrink-0"})}';
 const accountChip = accountChipHook + accountChipBody;
 // A lookalike view whose photo has no account to fall back to, and one that
-// binds the account but returns no photo read, must not be mistaken for the
+// binds the account but answers no photo call, must not be mistaken for the
 // account view hook.
 const accountPhotoDecoys = 'function photoOnly(){'
-  + 'return{name:"",photoUrl:profile()?.avatar_image_url||void 0,illustration:void 0}}'
+  + 'return{name:"",src:profile()?.avatar_image_url||void 0,isLoading:void 0}}'
   + 'function accountOnly(){let{account:e}=ctx();'
-  + 'return{name:e?.full_name||"",photoUrl:void 0,illustration:void 0}}';
+  + 'return{name:e?.full_name||"",src:void 0,isLoading:!0}}';
 // The user-menu identity reader: one function whose entire body returns the
 // auth-store hook's principal display name. The hook paints its loading state on
 // the popover's first frame (the menu content mounts on open) and only fills
@@ -175,17 +176,17 @@ for (const [i, variant] of variants.entries()) {
   assert.equal(webResult.patches.filter(p => p.id === "web-account-chip-avatar").length, 1,
     "the account chip's avatar slot must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes('(a?k(Av,{name:i,src:a,className:"shrink-0",style:{width:(r?20:16)+"px",height:(r?20:16)+"px"}})'
-      + ':k(Mark,{size:r?20:16,className:"shrink-0"})'),
+    .includes('(c?k(Av,{name:s,src:c,className:"shrink-0",style:{width:(o?20:16)+"px",height:(o?20:16)+"px"}})'
+      + ':k(Mark,{size:o?20:16,className:"shrink-0"}))'),
     "the chip must show the account avatar at the mark's own pixel size, and keep the mark otherwise");
   assert.equal(webResult.patches.filter(p => p.id === "web-account-photo-first-frame").length, 1,
     "the account view's photo fallback must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes('photoUrl:(t?.avatar_image_url||void 0||e?.avatar_image_url)'),
+    .includes('src:(photo(t,r)||e?.avatar_image_url)'),
     "the photo must fall back to the bootstrap account while the profile read is in flight");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes('photoUrl:profile()?.avatar_image_url'),
-    "a photo-less account view's own literal must not be spliced");
+    .includes('src:profile()?.avatar_image_url'),
+    "a lookalike view's own literal must not be spliced");
   assert.equal(webResult.patches.filter(p => p.id === "web-account-menu-name").length, 1,
     "the user-menu identity must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
@@ -275,8 +276,11 @@ assert.throws(() => patchRendererSources(new Map([["dup-chip.js",
     + `\n${accountChip}\n${accountChipB}`]]), false, true),
   /web-account-chip-avatar expected once, found 2/);
 // The avatar component and the photo binding are structural read-backs, so the
-// patch survives minification, not just renaming by hand.
-const chipCompiled = await minify(accountChip, {
+// patch survives minification, not just renaming by hand. The menu-name reader
+// rides along because in the shipping bundle it shares the account chunk and
+// carries the token the patcher's string prefilter keys on
+// (`principalDisplayName`), which the minified account chip alone would not.
+const chipCompiled = await minify(`${accountChip}\n${accountMenuName}`, {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
 assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
@@ -303,10 +307,7 @@ assert.throws(() => patchRendererSources(new Map([["dup-photo-hook.js",
 assert.equal(inspectRenderer(accountPhotoDecoys, false, true).patches
   .filter(patch => patch.id === "web-account-photo-first-frame").length, 0,
   "only the account view that reads the profile's own avatar field is a target");
-const photoCompiled = await minify(accountChip, {
-  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
-});
-assert.equal(inspectRenderer(photoCompiled.code, false, true).patches
+assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-account-photo-first-frame").length, 1,
   "a mangled account view hook must still be spliced once");
 // The full web-shell fixture set, reused for the identity-reader refusals below
@@ -354,25 +355,28 @@ vm.runInNewContext(`${nameOut}\nresult=menuIdentity();`, bareName);
 assert.equal(bareName.result, undefined,
   "without the preload surface the original reader behavior must remain");
 // The photo fallback answers from the account already in hand while the profile
-// read is in flight, the profile value wins once it arrives, and an account
-// without the field leaves the original photo-less behavior intact.
+// read is in flight, the resolved profile value wins once it arrives, and an
+// account without the field leaves the original photo-less behavior intact.
 const photoOut = patchRendererSources(
   new Map([["account-photo.js", `${webShellFixtures}\n${accountMenuName}`]]), false, true)
   .sources.get("account-photo.js");
 const heldPhoto = { callbacks: {}, event: {},
   ctx: () => ({ account: { full_name: "Ada", avatar_image_url: "/api/remote/account/avatar?v=1" } }),
-  prof: () => ({ data: undefined, isLoading: true }) };
-vm.runInNewContext(`${photoOut}\nresult=accountHook().photoUrl;`, heldPhoto);
+  prof: () => ({ data: undefined, isLoading: true }),
+  photo: () => undefined, org: () => ({}) };
+vm.runInNewContext(`${photoOut}\nresult=accountHook().src;`, heldPhoto);
 assert.equal(heldPhoto.result, "/api/remote/account/avatar?v=1",
   "the in-hand account's photo must answer while the profile read is in flight");
 const livePhoto = { callbacks: {}, event: {},
   ctx: () => ({ account: { full_name: "Ada", avatar_image_url: "/stale.png" } }),
-  prof: () => ({ data: { avatar_image_url: "/profile.png" }, isLoading: false }) };
-vm.runInNewContext(`${photoOut}\nresult=accountHook().photoUrl;`, livePhoto);
-assert.equal(livePhoto.result, "/profile.png", "the profile value must win once it arrives");
+  prof: () => ({ data: { avatar_image_url: "/profile.png" }, isLoading: false }),
+  photo: data => data?.avatar_image_url, org: () => ({}) };
+vm.runInNewContext(`${photoOut}\nresult=accountHook().src;`, livePhoto);
+assert.equal(livePhoto.result, "/profile.png", "the resolved profile value must win once it arrives");
 const barePhoto = { callbacks: {}, event: {},
-  ctx: () => ({ account: { full_name: "Ada" } }), prof: () => ({ data: undefined }) };
-vm.runInNewContext(`${photoOut}\nresult=accountHook().photoUrl;`, barePhoto);
+  ctx: () => ({ account: { full_name: "Ada" } }), prof: () => ({ data: undefined }),
+  photo: () => undefined, org: () => ({}) };
+vm.runInNewContext(`${photoOut}\nresult=accountHook().src;`, barePhoto);
 assert.equal(barePhoto.result, undefined,
   "an account without a photo must keep the original photo-less behavior");
 // ...and the notification-enable bridge: a renderer whose push enablement no

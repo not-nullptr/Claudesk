@@ -48,7 +48,7 @@ RUN npm install \
 
 FROM jlesage/baseimage-gui:debian-12-v4.11.3
 
-ARG CLAUDE_DESKTOP_VERSION=2.9939.4
+ARG CLAUDE_DESKTOP_VERSION=2.31226.1
 
 RUN add-pkg \
         ca-certificates \

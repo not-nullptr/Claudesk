@@ -27,7 +27,7 @@ export function NativePreview({sessionId:i,filePath:v,cacheBuster:y}){const read
 `);
   const result = spawnSync(process.execPath, [preparePath, ion, state, releasePath], {
     encoding: "utf8", env: { ...process.env, CLAUDE_DESKTOP_VERSION: release.desktopVersion,
-      CLAUDE_REMOTE_GATEWAY_SETTINGS: "1" },
+      CLAUDE_REMOTE_GATEWAY_SETTINGS: "1", CLAUDE_REMOTE_WEB_SHELL: "0" },
   });
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
