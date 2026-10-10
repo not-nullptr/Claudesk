@@ -14,6 +14,9 @@
 // as data (bounded strings), never as markup.
 
 const fallbackRoute = "/";
+// The official Desktop app icon, served same-origin (and already the PWA icon).
+// Chrome renders it on Windows and Linux; macOS shows the browser icon instead.
+const notificationIcon = "/desktop-icon.png";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -39,19 +42,33 @@ self.addEventListener("push", (event) => {
     payload = event.data ? event.data.json() : {};
   } catch {}
   const title = bounded(payload?.title, 200) || "Claude";
+  // `renotify` requires a tag, so one is always present: the bridge sends the
+  // official tag, and a payload without one gets a fresh unique tag (a unique
+  // tag also keeps such a notification out of any other's replacement slot).
+  const tag = bounded(payload?.tag, 200) || `claudesk-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const kind = bounded(payload?.kind, 32);
   const options = {
     body: bounded(payload?.body, 400),
-    tag: bounded(payload?.tag, 200) || undefined,
+    icon: notificationIcon,
+    tag,
+    // A replacement for the same tag re-alerts (the platform's default sound)
+    // instead of quietly swapping the text.
+    renotify: true,
     data: {
-      tag: bounded(payload?.tag, 200),
+      tag: bounded(payload?.tag, 200) || tag,
       route: safeRoute(payload?.route),
-      kind: bounded(payload?.kind, 32),
+      kind,
       allowOnce: payload?.allowOnce === true,
     },
   };
+  // Permission and question cards must not slide away unread; a finished turn
+  // may dismiss itself like the desktop notification would.
+  if (kind === "permission" || kind === "ask") {
+    options.requireInteraction = true;
+  }
   // Permission cards can be answered straight from the notification, the way
   // the app's own native notification offers "Allow once".
-  if (options.data.allowOnce && options.data.kind === "permission") {
+  if (options.data.allowOnce && kind === "permission") {
     options.actions = [{ action: "allow_once", title: "Allow once" }];
   }
   event.waitUntil(self.registration.showNotification(title, options));

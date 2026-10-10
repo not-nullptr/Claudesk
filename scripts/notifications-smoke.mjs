@@ -502,15 +502,28 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
   channel({ title: "Fix the bug", body: "Claude finished a task", tag: "idle-s1", sessionId: "s1", route: "/epitaxy/s1", kind: "idle", at: Date.now() });
   assert.equal(created.length, 1);
   assert.equal(created[0].title, "Fix the bug");
-  assert.deepEqual(JSON.parse(JSON.stringify(created[0].options)),
-    { body: "Claude finished a task", tag: "idle-s1" });
+  const options = JSON.parse(JSON.stringify(created[0].options));
+  assert.equal(options.body, "Claude finished a task");
+  assert.equal(options.tag, "idle-s1");
+  assert.equal(options.icon, "/desktop-icon.png",
+    "the notification must wear the Claude app icon (macOS shows the app icon instead)");
+  assert.equal(options.renotify, true,
+    "a same-tag replacement must re-alert rather than swap silently");
+  assert.equal(options.requireInteraction, undefined,
+    "a finished turn may dismiss itself");
+
+  // Permission and question cards must stay on screen until answered.
+  channel({ title: "repo", body: "Allow Claude to run npm test?", tag: "permission-r1", sessionId: "s3", kind: "permission", allowOnce: true, at: Date.now() });
+  assert.equal(created.at(-1).options.requireInteraction, true,
+    "a permission card must not slide away unread");
 
   // A record older than a minute (replayed after a reconnect) must not appear.
   channel({ title: "Old", body: "x", tag: "idle-old", at: Date.now() - 61 * 1000 });
-  assert.equal(created.length, 1, "stale relayed notifications must be dropped");
+  assert.equal(created.length, 2, "stale relayed notifications must be dropped");
   // ...and a close record closes the notification with that tag.
   sandbox.closeChannel({ tag: "idle-s1" });
   assert.equal(created[0].closed, true, "a close record must close the browser notification");
+  assert.equal(created[1].closed, false, "a close record must only close its own tag");
 }
 
 // While the user is looking at that very session nothing appears; a different
@@ -572,6 +585,121 @@ function loadPreload({ permission = "granted", focused = false, pathname = "/cow
   await sandbox.bridge().showNotification("Ready to go", "Claude's all set up.", "vm-ready", "/cowork/abc", "generic", {});
   assert.equal(created.length, 1);
   assert.equal(created[0].title, "Ready to go");
+}
+
+// --- The service worker -----------------------------------------------------
+// The pushed path runs in a worker context the smoke otherwise never touches:
+// it shows the pushed record with the app icon (and, for permission cards, the
+// "Allow once" action plus requireInteraction), and on a click it asks the
+// bridge which route the official handler navigated to before focusing an open
+// window or opening that route.
+const swSource = await readFile(new URL("../bridge/public/sw.js", import.meta.url), "utf8");
+
+function loadServiceWorker({ windowClients = [] } = {}) {
+  const handlers = new Map();
+  const notifications = [];
+  const requests = [];
+  const opened = [];
+  // The wrappers mutate the original client records, so assertions read those.
+  const clients = windowClients.map((client) => ({
+    focus: async () => { client.focused = true; },
+    postMessage: (message) => { client.messages.push(message); },
+  }));
+  const sandbox = vm.createContext({
+    self: {
+      addEventListener: (type, handler) => handlers.set(type, handler),
+      skipWaiting: async () => {},
+      registration: {
+        showNotification: async (title, options) => {
+          notifications.push({ title, options: JSON.parse(JSON.stringify(options)) });
+        },
+      },
+      clients: {
+        claim: async () => {},
+        matchAll: async () => clients,
+        openWindow: async (url) => { opened.push(url); },
+      },
+    },
+    fetch: async (path, options = {}) => {
+      requests.push({ path, body: options.body ? JSON.parse(options.body) : null });
+      return { json: async () => ({ ok: true, value: { route: "/epitaxy/s1" } }) };
+    },
+    AbortSignal,
+  });
+  vm.runInContext(swSource, sandbox);
+  return { handlers, notifications, requests, opened, clients };
+}
+
+function dispatchWorkerEvent(worker, type, event) {
+  const waits = [];
+  worker.handlers.get(type)({ ...event, waitUntil: (promise) => waits.push(promise) });
+  return Promise.all(waits);
+}
+
+{
+  const worker = loadServiceWorker();
+  await dispatchWorkerEvent(worker, "push", {
+    data: { json: () => ({ title: "Fix the bug", body: "Claude finished a task", tag: "idle-s1", kind: "idle", route: "/epitaxy/s1" }) },
+  });
+  const options = worker.notifications[0].options;
+  assert.equal(worker.notifications[0].title, "Fix the bug");
+  assert.equal(options.icon, "/desktop-icon.png", "a pushed notification must wear the app icon");
+  assert.equal(options.renotify, true);
+  assert.equal(options.tag, "idle-s1");
+  assert.equal(options.requireInteraction, undefined, "a finished turn may dismiss itself");
+  assert.equal(options.actions, undefined, "only permission cards carry actions");
+
+  await dispatchWorkerEvent(worker, "push", {
+    data: { json: () => ({ title: "repo", body: "Allow Claude to run npm test?", tag: "permission-r1", kind: "permission", allowOnce: true }) },
+  });
+  const permission = worker.notifications[1].options;
+  assert.equal(permission.requireInteraction, true, "a permission card must not slide away unread");
+  assert.deepEqual(permission.actions, [{ action: "allow_once", title: "Allow once" }]);
+
+  // A payload without a tag still gets one: `renotify` requires it and a
+  // unique tag keeps it out of any other notification's replacement slot.
+  await dispatchWorkerEvent(worker, "push", {
+    data: { json: () => ({ title: "No tag", body: "x", kind: "generic" }) },
+  });
+  const untagged = worker.notifications[2].options;
+  assert.match(untagged.tag, /^claudesk-\d+-/, "an untagged push must still get a tag");
+  assert.equal(untagged.data.tag, untagged.tag);
+
+  // A click runs the bridge's official handler and opens the route it answers
+  // with when no window is open...
+  const clickEvent = {
+    action: "",
+    notification: { data: { tag: "idle-s1", route: "/epitaxy/s1" }, close() { this.closed = true; } },
+  };
+  await dispatchWorkerEvent(worker, "notificationclick", clickEvent);
+  assert.equal(clickEvent.notification.closed, true, "a click must close the pushed notification");
+  assert.deepEqual(worker.requests.at(-1), {
+    path: "/api/remote/notifications/click",
+    body: { tag: "idle-s1", action: "default" },
+  });
+  assert.deepEqual(worker.opened, ["/epitaxy/s1"], "the reported route must open");
+
+  // ...and with an open window the worker focuses it and hands the route over
+  // instead of opening a second window.
+  const existingWindow = { messages: [], focused: false };
+  const workerWithClient = loadServiceWorker({ windowClients: [existingWindow] });
+  await dispatchWorkerEvent(workerWithClient, "notificationclick", {
+    action: "",
+    notification: { data: { tag: "idle-s1", route: "/epitaxy/s1" }, close() {} },
+  });
+  assert.deepEqual(workerWithClient.opened, []);
+  assert.equal(existingWindow.focused, true, "an existing window must be focused");
+  assert.deepEqual(JSON.parse(JSON.stringify(existingWindow.messages)),
+    [{ type: "claudesk-notification-navigate", route: "/epitaxy/s1" }]);
+
+  // "Allow once" answers the permission and must not steal focus or navigate.
+  const allowOnce = { action: "allow_once", notification: { data: { tag: "permission-r1", kind: "permission", allowOnce: true }, close() {} } };
+  await dispatchWorkerEvent(worker, "notificationclick", allowOnce);
+  assert.deepEqual(worker.requests.at(-1), {
+    path: "/api/remote/notifications/click",
+    body: { tag: "permission-r1", action: "allow_once" },
+  });
+  assert.equal(worker.opened.length, 1, "answering a permission must not open a window");
 }
 
 // --- The bridge's HTTP surface ----------------------------------------------

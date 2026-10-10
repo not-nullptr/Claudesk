@@ -157,7 +157,14 @@ The bridge now delivers them itself, in three parts.
   (its service worker shows pushes when no tab is open; clicking one focuses an
   existing window or opens the route). A record older than a minute is dropped
   (the event relay can replay after a reconnect) and nothing is shown while the
-  user is looking at that very session.
+  user is looking at that very session. Notifications carry the official Desktop
+  icon (rendered on Windows and Linux; macOS shows the browser icon instead),
+  a same-tag replacement re-alerts rather than swapping silently, and
+  permission/question cards use `requireInteraction` so they stay on screen
+  until answered. Nothing else is customizable by the web platform: the origin
+  line, the browser attribution and the alert sound are the browser's own
+  (the Notifications API has no sound option, and a service worker cannot play
+  audio — a custom sound would only be possible from an open page).
 - **Delivery (`bridge/notifications.mjs`, `bridge/push.mjs`).** The bridge
   drains the wrapper's notification queue even when no page is connected, and
   sends each notification as an RFC 8291 Web Push message (VAPID-signed,

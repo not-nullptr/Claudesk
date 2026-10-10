@@ -898,7 +898,19 @@
     try {
       notification = new Notification(title, {
         body: String(record?.body || "").slice(0, 400),
+        // The official Desktop app icon, served same-origin (and already the
+        // PWA icon). Chrome uses it on Windows and Linux; macOS shows the
+        // browser/app icon instead and ignores this.
+        icon: "/desktop-icon.png",
         tag,
+        // A replacement for the same tag re-alerts (the platform's default
+        // sound) instead of quietly swapping the text.
+        renotify: true,
+        // Permission and question cards must not slide away unread; a finished
+        // turn may dismiss itself like the desktop notification would.
+        ...(record?.kind === "permission" || record?.kind === "ask"
+          ? { requireInteraction: true }
+          : {}),
       });
     } catch {
       return false;
