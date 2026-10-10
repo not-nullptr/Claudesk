@@ -32,6 +32,7 @@ function load(env = {}) {
       resolve: resolveAccountIdentity,
       applyAccount: applyAccountIdentity,
       applyOrg: applyOrganizationIdentity,
+      applyPolicy: applyWebShellAccountPolicy,
       avatarIsUrl: avatarValueIsUrl,
     };`, sandbox);
   const r = sandbox.result;
@@ -44,9 +45,11 @@ function load(env = {}) {
     resolve: () => plain(r.resolve()),
     applyAccount: (account, identity) => plain(r.applyAccount(account, identity)),
     applyOrg: (organization, identity) => plain(r.applyOrg(organization, identity)),
+    applyPolicy: (account) => plain(r.applyPolicy(account)),
     // Raw (unserialized) result for identity checks.
     applyAccountRaw: (account, identity) => r.applyAccount(account, identity),
     applyOrgRaw: (organization, identity) => r.applyOrg(organization, identity),
+    applyPolicyRaw: (account) => r.applyPolicy(account),
     avatarIsUrl: (value) => r.avatarIsUrl(value),
   };
 }
@@ -135,6 +138,37 @@ const upstreamAccount = {
   const account = configured.applyAccount(upstreamAccount, configured.identity);
   assert.equal(account.avatar_image_url, "https://example.com/a.png");
   assert.equal(account.avatar, undefined, "the preset illustration index is not written");
+}
+{
+  // Top-level Cowork sessions have no remote backend in this deployment: the
+  // renderer places new sessions remotely unless the account document says
+  // `settings.dramatic_shrimp_enabled === false` (`enabled ?? true`), and the
+  // remote path's session-create POST 404s against this bridge — a new chat
+  // with manual approvals died on it. The policy merges the flag in and
+  // touches nothing else; unlike the identity overrides it applies without any
+  // CLAUDE_REMOTE_ACCOUNT_* value.
+  const policy = load({});
+  const account = policy.applyPolicy({
+    uuid: "11111111-1111-1111-1111-111111111111",
+    display_name: "app",
+    settings: { enabled_web_search: false },
+  });
+  assert.equal(account.settings.dramatic_shrimp_enabled, false, "remote sessions are declared off");
+  assert.equal(account.settings.enabled_web_search, false, "sibling settings survive");
+  assert.equal(account.uuid, "11111111-1111-1111-1111-111111111111", "the rest of the account is untouched");
+  assert.equal(account.display_name, "app");
+  const withoutSettings = policy.applyPolicy({ uuid: "x" });
+  assert.deepEqual(withoutSettings.settings, { dramatic_shrimp_enabled: false },
+    "an account without a settings object gains one");
+  const alreadyOff = { uuid: "x", settings: { dramatic_shrimp_enabled: false } };
+  assert.equal(policy.applyPolicyRaw(alreadyOff), alreadyOff,
+    "an already-disabled account returns the same reference");
+  const array = [1];
+  assert.equal(policy.applyPolicyRaw(array), array, "an array body is ignored");
+  assert.equal(policy.applyPolicyRaw(null), null, "a null account is ignored");
+  const oddSettings = { uuid: "x", settings: "nope" };
+  assert.equal(policy.applyPolicyRaw(oddSettings), oddSettings,
+    "malformed settings are left alone rather than guessed at");
 }
 {
   // Nothing to change: an unconfigured identity returns the same reference.

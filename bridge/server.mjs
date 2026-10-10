@@ -161,6 +161,23 @@ function applyAccountIdentity(account, identity) {
   }
   return changed ? next : account;
 }
+// Remote (cloud) Cowork sessions — upstream's "dramatic shrimp" — have no
+// backend in this deployment: the renderer primes one by POSTing
+// /api/organizations/<org>/cowork/sessions, which only claude.ai serves (the
+// bridge answers 404), and a new chat with manual approvals dies on that
+// response instead of starting locally. The renderer treats remote as enabled
+// unless the account's `settings.dramatic_shrimp_enabled` is exactly false
+// (`enabled ?? true`), so declare it disabled on the bootstrap account the web
+// shell's account context reads; the composer then takes the local path the
+// Desktop client already uses. Merges into the existing settings object;
+// unchanged accounts return the same reference.
+function applyWebShellAccountPolicy(account) {
+  if (!account || typeof account !== "object" || Array.isArray(account)) return account;
+  const settings = account.settings === undefined ? {} : account.settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return account;
+  if (settings.dramatic_shrimp_enabled === false) return account;
+  return { ...account, settings: { ...settings, dramatic_shrimp_enabled: false } };
+}
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
 // The account avatar accepts a browser URL (http(s)/data:) or a path to an image
 // on this container. A path is served by the bridge itself, same-origin, at one
@@ -1627,6 +1644,17 @@ async function forwardOfficialProtocol(request, response, url) {
           parsed = organization;
           rewrote = true;
         }
+      }
+    }
+    // Remote Cowork sessions are not served here (see
+    // applyWebShellAccountPolicy); opt the bootstrap account out of the
+    // renderer's remote-by-default placement so a new chat starts locally
+    // instead of priming a cloud session this deployment cannot create.
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && parsed.account) {
+      const account = applyWebShellAccountPolicy(parsed.account);
+      if (account !== parsed.account) {
+        parsed = { ...parsed, account };
+        rewrote = true;
       }
     }
     // The web shell's Cowork surface is gated on org entitlements these
