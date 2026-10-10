@@ -61,6 +61,18 @@ const sessionViewerReason = "not_desktop_app";
 // user-menu header uses), and the mark remains the no-photo fallback. Spliced
 // only in web-shell mode, like the other chrome patches.
 const accountChipPatchId = "web-account-chip-avatar";
+// The account view hook that feeds that slot (and the user-menu header's avatar)
+// takes its photo from the account-profile query alone, while the bootstrap
+// account document the same hook already destructures for the name carries the
+// very same `avatar_image_url` (the bridge puts it there when it applies the
+// operator identity). The profile read is a separate bridge round trip that only
+// starts after the bootstrap lands, so the chip painted the deployment mark for
+// as long as that read took and only then began the image request. This patch
+// makes `photoUrl` fall back to the in-hand account value, so the avatar paints
+// on the hook's first non-empty frame and the image download runs alongside the
+// profile read; the profile value still wins once it arrives. Spliced only in
+// web-shell mode, like the other chrome patches.
+const accountPhotoPatchId = "web-account-photo-first-frame";
 // Cowork tool permissions — the AskUserQuestion and tool-approval cards — are
 // fed by the app's pending-permission store, and the only thing that wires that
 // store (subscribes to the session event stream and hydrates from
@@ -306,6 +318,43 @@ function accountChipTarget(node) {
   const size = props.properties.find((entry) => key(entry, "size"));
   if (!size) return undefined;
   return { call: returned, bindings, sizeValue: size.value };
+}
+// The account view hook: a zero-parameter function that destructures `account`
+// from a zero-argument context call, reads the profile document, and returns the
+// view object holding `name`, `photoUrl` and `illustration` — the photo a read of
+// the profile's own `avatar_image_url`. Minified names, extra declarations and
+// the profile call's arguments are tolerated; a function that merely returns an
+// object with a photoUrl property, or reads the field without binding the
+// account that carries it, is not a target. The splice reads the account
+// binding's own name back from the destructuring.
+function accountPhotoRead(node) {
+  if (!functionTypes.has(node.type) || node.params?.length) return undefined;
+  if (node.body?.type !== "BlockStatement") return undefined;
+  const statements = node.body.body;
+  const returned = statements.at(-1);
+  if (returned?.type !== "ReturnStatement"
+    || returned.argument?.type !== "ObjectExpression") return undefined;
+  const properties = returned.argument.properties;
+  const entry = name => properties.find(candidate => key(candidate, name));
+  const photo = entry("photoUrl");
+  if (!photo || !entry("name") || !entry("illustration")) return undefined;
+  if (!contains(photo.value, child => property(child, "avatar_image_url"))) return undefined;
+  let account;
+  for (const statement of statements.slice(0, -1)) {
+    if (statement.type !== "VariableDeclaration") continue;
+    for (const declarator of statement.declarations) {
+      if (declarator.id?.type !== "ObjectPattern"
+        || declarator.init?.type !== "CallExpression"
+        || declarator.init.arguments.length !== 0) continue;
+      for (const binding of declarator.id.properties) {
+        if (binding.type !== "Property" || !key(binding, "account")) continue;
+        const name = identifier(binding.value);
+        if (name) account = name;
+      }
+    }
+  }
+  if (!account) return undefined;
+  return { start: photo.value.start, end: photo.value.end, account };
 }
 // The mark is drawn at an explicit pixel size (`size:r?20:16`); the Avatar reads
 // its `size` as a design token of its own scale, so passing the token made the
@@ -553,6 +602,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         patches.push({ id: accountMenuNamePatchId, start: menuName.start, end: menuName.end,
           original, replacement: `(${original}??${accountNameSyncFallback})` });
       }
+      const accountPhoto = accountPhotoRead(node);
+      if (accountPhoto) {
+        const original = source.slice(accountPhoto.start, accountPhoto.end);
+        patches.push({ id: accountPhotoPatchId, start: accountPhoto.start, end: accountPhoto.end,
+          original, replacement: `(${original}||${accountPhoto.account}?.avatar_image_url)` });
+      }
       const routeFlag = desktopRouteFlagName(node);
       if (routeFlag) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
@@ -644,7 +699,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     ...(webShellEnabled
-      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId,
+      ? [routeAliasPatchId, sessionViewerPatchId, accountChipPatchId, accountPhotoPatchId,
           coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId]
       : []),
     ...(gatewayEnabled

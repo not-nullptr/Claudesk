@@ -293,7 +293,15 @@ one frame and then flipped to the account name. The `web-account-menu-name`
 renderer patch makes that reader fall back to the preload's synchronously
 seeded store snapshot (`getStateSync`, already filled from `initialStores` —
 the same mechanism the managed-config store's label uses) while the async value
-is in flight, so the first frame already reads as the account. Because the prepared renderer is served under an immutable
+is in flight, so the first frame already reads as the account. The chip's photo
+has the same shape of wait: the account view hook takes it only from the
+profile document (`GET /api/account_profile`, a second bridge round trip that
+starts after the bootstrap), while the bootstrap account the hook already holds
+carries the same `avatar_image_url` the bridge put there. The
+`web-account-photo-first-frame` renderer patch makes the hook's `photoUrl` fall
+back to that in-hand value, so the avatar — and the image request behind it —
+starts on the hook's first non-empty frame instead of after the profile read;
+the profile value still wins once it lands. Because the prepared renderer is served under an immutable
 `/renderer/<version>/<patchRelease>/…` path, these patches ship with a
 `patchRelease` bump and need the `claude-desktop` service rebuilt (the preparer
 runs from its init), not just the bridge.

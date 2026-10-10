@@ -103,6 +103,27 @@ second photo-less account-view component, or a chip that no longer matches,
 refuses rather than splicing the avatar into the wrong slot. Spliced only in
 web-shell mode.
 
+The account view hook behind that slot (and the user-menu header's avatar) takes
+its photo only from the account-profile query, but the bootstrap account
+document it already destructures for the name carries the same
+`avatar_image_url` — the bridge puts it there when it applies the operator
+identity. The profile read is a separate bridge round trip that only starts
+after the bootstrap lands, so the chip painted the deployment mark for as long
+as that read took and only then began the image request. The
+`web-account-photo-first-frame` patch makes the hook's `photoUrl` fall back to
+the in-hand account value, so the avatar paints on its first non-empty frame and
+the image download runs alongside the profile read; the profile value still
+wins when it arrives. It is selected structurally: a zero-parameter function
+that destructures `account` from a zero-argument context call and returns the
+view object carrying `name`, `photoUrl` and `illustration`, with the photo a
+read of the profile's own `avatar_image_url`. The account binding's name is
+read back from the destructuring and spliced into the fallback, so renaming
+tolerates minification; a function that merely returns an object with a
+photoUrl property, or reads the field without binding the account that carries
+it, refuses rather than splicing the fallback onto the wrong reader. A required
+patch (see below), like the chip avatar it feeds. Spliced only in web-shell
+mode.
+
 The user menu's identity line is read from Desktop's interactive auth store
 through a hook that paints a loading state on the popover's first frame (the
 menu content mounts on open) and only fills from an async `getState()`. In the
