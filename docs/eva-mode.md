@@ -509,7 +509,8 @@ podman, and the update machinery) are all settled by one afternoon on the box.
   `.container` (rootless-podman quadlet) that the first connection starts through
   `systemd-socket-proxyd`. On-demand comes from systemd, not from the app.
 - `MemoryMax`/`CPUQuota` cap each unit; `/dev/kvm` and `/dev/vhost-vsock` are
-  passed explicitly.
+  passed explicitly. The Cowork VM's vsock port is host-global, so more than one
+  VM per host needs a port per instance — see docs/vsock-port.md.
 - No persistent-root overlay: Eva has no user-controlled container to need it, so
   an instance drops `CAP_SYS_ADMIN`, `userns_mode: host`, `apparmor=unconfined`
   and `pivot_root` and runs the base seccomp profile.

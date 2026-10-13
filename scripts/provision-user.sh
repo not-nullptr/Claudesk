@@ -27,6 +27,13 @@ data_root="${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}"
 puid="${PUID:-1000}"
 pgid="${PGID:-1001}"
 port_base="${CLAUDESK_USER_PORT_BASE:-15901}"
+# The Cowork VM's vsock port is a compile-time constant in the app, and
+# host-side vsock listeners are host-global (see docs/vsock-port.md), so accounts
+# on one box each need their own or only one VM can run. Off by default: the
+# guest side must be settled first, and a host-only move would send this
+# account's guest at whichever helper still holds the default. Set
+# CLAUDESK_VM_VSOCK_PORT_BASE (e.g. 51234) to give each account base + its id.
+vm_vsock_base="${CLAUDESK_VM_VSOCK_PORT_BASE:-}"
 
 # The shared stack (this compose project) owns authd; the per-user stacks are
 # separate projects below.
@@ -157,6 +164,11 @@ esac
 # CLAUDESK_ACCOUNT_* variable.
 account_scope "${role:-User}"
 
+# This account's Cowork vsock port (empty leaves the app's default). Computed
+# here, once the account's id is known.
+vm_vsock_port=""
+[ -z "$vm_vsock_base" ] || vm_vsock_port=$((vm_vsock_base + id))
+
 # Only the values above are scoped away from the deployment; the rest of its .env
 # (web shell, desktop home, identity org/plan, egress policy, timezone, VM sizing)
 # is inherited on purpose. CLAUDE_REMOTE_LOGIN_SHELL is scoped away too, and to
@@ -183,6 +195,8 @@ CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \
 COWORK_REMOTE_READ_ROOTS="$ACCOUNT_READ_ROOTS" \
 CLAUDE_COWORK_HOST_BASH=0 \
+CLAUDESK_VM_VSOCK_PORT="$vm_vsock_port" \
+CLAUDESK_VM_VSOCK_GUEST_SITES="${CLAUDESK_VM_VSOCK_GUEST_SITES:-0}" \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
 compose_shared --project-name "claudesk-$slug" \
     up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback

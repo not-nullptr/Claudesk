@@ -35,6 +35,12 @@ services:
       CLAUDE_COWORK_VM_IDLE_MINUTES: "${CLAUDE_COWORK_VM_IDLE_MINUTES:-30}"
       CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES: "${CLAUDE_COWORK_VM_SCHEDULE_GUARD_MINUTES:-10}"
       CLAUDE_COWORK_HOST_BASH: "${CLAUDE_COWORK_HOST_BASH:-0}"
+      # The Cowork VM's vsock port is fixed in the app and host-global, so only
+      # one VM runs per host unless each instance moves to a port of its own.
+      # Empty keeps the app's default (51234); accounts get a distinct port from
+      # provision-user.sh. See docs/vsock-port.md.
+      CLAUDESK_VM_VSOCK_PORT: "${CLAUDESK_VM_VSOCK_PORT:-}"
+      CLAUDESK_VM_VSOCK_GUEST_SITES: "${CLAUDESK_VM_VSOCK_GUEST_SITES:-0}"
       COWORK_BRIDGE_ENABLED: "${COWORK_BRIDGE_ENABLED:-1}"
       COWORK_BRIDGE_INTERNAL_PORT: "${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
       CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
