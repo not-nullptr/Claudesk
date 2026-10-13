@@ -51,7 +51,22 @@ shitproxy_image="${shitproxy_image:-local/shitproxy:latest}"
 if [ "$deploy_gateway" = 1 ]; then
     if [ -f "$shitproxy_dir/Dockerfile" ]; then
         sudo docker build -t "$shitproxy_image" "$shitproxy_dir"
-        sudo docker compose -f compose.gateway.yaml up -d
+        # compose.gateway.yaml pins its own Compose project (name:), so a gateway
+        # left by an older project name still holds the fixed `shitproxy` /
+        # `gateway` container names and the pinned project cannot start ("name is
+        # already in use"). Both carry their whole config in the image and /etc —
+        # no volumes — so recreating them costs only the restart of the pull.
+        for name in shitproxy gateway; do
+            gateway_project="$(sudo docker inspect \
+                -f '{{ index .Config.Labels "com.docker.compose.project" }}' \
+                "$name" 2>/dev/null || true)"
+            if [ -n "$gateway_project" ] && [ "$gateway_project" != claudesk-gateway ]; then
+                printf 'deploy: %s belongs to compose project %s; recreating it under claudesk-gateway\n' \
+                    "$name" "$gateway_project" >&2
+                sudo docker rm -f "$name"
+            fi
+        done
+        sudo docker compose -f compose.gateway.yaml up -d --remove-orphans
     else
         printf 'deploy: no shitproxy checkout at %s; leaving the gateway image as-is\n' \
             "$shitproxy_dir" >&2

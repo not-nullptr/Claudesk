@@ -12,6 +12,15 @@
 # mobile network namespace are NOT here: they follow those services, so they live
 # in compose.yaml and are prefixed per deployment.
 
+# Its own Compose project, pinned by name rather than taken from the directory.
+# A deployment's compose.yaml lives in the same directory, so without this both
+# stacks would resolve to one project: the deployment would see shitproxy and the
+# gateway as orphans (and `--remove-orphans` could tear the shared gateway down),
+# and this file would see every account's containers as orphans — and, because a
+# container name is fixed, could not reuse a gateway started under a different
+# project. Pinned, the two are independent no matter where they are run from.
+name: claudesk-gateway
+
 services:
   # Local caching/routing proxy in front of the upstream provider. Built from its
   # own private project; referenced here by an image, never a build context, so
