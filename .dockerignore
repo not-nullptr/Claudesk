@@ -8,3 +8,5 @@ scripts/
 data/
 *.log
 **/node_modules
+auth/target
+web/dist

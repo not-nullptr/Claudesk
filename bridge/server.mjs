@@ -101,11 +101,60 @@ function accountIdentityConfigured(identity) {
   return Boolean(identity && (identity.name || identity.email || identity.organization
     || identity.plan || identity.avatar || identity.deployment));
 }
-// Today the one env-configured identity, ignoring any context. A future
-// session/login layer passes a session here and returns that session's identity;
-// keeping the call sites behind this function means only this body changes.
+// The env-configured identity: used when no auth service is wired up, and as
+// the fallback when a request carries no live session. The request-scoped
+// resolver below is what callers use; this stays the single-body seam the
+// account smoke pins, and is what a default deployment still resolves.
 function resolveAccountIdentity() {
   return accountIdentity;
+}
+// The auth seam, filled: when AUTH_IDENTITY_URL points at the auth service, the
+// bridge resolves the signed-in user from the request's session cookie, so the
+// sidebar name, the account menu and the greeting read as that person rather
+// than the synthetic gateway identity. Unset keeps the single env-configured
+// identity, so a default deployment and the Maddie branch are unchanged.
+// Deployment-wide fields (organization, plan, avatar, deployment name) stay
+// operator-configured; only the person's name and email come from the account.
+const authIdentityUrl = (process.env.AUTH_IDENTITY_URL || "").trim().replace(/\/+$/, "");
+const authIdentityCache = new Map();
+const AUTH_IDENTITY_TTL_MS = 30 * 1000;
+const AUTH_IDENTITY_CACHE_MAX = 512;
+
+async function fetchAuthIdentity(request) {
+  const cookie = request?.headers?.cookie;
+  if (!authIdentityUrl || !cookie) return null;
+  const cached = authIdentityCache.get(cookie);
+  if (cached && cached.expires > Date.now()) return cached.identity;
+  let identity = null;
+  try {
+    const response = await fetch(`${authIdentityUrl}/api/auth/me`, { headers: { cookie } });
+    if (response.ok) {
+      const { user } = await response.json();
+      if (user && !user.disabled) {
+        identity = {
+          name: String(user.first_name || user.email || "").trim().slice(0, 80),
+          email: String(user.email || "").trim().slice(0, 200),
+        };
+      }
+    }
+  } catch { /* fall back to the env identity */ }
+  if (authIdentityCache.size >= AUTH_IDENTITY_CACHE_MAX) authIdentityCache.clear();
+  authIdentityCache.set(cookie, { identity, expires: Date.now() + AUTH_IDENTITY_TTL_MS });
+  return identity;
+}
+
+async function resolveRequestAccountIdentity(request) {
+  if (!authIdentityUrl) return resolveAccountIdentity();
+  const user = await fetchAuthIdentity(request);
+  if (!user) return null;
+  return {
+    name: user.name,
+    email: user.email,
+    organization: accountIdentity.organization,
+    plan: accountIdentity.plan,
+    avatar: accountIdentity.avatar,
+    deployment: accountIdentity.deployment,
+  };
 }
 // An avatar value is either a URL the browser loads directly, or a path to an
 // image on this container that the bridge serves itself (see accountAvatar).
@@ -1598,6 +1647,10 @@ async function forwardOfficialProtocol(request, response, url) {
     // mutating grant* helpers below), so the rewrite must capture the return.
     let parsed = JSON.parse(responseBody.toString("utf8"));
     let rewrote = false;
+    // The signed-in identity for this request (the seam above): the auth
+    // service's user when AUTH_IDENTITY_URL is set, else the env identity.
+    const requestIdentity = await resolveRequestAccountIdentity(request)
+      .catch(() => accountIdentity);
     if (bootstrapResponsePath.test(url.pathname)) {
       // Address the user the way the rest of the app does: the sidebar identity
       // is the name override, else whatever Desktop reports for its OS app user.
@@ -1611,7 +1664,7 @@ async function forwardOfficialProtocol(request, response, url) {
       // The operator's account name wins over the legacy user-name override, so
       // the greeting, the sidebar name and the account document agree.
       const name = resolveGreetingName({
-        override: accountIdentity.name || remoteUserName,
+        override: (requestIdentity && requestIdentity.name) || accountIdentity.name || remoteUserName,
         reported,
         account: parsed.account,
       });
@@ -1626,8 +1679,8 @@ async function forwardOfficialProtocol(request, response, url) {
     // — the bootstrap's `account`, the profile document GET /api/account_profile
     // returns, and the organization document. Each helper returns the same
     // reference when there is nothing to change.
-    if (webShellEnabled && accountIdentityConfigured(accountIdentity)) {
-      const identity = resolveAccountIdentity();
+    if (webShellEnabled && accountIdentityConfigured(requestIdentity)) {
+      const identity = requestIdentity;
       if (bootstrapResponsePath.test(url.pathname) && parsed.account) {
         const account = applyAccountIdentity(parsed.account, identity);
         if (account !== parsed.account) {

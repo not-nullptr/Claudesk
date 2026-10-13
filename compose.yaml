@@ -142,6 +142,10 @@ services:
       CLAUDE_REMOTE_ACCOUNT_PLAN: "${CLAUDE_REMOTE_ACCOUNT_PLAN:-}"
       CLAUDE_REMOTE_ACCOUNT_AVATAR: "${CLAUDE_REMOTE_ACCOUNT_AVATAR:-}"
       CLAUDE_REMOTE_DEPLOYMENT_NAME: "${CLAUDE_REMOTE_DEPLOYMENT_NAME:-}"
+      # When set (e.g. http://authd:8080), the bridge resolves the signed-in
+      # user from the auth service per request instead of the env identity, so
+      # the sidebar/greeting read as that person. Empty keeps the env identity.
+      AUTH_IDENTITY_URL: "${AUTH_IDENTITY_URL:-}"
       # Model the title generator is asked to use. Empty falls back to the
       # session's own model; set it to a cheap model the gateway serves.
       CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
@@ -294,6 +298,48 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  # Authentication and account service. Owns users, sessions and invites, serves
+  # the login/admin SPA, and answers the reverse proxy's `forward_auth`. A plain
+  # component: it never touches a container runtime.
+  authd:
+    build:
+      context: .
+      dockerfile: auth/Dockerfile
+    image: local/claudesk-authd:latest
+    container_name: claude-authd
+    user: "${PUID:-1000}:${PGID:-1001}"
+    ports:
+      - "127.0.0.1:${AUTH_PORT:-15830}:8080"
+    environment:
+      AXTD_BIND: "0.0.0.0:8080"
+      AXTD_DB: "/data/auth.db"
+      AXTD_WEB_DIR: "/app/web"
+      # A Secure cookie needs the HTTPS entry; the reverse proxy terminates TLS.
+      AXTD_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-1}"
+      # Number of trusted reverse proxies (Caddy), as with the mobile service.
+      AXTD_TRUST_PROXY: "${AUTH_TRUST_PROXY:-1}"
+      AXTD_SESSION_TTL_DAYS: "${AUTH_SESSION_TTL_DAYS:-30}"
+      AXTD_INVITE_TTL_HOURS: "${AUTH_INVITE_TTL_HOURS:-72}"
+      # First admin, created at startup if no admin exists; its one-time invite
+      # link is printed to the log (docker compose logs claude-authd).
+      AXTD_BOOTSTRAP_ADMIN_EMAIL: "${AUTH_BOOTSTRAP_ADMIN_EMAIL:-}"
+    volumes:
+      # SQLite database. Create it writable by PUID:PGID on the host.
+      - /opt/claudesk/data/auth-data:/data
+    mem_limit: "${AUTH_MEMORY_LIMIT:-128m}"
+    networks:
+      - gateway_net
+    healthcheck:
+      test:
+        - CMD
+        - /app/authd
+        - --healthcheck
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
 networks:

@@ -39,3 +39,23 @@ jobs:
         run: |
           npm ci --prefix rootfs/opt/claude-cowork-bridge --ignore-scripts --no-audit --no-fund
           ./scripts/validate.sh
+
+  auth-and-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build the auth service
+        working-directory: auth
+        run: cargo clippy --locked -- -D warnings && cargo build --release --locked
+
+      - name: Typecheck and build the SPA
+        working-directory: web
+        run: bun install --frozen-lockfile && bun run typecheck && bun run build

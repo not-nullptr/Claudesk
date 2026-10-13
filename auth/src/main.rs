@@ -76,6 +76,10 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--healthcheck") {
+        healthcheck();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -143,6 +147,18 @@ async fn main() {
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({ "ok": true, "service": "authd", "cookie_secure": state.cfg.cookie_secure }))
+}
+
+/// Container healthcheck: exit 0 if the configured port is accepting. A plain
+/// TCP connect keeps the runtime image free of curl/wget.
+fn healthcheck() -> ! {
+    let bind = std::env::var("AXTD_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let port = bind.rsplit(':').next().unwrap_or("8080");
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .expect("healthcheck address");
+    let ok = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_ok();
+    std::process::exit(if ok { 0 } else { 1 });
 }
 
 /// Create the first admin from `AXTD_BOOTSTRAP_ADMIN_EMAIL` if no admin exists,

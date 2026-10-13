@@ -53,6 +53,20 @@ jq -e . \
     security/claude-desktop-persistent.json \
     >/dev/null
 
+# The auth service and its SPA. Skipped, not failed, when a toolchain or the
+# web dependencies are absent locally; the CI job installs both.
+if command -v cargo >/dev/null 2>&1; then
+    ( cd auth && cargo check --quiet --locked )
+else
+    printf '%s\n' 'validate: cargo is unavailable; skipped authd build check' >&2
+fi
+
+if [ -x web/node_modules/.bin/tsc ]; then
+    ( cd web && node_modules/.bin/tsc --noEmit )
+else
+    printf '%s\n' 'validate: web dependencies are not installed; skipped SPA typecheck' >&2
+fi
+
 if command -v shellcheck >/dev/null 2>&1; then
     find rootfs scripts -type f -name '*.sh' -print0 \
         | xargs -0 shellcheck
