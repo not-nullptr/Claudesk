@@ -30,11 +30,17 @@ AUTH_COOKIE_SECURE=1
 AUTH_IDENTITY_URL=http://authd:8080
 ```
 
-Create the state directory writable by `PUID:PGID`:
+Create the state directory writable by `PUID:PGID` — note `PUID`/`PGID` are
+`.env` values, not shell variables, so source it first:
 
 ```bash
-sudo install -d -o "$PUID" -g "$PGID" /opt/claudesk/data/auth-data
+set -a; . ./.env; set +a
+sudo install -d -o "$PUID" -g "$PGID" "${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/auth-data"
 ```
+
+Running a **second** deployment on the same host (a v2 checkout beside the
+production one) also needs the deployment-identity vars, so the two never share
+data, container names or state — see [Two deployments on one box](#two-deployments-on-one-box).
 
 ### Build and start
 
@@ -94,6 +100,41 @@ it into the account documents the chrome reads — so the sidebar, the account
 menu and the greeting read as that person rather than the synthetic gateway
 identity. Unset, it falls back to the env-configured identity, which is what a
 default deployment and the `maddie` branch resolve.
+
+## Two deployments on one box
+
+A second checkout (say `/opt/claudesk-v2`) sharing a host with the production
+one collides on four things. Three are the checkout's to set; one is box-level.
+
+| Collision | Handled by |
+| --- | --- |
+| Host data paths (`/opt/claudesk/data/…`) | `CLAUDESK_DATA_ROOT` |
+| Persistent-root state | `CLAUDESK_ROOT_STATE` |
+| Container names | `CLAUDESK_NAME_PREFIX` (e.g. `eva-`) |
+| Host ports | `COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`, `AUTH_PORT` — set distinct values |
+
+```dotenv
+CLAUDESK_DATA_ROOT=/opt/claudesk-v2/data
+CLAUDESK_ROOT_STATE=/var/lib/claudesk-v2-root
+CLAUDESK_NAME_PREFIX=eva-
+COWORK_WEB_PORT=15831
+CLAUDE_MOBILE_PORT=8082
+AUTH_PORT=15832
+```
+
+Two things are **not** per-checkout:
+
+- **The gateway chain is box-level.** `compose.gateway.yaml`'s `shitproxy` and
+  `gateway` (caddy) are one shared chain — start them once, from one stack only.
+  A second stack cannot publish `127.0.0.1:14000` again. Point the second
+  deployment's `CLAUDE_GATEWAY_BASE_URL` at the shared gateway.
+- **Service aliases on the shared `gateway_net` are not project-scoped.** Both
+  stacks attach `authd` and `claude-desktop` to that external network, so a
+  bridge asking for `authd` can resolve the *other* deployment's container. The
+  cookie will not validate there, so it degrades to the env identity rather than
+  leaking — but it is wrong. Until this is scoped per deployment (giving each its
+  own network, which the per-user work in Stage 2 will produce anyway), don't run
+  both stacks' bridges against the same `gateway_net`.
 
 ## Stage 2 — per-user light instances
 

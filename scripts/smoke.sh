@@ -5,7 +5,7 @@ set -eu
 project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
 
-container_name="claude-desktop"
+container_name="${CLAUDESK_NAME_PREFIX:-}claude-desktop"
 web_port="${WEB_PORT:-15821}"
 
 docker inspect "$container_name" \
