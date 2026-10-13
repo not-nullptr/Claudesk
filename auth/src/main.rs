@@ -167,6 +167,17 @@ async fn main() {
         cfg,
         dummy_hash: hash_password("authd-timing-equalizer").expect("hash dummy"),
     };
+    // Say whether per-user key resolution is on, so a deployment that meant to
+    // enable it (and forgot the secret) is visible in the log rather than only as
+    // every request falling back at the gateway.
+    if state.cfg.gateway_secret.is_some() {
+        tracing::info!("gateway key resolution enabled at /internal/gateway/resolve");
+    } else {
+        tracing::info!(
+            "gateway key resolution disabled (set AXTD_GATEWAY_SECRET to enable it)"
+        );
+    }
+
     // The reconciler's path unit watches this directory. Create it so a drop
     // never fails and the host can install the unit before the first account.
     if let Err(error) = std::fs::create_dir_all(&state.cfg.provision_spool) {

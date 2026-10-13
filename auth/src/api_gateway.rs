@@ -36,7 +36,13 @@ fn secret_matches(presented: Option<&str>, expected: &str) -> bool {
 
 pub async fn resolve_gateway_key(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = state.cfg.gateway_secret.as_deref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        // Distinct body from "unknown gateway key" below, so a disabled route is
+        // not mistaken for a caller authd simply does not know.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "gateway key resolution is disabled" })),
+        )
+            .into_response();
     };
     let presented = headers.get(SECRET_HEADER).and_then(|value| value.to_str().ok());
     if !secret_matches(presented, expected) {
