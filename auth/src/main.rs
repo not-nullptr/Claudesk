@@ -90,6 +90,7 @@ async fn main() {
     let admin_for = flag("--create-admin");
     let show_for = flag("--show");
     let pending = args.iter().any(|arg| arg == "--pending");
+    let provisioned = args.iter().any(|arg| arg == "--provisioned");
     let set_upstream_for = flag("--set-upstream");
     let set_upstream_value = args
         .iter()
@@ -110,13 +111,14 @@ async fn main() {
                     | "--create-admin"
                     | "--show"
                     | "--pending"
+                    | "--provisioned"
                     | "--set-upstream"
             )
     }) {
         eprintln!("authd: unknown option {unknown}");
         eprintln!(
             "usage: authd [--healthcheck | --invite EMAIL | --create-admin EMAIL \
-             | --show EMAIL | --pending | --set-upstream EMAIL HOST:PORT]"
+             | --show EMAIL | --pending | --provisioned | --set-upstream EMAIL HOST:PORT]"
         );
         std::process::exit(2);
     }
@@ -162,10 +164,23 @@ async fn main() {
             }
         }
     }
-    // `--pending` lists accounts that still need an instance, one email per
-    // line; `--show` prints one account for the provisioner to read.
+    // `--pending` lists accounts that still need an instance and
+    // `--provisioned` the ones that already have one, one email per line;
+    // `--show` prints one account for the provisioner to read.
     if pending {
         match cli_pending(&state.store).await {
+            Ok(emails) => {
+                println!("{}", emails.join("\n"));
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if provisioned {
+        match cli_provisioned(&state.store).await {
             Ok(emails) => {
                 println!("{}", emails.join("\n"));
                 std::process::exit(0);
@@ -348,6 +363,20 @@ async fn cli_pending(store: &Store) -> Result<Vec<String>, String> {
     Ok(users
         .into_iter()
         .filter(|user| user.disabled == 0 && user.upstream.as_deref().unwrap_or("").is_empty())
+        .map(|user| user.email)
+        .collect())
+}
+
+/// `authd --provisioned`: emails of enabled accounts that already have an
+/// instance. The inverse of `--pending`, and what a host-side roll-out reads to
+/// recreate exactly the accounts a rebuilt image has to reach.
+async fn cli_provisioned(store: &Store) -> Result<Vec<String>, String> {
+    let users = store.list_users().await.map_err(|error| error.to_string())?;
+    Ok(users
+        .into_iter()
+        .filter(|user| {
+            user.disabled == 0 && !user.upstream.as_deref().unwrap_or("").is_empty()
+        })
         .map(|user| user.email)
         .collect())
 }

@@ -91,12 +91,34 @@ runtime, and no internet-facing service ever holds the Docker socket.
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace` — reload a moment later and it's there.
 
+### Rolling an image fix out to every account
+
+A container is pinned to the image it was created from, so a fix that lives in
+the image — the container init, the bridge, the renderer patches — reaches an
+account only when its containers are recreated. `deploy.sh` does the whole
+roll-out: it pulls the checkout, builds and recreates the deployment's own
+services, then runs `scripts/refresh-users.sh`, which asks authd for every
+account that already has an upstream and re-provisions each one.
+
+```bash
+./deploy.sh          # as the deploy user; it asks for root where it needs it
+```
+
+`scripts/refresh-users.sh` is safe to run on its own and safe to re-run. It is
+not destructive: an account's config, workspace, VM bundle and persistent-root
+overlay are host directories under `CLAUDESK_DATA_ROOT/users/<slug>`, and a
+recreate swaps containers rather than that directory. The port authd recorded
+for an account is kept, so the proxy mapping does not move. What a roll-out does
+cost is in-flight turns — anyone mid-session when the script reaches them is
+interrupted, though transcripts persist.
+
 Operator tools, run inside the shared authd container:
 
 ```bash
 docker compose -f compose.yaml exec authd /app/authd --create-admin you@example.com
 docker compose -f compose.yaml exec authd /app/authd --invite someone@example.com
 docker compose -f compose.yaml exec authd /app/authd --pending
+docker compose -f compose.yaml exec authd /app/authd --provisioned
 docker compose -f compose.yaml exec authd /app/authd --set-upstream someone@example.com 127.0.0.1:15903
 ```
 
