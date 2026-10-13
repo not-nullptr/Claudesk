@@ -247,6 +247,12 @@ pub async fn delete_user(
             "you cannot delete your own account".into(),
         ));
     }
+    // Read the account before it is gone: once the row is deleted its email and
+    // upstream are unrecoverable, and the host needs them to tear down the
+    // account's instance and data root. The teardown request is written first, so
+    // a crash in between leaves a replayable request rather than a silent leak.
+    let user = state.store.user(id).await?;
+    state.nudge_deprovision(&user);
     state.store.delete_user(id).await?;
     Ok(Json(json!({ "ok": true })))
 }

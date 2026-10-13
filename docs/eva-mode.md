@@ -175,6 +175,29 @@ your workspace`; that page refreshes itself, and reaching it nudges the
 reconciler, so the account is provisioned on demand rather than on the timer's
 next tick.
 
+### Deleting an account reclaims its instance
+
+Deleting a user in `/admin` is the mirror of creating one, and just as hands-off:
+the same reconciler tears the instance down. `authd` cannot ask for it the way it
+does a provision — a provision request just names the account and the host
+re-reads it from the database, but by the time a deletion is reclaimed the row is
+already gone. So the deprovision request **carries its payload**: before the row
+is deleted, `authd` writes the account's email/id/upstream into
+`<data-root>/auth-data/deprovision-requests`, and `scripts/deprovision-user.sh`
+stops and removes the account's compose project (`claudesk-<slug>`) and deletes
+its data root (`<data-root>/users/<slug>` — its config, reflinked VM bundle,
+workspace and persistent-root overlay).
+
+`scripts/install-reconciler.sh` installs the matching units, so this runs on the
+event exactly as provisioning does. A request is cleared only after its teardown
+succeeds, so a failure — or a delete taken while the host was down — stays queued
+and is retried by the `.timer` backstop rather than leaking. Two safety points:
+teardown refuses to run for a **reserved** slug (the box gateway stack is the
+compose project `claudesk-gateway`, which an account slug like `gateway` would
+otherwise collide with, so `scripts/lib/slug.sh` reserves it for provisioning
+too), and the `disabled` flag and a password reset are **reversible** — they
+never tear anything down. Only a real delete reclaims.
+
 ### Rolling an image fix out to every account
 
 A container is pinned to the image it was created from, so a fix that lives in
@@ -429,7 +452,7 @@ one collides on four things. Three are the checkout's to set; one is box-level.
 | Persistent-root state | `CLAUDESK_ROOT_STATE` |
 | Container names | `CLAUDESK_NAME_PREFIX` (e.g. `eva-`) |
 | Host ports | `COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`, `AUTH_PORT` — set distinct values |
-| Reconciler systemd units & watched spool | `install-reconciler.sh <checkout> <name>` — a distinct `NAME` per deployment |
+| Reconciler systemd units & watched spools | `install-reconciler.sh <checkout> <name>` — a distinct `NAME` per deployment |
 
 ```dotenv
 CLAUDESK_DATA_ROOT=/opt/claudesk-v2/data

@@ -1,0 +1,15 @@
+[Unit]
+Description=Tear down the Claudesk instances of @NAME@ accounts that were deleted
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it drives Docker and removes directories owned by PUID:PGID. authd never
+# does — it only records the deletion and drops a request file; this reconciler
+# reclaims the containers and disk. Rendered per deployment by install-reconciler.sh.
+ExecStart=@CHECKOUT@/scripts/converge-deprovisions.sh
+# Generous: a run tears down every queued account, and each one stops a Desktop
+# container and deletes a multi-GiB data root. A long run is not superseded —
+# systemd will not start the unit again while it is still active.
+TimeoutStartSec=30min

@@ -375,6 +375,12 @@ services:
       # request file here when an account needs an instance, so it is created on
       # the event; the installer derives the same path from CLAUDESK_DATA_ROOT.
       AXTD_PROVISION_SPOOL: "${AXTD_PROVISION_SPOOL:-/data/provision-requests}"
+      # The mirror for deletions: when an admin deletes an account, authd drops a
+      # request here carrying the account's email/upstream, so the host can tear
+      # down its instance and data root. Same mount, so it is created on the event
+      # and survives a restart. The installer derives the path from
+      # CLAUDESK_DATA_ROOT the same way it does the provision spool.
+      AXTD_DEPROVISION_SPOOL: "${AXTD_DEPROVISION_SPOOL:-/data/deprovision-requests}"
       # Shared secret for the internal gateway route that resolves an account's
       # gateway key to its own upstream key. Must match shitproxy's
       # GATEWAY_RESOLVER_SECRET (in /etc/shitproxy/gateway.env). Empty disables

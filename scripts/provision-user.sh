@@ -37,6 +37,11 @@ authd() { compose_shared exec -T authd /app/authd "$@"; }
 # shellcheck source=scripts/lib/account-scope.sh
 . "$project_dir/scripts/lib/account-scope.sh"
 
+# The account slug, shared with deprovision-user.sh so the two never disagree on
+# the project/name-prefix/data-root an account is keyed by.
+# shellcheck source=scripts/lib/slug.sh
+. "$project_dir/scripts/lib/slug.sh"
+
 info="$(authd --show "$email")" || exit 1
 
 id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""; gateway_key=""
@@ -66,13 +71,11 @@ if [ -n "$upstream" ]; then
     printf 'provision-user: %s already has %s; refreshing its stack\n' "$user_email" "$upstream"
 fi
 
-# ASCII-only slug: LC_ALL=C keeps the character classes to a-z0-9, so a
-# non-ASCII local part cannot leak into a container name.
-slug="$(printf '%s' "$user_email" \
-    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
-    | LC_ALL=C tr -cs '[:alnum:]' '-' \
-    | sed 's/^-*//; s/-*$//')"
-[ -n "$slug" ] || { printf 'provision-user: cannot derive a slug from %s\n' "$user_email" >&2; exit 1; }
+slug="$(claudesk_slug "$user_email")"
+if ! claudesk_slug_ok "$slug"; then
+    printf 'provision-user: refusing reserved or empty slug "%s" (from %s)\n' "$slug" "$user_email" >&2
+    exit 1
+fi
 
 # Keep the port already recorded for the account; a new one is 15901 + its id.
 if [ -n "$upstream" ]; then

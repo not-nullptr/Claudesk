@@ -1,0 +1,14 @@
+[Unit]
+Description=Deprovision a @NAME@ Claudesk instance for every account that was deleted
+
+[Timer]
+# A backstop, not the main path: the .path unit fires the moment authd drops a
+# request, so this only has to catch a missed event (a delete taken while the host
+# was down) or a failed teardown, whose request stays queued for the next run.
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=@NAME@-deprovision.service
+
+[Install]
+WantedBy=timers.target

@@ -22,7 +22,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::crypto::hash_password;
-use crate::store::Store;
+use crate::store::{Store, User};
 
 #[derive(Clone)]
 pub struct Config {
@@ -42,6 +42,11 @@ pub struct Config {
     /// per-account request file here so the host provisions on the event rather
     /// than on its next poll. authd itself never touches a container runtime.
     pub provision_spool: String,
+    /// Directory the deleting side's systemd `.path` unit watches. Unlike the
+    /// provision spool, a request here must carry its payload: by the time the
+    /// host reads it the account row is already gone, so it can no longer be
+    /// re-derived from the database. The file holds the account's email/id/upstream.
+    pub deprovision_spool: String,
     /// Shared secret the box gateway presents to `/internal/gateway/resolve`.
     /// Unset disables that route (404), so authd is inert until an operator opts in.
     pub gateway_secret: Option<String>,
@@ -71,6 +76,8 @@ impl Config {
             bootstrap_admin_email: env("AXTD_BOOTSTRAP_ADMIN_EMAIL"),
             provision_spool: env("AXTD_PROVISION_SPOOL")
                 .unwrap_or_else(|| "/data/provision-requests".into()),
+            deprovision_spool: env("AXTD_DEPROVISION_SPOOL")
+                .unwrap_or_else(|| "/data/deprovision-requests".into()),
             gateway_secret: env("AXTD_GATEWAY_SECRET"),
         }
     }
@@ -96,6 +103,28 @@ impl AppState {
             tracing::debug!("provision nudge for user {user_id} failed: {error}");
         }
     }
+
+    /// Ask the host's reconciler to tear this account's instance down: drop a
+    /// request file in the spool its systemd `.path` unit watches. Unlike
+    /// `nudge_provision`, the file must carry the account — the row is deleted
+    /// moments later, so the host can no longer re-read it from the database.
+    /// Best-effort for the caller's response, but a lost write leaks the
+    /// account's container and disk, so it is logged at warn.
+    pub fn nudge_deprovision(&self, user: &User) {
+        let path = std::path::Path::new(&self.cfg.deprovision_spool).join(user.id.to_string());
+        let payload = deprovision_payload(&user.email, user.id, user.upstream.as_deref());
+        if let Err(error) = std::fs::write(&path, payload) {
+            tracing::warn!("deprovision nudge for user {} failed: {error}", user.id);
+        }
+    }
+}
+
+/// The line-oriented payload a deprovision request carries. The account is gone
+/// from the database by the time the host reads it, so the file itself is the
+/// record: scripts/converge-deprovisions.sh parses `email=` back out of it. Kept
+/// as a free function so the wire format is pinned by a test.
+fn deprovision_payload(email: &str, id: i64, upstream: Option<&str>) -> String {
+    format!("email={email}\nid={id}\nupstream={}\n", upstream.unwrap_or(""))
 }
 
 #[tokio::main]
@@ -173,6 +202,15 @@ async fn main() {
         tracing::debug!(
             "cannot create provision spool {}: {error}",
             state.cfg.provision_spool
+        );
+    }
+    // The deprovision spool, watched by its own `.path` unit. Create it up front
+    // for the same reason — but a drop here is not merely a late provision, it is
+    // a leaked container and data root, so a failure is worth a warning.
+    if let Err(error) = std::fs::create_dir_all(&state.cfg.deprovision_spool) {
+        tracing::warn!(
+            "cannot create deprovision spool {}: {error}",
+            state.cfg.deprovision_spool
         );
     }
 
@@ -505,4 +543,23 @@ async fn cli_create_admin(cfg: &Config, store: &Store, email: &str) -> Result<()
         .map_err(|error| error.to_string())?;
     println!("/accept-invite?token={token}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deprovision_payload;
+
+    #[test]
+    fn deprovision_payload_carries_email_id_and_upstream() {
+        assert_eq!(
+            deprovision_payload("ada@example.com", 7, Some("127.0.0.1:15908")),
+            "email=ada@example.com\nid=7\nupstream=127.0.0.1:15908\n"
+        );
+        // An account that was deleted before its instance existed still
+        // deprovisions cleanly, with an empty upstream.
+        assert_eq!(
+            deprovision_payload("ada@example.com", 7, None),
+            "email=ada@example.com\nid=7\nupstream=\n"
+        );
+    }
 }

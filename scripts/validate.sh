@@ -24,6 +24,7 @@ node scripts/greeting-smoke.mjs
 node scripts/account-smoke.mjs
 node scripts/account-settings-smoke.mjs
 node scripts/account-scope-smoke.mjs
+node scripts/slug-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/package-sync-smoke.mjs
 node scripts/renderer-patches-smoke.mjs

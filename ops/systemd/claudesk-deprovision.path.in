@@ -1,0 +1,13 @@
+[Unit]
+Description=Deprovision a @NAME@ Claudesk instance the moment an account is deleted
+
+[Path]
+# authd drops one file per deleted account here (carrying its email/upstream — the
+# account row is gone by then, so the file, not the database, is the record).
+# systemd expands no variables in Path*=, so the directory below has to be a
+# literal path — which is why the installer renders this file per deployment.
+DirectoryNotEmpty=@SPOOL@
+Unit=@NAME@-deprovision.service
+
+[Install]
+WantedBy=paths.target
