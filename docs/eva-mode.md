@@ -77,16 +77,23 @@ To bill each account to their own key, authd holds two secrets per account: the
 opaque **gateway key** authd mints and `scripts/provision-user.sh` writes into the
 instance as `CLAUDE_GATEWAY_API_KEY`. The instance sends that gateway key to the box
 gateway, which asks authd (the internal, secret-gated route `/internal/gateway/resolve`)
-for the account's own upstream key and uses it upstream. An account with no key set
-is refused rather than falling back to the operator's — see the shitproxy README's
-"Per-request credential resolution".
+for the account's own upstream key and uses it upstream. An account authd knows but
+that has no key set is refused, never falling back to the operator's key.
+
+The fallback is per-*caller*, not global: a caller authd does not recognise — a
+different deployment sharing the same gateway, or any non-account client — keeps
+using the static `UPSTREAM_API_KEY`, exactly as before. So a shared box running
+this multi-user deployment beside another (for example a single-user build) serves
+both: this deployment's accounts on their own keys, everyone else on the shared
+one. That also means `UPSTREAM_API_KEY` must stay set for the other callers. See
+the shitproxy README's "Per-request credential resolution" for the exact contract.
 
 This needs these host-side pieces:
 
 - `AUTH_GATEWAY_SECRET` in this deployment's `.env` (see `.env.example`).
 - shitproxy's `/etc/shitproxy/gateway.env`: `UPSTREAM_KEY_RESOLVER_URL=http://authd:8080/internal/gateway/resolve`
-  and `GATEWAY_RESOLVER_SECRET` set to the same secret. `UPSTREAM_API_KEY` may be
-  dropped once every caller is an account. `compose.gateway.yaml` already puts
+  and `GATEWAY_RESOLVER_SECRET` set to the same secret. Keep `UPSTREAM_API_KEY`
+  for the callers this deployment does not own. `compose.gateway.yaml` already puts
   shitproxy on `gateway_net` so that name resolves; re-run
   `docker compose -f compose.gateway.yaml up -d` after pulling.
 - the box gateway's Caddyfile (`/etc/litellm/Caddyfile`): on the route(s) into
