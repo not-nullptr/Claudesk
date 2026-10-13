@@ -1,0 +1,15 @@
+[Unit]
+Description=Create a Claude Desktop instance for each @NAME@ Claudesk account
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it creates directories owned by PUID:PGID and drives Docker. authd never
+# does — it only records accounts and drops a request file; this reconciler gives
+# them instances. Rendered per deployment by scripts/install-reconciler.sh.
+ExecStart=@CHECKOUT@/scripts/converge-users.sh
+# Generous: a run provisions every pending account, CLAUDESK_RECONCILE_JOBS at a
+# time, and each one starts a Desktop container. A long run is not superseded —
+# systemd will not start the unit again while it is still active.
+TimeoutStartSec=30min

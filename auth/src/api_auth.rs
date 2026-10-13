@@ -240,9 +240,12 @@ pub async fn avatar(State(state): State<AppState>, jar: CookieJar, Path(id): Pat
 /// A short page for states a signed-in user lands on directly. The body of a
 /// `forward_auth` response is what they see, so it should read as a page rather
 /// than a JSON error.
-fn message_page(status: StatusCode, title: &str, body: &str) -> Response {
+fn message_page(status: StatusCode, title: &str, body: &str, refresh_secs: Option<u32>) -> Response {
+    let refresh = refresh_secs
+        .map(|secs| format!("<meta http-equiv=\"refresh\" content=\"{secs}\">"))
+        .unwrap_or_default();
     let page = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>{title}</title>\
+        "<!doctype html><meta charset=\"utf-8\">{refresh}<title>{title}</title>\
          <body style=\"font:15px/1.5 system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem\">\
          <h1 style=\"font-size:20px\">{title}</h1><p>{body}</p></body>"
     );
@@ -273,13 +276,18 @@ pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
                 response
             }
             // Transient: the account exists but its instance is still being
-            // created by the host-side provisioner.
-            None => message_page(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Setting up your workspace",
-                "Your account is ready and its workspace is being created. Reload \
-                 this page in a moment.",
-            ),
+            // created by the host-side provisioner. Nudge that provisioner (the
+            // person is here now) and refresh the page so they need not reload.
+            None => {
+                state.nudge_provision(user.id);
+                message_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Setting up your workspace",
+                    "Your account is ready and its workspace is being created — this \
+                     page will refresh itself in a moment.",
+                    Some(5),
+                )
+            }
         },
         _ => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
     }

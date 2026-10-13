@@ -37,6 +37,10 @@ pub struct Config {
     pub base_ban_secs: i64,
     pub trust_proxy_hops: u8,
     pub bootstrap_admin_email: Option<String>,
+    /// Directory the reconciler's systemd `.path` unit watches. authd drops a
+    /// per-account request file here so the host provisions on the event rather
+    /// than on its next poll. authd itself never touches a container runtime.
+    pub provision_spool: String,
 }
 
 impl Config {
@@ -61,6 +65,8 @@ impl Config {
             base_ban_secs: num("AXTD_BASE_BAN_SECONDS", 600).max(1),
             trust_proxy_hops: num("AXTD_TRUST_PROXY", 1).clamp(0, 4) as u8,
             bootstrap_admin_email: env("AXTD_BOOTSTRAP_ADMIN_EMAIL"),
+            provision_spool: env("AXTD_PROVISION_SPOOL")
+                .unwrap_or_else(|| "/data/provision-requests".into()),
         }
     }
 }
@@ -72,6 +78,19 @@ pub struct AppState {
     /// A real Argon2id hash of a throwaway value, verified on the "no such user"
     /// path so a missing account costs the same time as a wrong password.
     pub dummy_hash: String,
+}
+
+impl AppState {
+    /// Ask the host's reconciler to provision this account now: drop a request
+    /// file in the spool its systemd `.path` unit watches. Best-effort — a
+    /// failure only costs the timer backstop a little time, never the caller's
+    /// response, and authd stays a plain component.
+    pub fn nudge_provision(&self, user_id: i64) {
+        let path = std::path::Path::new(&self.cfg.provision_spool).join(user_id.to_string());
+        if let Err(error) = std::fs::write(&path, b"") {
+            tracing::debug!("provision nudge for user {user_id} failed: {error}");
+        }
+    }
 }
 
 #[tokio::main]
@@ -143,6 +162,14 @@ async fn main() {
         cfg,
         dummy_hash: hash_password("authd-timing-equalizer").expect("hash dummy"),
     };
+    // The reconciler's path unit watches this directory. Create it so a drop
+    // never fails and the host can install the unit before the first account.
+    if let Err(error) = std::fs::create_dir_all(&state.cfg.provision_spool) {
+        tracing::debug!(
+            "cannot create provision spool {}: {error}",
+            state.cfg.provision_spool
+        );
+    }
 
     // Operator tooling: `docker compose exec authd /app/authd --invite <email>`
     // (or --create-admin). Runs against the same database, prints one thing, exits.

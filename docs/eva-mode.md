@@ -81,14 +81,23 @@ runtime, and no internet-facing service ever holds the Docker socket.
   port, with the pristine Cowork VM bundle **reflinked** in, so the 10 GiB image
   is shared rather than copied. It then records `127.0.0.1:<port>` as the
   account's upstream.
-- `ops/systemd/claudesk-provision.{service,timer}` runs `scripts/converge-users.sh`
-  every 20 s, provisioning every account with no upstream yet. Install once (edit
-  the path in the `.service` to your checkout):
+- `scripts/install-reconciler.sh` installs the units that run
+  `scripts/converge-users.sh`. A **`.path` unit fires the moment authd drops a
+  provisioning request** — so a new account's instance is created on the event,
+  not on a poll — and a `.timer` runs it every 20 s as a backstop for a missed
+  event or a failed provision. authd only writes a file into
+  `<data-root>/auth-data/provision-requests` (on account creation, and again when
+  a signed-in user reaches the "setting up your workspace" page); it still never
+  touches Docker. Run the installer once per deployment, with a distinct `NAME`
+  for a second checkout on the same box:
 
   ```bash
-  sudo cp ops/systemd/claudesk-provision.* /etc/systemd/system/
-  sudo systemctl enable --now claudesk-provision.timer
+  sudo scripts/install-reconciler.sh                  # a deployment at /opt/claudesk
+  sudo scripts/install-reconciler.sh /opt/claudesk-v2 v2
   ```
+
+  Provisioning runs `CLAUDESK_RECONCILE_JOBS` (default 4) accounts at a time —
+  mind the memory each instance peaks at.
 
 Putting an instance up is also where an account's **privileges** are decided.
 The remote action surfaces — `CLAUDE_REMOTE_DEVELOPER_ACTIONS` (the Developer
@@ -104,7 +113,9 @@ regardless of role. Code stays off for accounts separately, and stays off until
 the deployment turns it on.
 
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
-your workspace` — reload a moment later and it's there.
+your workspace`; that page refreshes itself, and reaching it nudges the
+reconciler, so the account is provisioned on demand rather than on the timer's
+next tick.
 
 ### Rolling an image fix out to every account
 
@@ -112,8 +123,9 @@ A container is pinned to the image it was created from, so a fix that lives in
 the image — the container init, the bridge, the renderer patches — reaches an
 account only when its containers are recreated. `deploy.sh` does the whole
 roll-out: it pulls the checkout, builds and recreates the deployment's own
-services, then runs `scripts/refresh-users.sh`, which asks authd for every
-account that already has an upstream and re-provisions each one.
+services, recreates every provisioned account's instance (`scripts/refresh-users.sh`),
+and then provisions any account still pending (`scripts/converge-users.sh`).
+Both passes run `CLAUDESK_RECONCILE_JOBS` (default 4) at a time.
 
 ```bash
 ./deploy.sh          # as the deploy user; it asks for root where it needs it
@@ -202,6 +214,7 @@ one collides on four things. Three are the checkout's to set; one is box-level.
 | Persistent-root state | `CLAUDESK_ROOT_STATE` |
 | Container names | `CLAUDESK_NAME_PREFIX` (e.g. `eva-`) |
 | Host ports | `COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`, `AUTH_PORT` — set distinct values |
+| Reconciler systemd units & watched spool | `install-reconciler.sh <checkout> <name>` — a distinct `NAME` per deployment |
 
 ```dotenv
 CLAUDESK_DATA_ROOT=/opt/claudesk-v2/data

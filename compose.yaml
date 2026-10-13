@@ -365,6 +365,10 @@ services:
       # First admin, created at startup if no admin exists; its one-time invite
       # link is printed to the log (docker compose logs claude-authd).
       AXTD_BOOTSTRAP_ADMIN_EMAIL: "${AUTH_BOOTSTRAP_ADMIN_EMAIL:-}"
+      # Spool the host reconciler's systemd .path unit watches. authd drops a
+      # request file here when an account needs an instance, so it is created on
+      # the event; the installer derives the same path from CLAUDESK_DATA_ROOT.
+      AXTD_PROVISION_SPOOL: "${AXTD_PROVISION_SPOOL:-/data/provision-requests}"
     volumes:
       # SQLite database. Create it writable by PUID:PGID on the host.
       - ${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/auth-data:/data

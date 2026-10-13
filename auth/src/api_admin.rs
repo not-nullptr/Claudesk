@@ -155,6 +155,9 @@ pub async fn create_user(
         .store
         .create_invite(user.id, state.cfg.invite_ttl_secs)
         .await?;
+    // Ask the host to provision this account's instance now, so it is ready by
+    // the time the invite is accepted rather than on the reconciler's next poll.
+    state.nudge_provision(user.id);
     Ok(Json(json!({ "user": user, "invite_token": invite_token })))
 }
 

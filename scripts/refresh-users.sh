@@ -1,12 +1,14 @@
 #!/bin/sh
 #
-# Recreate every provisioned account's instance.
+# Recreate every account that already has an instance.
 #
-#   sudo scripts/refresh-users.sh
+#   [CLAUDESK_RECONCILE_JOBS=4] sudo scripts/refresh-users.sh
 #
 # Run after the image has been rebuilt — `deploy.sh` does exactly that, then
 # calls this — so a fix that lives in the image (the container init, the bridge,
 # the renderer patches) reaches every account without anyone visiting each one.
+# `deploy.sh` then also runs converge-users.sh, so a deploy both recreates the
+# accounts that have an instance and creates any that were still pending.
 #
 # Idempotent and non-destructive. Each account's data is on the host, under
 # CLAUDESK_DATA_ROOT/users/<slug>: its config, workspace, VM bundle and the
@@ -15,11 +17,16 @@
 # already recorded, so the reverse proxy mapping does not move.
 #
 # What it does cost: anyone mid-turn is interrupted. Transcripts persist, but a
-# session running while this walks the accounts ends where it stands.
+# session running while this walks the accounts ends where it stands. Accounts
+# are recreated CLAUDESK_RECONCILE_JOBS (default 4) at a time, so a roll-out also
+# starts that many instances at once — mind the memory each one peaks at.
 set -eu
 
 project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
+
+# shellcheck source=scripts/lib/reconcile.sh
+. "$project_dir/scripts/lib/reconcile.sh"
 
 [ -f .env ] || { printf 'refresh-users: no .env in %s\n' "$project_dir" >&2; exit 1; }
 
@@ -35,19 +42,10 @@ list="$(mktemp)"
 trap 'rm -f "$list"' EXIT HUP INT TERM
 printf '%s\n' "$accounts" > "$list"
 
-refreshed=0
-failed=0
-while IFS= read -r email; do
-    [ -n "$email" ] || continue
-    if "$project_dir/scripts/provision-user.sh" "$email"; then
-        refreshed=$((refreshed + 1))
-    else
-        printf 'refresh-users: %s failed; it keeps running what it had\n' "$email" >&2
-        failed=$((failed + 1))
-    fi
-done < "$list"
-
-printf 'refresh-users: recreated %s account(s)' "$refreshed"
-[ "$failed" -eq 0 ] || printf ', %s failed' "$failed"
-printf '\n'
-[ "$failed" -eq 0 ]
+if reconcile_list "$project_dir" "$list"; then
+    printf 'refresh-users: recreated %s account(s)\n' "$RECONCILE_OK"
+    exit 0
+fi
+printf 'refresh-users: recreated %s account(s), %s failed\n' \
+    "$RECONCILE_OK" "$RECONCILE_FAIL" >&2
+exit 1

@@ -1,0 +1,13 @@
+[Unit]
+Description=Provision a @NAME@ Claudesk instance the moment an account needs one
+
+[Path]
+# authd drops one file per pending account here (on account creation, and again
+# when someone lands on the "setting up your workspace" page). systemd expands no
+# variables in Path*=, so the directory below has to be a literal path — which is
+# why the installer renders this file per deployment rather than shipping it fixed.
+DirectoryNotEmpty=@SPOOL@
+Unit=@NAME@-provision.service
+
+[Install]
+WantedBy=paths.target
