@@ -298,14 +298,14 @@ login HTML in place of a module or a stylesheet:
 
 ```caddyfile
 	# The login shell: the renderer's own sign-in page and everything it loads,
-	# served by the deployment's own instance (CLAUDE_REMOTE_LOGIN_SHELL=1). It
-	# refuses its own API, so it can never proxy the Desktop or run inference.
-	# The bootstrap is in here because the page renders *because* it answers an
-	# error.
+	# served by the deployment's own instance (CLAUDE_REMOTE_LOGIN_SHELL=1).
+	# Static only — never an API path. Anything here is served without a session,
+	# and the only thing standing between it and the workspace is that instance's
+	# own gate; if the mode is ever not in effect, an API path here would hand
+	# out the workspace.
 	@loginshell path /login /renderer/* /remote-preload.js /remote-main-menu.js \
 		/remote-main-menu.css /remote-shell.css /remote-folder-picker.js \
-		/fonts/* /favicon.ico /manifest.webmanifest \
-		/api/bootstrap /api/bootstrap/* /edge-api/bootstrap /edge-api/bootstrap/*
+		/fonts/* /favicon.ico /manifest.webmanifest
 	handle @loginshell {
 		reverse_proxy 127.0.0.1:15831
 	}
@@ -339,6 +339,16 @@ it is not used here because Caddy keeps the original status on that branch,
 which would serve the page and its scripts under a 401.) Add
 `CLAUDE_REMOTE_WEB_SHELL=1` on the instance to render the browser chrome (the
 marketing sign-in page with the hero) instead of the Desktop chrome.
+
+The page's **bootstrap deliberately stays out of this matcher**. It is what the
+app reads to decide whether it is signed out, and it is answered by the session
+gate instead: `forward_auth` calls `/api/auth/verify`, which returns the plain
+`401` a fetch needs, the app concludes it is signed out, and it routes itself to
+its own `/login` — which is this matcher. Routing the bootstrap here would work
+only while the instance is correctly in login-shell mode, and would serve the
+workspace's own bootstrap document if it were not; the bridge logs
+`login shell: the whole API is refused` at startup precisely so that state is
+visible rather than guessed at.
 
 Worth knowing before you expect a pixel match: the hero media is **not** in the
 bundle — the still is fetched from the web root and the video from

@@ -2940,6 +2940,13 @@ server.listen(port, host, () => {
     `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`
       + ` (requested ${sessionFileCapBytes}, memory limit ${sessionFileMemoryLimitBytes ?? "unknown"})`,
   );
+  // Say it out loud, because this one is refused-silently-when-absent: a login
+  // shell that is not actually in that mode looks like an ordinary instance, and
+  // anything routed to it would be served the workspace instead of refused.
+  if (loginShellEnabled) {
+    console.log("[cowork-bridge] login shell: the whole API is refused; "
+      + "only the renderer shell and its assets are served");
+  }
 });
 
 const realtimePoller = setInterval(() => void realtime.pollState(), 1000);
