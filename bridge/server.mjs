@@ -35,6 +35,14 @@ const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 // entitlements, so enabling this also grants them in the bootstrap/access
 // documents the app reads. See docs/web-shell.md.
 const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
+// The login shell: this instance exists only to put Claude's own sign-in page in
+// front of the deployment, before anyone has a session. It serves the renderer
+// and nothing else — every API request is refused (see the gate in handleApi),
+// so the instance cannot proxy the Desktop, hold a session, or run inference,
+// signed in or not. The sign-in page itself needs no API: it renders because the
+// bootstrap answers an error, and it posts credentials straight to authd, which
+// the proxy already routes there. See docs/eva-mode.md, "The sign-in page".
+const loginShellEnabled = process.env.CLAUDE_REMOTE_LOGIN_SHELL === "1";
 // Entitlements the web shell checks before offering Cowork and remote control.
 // `dramatic_shrimp` is the (secret) internal flag ion-dist's web-Cowork gate
 // reads; `cowork_remote_control` is its productized twin. Both sit beside the
@@ -2147,6 +2155,19 @@ async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = fals
 }
 
 async function handleApi(request, response, url) {
+  // The login shell refuses the entire API surface, with or without a session.
+  // It exists to serve the sign-in page and nothing else, so there is no route
+  // here that could reach the Desktop, a store or inference. The page reads
+  // exactly one API answer — an error status on the bootstrap, which is how the
+  // renderer concludes it is signed out and routes itself to its own /login —
+  // and it sends credentials straight to authd, which the proxy routes there
+  // rather than here. 403 rather than 401: the proxy rewrites a 401 into a
+  // redirect to the login page, which would hand that fetch an HTML document
+  // instead of an error status.
+  if (loginShellEnabled) {
+    sendJson(response, 403, { ok: false, error: "not signed in" });
+    return;
+  }
   // The web-shell account avatar, when CLAUDE_REMOTE_ACCOUNT_AVATAR is a local
   // image path. Serves only the file resolved at startup; any `?v=` is ignored
   // (it is only a cache-buster), so this is not a path the caller can steer.
@@ -2763,7 +2784,11 @@ async function serveOfficialIndex(response) {
   if (!upstream.ok) throw new ApiError(502, "official ion-dist entry is unavailable");
   const config = {
     configuredModels,
-    chatSessionIds: await initialChatSessionIds(),
+    loginShell: loginShellEnabled,
+    // A login shell is a public page, so it seeds none of the instance's own
+    // state: the interactive-auth store carries the operator's display name and
+    // the chat session list is theirs. The sign-in page reads neither.
+    chatSessionIds: loginShellEnabled ? [] : await initialChatSessionIds(),
     desktopBootFeatures: await desktop.bootFeatures(),
     desktopRuntime,
     release,
@@ -2771,7 +2796,7 @@ async function serveOfficialIndex(response) {
     developerActionsEnabled,
     gatewaySettingsEnabled,
     webShell: webShellEnabled,
-    initialStores: await initialRemoteStores(),
+    initialStores: loginShellEnabled ? {} : await initialRemoteStores(),
     listeners: Object.fromEntries(
       [...remoteListenerMethods].map(([surface, methods]) => [surface, [...methods]]),
     ),

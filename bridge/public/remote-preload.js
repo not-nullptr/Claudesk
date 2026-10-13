@@ -1297,6 +1297,136 @@
     }
   }
 
+  // BEGIN login shell
+  // A login-shell instance serves Claude's own sign-in page and refuses the
+  // whole API (see the bridge's handleApi gate); the page renders because the
+  // bootstrap answers an error, which is how the renderer concludes it is signed
+  // out. Its card, however, signs in through claude.ai's provider and magic-link
+  // flows, which do not exist here, and it has no password field at all. So the
+  // real card is extended rather than replaced: a password field beneath the
+  // email, submitted to this deployment's auth service, and the provider buttons
+  // dropped, since there is nothing behind them. Everything is read from and
+  // written to the DOM — the card belongs to React and this runs outside its
+  // tree, so a MutationObserver re-applies whatever a re-render discards.
+  if (config.loginShell) {
+    const passwordId = "claudesk-login-password";
+    const errorId = "claudesk-login-error";
+
+    function setLoginError(message) {
+      let node = document.getElementById(errorId);
+      if (!message) {
+        node?.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.id = errorId;
+        node.className = "claudesk-login-error";
+        node.setAttribute("role", "alert");
+        const submit = document.querySelector('[data-testid="continue"]');
+        const block = submit?.closest("div.flex.flex-col") ?? submit;
+        (block?.parentElement ?? document.body).insertBefore(node, block ?? null);
+      }
+      node.textContent = message;
+    }
+
+    // Remove something that exists only to hold the node we cannot use: climb
+    // while the parent has no other element child, so a wrapper goes with it and
+    // anything sharing the row stays.
+    function removeWithWrapper(node) {
+      let target = node;
+      while (target.parentElement && target.parentElement.childElementCount === 1) {
+        target = target.parentElement;
+      }
+      target.remove();
+    }
+
+    async function submitLogin() {
+      const email = String(document.querySelector('[data-testid="email"]')?.value || "").trim();
+      const password = String(document.getElementById(passwordId)?.value || "");
+      const submit = document.querySelector('[data-testid="continue"]');
+      if (!email || !password) {
+        setLoginError("Enter your email and password to continue.");
+        return;
+      }
+      setLoginError("");
+      if (submit) submit.disabled = true;
+      try {
+        const response = await fetch("/api/auth/login", {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body?.error || "sign in failed");
+        // Same rule the auth service's own page uses, plus a `next` the proxy
+        // may have attached when it turned a request away.
+        const next = new URLSearchParams(globalThis.location.search).get("next") || "";
+        const safe = next.startsWith("/") && !next.startsWith("//");
+        globalThis.location.assign(safe ? next : body?.user?.role === "Admin" ? "/admin" : "/");
+      } catch (error) {
+        setLoginError(error?.message || "sign in failed");
+        if (submit) submit.disabled = false;
+      }
+    }
+
+    const enhanceLoginShell = () => {
+      const email = document.querySelector('[data-testid="email"]');
+      const submit = document.querySelector('[data-testid="continue"]');
+      if (!email || !submit) return;
+      // The submit block's parent is the card's field column, so a field added
+      // beside it inherits the same gap and lands directly beneath the email.
+      const block = submit.closest("div.flex.flex-col") ?? submit;
+      const column = block.parentElement;
+      if (!column) return;
+
+      if (!document.getElementById(passwordId)) {
+        // A clone of the email field keeps the design system's own classes, so
+        // the new field is styled by the bundle rather than by us.
+        const password = email.cloneNode(true);
+        password.id = passwordId;
+        password.type = "password";
+        password.value = "";
+        password.setAttribute("data-testid", "claudesk-login-password");
+        password.setAttribute("aria-label", "Password");
+        password.setAttribute("placeholder", "Enter your password");
+        password.setAttribute("autocomplete", "current-password");
+        password.removeAttribute("readonly");
+        password.disabled = false;
+        column.insertBefore(password, block);
+      }
+
+      for (const id of ["login-with-google", "login-with-apple"]) {
+        const provider = document.querySelector(`[data-testid="${id}"]`);
+        if (provider) removeWithWrapper(provider);
+      }
+      // The divider that separates the provider buttons from the email field.
+      for (const node of column.children) {
+        if (node.id === passwordId) continue;
+        const text = String(node.textContent || "").trim();
+        if (text.length <= 2 && text.toUpperCase() === "OR") removeWithWrapper(node);
+      }
+
+      const form = submit.closest("form");
+      const target = form ?? submit;
+      if (target.dataset.claudeskLogin === "1") return;
+      target.dataset.claudeskLogin = "1";
+      // Capture, so the card's own React handler on the root never sees the
+      // event and its claude.ai flow cannot start.
+      target.addEventListener(form ? "submit" : "click", (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        submitLogin();
+      }, true);
+    };
+
+    enhanceLoginShell();
+    const loginObserver = new MutationObserver(enhanceLoginShell);
+    loginObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  // END login shell
+
   function createCodePreferences() {
     const listeners = new Set();
     let timer, previous;

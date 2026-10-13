@@ -71,6 +71,29 @@ html:not(.claude-remote-code-enabled) [data-compact-mode-switcher] {
   display: none !important;
 }
 
+/* The login shell's own error line, shown under the password field the preload
+ * adds to the bundle's sign-in card. The theme is the app's `data-mode`, with
+ * `system` falling back to the media query, exactly as the renderer does. */
+.claudesk-login-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--cds-text-danger, #bd4b3f);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  text-align: left;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-mode="system"] .claudesk-login-error {
+    color: var(--cds-text-danger, #e08b83);
+  }
+}
+
+html[data-mode="dark"] .claudesk-login-error {
+  color: var(--cds-text-danger, #e08b83);
+}
+
 /* Reuse the official Desktop renderer unchanged. These layout overrides are
  * gated by a class that the preload adds only for a mobile device, so mobile
  * browser tabs and PWAs share them while PC windows keep the official layout. */

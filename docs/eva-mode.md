@@ -251,6 +251,46 @@ The assets come from the Desktop renderer on the box:
 - the lockup is inlined in `web/src/components/ClaudeLogo.tsx`, paths copied
   from the renderer's `ClaudeLogo` (the 24px viewBox).
 
+### The login shell — the bundle's own sign-in page
+
+`CLAUDE_REMOTE_LOGIN_SHELL=1` turns an instance into a front door: it serves the
+renderer's **own** `/login` — Claude's sign-in page, out of the same bundle the
+workspace runs, not a copy of it — and refuses **every** API request, so the
+instance cannot proxy the Desktop, hold a session or run inference, signed in or
+not.
+
+Two things make that work.
+
+The page needs no data to appear. The app routes itself to its own `/login` the
+moment the bootstrap answers an error (`isLoggedOut` in the bootstrap store), so
+the refused bootstrap *is* what puts the page up — no synthesised account
+document, and nothing from claude.ai.
+
+Credentials go straight to `authd`, which the proxy already sends `/api/auth/*`
+to. `bridge/public/remote-preload.js` extends the card in the DOM — adding a
+password field beneath the email, pointing the form at `/api/auth/login`, and
+dropping the Google/Apple buttons, which have nothing behind them here. That
+lives in the preload rather than a renderer patch on purpose: the card belongs
+to React, so the additions have to survive its re-renders, and this way a tweak
+costs a bridge restart instead of a renderer rebuild.
+
+The proxy side is host-side (the Caddyfile is not in this repo): send `/login`
+and `/renderer/*` to the login instance — the SPA's assets are rewritten to that
+prefix by the index shim, so they never collide with the workspace's own — while
+`/api/auth/*` and `/api/admin/*` keep going to authd, and everything else stays
+behind `forward_auth`. Add `CLAUDE_REMOTE_WEB_SHELL=1` on that instance to
+render the browser chrome (the marketing sign-in page with the hero) instead of
+the Desktop chrome.
+
+Worth knowing before you expect a pixel match: the hero media is **not** in the
+bundle — the still is fetched from the web root and the video from
+`assets.claude.ai` — so the right-hand column is empty unless those are vendored
+alongside the fonts; and this build's card may render no provider buttons at
+all, in which case there is nothing to drop.
+
+`scripts/login-shell-smoke.mjs` boots the bridge in this mode and asserts the
+refusals, so the property cannot rot quietly.
+
 ## Two deployments on one box
 
 A second checkout (say `/opt/claudesk-v2`) sharing a host with the production
