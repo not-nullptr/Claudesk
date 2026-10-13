@@ -74,6 +74,13 @@ try {
   const shell = await request("/remote-preload.js");
   assert.equal(shell.status, 200, "the shell's own assets still serve");
 
+  // The container healthcheck probes this path, so it has to answer — but with
+  // liveness only, not the Desktop's surface list the real route reports.
+  const health = await request("/api/health");
+  assert.equal(health.status, 200, "the healthcheck must still pass in this mode");
+  assert.deepEqual(JSON.parse(health.body), { ok: true },
+    "health must report liveness, not the Desktop's surfaces");
+
   console.log("login-shell-smoke: the login shell refuses the API and serves its assets");
 } finally {
   child.kill("SIGKILL");

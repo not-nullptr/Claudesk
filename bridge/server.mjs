@@ -2165,6 +2165,14 @@ async function handleApi(request, response, url) {
   // redirect to the login page, which would hand that fetch an HTML document
   // instead of an error status.
   if (loginShellEnabled) {
+    // The container healthcheck probes this path, and a liveness answer is all
+    // it needs — the real one reports the Desktop's surface list, which is
+    // exactly what a public instance must not hand out. Everything else is
+    // refused, including the routes this bridge synthesises itself.
+    if (request.method === "GET" && url.pathname === "/api/health") {
+      sendJson(response, 200, { ok: true });
+      return;
+    }
     sendJson(response, 403, { ok: false, error: "not signed in" });
     return;
   }
