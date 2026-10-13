@@ -199,6 +199,20 @@ export function AdminPage() {
               </td>
               <td>
                 <div className="actions">
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      const next = window.prompt(
+                        `Desktop instance for ${user.email} (host:port, empty to clear)`,
+                        user.upstream ?? "",
+                      );
+                      if (next !== null) {
+                        void guard(() => api.updateUser(user.id, { upstream: next.trim() }));
+                      }
+                    }}
+                  >
+                    Instance…
+                  </button>
                   <button className="ghost" onClick={() => reset(user)}>
                     Reset password
                   </button>

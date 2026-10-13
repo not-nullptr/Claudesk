@@ -182,6 +182,23 @@ pub async fn accept_invite(
     Ok((jar.add(session_cookie(&state.cfg, token)), Json(json!({ "user": user }))))
 }
 
+/// A short page for states a signed-in user lands on directly. The body of a
+/// `forward_auth` response is what they see, so it should read as a page rather
+/// than a JSON error.
+fn message_page(status: StatusCode, title: &str, body: &str) -> Response {
+    let page = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>{title}</title>\
+         <body style=\"font:15px/1.5 system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem\">\
+         <h1 style=\"font-size:20px\">{title}</h1><p>{body}</p></body>"
+    );
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        page,
+    )
+        .into_response()
+}
+
 /// Caddy's `forward_auth` endpoint: 200 + `X-Instance-Upstream` when the session
 /// is live and the user has an instance, otherwise a non-2xx and no upstream.
 pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
@@ -200,11 +217,14 @@ pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
                 );
                 response
             }
-            None => (
+            // Transient: the account exists but its instance is still being
+            // created by the host-side provisioner.
+            None => message_page(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "no instance provisioned for this account" })),
-            )
-                .into_response(),
+                "Setting up your workspace",
+                "Your account is ready and its workspace is being created. Reload \
+                 this page in a moment.",
+            ),
         },
         _ => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
     }

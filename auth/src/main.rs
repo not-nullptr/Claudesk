@@ -88,6 +88,14 @@ async fn main() {
     };
     let invite_for = flag("--invite");
     let admin_for = flag("--create-admin");
+    let show_for = flag("--show");
+    let pending = args.iter().any(|arg| arg == "--pending");
+    let set_upstream_for = flag("--set-upstream");
+    let set_upstream_value = args
+        .iter()
+        .position(|arg| arg == "--set-upstream")
+        .and_then(|index| args.get(index + 2))
+        .cloned();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -123,6 +131,42 @@ async fn main() {
     }
     if let Some(email) = admin_for.as_deref() {
         match cli_create_admin(&state.cfg, &state.store, email).await {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // `--pending` lists accounts that still need an instance, one email per
+    // line; `--show` prints one account for the provisioner to read.
+    if pending {
+        match cli_pending(&state.store).await {
+            Ok(emails) => {
+                println!("{}", emails.join("\n"));
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(email) = show_for.as_deref() {
+        match cli_show(&state.store, email).await {
+            Ok(text) => {
+                println!("{text}");
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(email) = set_upstream_for.as_deref() {
+        let upstream = set_upstream_value.as_deref().unwrap_or("");
+        match cli_set_upstream(&state.store, email, upstream).await {
             Ok(()) => std::process::exit(0),
             Err(message) => {
                 eprintln!("authd: {message}");
@@ -244,6 +288,62 @@ async fn cli_invite(cfg: &Config, store: &Store, email: &str) -> Result<(), Stri
         .await
         .map_err(|error| error.to_string())?;
     println!("/accept-invite?token={token}");
+    Ok(())
+}
+
+/// `authd --show <email>`: one account as `key=value` lines, for the host-side
+/// provisioner. Values have newlines stripped so the shell can read them
+/// without a JSON parser.
+async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
+    let email = email.trim().to_lowercase();
+    let user = store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no account for {email}"))?;
+    let line = |key: &str, value: &str| {
+        format!("{key}={}", value.replace(&['\n', '\r'][..], " "))
+    };
+    Ok([
+        line("id", &user.id.to_string()),
+        line("email", &user.email),
+        line("first_name", &user.first_name),
+        line("disabled", &user.disabled.to_string()),
+        line("upstream", user.upstream.as_deref().unwrap_or("")),
+        line(
+            "has_password",
+            if user.password_hash.is_some() { "1" } else { "0" },
+        ),
+    ]
+    .join("\n"))
+}
+
+/// `authd --pending`: emails of enabled accounts that still need an instance.
+async fn cli_pending(store: &Store) -> Result<Vec<String>, String> {
+    let users = store.list_users().await.map_err(|error| error.to_string())?;
+    Ok(users
+        .into_iter()
+        .filter(|user| user.disabled == 0 && user.upstream.as_deref().unwrap_or("").is_empty())
+        .map(|user| user.email)
+        .collect())
+}
+
+/// `authd --set-upstream <email> <host:port>`: point an account at its instance
+/// (an empty upstream clears it).
+async fn cli_set_upstream(store: &Store, email: &str, upstream: &str) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    let user = store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no account for {email}"))?;
+    let value = upstream.trim();
+    let value = if value.is_empty() { None } else { Some(value) };
+    store
+        .set_upstream(user.id, value)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("{} -> {}", user.email, value.unwrap_or("(cleared)"));
     Ok(())
 }
 

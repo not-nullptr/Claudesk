@@ -1,0 +1,13 @@
+[Unit]
+Description=Create a Claude Desktop instance for each new Claudesk account
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it creates directories owned by PUID:PGID and drives Docker. authd never
+# does — it only records accounts; this reconciler gives them instances.
+#
+# EDIT this path to the deployment checkout (and its .env must be present).
+ExecStart=/opt/claudesk/scripts/converge-users.sh
+TimeoutStartSec=10min

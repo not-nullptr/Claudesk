@@ -9,7 +9,10 @@ single-user deployment ("Maddie Mode") lives on the `maddie` branch.
   Cowork surface with the merge flags on.
 - **Auth:** the `authd` service owns users, sessions and invites. It is a plain
   component — it never touches a container runtime.
-- **Instances:** one per user, owned by **systemd**, not a container daemon.
+- **Instances:** one per account. Creating an account provisions its instance via
+  a host-side reconciler, so the app itself never holds a container-runtime
+  socket. (Currently a compose project per account; Stage 2 moves that to
+  systemd units.)
 
 ## Stage 1 — the auth layer (shippable on its own)
 
@@ -63,6 +66,39 @@ Open the printed `/accept-invite?token=…` link, set a password, and you land i
 `/admin`. From there, **Create a user** returns a one-time invite link (shown
 once) — send it to them; they set their own password and their browser timezone
 is captured then.
+
+### Each account gets its own instance
+
+Creating an account does not by itself give it a workspace. `authd` records the
+account; a **host-side reconciler** creates the instance and writes the upstream
+back. That is what keeps `authd` a plain component — it never touches a container
+runtime, and no internet-facing service ever holds the Docker socket.
+
+- `scripts/provision-user.sh EMAIL` creates that account's own compose project
+  (`claudesk-<slug>`): its own `/config`, `/workspace`, container names and host
+  port, with the pristine Cowork VM bundle **reflinked** in, so the 10 GiB image
+  is shared rather than copied. It then records `127.0.0.1:<port>` as the
+  account's upstream.
+- `ops/systemd/claudesk-provision.{service,timer}` runs `scripts/converge-users.sh`
+  every 20 s, provisioning every account with no upstream yet. Install once (edit
+  the path in the `.service` to your checkout):
+
+  ```bash
+  sudo cp ops/systemd/claudesk-provision.* /etc/systemd/system/
+  sudo systemctl enable --now claudesk-provision.timer
+  ```
+
+Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
+your workspace` — reload a moment later and it's there.
+
+Operator tools, run inside the shared authd container:
+
+```bash
+docker compose -f compose.yaml exec authd /app/authd --create-admin you@example.com
+docker compose -f compose.yaml exec authd /app/authd --invite someone@example.com
+docker compose -f compose.yaml exec authd /app/authd --pending
+docker compose -f compose.yaml exec authd /app/authd --set-upstream someone@example.com 127.0.0.1:15903
+```
 
 ### Reverse proxy
 
