@@ -74,7 +74,10 @@ install -d -m 0755 -o "$puid" -g "$pgid" \
     "$user_root/config" "$user_root/workspace" "$user_root/bridge-data" "$user_root/root"
 
 # Share the pristine VM bundle rather than downloading 10 GiB per account.
-master_bundle="$data_root/config/.config/Claude-3p/vm_bundles/claudevm.bundle"
+# The bundle every account's copy is reflinked from. Point CLAUDESK_VM_MASTER at
+# an existing one (e.g. another deployment's already-downloaded bundle) if this
+# deployment's workspace has not fetched one yet.
+master_bundle="${CLAUDESK_VM_MASTER:-$data_root/config/.config/Claude-3p/vm_bundles/claudevm.bundle}"
 user_bundle="$user_root/config/.config/Claude-3p/vm_bundles/claudevm.bundle"
 if [ -d "$master_bundle" ] && [ ! -e "$user_bundle/rootfs.img" ]; then
     install -d -o "$puid" -g "$pgid" "$user_bundle"

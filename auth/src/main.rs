@@ -97,6 +97,30 @@ async fn main() {
         .and_then(|index| args.get(index + 2))
         .cloned();
 
+    // An unrecognised option is a mistake, not a request to serve. Without this
+    // an older binary handed a flag it does not know falls through and tries to
+    // bind the port its own running instance already holds — which is exactly
+    // how `--show` used to fail confusingly.
+    if let Some(unknown) = args.iter().skip(1).find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--healthcheck"
+                    | "--invite"
+                    | "--create-admin"
+                    | "--show"
+                    | "--pending"
+                    | "--set-upstream"
+            )
+    }) {
+        eprintln!("authd: unknown option {unknown}");
+        eprintln!(
+            "usage: authd [--healthcheck | --invite EMAIL | --create-admin EMAIL \
+             | --show EMAIL | --pending | --set-upstream EMAIL HOST:PORT]"
+        );
+        std::process::exit(2);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
