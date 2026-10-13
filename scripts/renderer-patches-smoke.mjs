@@ -175,6 +175,27 @@ const gatewayUrlSchema = 'function urlSchema(options={}){return wrap('
 const gatewayUrlDecoy = 'function strictSchema(o={}){return refine(raw=>{'
   + 'let{protocol:p,hostname:h}=new URL(raw);return p==="https:"&&!hosts.has(h)},'
   + '{message:"must use https"})}';
+// The titlebar's compact mode switcher: the element whose props carry the
+// `data-compact-mode-switcher` label, wrapping the switcher call whose props
+// name the segments array. When that array carries a disabled segment — how a
+// deployment with Code turned off renders — the patcher hides the whole control,
+// since it offers nothing to switch to. The element factory and the segments
+// name are mangled here, like the shipping bundle.
+const modePicker = 'function CompactModeSwitcher({ref:e}){let t=useLocale(),n="Claude",'
+  + 'd=useCodeState(),f=d?.reason??null,'
+  + 'F=useMemo(()=>[{value:"cowork",icon:"Chats",tooltip:n},'
+  + 'f===null?{value:"code",icon:"Code",tooltip:t("Code")}'
+  + ':{value:"code",icon:"Code",tooltip:"Code",disabled:!0,disabledReason:"Code"}],[f,n,t]);'
+  + 'return S(Frame,{children:[h(Switch,{ref:e,modes:F.map(s=>s.value),'
+  + '"data-compact-mode-switcher":!0,"data-chorus-callout":"pills",className:"flex",'
+  + 'children:h(Segmented,{segments:F,value:"cowork","aria-label":t("Mode")})}),'
+  + 'h(DiscoveryPopover,{})]})}';
+// A marker on an element whose children are not the switcher call, and a
+// switcher call with no segments binding: neither is the mode picker.
+const modePickerDecoys = 'function markerWithoutSwitcher(){'
+  + 'return h(Frame,{"data-compact-mode-switcher":!0,children:h(Other,{})})}'
+  + 'function switcherWithoutSegments(){return h(Frame,{"data-compact-mode-switcher":!0,'
+  + 'children:h(Segmented,{value:"cowork"})})}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -287,6 +308,31 @@ for (const [i, variant] of variants.entries()) {
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
+// The titlebar's compact mode switcher — the "Claude"/"Code" pills. When Code is
+// turned off (the managed default) its segments array carries a disabled
+// segment, so the control has nothing to switch to and the patcher hides it
+// whole; a deployment with Code on keeps it, because then no segment is
+// disabled. The splice is a structural read-back, so it survives minification,
+// and a marker on an element that does not wrap the switcher call, or a switcher
+// call with no segments binding, is not a target.
+const pickerPatches = inspectRenderer(modePicker, false).patches
+  .filter(patch => patch.id === "titlebar-mode-picker-without-code");
+assert.equal(pickerPatches.length, 1, "the compact mode switcher must be spliced once");
+assert.ok(pickerPatches[0].replacement.startsWith(
+  "(F.some(__claudeskMode=>__claudeskMode.disabled)?null:h(Switch,{"),
+  "the splice must hide the switcher whenever a segment is disabled");
+assert.ok(pickerPatches[0].original.startsWith("h(Switch,{")
+  && pickerPatches[0].original.includes("\"data-compact-mode-switcher\":!0,"),
+  "the splice must wrap the whole rendered element");
+assert.equal(inspectRenderer(modePickerDecoys, false).patches
+  .filter(patch => patch.id === "titlebar-mode-picker-without-code").length, 0,
+  "an element that does not wrap the segments switcher is not the mode picker");
+const pickerCompiled = await minify(modePicker, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(pickerCompiled.code, false).patches
+  .filter(patch => patch.id === "titlebar-mode-picker-without-code").length, 1,
+  "a mangled compact mode switcher must still be spliced once");
 // The session Desktop gate is a structural read-back, so it must survive
 // minification: the flag is renamed, but the `if(!x)` guard and the zero-argument
 // initialiser it points at are unchanged.

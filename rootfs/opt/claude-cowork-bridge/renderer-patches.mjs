@@ -186,6 +186,23 @@ const notificationEnableBranch = "{const __claudeskNotifications="
 const accountMenuNamePatchId = "web-account-menu-name";
 const accountNameSyncFallback = 'globalThis["claude.web"]?.LocalAgentModeSessions'
   + '?.interactiveAuthStore?.getStateSync?.()?.principalDisplayName';
+// The titlebar's compact mode switcher — the "Claude"/"Code" pills at the top
+// right of the navbar. Its only job is to move between the home surface and the
+// Code surface, so a deployment with Code turned off (the managed default)
+// renders the Code segment disabled and the whole control is a dead switch. The
+// component is pinned by the `data-compact-mode-switcher` label it sets on the
+// element it renders, which appears nowhere else in the renderer graph, and the
+// segments array is read back from the switcher call those props wrap. The
+// splice replaces that element with `null` whenever the array carries a disabled
+// segment — exactly the shape the Code-off state produces — leaving its siblings
+// (the discovery popover) and the rest of the titlebar untouched. Applied in
+// either shell, independent of the Gateway setting; a deployment that enables
+// Code keeps the picker, because then no segment is disabled. Deliberately not
+// in `required`: a bundle that no longer matches leaves the picker in place,
+// which is visible rather than silent, so it must not block candidate
+// preparation the way the download and preview patches do.
+const modePickerPatchId = "titlebar-mode-picker-without-code";
+const modePickerMarker = "data-compact-mode-switcher";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 // A minified component body may answer through a comma sequence
@@ -315,6 +332,27 @@ function notificationEnableTarget(node) {
     if (literal(child, notificationPermissionDeniedSource)) deniedSource = true;
   });
   return requestsPermission && tracksResult && deniedSource ? node : undefined;
+}
+// The compact mode switcher's rendered element: the sole call whose props carry
+// the `data-compact-mode-switcher` label, wrapping a switcher call whose props
+// name the segments array. Only parsed props establish it, so a string or
+// comment that merely spells the label is not a target; a marker whose children
+// are not the switcher call, or a switcher call with no `segments` binding,
+// refuses rather than splice over the wrong element. The array's name is read
+// back from the same graph, so a renamed minifier output still matches.
+function modePickerTarget(node) {
+  if (node.type !== "CallExpression") return undefined;
+  const props = node.arguments.map(unwrap).find(argument => argument?.type === "ObjectExpression");
+  if (!props) return undefined;
+  if (!props.properties.some(entry => key(entry, modePickerMarker))) return undefined;
+  const children = props.properties.find(entry => key(entry, "children"));
+  const switcher = unwrap(children?.value);
+  if (switcher?.type !== "CallExpression") return undefined;
+  const switcherProps = switcher.arguments.map(unwrap)
+    .find(argument => argument?.type === "ObjectExpression");
+  const segments = switcherProps?.properties.find(entry => key(entry, "segments"));
+  const name = identifier(segments?.value);
+  return name ? { segments: name } : undefined;
 }
 
 // The session layout's Desktop gate is `if(!x){ …redirect with reason
@@ -705,8 +743,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // account chip's chunk is reached by the API field it reads (`avatar_image_url`),
   // and the user-menu identity reader in the same chunk by `principalDisplayName`;
   // the Desktop-checks slot by its own component label; the session-placement
-  // helper by the force-local shrimp literal only it carries.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result/.test(source)) {
+  // helper by the force-local shrimp literal only it carries; the compact mode
+  // switcher by its own `data-compact-mode-switcher` label.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -722,6 +761,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
     if (inferenceBannerTarget(node, ancestors)) {
       patches.push({ id: inferenceBannerPatchId, start: node.body.start, end: node.body.end,
         original: source.slice(node.body.start, node.body.end), replacement: "{return null;}" });
+    }
+    const modePicker = modePickerTarget(node);
+    if (modePicker) {
+      const original = source.slice(node.start, node.end);
+      patches.push({ id: modePickerPatchId, start: node.start, end: node.end, original,
+        replacement: `(${modePicker.segments}.some(__claudeskMode=>__claudeskMode.disabled)`
+          + `?null:${original})` });
     }
     if (webShellEnabled) {
       const chip = accountChipTarget(node);

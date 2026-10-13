@@ -110,6 +110,27 @@ the component is otherwise restructured, candidate preparation fails and the
 selector must be updated before the new Desktop is promoted, rather than the card
 returning silently.
 
+The titlebar's compact mode switcher — the `Claude`/`Code` pills at the top right
+of the navbar — exists only to move between the home surface and the Code
+surface, so a deployment with Code turned off (the managed default,
+`isClaudeCodeForDesktopEnabled: false`) renders its Code segment disabled and the
+whole control is a dead switch. The `titlebar-mode-picker-without-code` patch
+replaces the element the switcher renders with `null` whenever its segments array
+carries a disabled segment — the exact shape the Code-off state produces — so the
+control disappears while the rest of the titlebar, including the switcher's
+discovery popover sibling, is untouched; a deployment that enables Code keeps the
+picker, because then no segment is disabled. It is selected by the
+`data-compact-mode-switcher` label the component sets on that element (which
+appears nowhere else in the renderer graph), wrapping a switcher call whose props
+name the segments array; the array's binding is read back from the same parsed
+graph, so a renamed minifier output still matches. A marker whose children are
+not the switcher call, or a switcher call with no `segments` binding, refuses
+rather than splice over the wrong element. Like the provider card it is applied
+independent of the Gateway setting and in either shell, but — deliberately, and
+unlike the card — it is **not** a required patch: a bundle that no longer matches
+leaves a useless picker in place, which is visible rather than silent, so it must
+not block candidate preparation the way the download and preview patches do.
+
 The sidebar's account chip — the bottom-left identity row — leads with an avatar
 slot, but in this build the component behind that slot still reads the account
 view and then renders the deployment mark, discarding the `src` it just read:
