@@ -47,6 +47,10 @@ pub struct UpdateUserRequest {
     /// Empty string clears the upstream.
     #[serde(default)]
     pub upstream: Option<String>,
+    /// Replace the account's own upstream API key. The stored value is never read
+    /// back, so this is a blind write; an empty string clears it.
+    #[serde(default)]
+    pub upstream_api_key: Option<String>,
 }
 
 /// A first name that must be present (the invitee's, or an admin edit), trimmed
@@ -57,6 +61,17 @@ pub fn normalize_first_name(raw: Option<&str>) -> AppResult<&str> {
         return Err(AppError::BadRequest("a first name is required".into()));
     }
     Ok(name)
+}
+
+/// The account's own upstream API key, which they supply when they accept the
+/// invite (or an admin sets later). Required and bounded; the value is never
+/// echoed back, and it is not verified against the provider here.
+pub fn normalize_api_key(raw: Option<&str>) -> AppResult<&str> {
+    let key = raw.unwrap_or("").trim();
+    if key.is_empty() || key.len() > 200 {
+        return Err(AppError::BadRequest("an API key is required".into()));
+    }
+    Ok(key)
 }
 
 /// The `Content-Type` an uploaded avatar may carry, or a 400. A parameter such as
@@ -190,6 +205,17 @@ pub async fn update_user(
         let value = if value.is_empty() { None } else { Some(value) };
         state.store.set_upstream(user.id, value).await?;
     }
+    if let Some(api_key) = body.upstream_api_key.as_deref() {
+        let value = api_key.trim();
+        if value.is_empty() {
+            state.store.clear_upstream_api_key(user.id).await?;
+        } else {
+            state
+                .store
+                .set_upstream_api_key(user.id, normalize_api_key(Some(value))?)
+                .await?;
+        }
+    }
     Ok(Json(json!({ "user": state.store.user(user.id).await? })))
 }
 
@@ -295,5 +321,13 @@ mod tests {
         assert!(normalize_first_name(None).is_err());
         assert!(normalize_first_name(Some("   ")).is_err());
         assert!(normalize_first_name(Some(&"a".repeat(81))).is_err());
+    }
+
+    #[test]
+    fn api_key_is_required_trimmed_and_bounded() {
+        assert_eq!(normalize_api_key(Some("  sk-abc  ")).unwrap(), "sk-abc");
+        assert!(normalize_api_key(None).is_err());
+        assert!(normalize_api_key(Some("   ")).is_err());
+        assert!(normalize_api_key(Some(&"k".repeat(201))).is_err());
     }
 }

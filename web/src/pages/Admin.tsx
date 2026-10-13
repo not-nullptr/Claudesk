@@ -81,6 +81,17 @@ export function AdminPage() {
     void guard(() => api.updateUser(user.id, { first_name: next.trim() }));
   }
 
+  /** Replace a person's upstream API key. The stored value is never sent to the
+   *  browser, so this is a blind write; an empty value clears it. */
+  function editApiKey(user: User) {
+    const next = window.prompt(
+      `API key for ${user.email} (empty to clear)`,
+      "",
+    );
+    if (next === null) return;
+    void guard(() => api.updateUser(user.id, { upstream_api_key: next.trim() }));
+  }
+
   async function changePhoto(user: User) {
     const file = await pickImage();
     if (!file) return;
@@ -139,7 +150,8 @@ export function AdminPage() {
       <form className="card panel" onSubmit={create}>
         <h2>Create a user</h2>
         <p className="muted" style={{ margin: 0 }}>
-          Invite by email — the person sets their name and photo when they accept.
+          Invite by email — the person sets their name, photo and their own API key
+          when they accept.
         </p>
         <div className="row">
           <label>
@@ -191,7 +203,8 @@ export function AdminPage() {
             <th>Email</th>
             <th>Role</th>
             <th>Timezone</th>
-            <th>Status</th>
+            <th>Instance</th>
+            <th>API key</th>
             <th />
           </tr>
         </thead>
@@ -220,6 +233,9 @@ export function AdminPage() {
               <td className="muted">
                 {user.disabled ? "disabled" : user.upstream || "no instance"}
               </td>
+              <td className="muted">
+                {user.api_key_updated_at ? "set" : "needs key"}
+              </td>
               <td>
                 <div className="actions">
                   <button className="ghost" onClick={() => editName(user)}>
@@ -246,6 +262,9 @@ export function AdminPage() {
                     }}
                   >
                     Instance…
+                  </button>
+                  <button className="ghost" onClick={() => editApiKey(user)}>
+                    API key…
                   </button>
                   <button className="ghost" onClick={() => reset(user)}>
                     Reset password

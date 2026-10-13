@@ -10,6 +10,9 @@ export interface User {
   disabled: number;
   /** When the photo last changed; null means the account has none. */
   avatar_updated_at: number | null;
+  /** When the account's own upstream API key last changed; null means it has
+   *  none. The key itself is never sent to the browser. */
+  api_key_updated_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -59,10 +62,16 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => request<{ ok: true }>("/api/auth/logout", { method: "POST" }),
-  acceptInvite: (token: string, password: string, timezone: string, first_name: string) =>
+  acceptInvite: (
+    token: string,
+    password: string,
+    timezone: string,
+    first_name: string,
+    upstream_api_key: string,
+  ) =>
     request<{ user: User }>("/api/auth/accept-invite", {
       method: "POST",
-      body: JSON.stringify({ token, password, timezone, first_name }),
+      body: JSON.stringify({ token, password, timezone, first_name, upstream_api_key }),
     }),
   /** The signed-in person's own photo, uploaded right after accepting an invite. */
   uploadAvatar: (file: Blob) => requestBinary<{ user: User }>("/api/auth/me/avatar", "PUT", file),

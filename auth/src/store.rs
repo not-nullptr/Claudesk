@@ -30,6 +30,10 @@ pub struct User {
     /// Serves as the presence flag the bridge reads and the cache-buster in the
     /// avatar URL.
     pub avatar_updated_at: Option<i64>,
+    /// When this account's upstream API key last changed; NULL means it has none.
+    /// The key itself lives in `user_keys` and is never serialized. This doubles
+    /// as the "has a key" flag the admin UI reads.
+    pub api_key_updated_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -237,6 +241,102 @@ impl Store {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await?)
+    }
+
+    // --- upstream keys -----------------------------------------------------
+
+    /// Store (or replace) the account's own upstream API key, stamping the change
+    /// on the user row in the same transaction so the presence flag and the key
+    /// never disagree. A `gateway_key` already set is left alone.
+    pub async fn set_upstream_api_key(&self, user_id: i64, api_key: &str) -> AppResult<()> {
+        let ts = now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO user_keys (user_id, upstream_api_key, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET upstream_api_key = ?2, updated_at = ?3",
+        )
+        .bind(user_id)
+        .bind(api_key)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE users SET api_key_updated_at = ?2, updated_at = ?2 WHERE id = ?1")
+            .bind(user_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Forget the account's upstream key, so the gateway refuses its requests
+    /// again until a new one is set. The `gateway_key` stays.
+    pub async fn clear_upstream_api_key(&self, user_id: i64) -> AppResult<()> {
+        let ts = now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE user_keys SET upstream_api_key = NULL, updated_at = ?2 WHERE user_id = ?1")
+            .bind(user_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE users SET api_key_updated_at = NULL, updated_at = ?2 WHERE id = ?1")
+            .bind(user_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The account's gateway identity, creating it if it has none. The gateway
+    /// key is opaque and long-lived: it is what the instance sends to the box
+    /// gateway as `X-Api-Key`, and it never changes once set.
+    pub async fn ensure_gateway_key(&self, user_id: i64) -> AppResult<String> {
+        if let Some(existing) = self.gateway_key(user_id).await? {
+            return Ok(existing);
+        }
+        let token = crate::crypto::random_token();
+        sqlx::query(
+            "INSERT INTO user_keys (user_id, gateway_key, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET gateway_key = COALESCE(user_keys.gateway_key, ?2), \
+             updated_at = ?3",
+        )
+        .bind(user_id)
+        .bind(&token)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        // Read back so a concurrent writer that won the insert is what the caller
+        // gets, not a token this call generated and then discarded.
+        Ok(self.gateway_key(user_id).await?.unwrap_or(token))
+    }
+
+    pub async fn gateway_key(&self, user_id: i64) -> AppResult<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT gateway_key FROM user_keys WHERE user_id = ?1")
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(key,)| key))
+    }
+
+    /// Resolve a gateway key to its account and that account's upstream API key.
+    /// `None` is an unknown key; `Some((id, None))` is a known account that has
+    /// not supplied a key yet (or is disabled), which the gateway must refuse.
+    pub async fn resolve_gateway_key(
+        &self,
+        gateway_key: &str,
+    ) -> AppResult<Option<(i64, Option<String>)>> {
+        let row: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT user_keys.user_id, user_keys.upstream_api_key
+             FROM user_keys JOIN users ON users.id = user_keys.user_id
+             WHERE user_keys.gateway_key = ?1 AND users.disabled = 0",
+        )
+        .bind(gateway_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     // --- invites -----------------------------------------------------------

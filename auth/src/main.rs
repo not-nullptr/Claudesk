@@ -7,6 +7,7 @@
 
 mod api_admin;
 mod api_auth;
+mod api_gateway;
 mod crypto;
 mod error;
 mod store;
@@ -41,6 +42,9 @@ pub struct Config {
     /// per-account request file here so the host provisions on the event rather
     /// than on its next poll. authd itself never touches a container runtime.
     pub provision_spool: String,
+    /// Shared secret the box gateway presents to `/internal/gateway/resolve`.
+    /// Unset disables that route (404), so authd is inert until an operator opts in.
+    pub gateway_secret: Option<String>,
 }
 
 impl Config {
@@ -67,6 +71,7 @@ impl Config {
             bootstrap_admin_email: env("AXTD_BOOTSTRAP_ADMIN_EMAIL"),
             provision_spool: env("AXTD_PROVISION_SPOOL")
                 .unwrap_or_else(|| "/data/provision-requests".into()),
+            gateway_secret: env("AXTD_GATEWAY_SECRET"),
         }
     }
 }
@@ -254,6 +259,14 @@ async fn main() {
         .route("/api/auth/avatar/:id", get(api_auth::avatar))
         .route("/api/auth/me/avatar", put(api_auth::set_my_avatar))
         .route("/api/auth/verify", any(api_auth::verify))
+        // Internal: the box gateway resolves an account's opaque gateway key to
+        // that account's own upstream key. Deliberately outside `/api/*` so the
+        // public reverse-proxy matcher never forwards it; secret-gated and inert
+        // (404) with no secret configured. See api_gateway.rs.
+        .route(
+            "/internal/gateway/resolve",
+            post(api_gateway::resolve_gateway_key),
+        )
         .route("/api/admin/users", get(api_admin::list_users).post(api_admin::create_user))
         .route(
             "/api/admin/users/:id",
@@ -380,6 +393,12 @@ async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
     let line = |key: &str, value: &str| {
         format!("{key}={}", value.replace(&['\n', '\r'][..], " "))
     };
+    // The gateway key is created here, on first read, so an account provisioned
+    // before this existed gets one the next time the reconciler runs it.
+    let gateway_key = store
+        .ensure_gateway_key(user.id)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok([
         line("id", &user.id.to_string()),
         line("email", &user.email),
@@ -391,9 +410,14 @@ async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
             if user.avatar_updated_at.is_some() { "1" } else { "0" },
         ),
         line("upstream", user.upstream.as_deref().unwrap_or("")),
+        line("gateway_key", &gateway_key),
         line(
             "has_password",
             if user.password_hash.is_some() { "1" } else { "0" },
+        ),
+        line(
+            "has_api_key",
+            if user.api_key_updated_at.is_some() { "1" } else { "0" },
         ),
     ]
     .join("\n"))

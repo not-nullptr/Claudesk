@@ -28,6 +28,12 @@ services:
       PORT: "4000"
     ports:
       - "127.0.0.1:${SHITPROXY_PORT:-14000}:4000"
+    # On gateway_net so it can resolve `authd` for per-user key resolution
+    # (UPSTREAM_KEY_RESOLVER_URL): each deployment's authd is reachable there by
+    # name. The Caddy front door below shares the network, so it still reaches
+    # shitproxy as before.
+    networks:
+      - gateway_net
     init: true
     read_only: true
     security_opt:

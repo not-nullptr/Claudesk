@@ -375,6 +375,11 @@ services:
       # request file here when an account needs an instance, so it is created on
       # the event; the installer derives the same path from CLAUDESK_DATA_ROOT.
       AXTD_PROVISION_SPOOL: "${AXTD_PROVISION_SPOOL:-/data/provision-requests}"
+      # Shared secret for the internal gateway route that resolves an account's
+      # gateway key to its own upstream key. Must match shitproxy's
+      # GATEWAY_RESOLVER_SECRET (in /etc/shitproxy/gateway.env). Empty disables
+      # the route (404), leaving per-user keys off.
+      AXTD_GATEWAY_SECRET: "${AUTH_GATEWAY_SECRET:-}"
     volumes:
       # SQLite database. Create it writable by PUID:PGID on the host.
       - ${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/auth-data:/data

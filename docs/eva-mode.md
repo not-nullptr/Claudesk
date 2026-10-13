@@ -65,9 +65,43 @@ sudo docker compose logs "${CLAUDESK_NAME_PREFIX:-}claude-authd" | grep 'bootstr
 Open the printed `/accept-invite?token=…` link, set your name and a password, and
 you land in `/admin`. From there, **Create a user** takes just an email and a role
 and returns a one-time invite link (shown once) — send it to them; they set their
-own first name, password and (optionally) profile photo, and their browser timezone
-is captured then. The name and photo are theirs: the admin only picks email + role
-at creation, though an admin can still correct them afterwards.
+own first name, API key, password and (optionally) profile photo, and their browser
+timezone is captured then. The name, photo and API key are theirs: the admin only
+picks email + role at creation, though an admin can still correct them afterwards.
+
+### Each account spends its own API key
+
+By default every account's inference leaves the box under one upstream credential.
+To bill each account to their own key, authd holds two secrets per account: the
+**upstream API key** they supply when they accept the invite (required) and an
+opaque **gateway key** authd mints and `scripts/provision-user.sh` writes into the
+instance as `CLAUDE_GATEWAY_API_KEY`. The instance sends that gateway key to the box
+gateway, which asks authd (the internal, secret-gated route `/internal/gateway/resolve`)
+for the account's own upstream key and uses it upstream. An account with no key set
+is refused rather than falling back to the operator's — see the shitproxy README's
+"Per-request credential resolution".
+
+This needs these host-side pieces:
+
+- `AUTH_GATEWAY_SECRET` in this deployment's `.env` (see `.env.example`).
+- shitproxy's `/etc/shitproxy/gateway.env`: `UPSTREAM_KEY_RESOLVER_URL=http://authd:8080/internal/gateway/resolve`
+  and `GATEWAY_RESOLVER_SECRET` set to the same secret. `UPSTREAM_API_KEY` may be
+  dropped once every caller is an account. `compose.gateway.yaml` already puts
+  shitproxy on `gateway_net` so that name resolves; re-run
+  `docker compose -f compose.gateway.yaml up -d` after pulling.
+- the box gateway's Caddyfile (`/etc/litellm/Caddyfile`): on the route(s) into
+  shitproxy, stop overwriting `X-Api-Key` with the shared credential, so the
+  account's gateway key reaches shitproxy intact; any route that goes straight to
+  the router must be moved behind shitproxy (or given the same resolution), or it
+  will keep using the shared key.
+
+Two deployments on one box share `gateway_net`, so the name `authd` is ambiguous
+there; point `UPSTREAM_KEY_RESOLVER_URL` at the intended deployment's authd by a
+distinct alias or its host port (see "Two deployments on one box").
+
+An admin can replace or clear a person's key from `/admin` (the `API key…` action);
+the stored value is never sent back to the browser, so it is a blind write, and the
+table only shows whether a key is set.
 
 ### Each account gets its own instance
 

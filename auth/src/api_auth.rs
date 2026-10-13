@@ -9,7 +9,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::api_admin::{normalize_first_name, validate_avatar};
+use crate::api_admin::{normalize_api_key, normalize_first_name, validate_avatar};
 use crate::crypto::{hash_password, verify_password};
 use crate::error::{AppError, AppResult};
 use crate::store::User;
@@ -33,6 +33,10 @@ pub struct AcceptInviteRequest {
     /// user's own browser, rather than the admin's, is in the loop.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// The account's own upstream API key. Required: their inference is billed to
+    /// this key, not the operator's, so an account without one is refused.
+    #[serde(default)]
+    pub upstream_api_key: Option<String>,
 }
 
 /// Collapse an IPv6 client to its /64 so rotating the host part cannot escape a
@@ -173,12 +177,15 @@ pub async fn accept_invite(
         )));
     }
     let first_name = normalize_first_name(body.first_name.as_deref())?;
+    // Validate before consuming the invite, so a missing key does not spend it.
+    let api_key = normalize_api_key(body.upstream_api_key.as_deref())?.to_string();
     let user_id = state.store.consume_invite(&body.token).await?;
     state
         .store
         .set_password(user_id, &hash_password(&body.password)?)
         .await?;
     state.store.set_first_name(user_id, first_name).await?;
+    state.store.set_upstream_api_key(user_id, &api_key).await?;
     if let Some(tz) = body.timezone.as_deref().map(str::trim).filter(|t| !t.is_empty() && t.len() <= 64) {
         state.store.set_timezone(user_id, tz).await?;
     }

@@ -7,6 +7,7 @@ export function AcceptInvitePage() {
   const [firstName, setFirstName] = useState("");
   const [photo, setPhoto] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
@@ -32,6 +33,10 @@ export function AcceptInvitePage() {
       setError("please tell us your first name");
       return;
     }
+    if (!apiKey.trim()) {
+      setError("please paste your API key");
+      return;
+    }
     if (password !== confirm) {
       setError("the passwords do not match");
       return;
@@ -40,12 +45,13 @@ export function AcceptInvitePage() {
     setError("");
     try {
       // The user's own browser is here for the first time — this is where their
-      // name and timezone are captured, and the only place they set them.
+      // name, API key and timezone are captured, and the only place they set them.
       const { user } = await api.acceptInvite(
         token,
         password,
         browserTimezone(),
         firstName.trim(),
+        apiKey.trim(),
       );
       if (photo) {
         // The invite is already spent, so a photo that fails to upload must not
@@ -72,8 +78,8 @@ export function AcceptInvitePage() {
         <div className="auth__column">
           <h1 className="auth__title">Set up your account</h1>
           <p className="auth__subtitle">
-            Welcome to Claudesk. Tell us who you are and choose a password to activate
-            your account.
+            Welcome to Claudesk. Tell us who you are, paste the API key your requests
+            should use, and choose a password to activate your account.
           </p>
           <form className="auth-card" onSubmit={submit}>
             <input
@@ -93,6 +99,15 @@ export function AcceptInvitePage() {
               onChange={(event) => setPhoto(event.target.files?.[0] ?? null)}
             />
             {preview && <img className="avatar preview" src={preview} alt="Profile preview" />}
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="API key"
+              placeholder="API key for your account"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              required
+            />
             <input
               type="password"
               autoComplete="new-password"

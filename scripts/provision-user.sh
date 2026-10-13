@@ -39,7 +39,7 @@ authd() { compose_shared exec -T authd /app/authd "$@"; }
 
 info="$(authd --show "$email")" || exit 1
 
-id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""
+id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""; gateway_key=""
 while IFS='=' read -r key value; do
     case "$key" in
         id) id="$value" ;;
@@ -48,6 +48,7 @@ while IFS='=' read -r key value; do
         role) role="$value" ;;
         upstream) upstream="$value" ;;
         disabled) disabled="$value" ;;
+        gateway_key) gateway_key="$value" ;;
     esac
 done <<EOF
 $info
@@ -116,14 +117,16 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 # gateway_net, which the container resolves through Docker DNS and the guest
 # through the container.
 #
-# The key is a placeholder that never leaves the box. caddy `gateway` replaces
-# X-Api-Key with the upstream credential on the one route that goes straight to
-# the router, so a deployment's key never has to be an upstream key — and is
-# never sent as a bearer token the router would reject, which is what an
-# `x-api-key` scheme avoids. Override any of the three with
-# CLAUDESK_ACCOUNT_GATEWAY_URL / _API_KEY / _AUTH_SCHEME.
+# The key is the account's own gateway identity, minted by authd (`gateway_key`
+# in `authd --show`). It is opaque and never leaves the box: the box gateway
+# (shitproxy) resolves it to this account's own upstream key, so each account's
+# inference is billed to the key they supplied, not the operator's. It is not an
+# upstream key — which is what the `x-api-key` scheme avoids sending as a bearer
+# token the router would reject. The deployment-wide CLAUDESK_ACCOUNT_GATEWAY_API_KEY
+# is only a fallback for an authd too old to report one. Override the URL and
+# scheme with CLAUDESK_ACCOUNT_GATEWAY_URL / _AUTH_SCHEME.
 account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://gateway:4000}"
-account_gateway_key="${CLAUDESK_ACCOUNT_GATEWAY_API_KEY:-sk-local}"
+account_gateway_key="${gateway_key:-${CLAUDESK_ACCOUNT_GATEWAY_API_KEY:-sk-local}}"
 account_gateway_scheme="${CLAUDESK_ACCOUNT_GATEWAY_AUTH_SCHEME:-x-api-key}"
 case "$account_gateway_url" in
     *127.0.0.1*|*localhost*|*"::1"*)
