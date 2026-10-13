@@ -102,12 +102,18 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 #   - no Code surface.
 # Both are overridable for a deployment that wants something else.
 
-# Desktop only accepts a gateway URL that is HTTPS, or plain HTTP on the
-# loopback, so the account's endpoint is this deployment's own relay
-# (claude-gateway-loopback, below), which fronts the box-level chain. Point an
-# account elsewhere with CLAUDESK_ACCOUNT_GATEWAY_URL; an HTTPS gateway is the
-# other shape Desktop takes.
-account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://127.0.0.1:4000}"
+# The account's inference endpoint is the deployment's own unless a deployment
+# says otherwise. It must not be invented here: the Cowork VM makes the model
+# calls, and an endpoint that is only meaningful inside the container — the
+# loopback relay, say — is unreachable from the guest, where it resolves to the
+# guest itself. Inheriting keeps a provisioned account configured exactly like
+# the instance it is provisioned from.
+account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-${CLAUDE_GATEWAY_BASE_URL:-}}"
+[ -n "$account_gateway_url" ] || {
+    printf 'provision-user: no gateway URL: set CLAUDE_GATEWAY_BASE_URL (or CLAUDESK_ACCOUNT_GATEWAY_URL) in %s/.env\n' \
+        "$project_dir" >&2
+    exit 1
+}
 
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
