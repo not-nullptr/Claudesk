@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { inspectRenderer, patchRendererSources } from "../rootfs/opt/claude-cowork-bridge/renderer-patches.mjs";
+import { inspectRenderer, patchEmbeddedSources, patchRendererSources } from "../rootfs/opt/claude-cowork-bridge/renderer-patches.mjs";
 const { minify } = createRequire(new URL("../rootfs/opt/claude-cowork-bridge/package.json", import.meta.url))("terser");
 
 const native = 'const error="rewindSession unavailable"; callbacks.rewindV2; globalThis.ime=event.keyCode===229; const actions={edit:"onEdit"};';
@@ -587,4 +587,24 @@ const checksCompiled = await minify(`${desktopRoot}\n${desktopChecks}`, {
 assert.equal(inspectRenderer(checksCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-cowork-permission-wiring").length, 1,
   "a mangled Desktop root and slot must still be spliced");
+// The main process bundles the same schema and runs the Gateway connection test
+// and model discovery there, so the renderer splice alone leaves the process
+// that dials the endpoint still refusing it. patchEmbeddedSources applies only
+// the Gateway URL splice to an already-extracted app archive, where the
+// renderer's required patches do not exist and must not be demanded.
+const embedded = patchEmbeddedSources(new Map([["main.js", gatewayUrlSchema]]));
+assert.equal(embedded.patches.length, 1, "the main bundle's copy must be spliced");
+assert.ok(embedded.sources.get("main.js").includes("!!options.allowLoopbackHttp&&!0)"));
+assert.equal(patchEmbeddedSources(new Map([["main.js", gatewayUrlDecoy]])).patches.length, 0,
+  "a main bundle without that copy is left alone, not refused");
+const bothEntries = patchEmbeddedSources(new Map([
+  ["index.pre.js", gatewayUrlSchema], ["index.chunk.js", gatewayUrlSchema]]));
+assert.equal(bothEntries.patches.length, 2,
+  "an archive that builds the schema into two entries splices both");
+assert.ok([...bothEntries.sources.values()].every(text => text.includes("&&!0)")));
+const embeddedCompiled = await minify(gatewayUrlSchema, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(patchEmbeddedSources(new Map([["main.js", embeddedCompiled.code]])).patches.length, 1,
+  "a re-minified main bundle must still be spliced");
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

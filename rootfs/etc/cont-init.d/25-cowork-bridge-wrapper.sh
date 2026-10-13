@@ -12,6 +12,8 @@ patched_injection_file="$state_dir/patched.injection"
 asar_cli=/opt/claude-cowork-bridge/asar/node_modules/@electron/asar/bin/asar.js
 injection_dir=/opt/claude-cowork-bridge/injection/bridge-wrapper
 package_patcher=/opt/claude-cowork-bridge/patch-package.mjs
+main_process_patcher=/opt/claude-cowork-bridge/patch-main-process.mjs
+renderer_patcher=/opt/claude-cowork-bridge/renderer-patches.mjs
 renderer_preparer=/opt/claude-cowork-bridge/prepare-renderer.mjs
 requested_mode="vm"
 [ "${CLAUDE_COWORK_HOST_BASH:-0}" != "1" ] || requested_mode="container-host"
@@ -39,7 +41,7 @@ patched_injection=""
 # survive on a writable layer (or any preserved resources dir) even though the
 # image was rebuilt with a new bridge-wrapper; its sha still matches patched.sha256,
 # so keying on the archive alone would silently keep serving the previous wrapper.
-injection_sha="$(find "$injection_dir" "$package_patcher" -type f \
+injection_sha="$(find "$injection_dir" "$package_patcher" "$main_process_patcher" "$renderer_patcher" -type f \
     | LC_ALL=C sort | xargs -r sha256sum | sha256sum | awk '{ print $1 }')"
 
 if [ "${COWORK_BRIDGE_ENABLED:-0}" != "1" ]; then
@@ -77,6 +79,11 @@ patched_asar="$tmp_dir/app.asar"
 rm -rf "$extract_dir/bridge-wrapper"
 cp -a "$injection_dir" "$extract_dir/bridge-wrapper"
 /usr/bin/node "$package_patcher" "$extract_dir/package.json"
+# The main process carries its own copy of the Gateway URL schema, and the
+# connection test and model discovery run there rather than in the renderer, so
+# the renderer splice alone leaves the process that dials the endpoint still
+# refusing it.
+/usr/bin/node "$main_process_patcher" "$extract_dir"
 /usr/bin/node "$asar_cli" pack "$extract_dir" "$patched_asar" --unpack '**/*.node'
 test -s "$patched_asar"
 

@@ -833,6 +833,34 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   return { evidence, patches };
 }
 
+// The Desktop main process bundles its own copy of the same URL schema, and the
+// Gateway connection test (Custom3pHelperRun.probeInference) and its model
+// discovery run *there*, not in the renderer. So the renderer splice only gets a
+// deployment's endpoint as far as the settings field: the main process validates
+// it again on the way out and refuses an http URL off the loopback, which is
+// what a "Connection test failed. The endpoint URL was rejected." is. This
+// applies only the Gateway URL splice, to the app archive the wrapper already
+// extracts and repacks — the renderer's own required patches have no meaning
+// there.
+export function patchEmbeddedSources(sources) {
+  const output = new Map(sources);
+  const patches = [];
+  for (const [path, source] of sources) {
+    const applied = inspectRenderer(source, false, false).patches
+      .filter(patch => patch.id === gatewayLoopbackHttpPatchId);
+    if (!applied.length) continue;
+    let text = source;
+    for (const patch of [...applied].sort((a, b) => b.start - a.start)) {
+      text = text.slice(0, patch.start) + patch.replacement + text.slice(patch.end);
+    }
+    // Parse the result before it is written back, as the renderer path does.
+    parse(text, { ecmaVersion: "latest", sourceType: "module" });
+    output.set(path, text);
+    for (const patch of applied) patches.push({ path, ...patch });
+  }
+  return { sources: output, patches };
+}
+
 export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false) {
   const matches = new Map();
   const markers = new Map(markerIds.map(id => [id, []]));

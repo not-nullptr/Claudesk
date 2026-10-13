@@ -32,6 +32,19 @@ patches, whose absence degrades silently — it is not a required patch: if the
 copy changes upstream the schema keeps its guard, Desktop refuses the
 deployment's URL, and the gateway visibly stops answering.
 
+The same schema is bundled a second time into the Desktop **main process**, and
+the Gateway connection test (`Custom3pHelperRun.probeInference`) and its model
+discovery run there rather than in the renderer. Patching only the renderer
+therefore gets a deployment's endpoint as far as the settings field and no
+further: the process that actually dials it validates the URL again and refuses
+an http host off the loopback. `patch-main-process.mjs` applies the same splice
+to the already-extracted app archive in `25-cowork-bridge-wrapper.sh`, against
+`.vite/build/**/*.js`, and drops the V8 code cache for any entry it rewrites so
+the patched source cannot be served from a stale cache. It is deliberately
+unforgiving — the archive it ships with builds the schema into two entries and
+each must match exactly once, so drift fails container start rather than
+producing a deployment whose gateway silently cannot be dialled.
+
 The file pane's streaming download button is selected by the file pane's
 trailing actions fragment: a two-element `children` array holding a
 session-scoped search button and a session-scoped anchor control, on the right
