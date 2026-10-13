@@ -52,7 +52,7 @@ services:
       CLAUDE_GATEWAY_ENV_AUTHORITATIVE: "${CLAUDE_GATEWAY_ENV_AUTHORITATIVE:-0}"
       CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:?Set CLAUDE_GATEWAY_API_KEY in .env}"
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
-      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:-}"
       # Model Auto permission mode's safety classifier falls back to on this
       # gateway (exported as ANTHROPIC_DEFAULT_OPUS_MODEL by startapp.sh). A
       # model the gateway serves; empty keeps the built-in resolution. See
@@ -173,7 +173,7 @@ services:
       COWORK_REMOTE_PREVIEW_MAX_BYTES: "${COWORK_REMOTE_PREVIEW_MAX_BYTES:-52428800}"
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
-      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"
+      CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:-}"
       # Browser notifications: Web Push subscriptions, the VAPID key they are
       # bound to and the notification-preferences the settings panel writes, all
       # kept here so a restart does not drop every subscription. Contact address

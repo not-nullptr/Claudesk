@@ -90,7 +90,12 @@ case "$auth_scheme" in
         ;;
 esac
 
-if [ -z "$models_json" ] || ! printf '%s' "$models_json" \
+# An empty list is meaningful, and is what a gateway that serves GET /v1/models
+# wants: the Desktop discovers the routes off the endpoint instead of being
+# handed a fixed set, and the model picker fills from what the gateway reports.
+# A non-empty list is still validated, so a typo cannot silently pin the picker
+# to a route the gateway does not serve.
+if [ -n "$models_json" ] && ! printf '%s' "$models_json" \
     | jq -e '
         type == "array"
         and length > 0
@@ -100,8 +105,11 @@ if [ -z "$models_json" ] || ! printf '%s' "$models_json" \
             (type == "object" and (.name | type == "string" and length > 0))
         )
     ' >/dev/null; then
-    printf '[claude-config] ERROR: CLAUDE_INFERENCE_MODELS_JSON must contain model names or model objects with a name\n' >&2
+    printf '[claude-config] ERROR: CLAUDE_INFERENCE_MODELS_JSON must be empty, or hold model names / model objects with a name\n' >&2
     exit 1
+fi
+if [ -z "$models_json" ]; then
+    models_json=null
 fi
 
 if [ -n "$allowed_egress_hosts_json" ] && ! printf '%s' "$allowed_egress_hosts_json" \
@@ -144,12 +152,12 @@ jq -n \
         inferenceGatewayApiKey: $api_key,
         inferenceGatewayAuthScheme: $auth_scheme,
         inferenceCredentialKind: "static",
-        inferenceModels: $models,
         disableDeploymentModeChooser: ($remote == "0"),
         chatTabEnabled: true,
         coworkTabEnabled: true,
         isClaudeCodeForDesktopEnabled: ($code == "1")
-    } + if $desktop_home == "" then {} else {desktopHome: $desktop_home} end
+    } + if $models == null then {} else {inferenceModels: $models} end
+      + if $desktop_home == "" then {} else {desktopHome: $desktop_home} end
       + if $allowed_egress_hosts == null then {} else {coworkEgressAllowedHosts: $allowed_egress_hosts} end)' > "$tmp_file"
 
 # The official Desktop builds its top-level Developer menu only when the
