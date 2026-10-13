@@ -12,7 +12,7 @@ set -eu
 #
 # Run as the deploy user, not as root: the pull lands in their checkout. The
 # steps that need root ask for it. Accounts are reconciled CLAUDESK_RECONCILE_JOBS
-# (default 4) at a time.
+# (default 8) at a time.
 
 project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 cd "$project_dir"

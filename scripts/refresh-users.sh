@@ -2,7 +2,7 @@
 #
 # Recreate every account that already has an instance.
 #
-#   [CLAUDESK_RECONCILE_JOBS=4] sudo scripts/refresh-users.sh
+#   [CLAUDESK_RECONCILE_JOBS=8] sudo scripts/refresh-users.sh
 #
 # Run after the image has been rebuilt — `deploy.sh` does exactly that, then
 # calls this — so a fix that lives in the image (the container init, the bridge,
@@ -18,7 +18,7 @@
 #
 # What it does cost: anyone mid-turn is interrupted. Transcripts persist, but a
 # session running while this walks the accounts ends where it stands. Accounts
-# are recreated CLAUDESK_RECONCILE_JOBS (default 4) at a time, so a roll-out also
+# are recreated CLAUDESK_RECONCILE_JOBS (default 8) at a time, so a roll-out also
 # starts that many instances at once — mind the memory each one peaks at.
 set -eu
 

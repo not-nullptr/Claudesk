@@ -2,7 +2,7 @@
 #
 # Provision an instance for every account that still needs one.
 #
-#   [CLAUDESK_RECONCILE_JOBS=4] scripts/converge-users.sh
+#   [CLAUDESK_RECONCILE_JOBS=8] scripts/converge-users.sh
 #
 # Run as root — it drives Docker and creates directories owned by PUID:PGID.
 # authd itself never does; that is the point.

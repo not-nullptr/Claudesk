@@ -137,7 +137,7 @@ runtime, and no internet-facing service ever holds the Docker socket.
   sudo scripts/install-reconciler.sh /opt/claudesk-v2 v2
   ```
 
-  Provisioning runs `CLAUDESK_RECONCILE_JOBS` (default 4) accounts at a time —
+  Provisioning runs `CLAUDESK_RECONCILE_JOBS` (default 8) accounts at a time —
   mind the memory each instance peaks at.
 
 Putting an instance up is also where an account's **privileges** are decided
@@ -206,7 +206,7 @@ account only when its containers are recreated. `deploy.sh` does the whole
 roll-out: it pulls the checkout, builds and recreates the deployment's own
 services, recreates every provisioned account's instance (`scripts/refresh-users.sh`),
 and then provisions any account still pending (`scripts/converge-users.sh`).
-Both passes run `CLAUDESK_RECONCILE_JOBS` (default 4) at a time.
+Both passes run `CLAUDESK_RECONCILE_JOBS` (default 8) at a time.
 
 ```bash
 ./deploy.sh          # as the deploy user; it asks for root where it needs it

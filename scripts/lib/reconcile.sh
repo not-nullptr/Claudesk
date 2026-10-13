@@ -6,7 +6,7 @@
 #   reconcile_list PROJECT_DIR LIST_FILE
 #
 # Runs scripts/provision-user.sh once per non-empty line of LIST_FILE, at most
-# CLAUDESK_RECONCILE_JOBS (default 4) at a time. Each account's output is
+# CLAUDESK_RECONCILE_JOBS (default 8) at a time. Each account's output is
 # captured and printed only if it fails, so a parallel run stays readable. The
 # counts are left in RECONCILE_OK and RECONCILE_FAIL, and the function returns
 # non-zero when any account failed.
@@ -32,11 +32,11 @@ provision_one() {
 reconcile_list() {
     project_dir="$1"
     list_file="$2"
-    jobs="${CLAUDESK_RECONCILE_JOBS:-4}"
+    jobs="${CLAUDESK_RECONCILE_JOBS:-8}"
     case "$jobs" in
-        ''|*[!0-9]*) jobs=4 ;;
+        ''|*[!0-9]*) jobs=8 ;;
     esac
-    [ "$jobs" -ge 1 ] || jobs=4
+    [ "$jobs" -ge 1 ] || jobs=8
 
     results="$(mktemp -d)"
     running=0
