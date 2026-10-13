@@ -1,0 +1,28 @@
+[package]
+name = "authd"
+version = "0.1.0"
+edition = "2021"
+description = "First-class authentication and account service for Claudesk (Eva Mode)"
+license = "UNLICENSED"
+publish = false
+
+[dependencies]
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["cookie"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+argon2 = "0.5"
+time = "0.3"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
