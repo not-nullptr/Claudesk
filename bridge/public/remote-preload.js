@@ -1536,26 +1536,60 @@
   // holds it, so its cookie is what has to go; the browser then lands on the
   // sign-in page, where the proxy sends anyone without a session. Captured on
   // the document, so the menu's own handler never runs, exactly as the
-  // Inference configuration item is handled above. The label is the bundle's
-  // own copy, and both of its wordings are accepted.
-  if (config.authdSessions) {
-    const signOutLabels = new Set(["sign out", "log out"]);
+  // Inference configuration item is handled above.
+  //
+  // The item is found two ways, because it is a menu row rather than a plain
+  // button. The click is walked with `composedPath`, since the renderer uses
+  // shadow DOM in places and `closest` cannot see past a retargeted event; and
+  // the label is matched as a phrase rather than by equality, since the row may
+  // carry a shortcut hint beside its copy ("Sign out ⌘Q"). Both of the bundle's
+  // wordings are accepted, and its own test ids and class names are believed
+  // over the label when they say "sign out".
+  const installSignOutInterceptor = () => {
+    const signOutLabel = /\b(?:sign|log)\s?out\b/;
+    const signOutHint = /sign-?out|log-?out/i;
+    const identifies = (node) => {
+      const hint = `${node.getAttribute("data-testid") || ""} ${node.id || ""}`
+        + ` ${typeof node.className === "string" ? node.className : ""}`;
+      if (signOutHint.test(hint)) return true;
+      const label = String(node.textContent || "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+      // Bounded, so a container that merely wraps the item is not mistaken for it.
+      return label.length > 0 && label.length <= 24 && signOutLabel.test(label);
+    };
     document.addEventListener("click", (event) => {
-      const item = event.target instanceof Element
-        ? event.target.closest('[role="menuitem"], button, a')
-        : null;
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const nodes = (path.length ? path : [event.target])
+        .filter((node) => node instanceof Element);
+      const item = nodes.find((node) =>
+        node.matches?.('[role="menuitem"], button, a, [data-testid]') && identifies(node));
       if (!item) return;
-      const label = String(item.textContent || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLocaleLowerCase();
-      if (!signOutLabels.has(label)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       fetch("/api/auth/logout", { method: "POST", credentials: "include" })
         .catch(() => undefined)
         .then(() => globalThis.location.assign("/login"));
     }, true);
+    console.info("[claudesk] Sign out ends the session at the auth service, not at claude.ai");
+  };
+
+  // Whether the deployment's auth service is behind this app, judged two ways:
+  // the bridge says so when its identity seam is filled, and the session route
+  // says so when it is not. The environment variable that fills that seam has
+  // gone missing on a live deployment before, and a Sign out that quietly does
+  // the app's own thing is the kind of failure nobody notices until the moment
+  // they want to leave.
+  if (config.authdSessions) {
+    installSignOutInterceptor();
+  } else {
+    globalThis.fetch("/api/auth/me", { credentials: "include" })
+      .then(async (response) => {
+        const body = await response.json().catch(() => null);
+        // authd's own envelope is `{"error": …}`; the bridge's carries `ok`.
+        const isAuthd = body && typeof body === "object"
+          && typeof body.error === "string" && !("ok" in body);
+        if (response.ok || isAuthd) installSignOutInterceptor();
+      })
+      .catch(() => undefined);
   }
   // END sign out
 
