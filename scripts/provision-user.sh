@@ -96,12 +96,19 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 # gateway chain is box-level and already running; the socat relay reaches it over
 # gateway_net, so this stack never declares shitproxy/gateway. The identity comes
 # from the account, not from authd (each instance is one person).
+# Eva semantics, set here rather than inherited from the shared .env:
+#   - inference goes through this account's relay into the box-level chain
+#     (relay → caddy `gateway` → shitproxy), not straight at the router;
+#   - no Code surface.
+# Both are overridable for a deployment that wants something else.
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
 CLAUDESK_NAME_PREFIX="$slug-" \
 COWORK_WEB_PORT="$port" \
 CLAUDE_REMOTE_ACCOUNT_NAME="$first_name" \
 CLAUDE_REMOTE_ACCOUNT_EMAIL="$user_email" \
+CLAUDE_GATEWAY_BASE_URL="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://127.0.0.1:4000}" \
+CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 AUTH_IDENTITY_URL='' \
 compose_shared --project-name "claudesk-$slug" \
     up -d claude-desktop cowork-bridge claude-gateway-loopback

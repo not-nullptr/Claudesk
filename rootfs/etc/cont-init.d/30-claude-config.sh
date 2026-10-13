@@ -272,15 +272,28 @@ if [ "$remote_gateway_settings" = "1" ]; then
             rm -f "$egress_tmp"
             printf '[claude-config] applied explicit egress policy from environment\n'
         fi
+        # The Code surface follows the environment both ways, like the egress and
+        # desktop-home flags below: a deployment that turns Code off has to turn
+        # it off in an existing writable configuration, not merely fail to turn
+        # it on. Only write when it actually differs, so a steady state does not
+        # rewrite the file on every boot.
         if [ "$remote_code_actions" = "1" ]; then
+            code_enabled=true
+        else
+            code_enabled=false
+        fi
+        if [ "$(jq -r '.isClaudeCodeForDesktopEnabled // empty' \
+                "$config_library/$applied_id.json")" != "$code_enabled" ]; then
             code_tmp="$(mktemp "$config_library/.code.XXXXXX")"
-            jq '. + {isClaudeCodeForDesktopEnabled: true}' \
+            jq --argjson enabled "$code_enabled" \
+                '. + {isClaudeCodeForDesktopEnabled: $enabled}' \
                 "$config_library/$applied_id.json" > "$code_tmp"
             install -o "$user_id" -g "$group_id" -m 0600 \
                 "$code_tmp" "$config_library/$applied_id.json"
             rm -f "$code_tmp"
-            printf '[claude-config] official Code surface enabled from environment\n'
         fi
+        printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s\n' \
+            "$remote_code_actions"
         # Unified Claude follows the environment the same way as the Code flag,
         # but only while the variable is set: an unset value leaves whatever the
         # Setup window last wrote to the writable configuration.
