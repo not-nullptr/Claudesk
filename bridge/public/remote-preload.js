@@ -1523,6 +1523,35 @@
   }
   // END login shell
 
+  // BEGIN sign out
+  // The account menu's "Sign out", and the whole-page one, end a claude.ai
+  // session — which is not what holds this one. The deployment's auth service
+  // holds it, so its cookie is what has to go; the browser then lands on the
+  // sign-in page, where the proxy sends anyone without a session. Captured on
+  // the document, so the menu's own handler never runs, exactly as the
+  // Inference configuration item is handled above. The label is the bundle's
+  // own copy, and both of its wordings are accepted.
+  if (config.authdSessions) {
+    const signOutLabels = new Set(["sign out", "log out"]);
+    document.addEventListener("click", (event) => {
+      const item = event.target instanceof Element
+        ? event.target.closest('[role="menuitem"], button, a')
+        : null;
+      if (!item) return;
+      const label = String(item.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase();
+      if (!signOutLabels.has(label)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      fetch("/api/auth/logout", { method: "POST", credentials: "include" })
+        .catch(() => undefined)
+        .then(() => globalThis.location.assign("/login"));
+    }, true);
+  }
+  // END sign out
+
   function createCodePreferences() {
     const listeners = new Set();
     let timer, previous;

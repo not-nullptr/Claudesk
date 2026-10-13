@@ -92,8 +92,9 @@ const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().
 // session-placement policy below is the one deliberate exception, flipping a
 // single settings flag. A default
 // deployment, and the Desktop shell, never reach any of this. This is identity
-// only: there is no login/logout session yet — `resolveAccountIdentity` is the
-// seam a future auth layer fills with a per-session identity (see docs/web-shell.md).
+// only: the session itself belongs to the auth service (see docs/eva-mode.md),
+// which is also where the account menu's own "Sign out" is pointed — the preload
+// replaces that item's claude.ai logout with one that ends the real session.
 function accountEnv(name, max) {
   return String(process.env[name] || "").trim().slice(0, max);
 }
@@ -2793,6 +2794,11 @@ async function serveOfficialIndex(response) {
   const config = {
     configuredModels,
     loginShell: loginShellEnabled,
+    // The deployment's own auth service holds the session, so the account menu's
+    // own "Sign out" — which ends a claude.ai session — is replaced by the
+    // preload with one that ends that. Only meaningful where the identity seam
+    // is filled.
+    authdSessions: Boolean(authIdentityUrl),
     // A login shell is a public page, so it seeds none of the instance's own
     // state: the interactive-auth store carries the operator's display name and
     // the chat session list is theirs. The sign-in page reads neither.

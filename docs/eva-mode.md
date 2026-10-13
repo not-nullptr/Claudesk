@@ -220,6 +220,14 @@ and **404 when the person has no photo**, which is the chrome's cue to fall back
 to the default mark. Photos are stored beside the account in authd's SQLite, up
 to 2 MiB (PNG/JPEG/WebP/GIF/AVIF).
 
+**Signing out** is the same seam read the other way. The app's own "Sign out"
+ends a claude.ai session, which is not what holds this one, so the preload
+replaces it wherever it appears — the account menu's item and the whole-page
+button, both matched by their own copy — with a `POST /api/auth/logout` against
+authd and a trip back to the sign-in page. That only applies where
+`AUTH_IDENTITY_URL` is set: the bridge tells the preload so, and a deployment
+without the auth service keeps the app's own behaviour.
+
 ### The sign-in page
 
 `/login` and `/accept-invite` are a hand-port of **Claude's own sign-in screen**,
