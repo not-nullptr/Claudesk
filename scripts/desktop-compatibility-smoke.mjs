@@ -41,7 +41,7 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, webShell === "1" ? 15 : gateway === "1" ? 7 : 5);
+    assert.equal(manifest.patches.length, webShell === "1" ? 16 : gateway === "1" ? 8 : 6);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
@@ -96,16 +96,20 @@ try {
   // structural read-back, so only the always-on and Gateway targets run here.
   for (const compress of [false, { passes: 2 }]) {
     const changed = new Map(originals);
-    for (const [i, patch] of gatewayManifest.patches.entries()) {
-      const source = originals.get(patch.path);
+    // One moved file per patched source, not per patch: a chunk can carry several
+    // targets (the user-menu chunk holds the provider card and the Sign out flag),
+    // and re-adding it once per target would duplicate its patches.
+    const patchedPaths = [...new Set(gatewayManifest.patches.map(patch => patch.path))];
+    for (const [i, path] of patchedPaths.entries()) {
+      const source = originals.get(path);
       const compiled = await minify(source, { module: true, compress,
         mangle: { toplevel: true }, format: { quote_style: 1 } });
       assert.ok(compiled.code);
-      changed.delete(patch.path);
+      changed.delete(path);
       changed.set(`moved/chunk-${i}.js`, compiled.code);
     }
     const patched = patchRendererSources(changed, true);
-    assert.equal(patched.patches.length, 7);
+    assert.equal(patched.patches.length, 8);
     assert.ok(patched.patches.every(patch => patch.path.startsWith("moved/")));
     assert.equal(patched.markers.length, 4);
   }

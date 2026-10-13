@@ -203,6 +203,26 @@ a member expression or additional statements refuses — and that property name
 appears nowhere else in the renderer graph, so a lookalike helper cannot
 establish the target. Spliced only in web-shell mode.
 
+The user menu's "Sign out" row exists only when the app believes it holds a
+login. The menu builds its flags from `signOut: !!loginDesktop3pStatus`, and
+that status is the bootstrap's own `login` — written by the *writable* 3P
+configuration — or, absent that, the `Custom3pSetup.getLoginDesktop3pStatus`
+IPC, which the bridge serves only with the writable Gateway library enabled. A
+managed account has neither, so the app draws no row and the browser-side
+preload had to clone a neighbouring menu item, which never carried the menu's
+own icon, hover styling or keyboard handling. The deployment's auth service is
+what holds an account's session, and the preload replaces the row's click
+wherever it appears, so the row only has to exist: the `account-sign-out-row`
+patch forces the flag's value to `true`, and the app renders its genuine item
+(`icon` `Logout`). It is selected structurally: the single object literal
+carrying `signOut` beside `inferenceConfig` and `internalTools` — all
+non-mangled property names, and no other literal in the graph carries that trio
+— and only the `signOut` value is spliced, so `inferenceConfig` and every other
+flag are untouched. Applied independent of the Gateway setting and in either
+shell, and **required**: a managed account has no other sign-out, so a bundle
+that no longer matches must fail candidate preparation rather than silently drop
+it.
+
 Cowork tool permissions — the AskUserQuestion and tool-approval cards — are fed
 by the app's pending-permission store, and the only thing that wires that store
 (its subscription to the session event stream plus the

@@ -1556,38 +1556,14 @@
     return label.length > 0 && label.length <= 24 && signOutLabel.test(label);
   };
 
-  // The app offers its own Sign out only when it believes it holds a login, and
-  // a managed 3P account has none to report (`signOut` comes from the
-  // bootstrap's `login`, which the writable configuration is what writes). The
-  // session still exists — authd's — so offer a row for it: a clone of the last
-  // row the menu already has, wearing the menu's own classes, with its label
-  // swapped. The clone carries no React handler, since React's are keyed to the
-  // tree it built, so the only thing that answers it is the interceptor below.
-  const ensureSignOutRow = () => {
-    const items = [...document.querySelectorAll('[role="menuitem"]')];
-    if (!items.length) return;
-    if (items.some(identifiesSignOut)) return;
-    const template = items[items.length - 1];
-    const menu = template.parentElement;
-    if (!menu || menu.querySelector("[data-claudesk-sign-out]")) return;
-    const clone = template.cloneNode(true);
-    clone.setAttribute("data-claudesk-sign-out", "1");
-    for (const node of [clone, ...clone.querySelectorAll("[data-testid], [id], [aria-keyshortcuts]")]) {
-      node.removeAttribute("data-testid");
-      node.removeAttribute("id");
-      node.removeAttribute("aria-keyshortcuts");
-    }
-    // Swap the label where it sits, so the row keeps the menu's typography, and
-    // drop any shortcut hint that belonged to the row this was cloned from.
-    const label = String(template.textContent || "").replace(/\s+/g, " ").trim();
-    const labelled = [...clone.querySelectorAll("*")].filter((node) =>
-      String(node.textContent || "").replace(/\s+/g, " ").trim() === label);
-    const target = labelled[labelled.length - 1] ?? clone;
-    target.textContent = "Sign out";
-    for (const hint of clone.querySelectorAll("kbd, [class*='shortcut']")) hint.remove();
-    menu.append(clone);
-  };
-
+  // The app renders its own Sign out only when its login-status seam reports a
+  // login, which a managed 3P account lacks (`signOut` comes from the
+  // bootstrap's `login`, written by the writable configuration). The renderer
+  // patch (`account-sign-out-row`) forces that flag so the app draws its real
+  // item — icon, hover and keyboard handling and all — on every deployment,
+  // where before the preload cloned a neighbouring row and lost all three. So
+  // there is nothing to add here: the row exists, and the interceptor below is
+  // the only thing that answers it (React will not, being keyed to its own tree).
   const installSignOutInterceptor = () => {
     document.addEventListener("click", (event) => {
       const path = typeof event.composedPath === "function" ? event.composedPath() : [];
@@ -1602,23 +1578,6 @@
         .catch(() => undefined)
         .then(() => globalThis.location.assign("/login"));
     }, true);
-    ensureSignOutRow();
-    // Only a mutation that brings a menu in is worth a look: the app repaints
-    // constantly, and scanning the document on every one of those would be a
-    // cost paid on every token it streams.
-    const observer = new MutationObserver((records) => {
-      for (const record of records) {
-        for (const node of record.addedNodes) {
-          if (!(node instanceof Element)) continue;
-          if (node.matches?.('[role="menu"], [role="menuitem"]')
-            || node.querySelector?.('[role="menuitem"]')) {
-            ensureSignOutRow();
-            return;
-          }
-        }
-      }
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
     console.info("[claudesk] Sign out ends the session at the auth service, not at claude.ai");
   };
 

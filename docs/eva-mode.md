@@ -277,14 +277,15 @@ authd and a trip back to the sign-in page. That only applies where
 `AUTH_IDENTITY_URL` is set: the bridge tells the preload so, and a deployment
 without the auth service keeps the app's own behaviour.
 
-Where the app renders no such row at all, the preload adds one. The app offers
-its own only when it believes it holds a login (`signOut` comes from the
-bootstrap's `login`, which is written by the *writable* configuration — so an
-admin's instance has one and a managed account legitimately does not, even
-though authd holds a session for both). The added row is a clone of the last row
-the menu already has, wearing the menu's own classes with its label swapped and
-its test ids stripped; the clone carries no React handler, so the only thing
-that answers it is the same interceptor.
+The app renders its own row only when it believes it holds a login (`signOut`
+comes from the bootstrap's `login`, which is written by the *writable*
+configuration — so an admin's instance has one and a managed account
+legitimately does not, even though authd holds a session for both). A renderer
+patch (`account-sign-out-row`) forces that flag true, so the app draws its
+genuine menu item — icon, hover styling and keyboard handling included — on
+every deployment, where a managed account previously got a clone of a
+neighbouring row that carried none of them. The preload then only has to
+intercept the click, exactly as it already did for the row an admin had.
 
 ### The sign-in page
 

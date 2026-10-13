@@ -16,9 +16,10 @@ const guards = 'function signin(){const code=user.pendingUserCode;let changedFla
 const filePane = 'function fileHeader(){const Dl=()=>null;const k=$(t=>e==="file"?t.fileView:void 0);'
   + 'g(Dl,{variant:"ghost",iconOnly:!0,icon:"Download"});'
   + 'return e==="file"&&v(p,{children:[g(Kg,{sessionRef:C}),g(Um,{sessionRef:C,anchorRef:oe})]});}';
-// The provider-card and native-preview targets are required patches like the
-// download button, so the fragment carries all three; every rejection case below
-// still contains them and only drifts in its own anchor.
+// The download button, provider card, native preview and Sign out flag are all
+// required patches, so the fragment carries the download button in `filePane` and
+// the rest in `alwaysOn`; every rejection case below still contains them and only
+// drifts in its own anchor.
 const bannerCard = 'function bannerModule(){const providerCard=wrap(function({compact:e,fallback:t}){'
   + 'let s=useStore();if(s.hidden)return t??null;'
   + 'return e?h("div",{children:s.provider})'
@@ -29,7 +30,11 @@ const previewComponent = 'function NativePreview({sessionId:i,filePath:v,cacheBu
   + 'return s("div",{className:"h-full w-full relative overflow-hidden",children:['
   + 'ready==null?null:s(Spinner,{className:"absolute inset-0 flex items-center justify-center"}),'
   + 'caption&&s("img",{src:caption.src,alt:""})]});}';
-const alwaysOn = `${bannerCard}\n${previewComponent}`;
+// The user menu's flags object, whose `signOut` the patcher forces true so a
+// managed account still gets the app's own Sign out row.
+const userMenuFlags = 'function menuFlags(){return {hasAccount:!!a,inferenceConfig:e,'
+  + 'internalTools:t,signOut:s}}';
+const alwaysOn = `${bannerCard}\n${previewComponent}\n${userMenuFlags}`;
 function prepare(version = release.desktopVersion) {
   return spawnSync(process.execPath, [join(root,
     "rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs"), ion, state, releasePath], {

@@ -111,6 +111,15 @@ const accountMenuNameDecoys = '// principalDisplayName\n'
   + 'function callWithArgs(){return accountStoreHook(user)?.principalDisplayName}'
   + 'function notACall(){return account.principalDisplayName}'
   + 'function multiStatement(){track();return accountStoreHook(who)?.principalDisplayName}';
+// The user menu's flags object: the one literal carrying `signOut` beside
+// `inferenceConfig` and `internalTools`. The patcher forces only `signOut` true
+// so the app draws its own Sign out row whether or not a writable login reports
+// one. A literal missing a sibling name, or carrying only `signOut`, is not a
+// target, and no flag but `signOut` may be spliced.
+const accountSignOut = 'function menuFlags(){return {hasAccount:!!a,'
+  + 'inferenceConfig:e&&!!r&&Zt(r),internalTools:t,signOut:s}}';
+const accountSignOutDecoys = 'function twoNames(){return {signOut:s,internalTools:t}}'
+  + 'function oneName(){return {signOut:s}}';
 // The Desktop signing gate spells the same reason with a member-expression test
 // and no declaring initialiser, so it must not be a target.
 const signingDecoy = 'function shouldSign(e,t){const n=x=>({kind:"skip",reason:x});'
@@ -210,10 +219,16 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
-  assert.equal(result.patches.length, 6);
+  assert.equal(result.patches.length, 7);
   const output = result.sources.get(`changed-chunk-${i}.js`);
+  assert.equal(result.patches.filter(p => p.id === "account-sign-out-row").length, 1,
+    "the user menu's signOut flag must be spliced exactly once");
+  assert.ok(output.includes("internalTools:t,signOut:!0}"),
+    "the app's own Sign out row must be forced on, and its sibling flags left alone");
+  assert.ok(output.includes("{signOut:s,internalTools:t}") && output.includes("{signOut:s}"),
+    "a literal without the sibling flags must not be spliced");
   assert.ok(output.includes('icon:"Download"'), "the file pane must gain the streaming download button");
   assert.ok(output.includes('/api/remote/files/download?path='), "the button must target the streaming endpoint");
   assert.ok(output.includes('target="_blank"'), "a refused download must not replace the app");
@@ -224,7 +239,7 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 14,
+  assert.equal(webResult.patches.length, 15,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
@@ -295,7 +310,7 @@ for (const [i, variant] of variants.entries()) {
   const disabled = patchRendererSources(inputs, false);
   assert.deepEqual(disabled.patches.map(patch => patch.id),
     ["file-pane-download", "inference-banner", "native-file-preview-bridge",
-      "gateway-url-any-host-http"],
+      "account-sign-out-row", "gateway-url-any-host-http"],
     "without the Gateway flag only the always-on patches are spliced");
   const disabledOutput = disabled.sources.get(`changed-chunk-${i}.js`);
   assert.ok(disabledOutput.includes('icon:"Download"'), "the download button stays on with the flag off");
@@ -304,7 +319,7 @@ for (const [i, variant] of variants.entries()) {
   const compiled = await minify(inputs.get(`changed-chunk-${i}.js`), {
     mangle: true, compress: { unused: false }, format: { quote_style: 1 },
   });
-  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 6,
+  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 7,
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
@@ -327,6 +342,17 @@ assert.ok(pickerPatches[0].original.startsWith("h(Switch,{")
 assert.equal(inspectRenderer(modePickerDecoys, false).patches
   .filter(patch => patch.id === "titlebar-mode-picker-without-code").length, 0,
   "an element that does not wrap the segments switcher is not the mode picker");
+// A `signOut` shorthand or method shares or owns its key's extent, so replacing
+// its value would corrupt the literal; only a genuine `signOut: <expr>` pair is
+// a target.
+assert.equal(inspectRenderer(
+  "function flags(){return {hasAccount:a,inferenceConfig:e,internalTools:t,signOut}}", false).patches
+  .filter(patch => patch.id === "account-sign-out-row").length, 0,
+  "a shorthand signOut must not be spliced");
+assert.equal(inspectRenderer(
+  "function flags(){return {hasAccount:a,inferenceConfig:e,internalTools:t,signOut(){}}}", false).patches
+  .filter(patch => patch.id === "account-sign-out-row").length, 0,
+  "a signOut method must not be spliced");
 const pickerCompiled = await minify(modePicker, {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
@@ -347,12 +373,12 @@ assert.equal(inspectRenderer(compiledSession.code, false, true).patches
 // platform call carrying arguments is not the sequence, and the splice
 // survives minification like the other structural read-backs.
 assert.throws(() => patchRendererSources(new Map([["no-placement.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
   /web-local-session-placement expected once, found 0/,
   "the web shell must refuse a renderer without the placement helper");
 assert.throws(() => patchRendererSources(new Map([["dup-placement.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}`
     + `\n${sessionPlacement}\n${sessionPlacement.replaceAll("placeSession", "placeSessionB")}\n${accountChip}\n${desktopRoot}`
     + `\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
   /web-local-session-placement expected once, found 2/);
@@ -371,20 +397,20 @@ assert.throws(() => patchRendererSources(new Map([["a.js", filePane], ["b.js", f
   /file-pane-download expected once, found 2/);
 // The web shell requires the alias splice: a renderer with no resolver refuses.
 assert.throws(() => patchRendererSources(new Map([["no-alias.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}`]]), false, true),
   /desktop-code-route-alias expected once, found 0/,
   "the web shell must refuse a renderer without the route-alias resolver");
 // ...and the session Desktop gate: a renderer whose session layout no longer
 // matches must be refused rather than ship a shell where every session bounces.
 assert.throws(() => patchRendererSources(new Map([["no-session-gate.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}`]]), false, true),
   /desktop-session-viewer-gate expected once, found 0/,
   "the web shell must refuse a renderer without the session Desktop gate");
 // ...and the account chip's avatar: a renderer whose chip still renders the
 // photo-less mark must be refused rather than ship a shell where a configured
 // pfp never renders (the chip never sets a source, so no image is requested).
 assert.throws(() => patchRendererSources(new Map([["no-chip.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`]]), false, true),
   /web-account-chip-avatar expected once, found 0/,
   "the web shell must refuse a renderer without the account-chip avatar");
 // Two chips (or a second photo-less account-view component) must refuse rather
@@ -392,7 +418,7 @@ assert.throws(() => patchRendererSources(new Map([["no-chip.js",
 const accountChipB = accountChip.replaceAll("chipMark", "chipMarkB")
   .replaceAll("accountHook", "accountHookB").replaceAll("accountAvatar", "accountAvatarB");
 assert.throws(() => patchRendererSources(new Map([["dup-chip.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${accountChipB}`]]), false, true),
   /web-account-chip-avatar expected once, found 2/);
 // The avatar component and the photo binding are structural read-backs, so the
@@ -410,14 +436,14 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
 // matches must be refused rather than ship a chip whose photo waits for the
 // profile read while the bootstrap account already carries it.
 assert.throws(() => patchRendererSources(new Map([["no-photo-hook.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChipBody}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]),
   false, true),
   /web-account-photo-first-frame expected once, found 0/,
   "the web shell must refuse a renderer without the account view hook");
 // Two view hooks must refuse rather than splice the fallback into the wrong one.
 assert.throws(() => patchRendererSources(new Map([["dup-photo-hook.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${accountChipHook.replaceAll("accountHook", "accountHookB")}`
     + `\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${accountMenuName}`]]), false, true),
   /web-account-photo-first-frame expected once, found 2/,
@@ -432,7 +458,7 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
   "a mangled account view hook must still be spliced once");
 // The full web-shell fixture set, reused for the identity-reader refusals below
 // and for the Desktop-checks success case.
-const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}`
+const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}`
   + `\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`;
 // ...and the user-menu identity: a renderer whose identity reader no longer
 // matches must be refused rather than ship a menu whose title flips to the
@@ -503,14 +529,14 @@ assert.equal(barePhoto.result, undefined,
 // longer matches must be refused rather than ship an enable action that dies in
 // a Firebase registration this deployment can never complete.
 assert.throws(() => patchRendererSources(new Map([["no-push-enable.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}`]]), false, true),
   /web-notifications-enable-bridge expected once, found 0/,
   "the web shell must refuse a renderer without the push-enablement function");
 // Two push-enablement functions must refuse rather than splice the branch into
 // the wrong one.
 assert.throws(() => patchRendererSources(new Map([["dup-push-enable.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n`
     + `${pushEnable.replaceAll("pushEnable", "pushEnableB")}`]]), false, true),
   /web-notifications-enable-bridge expected once, found 2/);
@@ -532,14 +558,15 @@ assert.equal(inspectRenderer(signingDecoy, false, true).patches
   .filter(patch => patch.id === "desktop-session-viewer-gate").length, 0,
   "a member-expression test naming the reason is not the session layout");
 assert.equal(patchRendererSources(new Map([["only.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false).patches
-  .map(patch => patch.id).join(","), "file-pane-download,inference-banner,native-file-preview-bridge");
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}`]]), false).patches
+  .map(patch => patch.id).join(","),
+    "file-pane-download,inference-banner,native-file-preview-bridge,account-sign-out-row");
 // Native checks also survive reverse comparisons, computed keys and formatting.
 const changedNative = "const error='rewindSession unavailable'; callbacks['rewindV2']; 229 == event['keyCode']; const actions={'edit': 'onEdit'};";
 assert.equal(patchRendererSources(new Map([["changed-native.js",
-  `${changedNative}\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false).markers.length, 4);
+  `${changedNative}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}`]]), false).markers.length, 4);
 assert.throws(() => patchRendererSources(new Map([["comments.js",
-  `/* ${native} */\n${filePane}\n${bannerCard}\n${previewComponent}`]]), false), /capability .* missing/);
+  `/* ${native} */\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}`]]), false), /capability .* missing/);
 // The card removal is required: its body is blanked wherever it is found, any
 // declaration or string naming the ids is ignored, and a bundle that no longer
 // matches is refused rather than letting the card return silently.
@@ -548,14 +575,14 @@ const bannerGuard = 'function signin(){const code=user.pendingUserCode;'
   + 'const route=()=>{const ok=(typeof window!=="undefined")'
   + '&&(window.location.protocol==="app:");router.replace("/new");return ok;};';
 const bannerInputs = new Map([["banner-chunk.js",
-  `${native}\n${bannerGuard}\n${filePane}\n${bannerCard}\n${previewComponent}\n${bannerDecoy}`]]);
+  `${native}\n${bannerGuard}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${bannerDecoy}`]]);
 const bannerOut = patchRendererSources(bannerInputs, true).sources.get("banner-chunk.js");
 assert.ok(!bannerOut.includes("model allowlist"), "the provider card copy must be removed");
 assert.ok(bannerOut.includes("const providerCard=wrap(function({compact:e,fallback:t}){return null;})"),
   "only the card component's body is replaced");
 assert.ok(bannerOut.endsWith(bannerDecoy), "a declaration or string naming the ids is not a target");
 assert.deepEqual(patchRendererSources(bannerInputs, false).patches.map(patch => patch.id).sort(),
-  ["file-pane-download", "inference-banner", "native-file-preview-bridge"],
+  ["account-sign-out-row", "file-pane-download", "inference-banner", "native-file-preview-bridge"],
   "the card is removed independent of the Gateway setting");
 assert.throws(() => patchRendererSources(new Map([["no-card.js", `${native}\n${filePane}`]]), false),
   /inference-banner expected once, found 0/,
@@ -574,7 +601,7 @@ const previewProbe = `const id="native-file-preview-error";\n${previewComponent}
 assert.ok(inspectRenderer(previewProbe, false).patches.some(patch => patch.id === "native-file-preview-bridge"),
   "the preview chunk's own token must trigger inspection without the other anchors");
 const previewInputs = new Map([["preview-chunk.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}`]]);
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}`]]);
 const previewOut = patchRendererSources(previewInputs, false).sources.get("preview-chunk.js");
 assert.ok(previewOut.includes(
   's("iframe",{src:"/api/remote/files/preview?path="+encodeURIComponent(v)'
@@ -585,7 +612,7 @@ assert.ok(previewOut.includes("/(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
 // Two preview containers, or a container whose props are not the ones read back,
 // must refuse rather than splice a preview that would never fire.
 assert.throws(() => patchRendererSources(new Map([["dup-preview.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n`
     + `${previewComponent.replace("function NativePreview", "function NativePreviewB")}`]]), false),
   /native-file-preview-bridge expected once, found 2/);
 assert.throws(() => patchRendererSources(new Map([["no-preview.js",
@@ -615,11 +642,11 @@ assert.ok(!patchRendererSources(checksInputs, false).sources.get("checks-chunk.j
   .includes("function desktopChecks(){wirePendingPermissions(api);"),
   "the wiring stays off without the web shell");
 assert.throws(() => patchRendererSources(new Map([["no-checks.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}`]]), false, true),
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}`]]), false, true),
   /web-cowork-permission-wiring expected once, found 0/,
   "the web shell must refuse a renderer without the Desktop-checks slot");
 assert.throws(() => patchRendererSources(new Map([["dup-checks.js",
-  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
+  `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}`
     + `\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n`
     + desktopChecks.replaceAll("desktopChecks", "desktopChecksB").replaceAll("otherChecks", "otherChecksB")]]),
   false, true), /web-cowork-permission-wiring expected once, found 2/,

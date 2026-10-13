@@ -186,6 +186,26 @@ const notificationEnableBranch = "{const __claudeskNotifications="
 const accountMenuNamePatchId = "web-account-menu-name";
 const accountNameSyncFallback = 'globalThis["claude.web"]?.LocalAgentModeSessions'
   + '?.interactiveAuthStore?.getStateSync?.()?.principalDisplayName';
+// The user menu's "Sign out" item. The app renders it only when its login-status
+// seam reports a login: the menu's flags object sets `signOut` from
+// `!!loginDesktop3pStatus`, and that status comes from the bootstrap's own
+// `login` — written by the *writable* 3P configuration — or, absent that, the
+// `Custom3pSetup.getLoginDesktop3pStatus` IPC, which the bridge serves only when
+// the writable Gateway library is enabled. A managed account has neither, so it
+// gets no row at all and the preload has had to clone one from a neighbouring
+// item — which never carries the menu's own icon or hover styling. The
+// deployment's auth service is what holds an account's session, and the preload
+// replaces the row's click wherever it appears, so only the row has to exist:
+// force the flag true and the app renders its own item (`icon` "Logout", native
+// hover, focus ring and keyboard handling), which the preload intercepts.
+//
+// Applied unconditionally, not only where the seam is filled: the environment
+// variable that fills it has gone missing on a live deployment before, and a row
+// that is present but runs the app's own handler is the safer failure — the
+// preload leaves that handler alone on a deployment with no auth service, where
+// it is the correct behaviour anyway. Required, unlike the mode picker: a bundle
+// that no longer matches degrades silently, removing Sign out entirely.
+const accountSignOutPatchId = "account-sign-out-row";
 // The titlebar's compact mode switcher — the "Claude"/"Code" pills at the top
 // right of the navbar. Its only job is to move between the home surface and the
 // Code surface, so a deployment with Code turned off (the managed default)
@@ -558,6 +578,27 @@ function accountMenuNameRead(node) {
   return identifier(call.callee) ? statements[0].argument : undefined;
 }
 
+// The user menu's flags object: the one object literal carrying `signOut`
+// beside `inferenceConfig` and `internalTools`. All three are non-mangled
+// property names, and no other literal in the graph carries that trio, so the
+// object is pinned without reading a single minified local. Returns the
+// `signOut` property's value — the expression to splice to `true`; an object
+// missing a sibling name, or whose `signOut` is a shorthand or method, is not a
+// target.
+function accountSignOutFlag(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const properties = node.properties.filter(entry => entry.type === "Property");
+  const names = properties.map(entry => entry.key.name ?? entry.key.value);
+  if (!["signOut", "inferenceConfig", "internalTools"].every(name => names.includes(name))) {
+    return undefined;
+  }
+  const entry = properties.find(candidate => key(candidate, "signOut"));
+  // A shorthand or method shares (or owns) the key's own extent, so replacing
+  // its value would corrupt the literal; only a genuine `signOut: <expr>` pair.
+  if (!entry || entry.shorthand || entry.method) return undefined;
+  return entry.value && unwrap(entry.value) ? entry.value : undefined;
+}
+
 // The provider card is the sole component passed to a wrapper call whose body
 // carries both of its message ids; declarations and unrelated helper functions
 // are not arguments, so they are not targets.
@@ -745,7 +786,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // the Desktop-checks slot by its own component label; the session-placement
   // helper by the force-local shrimp literal only it carries; the compact mode
   // switcher by its own `data-compact-mode-switcher` label.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher/.test(source)) {
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -768,6 +809,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: modePickerPatchId, start: node.start, end: node.end, original,
         replacement: `(${modePicker.segments}.some(__claudeskMode=>__claudeskMode.disabled)`
           + `?null:${original})` });
+    }
+    const signOutFlag = accountSignOutFlag(node);
+    if (signOutFlag) {
+      const original = source.slice(signOutFlag.start, signOutFlag.end);
+      patches.push({ id: accountSignOutPatchId, start: signOutFlag.start, end: signOutFlag.end,
+        original, replacement: "!0" });
     }
     if (webShellEnabled) {
       const chip = accountChipTarget(node);
@@ -921,6 +968,7 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     }
   }
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
+    accountSignOutPatchId,
     ...(webShellEnabled
       ? [routeAliasPatchId, sessionViewerPatchId, localSessionPlacementPatchId,
           accountChipPatchId, accountPhotoPatchId,
