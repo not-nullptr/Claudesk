@@ -17,6 +17,21 @@ and replacements. The two Gateway setup guards are selected by:
 - A window existence check for the setup route, or `pendingUserCode` for the
   sign-in route.
 
+The Gateway URL schema's host guard is selected by the schema's own error copy —
+the `must use https (or http on loopback)` branch of its `refine` message, which
+appears nowhere else in the renderer graph — together with the message property
+that carries it. Desktop accepts an http endpoint only when its host is in the
+loopback set, which a provisioned Cowork VM cannot use: the VM makes the model
+calls, and `127.0.0.1` inside the guest is the guest. The splice replaces the
+http branch's single `hostSet.has(hostname)` membership test with `true`, reading
+the hostname back from the object pattern the predicate destructures out of
+`new URL(…)`. Only that membership test changes, so a schema that does not allow
+http at all still refuses it and the https branch is untouched. It is applied
+independent of the Gateway setting, and — unlike the card removal and the pane
+patches, whose absence degrades silently — it is not a required patch: if the
+copy changes upstream the schema keeps its guard, Desktop refuses the
+deployment's URL, and the gateway visibly stops answering.
+
 The file pane's streaming download button is selected by the file pane's
 trailing actions fragment: a two-element `children` array holding a
 session-scoped search button and a session-scoped anchor control, on the right

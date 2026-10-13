@@ -153,6 +153,28 @@ const pushEnableDecoy = 'function pushEnableDecoy(){'
   + 'return{errorSource:"browser_or_permissions",note:text};}'
   + 'const pushEnableArrow=async()=>({errorSource:"browser_or_permissions",'
   + 'note:Notification.requestPermission,key:"claudeai.notification.permission.result"});';
+// The Gateway URL schema: refine() over the URL field, with the message
+// conditional that carries Desktop's loopback-http copy. The patcher splices the
+// http branch's host *membership* test, so a deployment can point Desktop at an
+// http gateway on a host that is not the container's loopback — the address a
+// provisioned Cowork VM actually has to dial. The https branch is untouched, and
+// a schema whose message lacks that copy, or one that does not allow http at
+// all, is not a target.
+const gatewayUrlSchema = 'function urlSchema(options={}){return wrap('
+  + 'preprocess(value=>{let text=value.trim();'
+  + 'return text&&!options.allowHttp&&!/^[a-z][a-z0-9+.-]*:\\/\\//i.test(text)?`https://${text}`:text},'
+  + 'string().trim().url().refine(raw=>{try{let{protocol:scheme,hostname:host}=new URL(raw);'
+  + 'return scheme==="https:"?!options.rejectLoopback||!isReserved(host)'
+  + ':scheme==="http:"&&(!!options.allowHttp||!!options.allowLoopbackHttp&&loopbackHosts.has(host))}'
+  + 'catch{return!1}},'
+  + '{message:options.allowHttp?"must be an http:// or https:// URL"'
+  + ':options.rejectLoopback?"must use https with a non-loopback host"'
+  + ':options.allowLoopbackHttp?"must use https (or http on loopback)":"must use https"})))}';
+// A schema that tests the same hostname but carries none of the copy: its
+// message is the plain https one, so it must not be spliced.
+const gatewayUrlDecoy = 'function strictSchema(o={}){return refine(raw=>{'
+  + 'let{protocol:p,hostname:h}=new URL(raw);return p==="https:"&&!hosts.has(h)},'
+  + '{message:"must use https"})}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -167,17 +189,21 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
-  assert.equal(result.patches.length, 5);
+  assert.equal(result.patches.length, 6);
   const output = result.sources.get(`changed-chunk-${i}.js`);
   assert.ok(output.includes('icon:"Download"'), "the file pane must gain the streaming download button");
   assert.ok(output.includes('/api/remote/files/download?path='), "the button must target the streaming endpoint");
   assert.ok(output.includes('target="_blank"'), "a refused download must not replace the app");
   assert.ok(output.includes('/api/remote/files/preview?path='), "the preview pane must target the bridge preview route");
   assert.ok(output.endsWith(decoy), "unrelated checks/comments/strings must remain byte-identical");
+  assert.ok(output.includes('!!options.allowLoopbackHttp&&!0)'),
+    "the gateway URL's http branch must accept a host that is not the container's loopback");
+  assert.ok(output.includes('!hosts.has(h)},'),
+    "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 13,
+  assert.equal(webResult.patches.length, 14,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
@@ -247,8 +273,9 @@ for (const [i, variant] of variants.entries()) {
   }
   const disabled = patchRendererSources(inputs, false);
   assert.deepEqual(disabled.patches.map(patch => patch.id),
-    ["file-pane-download", "inference-banner", "native-file-preview-bridge"],
-    "without the Gateway flag only the always-on download button, card removal and preview are spliced");
+    ["file-pane-download", "inference-banner", "native-file-preview-bridge",
+      "gateway-url-any-host-http"],
+    "without the Gateway flag only the always-on patches are spliced");
   const disabledOutput = disabled.sources.get(`changed-chunk-${i}.js`);
   assert.ok(disabledOutput.includes('icon:"Download"'), "the download button stays on with the flag off");
   assert.ok(!disabledOutput.includes("gatewaySettingsEnabled"), "the Gateway guards stay off with the flag off");
@@ -256,7 +283,7 @@ for (const [i, variant] of variants.entries()) {
   const compiled = await minify(inputs.get(`changed-chunk-${i}.js`), {
     mangle: true, compress: { unused: false }, format: { quote_style: 1 },
   });
-  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 5,
+  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 6,
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }

@@ -41,7 +41,7 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, webShell === "1" ? 13 : gateway === "1" ? 5 : 3);
+    assert.equal(manifest.patches.length, webShell === "1" ? 14 : gateway === "1" ? 6 : 4);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
@@ -103,7 +103,7 @@ try {
       changed.set(`moved/chunk-${i}.js`, compiled.code);
     }
     const patched = patchRendererSources(changed, true);
-    assert.equal(patched.patches.length, 5);
+    assert.equal(patched.patches.length, 6);
     assert.ok(patched.patches.every(patch => patch.path.startsWith("moved/")));
     assert.equal(patched.markers.length, 4);
   }

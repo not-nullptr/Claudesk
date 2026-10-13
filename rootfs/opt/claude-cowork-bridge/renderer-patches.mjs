@@ -21,6 +21,27 @@ const downloadPatchId = "file-pane-download";
 // candidate preparation rather than silently let the card return.
 const inferenceBannerPatchId = "inference-banner";
 const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
+// Desktop validates the Gateway URL as https, or plain http only on a loopback
+// host, and refuses anything else. A managed deployment supplies that URL from
+// its own environment, so the rule does not describe a choice the user made —
+// and the Cowork VM, which makes the model calls, has to dial the gateway on
+// whatever address reaches it, which need not be the container's loopback. The
+// predicate is pinned by the schema's own error copy, the "must use https (or
+// http on loopback)" branch of its message, which appears nowhere else in the
+// renderer graph; the hostname it tests is read back from the same parsed graph
+// (the `hostname` binding of the URL it destructures), so a renamed minifier
+// output still matches. Only the loopback *membership* test in the http branch
+// is spliced, so a schema that does not allow http at all still refuses it and
+// nothing about the https branch changes. Always applied: the endpoint is a
+// Gateway deployment's, whether it is managed or writable.
+//
+// Deliberately not in `required`, unlike the card removal and the pane patches.
+// Those are required because failing to apply them degrades silently — the card
+// quietly returns, the pane quietly goes blank. This one fails loudly: an
+// unpatched schema refuses the deployment's URL and the gateway stops answering,
+// in the same place an operator is already looking.
+const gatewayLoopbackHttpPatchId = "gateway-url-any-host-http";
+const gatewayLoopbackHttpMessage = "must use https (or http on loopback)";
 // The native file preview draws into an Electron view over Desktop's own window,
 // which the browser never composites, so an Office or PDF file showed a blank
 // pane. This patch swaps the preview component's rendered children for an
@@ -216,6 +237,40 @@ function checksFileKind(node) {
   return contains(node, child => child.type === "BinaryExpression"
     && ["==", "==="].includes(child.operator)
     && (literal(child.left, "file") || literal(child.right, "file")));
+}
+// The Gateway URL schema: `X.refine(predicate, {message: …})`, where the message
+// conditional carries the loopback-http copy above. The predicate is the arrow
+// that destructures a URL and returns the protocol test.
+function gatewayUrlPredicate(node) {
+  if (node.type !== "CallExpression" || !property(node.callee, "refine")) return undefined;
+  const options = node.arguments[1];
+  if (options?.type !== "ObjectExpression") return undefined;
+  const message = options.properties.find(entry => key(entry, "message"));
+  if (!message || !contains(message.value,
+    child => literal(child, gatewayLoopbackHttpMessage))) return undefined;
+  const predicate = unwrap(node.arguments[0]);
+  return predicate && functionTypes.has(predicate.type) ? predicate : undefined;
+}
+// The http branch's loopback test: the single `hostSet.has(hostname)` call, with
+// the hostname read back from the object pattern the predicate destructures out
+// of `new URL(…)`. Any other count refuses the splice rather than guess which
+// call is the membership test.
+function loopbackMembershipCheck(predicate) {
+  let hostname;
+  walk(predicate, [], (child) => {
+    if (child.type !== "VariableDeclarator" || child.id?.type !== "ObjectPattern") return;
+    const entry = child.id.properties.find(member => key(member, "hostname")
+      && member.value?.type === "Identifier");
+    if (entry) hostname = entry.value.name;
+  });
+  if (!hostname) return undefined;
+  const calls = [];
+  walk(predicate, [], (child) => {
+    if (child.type !== "CallExpression" || !property(child.callee, "has")) return;
+    if (child.arguments.length !== 1 || identifier(child.arguments[0]) !== hostname) return;
+    calls.push(child);
+  });
+  return calls.length === 1 ? calls[0] : undefined;
 }
 // The route-alias resolver guards each rule with
 // `!(X.when==="desktop"&&!Y)`, where Y is the `isDesktop` flag it was called
@@ -724,6 +779,15 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       if (enableTarget) {
         patches.push({ id: notificationEnablePatchId, start: enableTarget.body.start + 1,
           end: enableTarget.body.start + 1, original: "", replacement: notificationEnableBranch });
+      }
+    }
+    const gatewayPredicate = gatewayUrlPredicate(node);
+    if (gatewayPredicate) {
+      const membership = loopbackMembershipCheck(gatewayPredicate);
+      if (membership) {
+        patches.push({ id: gatewayLoopbackHttpPatchId, start: membership.start,
+          end: membership.end, original: source.slice(membership.start, membership.end),
+          replacement: "!0" });
       }
     }
     const previewArray = filePreviewChildrenArray(node);
