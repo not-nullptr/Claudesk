@@ -1308,7 +1308,14 @@
   // dropped, since there is nothing behind them. Everything is read from and
   // written to the DOM — the card belongs to React and this runs outside its
   // tree, so a MutationObserver re-applies whatever a re-render discards.
-  if (config.loginShell) {
+  // The sign-in shell. The instance says so when the mode is applied — and the
+  // route says so too, because this bundle's sign-in page is only ever reached
+  // without a session at `/login`: every other path is the workspace, behind the
+  // session gate. Acting on the route as well keeps the page right when the
+  // instance's mode has not been applied, which is otherwise silent.
+  const loginShellPage = config.loginShell === true
+    || globalThis.location.pathname.replace(/\/+$/, "") === "/login";
+  if (loginShellPage) {
     const passwordId = "claudesk-login-password";
     const errorId = "claudesk-login-error";
     // Marks the document for the shell's own stylesheet (the scroll lock), set

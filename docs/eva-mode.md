@@ -290,6 +290,14 @@ lives in the preload rather than a renderer patch on purpose: the card belongs
 to React, so the additions have to survive its re-renders, and this way a tweak
 costs a bridge restart instead of a renderer rebuild.
 
+Those page edits fire on the instance's mode **or** on the route: this bundle's
+sign-in page is only ever reached without a session at `/login`, since every
+other path is the workspace behind the session gate, so the route is as good a
+signal as the flag — and it keeps the page right when the mode has not actually
+been applied, which is otherwise silent. The *gate* still depends on the flag
+alone; the bridge says in its startup log when it is one, so a missing mode is
+visible rather than mistaken for a working deployment.
+
 The proxy side is host-side (the Caddyfile is not in this repo). The login page
 needs its own handler ahead of the session gate — `/login` comes **out** of the
 authd matcher, or authd's own page is what shows, and the paths the page loads
