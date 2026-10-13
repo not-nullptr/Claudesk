@@ -97,25 +97,17 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 # gateway_net, so this stack never declares shitproxy/gateway. The identity comes
 # from the account, not from authd (each instance is one person).
 # Eva semantics, set here rather than inherited from the shared .env:
-#   - no Code surface;
-#   - inference at the deployment's gateway URL (below).
+#   - inference goes through this account's relay into the box-level chain
+#     (relay → caddy `gateway` → shitproxy), not straight at the router;
+#   - no Code surface.
 # Both are overridable for a deployment that wants something else.
 
-# The Cowork VM makes the model calls. Its egress is dialed by this container
-# (QEMU user-mode networking), so the VM reaches anything the container reaches;
-# only name resolution differs, and the guest does that itself. A loopback URL
-# therefore resolves to the guest inside the VM and can never work, however well
-# it answers in the container. Reach the box-level chain by a name both sides
-# resolve — caddy `gateway` on gateway_net, via Docker DNS in the container and
-# through the container's resolver from the guest — and let
-# CLAUDESK_ACCOUNT_GATEWAY_URL point an account somewhere else.
-account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://gateway:4000}"
-case "$account_gateway_url" in
-    *127.0.0.1*|*localhost*|*"::1"*)
-        printf 'provision-user: WARNING: gateway URL %s is loopback; the Cowork VM resolves that to itself, so inference will fail\n' \
-            "$account_gateway_url" >&2
-        ;;
-esac
+# Desktop only accepts a gateway URL that is HTTPS, or plain HTTP on the
+# loopback, so the account's endpoint is this deployment's own relay
+# (claude-gateway-loopback, below), which fronts the box-level chain. Point an
+# account elsewhere with CLAUDESK_ACCOUNT_GATEWAY_URL; an HTTPS gateway is the
+# other shape Desktop takes.
+account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://127.0.0.1:4000}"
 
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
