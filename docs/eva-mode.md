@@ -220,6 +220,37 @@ and **404 when the person has no photo**, which is the chrome's cue to fall back
 to the default mark. Photos are stored beside the account in authd's SQLite, up
 to 2 MiB (PNG/JPEG/WebP/GIF/AVIF).
 
+### The sign-in page
+
+`/login` and `/accept-invite` are a hand-port of **Claude's own sign-in screen**,
+rendered by authd's SPA: the centered shell with the Claude lockup, a serif
+display heading, and the rounded card holding the form. It is a *visual* port,
+not a runtime reuse — the official page is claude.ai SSO / magic-link / MFA
+against `/api/auth/{login_methods,send_magic_link,verify_google,…}` and has no
+password field, so running it here would mean synthesising a signed-out
+bootstrap (the bridge only *edits* the running Desktop's) and reimplementing
+claude.ai's auth API against authd. The port keeps authd's email + password
+semantics, adds the password field beneath the email, and drops the Google/Apple
+buttons, which have nothing to authenticate against.
+
+Two details are deliberate. The official styles are Tailwind utilities compiled
+into a 1.6 MB sheet we do not ship, so the card, inputs and button are
+reproduced by hand in `web/src/styles.css` rather than linked — expect cosmetic
+drift if Anthropic restyles, and treat a refresh as a manual chore. And the
+official footer's "you acknowledge Anthropic's Privacy Policy" line is omitted:
+this is not Anthropic's screen, and that claim would be false here.
+
+The assets come from the Desktop renderer on the box:
+
+- the two faces (`anthropic-serif`, `anthropic-sans`, woff2 from
+  `assets/v1/`) are vendored under `web/src/assets/fonts/` and referenced from
+  `styles.css` by a *relative* url, so Vite emits them into `/auth-assets/` —
+  the one prefix the proxy already sends to authd. A `public/`-rooted
+  `/fonts/…` would fall through to the workspace and `forward_auth` would 401 an
+  unauthenticated visitor.
+- the lockup is inlined in `web/src/components/ClaudeLogo.tsx`, paths copied
+  from the renderer's `ClaudeLogo` (the 24px viewBox).
+
 ## Two deployments on one box
 
 A second checkout (say `/opt/claudesk-v2`) sharing a host with the production

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, ApiError, browserTimezone, prepareAvatar } from "../api";
+import { ClaudeLogo } from "../components/ClaudeLogo";
 
 export function AcceptInvitePage() {
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
@@ -63,58 +64,64 @@ export function AcceptInvitePage() {
   }
 
   return (
-    <div className="shell">
-      <form className="card" onSubmit={submit}>
-        <h1>Set up your account</h1>
-        <p className="muted" style={{ margin: 0 }}>
-          Welcome to Claudesk. Tell us who you are and choose a password to activate
-          your account.
-        </p>
-        <label>
-          First name
-          <input
-            value={firstName}
-            onChange={(event) => setFirstName(event.target.value)}
-            required
-            autoFocus
-          />
-        </label>
-        <label>
-          Profile photo <span className="muted">(optional)</span>
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
-            onChange={(event) => setPhoto(event.target.files?.[0] ?? null)}
-          />
-        </label>
-        {preview && <img className="avatar preview" src={preview} alt="Profile preview" />}
-        <label>
-          Password
-          <input
-            type="password"
-            autoComplete="new-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
-        <label>
-          Confirm password
-          <input
-            type="password"
-            autoComplete="new-password"
-            value={confirm}
-            onChange={(event) => setConfirm(event.target.value)}
-            required
-          />
-        </label>
-        {error && (
-          <p className="error" role="alert">
-            {error}
+    <main className="auth">
+      <div className="auth__logo">
+        <ClaudeLogo />
+      </div>
+      <div className="auth__inner">
+        <div className="auth__column">
+          <h1 className="auth__title">Set up your account</h1>
+          <p className="auth__subtitle">
+            Welcome to Claudesk. Tell us who you are and choose a password to activate
+            your account.
           </p>
-        )}
-        <button disabled={busy}>{busy ? "Saving…" : "Set up and continue"}</button>
-      </form>
-    </div>
+          <form className="auth-card" onSubmit={submit}>
+            <input
+              type="text"
+              autoComplete="given-name"
+              aria-label="First name"
+              placeholder="First name"
+              value={firstName}
+              onChange={(event) => setFirstName(event.target.value)}
+              required
+              autoFocus
+            />
+            <input
+              type="file"
+              aria-label="Profile photo (optional)"
+              accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+              onChange={(event) => setPhoto(event.target.files?.[0] ?? null)}
+            />
+            {preview && <img className="avatar preview" src={preview} alt="Profile preview" />}
+            <input
+              type="password"
+              autoComplete="new-password"
+              aria-label="Password"
+              placeholder="Choose a password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              aria-label="Confirm password"
+              placeholder="Confirm password"
+              value={confirm}
+              onChange={(event) => setConfirm(event.target.value)}
+              required
+            />
+            {error && (
+              <p className="auth__error" role="alert">
+                {error}
+              </p>
+            )}
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Saving…" : "Set up and continue"}
+            </button>
+          </form>
+        </div>
+      </div>
+    </main>
   );
 }

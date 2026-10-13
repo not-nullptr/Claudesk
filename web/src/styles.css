@@ -1,23 +1,56 @@
+/* The auth pages are a hand-port of the official Claude sign-in screen (see
+ * docs/eva-mode.md, "The sign-in page"). The tokens below are the official
+ * `--cds-*` palette collapsed to the handful this app uses; the two faces are
+ * the Desktop renderer's own `anthropic-serif` / `anthropic-sans` woff2 files,
+ * vendored under src/assets/fonts so Vite emits them into /auth-assets/ — the
+ * one path prefix the proxy already routes to authd. Referenced relatively so
+ * they resolve in dev and in the built bundle alike. */
+@font-face {
+  font-family: "anthropic-serif";
+  src: url("./assets/fonts/anthropic-serif.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "anthropic-sans";
+  src: url("./assets/fonts/anthropic-sans.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+  font-feature-settings: "dlig" 0;
+}
+
 :root {
-  --bg: #f6f6f5;
-  --panel: #ffffff;
-  --ink: #1c1c1a;
-  --muted: #6b6b66;
-  --line: #e3e3df;
-  --accent: #b45309;
-  --error: #b91c1c;
+  --bg: #f9f9f7;
+  --panel: #fcfcfb;
+  --ink: #141412;
+  --muted: #67675f;
+  --faint: #a5a49a;
+  --line: #d9d8d2;
+  --accent: #d97757;
+  --error: #b42318;
+  --btn-bg: #141412;
+  --btn-fg: #fdfcfb;
   --radius: 10px;
+  --font-serif: "anthropic-serif", ui-serif, Georgia, serif;
+  --font-sans: "anthropic-sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #171716;
-    --panel: #202020;
-    --ink: #ececea;
-    --muted: #9a9a95;
-    --line: #333330;
-    --accent: #e0913f;
-    --error: #f87171;
+    --bg: #0b0b0b;
+    --panel: #151515;
+    --ink: #f7f6f2;
+    --muted: #b0aea6;
+    --faint: #7c7a72;
+    --line: #2a2a27;
+    --accent: #d97757;
+    --error: #ff8a80;
+    --btn-bg: #f7f6f2;
+    --btn-fg: #141412;
   }
 }
 
@@ -29,7 +62,8 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 15px/1.5 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 .shell {
@@ -99,6 +133,134 @@ input:focus,
 select:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
+}
+
+/* --- The sign-in / invite shell ------------------------------------------
+ * Faithful to the official page: the lockup over a centred column, a serif
+ * display heading, and the rounded card holding the form. The official card
+ * carries no field labels (it labels its inputs with aria-label), and neither
+ * do these. */
+.auth {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.auth__logo {
+  display: flex;
+  justify-content: center;
+  padding-top: 2rem;
+  color: var(--ink);
+}
+
+.auth__inner {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem 6rem;
+}
+
+.auth__column {
+  width: 100%;
+  max-width: 28rem;
+  text-align: center;
+}
+
+.auth__title {
+  margin: 3rem 0 0;
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: clamp(2.5rem, 7vw, 3.5rem);
+  line-height: 1em;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.auth__subtitle {
+  margin: 1rem 0 0;
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  line-height: 1.45;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.auth-card {
+  margin-top: 2rem;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  background: var(--panel);
+  border: 0.5px solid var(--line);
+  border-radius: 2rem;
+  box-shadow:
+    0 4px 24px rgb(0 0 0 / 1.57%),
+    0 4px 32px rgb(0 0 0 / 1.57%),
+    0 2px 64px rgb(0 0 0 / 1.18%),
+    0 16px 32px rgb(0 0 0 / 1.18%);
+}
+
+.auth-card input[type="email"],
+.auth-card input[type="password"],
+.auth-card input[type="text"] {
+  width: 100%;
+  height: 2.75rem;
+  padding: 0 0.875rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 0.5px solid var(--line);
+  border-radius: 0.75rem;
+}
+
+.auth-card input::placeholder {
+  color: var(--faint);
+}
+
+.auth-card input[type="file"] {
+  padding: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.auth-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.auth-submit {
+  width: 100%;
+  height: 2.75rem;
+  margin-top: 0.25rem;
+  border: 0;
+  border-radius: 0.75rem;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.auth-submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.auth__error {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--error);
+}
+
+.auth__hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
 }
 
 .row {
@@ -226,6 +388,10 @@ th {
   width: 64px;
   height: 64px;
   margin: 4px 0;
+}
+
+.auth-card .avatar.preview {
+  align-self: center;
 }
 
 .head {

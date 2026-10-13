@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { api, ApiError } from "../api";
+import { ClaudeLogo } from "../components/ClaudeLogo";
 
 export function LoginPage() {
   const [email, setEmail] = useState("");
@@ -22,40 +23,45 @@ export function LoginPage() {
   }
 
   return (
-    <div className="shell">
-      <form className="card" onSubmit={submit}>
-        <h1>Sign in</h1>
-        <p className="muted" style={{ margin: 0 }}>
-          Claudesk
-        </p>
-        <label>
-          Email
-          <input
-            type="email"
-            autoComplete="username"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-            autoFocus
-          />
-        </label>
-        <label>
-          Password
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
-      </form>
-    </div>
+    <main className="auth">
+      <div className="auth__logo">
+        <ClaudeLogo />
+      </div>
+      <div className="auth__inner">
+        <div className="auth__column">
+          <h1 className="auth__title">Sign in</h1>
+          <p className="auth__subtitle">Continue with your Claudesk account.</p>
+          <form className="auth-card" onSubmit={submit}>
+            <input
+              type="email"
+              autoComplete="username"
+              aria-label="Email"
+              placeholder="Enter your email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+              autoFocus
+            />
+            <input
+              type="password"
+              autoComplete="current-password"
+              aria-label="Password"
+              placeholder="Enter your password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+            {error && (
+              <p className="auth__error" role="alert">
+                {error}
+              </p>
+            )}
+            <button className="auth-submit" disabled={busy}>
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+        </div>
+      </div>
+    </main>
   );
 }
