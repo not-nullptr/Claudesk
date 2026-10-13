@@ -35,12 +35,13 @@ authd() { compose_shared exec -T authd /app/authd "$@"; }
 
 info="$(authd --show "$email")" || exit 1
 
-id=""; user_email=""; first_name=""; upstream=""; disabled=""
+id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""
 while IFS='=' read -r key value; do
     case "$key" in
         id) id="$value" ;;
         email) user_email="$value" ;;
         first_name) first_name="$value" ;;
+        role) role="$value" ;;
         upstream) upstream="$value" ;;
         disabled) disabled="$value" ;;
     esac
@@ -125,6 +126,26 @@ case "$account_gateway_url" in
         ;;
 esac
 
+# The remote action surfaces are operator tooling, and a provisioned account is
+# an end user. The Developer menu's privileged actions and its editor for
+# claude_desktop_config.json, developer_settings.json, MCP logs and trace
+# downloads, and the Projects/Spaces, Artifact, browser-file, Memory and
+# Scheduled-Tasks mutations, all belong to whoever administers the box rather
+# than to the person using it. An Admin account keeps the deployment's own
+# setting; every other account gets none of it. (Code is separately off for
+# accounts, and stays off until the deployment turns it on.) Override with
+# CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS / _INFRASTRUCTURE_ACTIONS.
+case "${role:-User}" in
+    Admin)
+        account_developer_actions="${CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS:-${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}}"
+        account_infrastructure_actions="${CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS:-${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}}"
+        ;;
+    *)
+        account_developer_actions="${CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS:-0}"
+        account_infrastructure_actions="${CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS:-0}"
+        ;;
+esac
+
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
 CLAUDESK_NAME_PREFIX="$slug-" \
@@ -136,6 +157,8 @@ CLAUDE_GATEWAY_API_KEY="$account_gateway_key" \
 CLAUDE_GATEWAY_AUTH_SCHEME="$account_gateway_scheme" \
 CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
+CLAUDE_REMOTE_DEVELOPER_ACTIONS="$account_developer_actions" \
+CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$account_infrastructure_actions" \
 AUTH_IDENTITY_URL='' \
 compose_shared --project-name "claudesk-$slug" \
     up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback

@@ -88,6 +88,19 @@ runtime, and no internet-facing service ever holds the Docker socket.
   sudo systemctl enable --now claudesk-provision.timer
   ```
 
+Putting an instance up is also where an account's **privileges** are decided.
+The remote action surfaces — `CLAUDE_REMOTE_DEVELOPER_ACTIONS` (the Developer
+menu's privileged actions and its editor for `claude_desktop_config.json`,
+`developer_settings.json`, MCP logs and trace downloads) and
+`CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` (the Projects/Spaces, Artifact,
+browser-file, Memory and Scheduled-Tasks mutations) — are operator tooling, so a
+provisioned account gets neither. An account whose role is `Admin` keeps the
+deployment's own setting instead. `provision-user.sh` reads the role from
+`authd --show` and decides; `CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS` /
+`CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS` force a value for every account
+regardless of role. Code stays off for accounts separately, and stays off until
+the deployment turns it on.
+
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace` — reload a moment later and it's there.
 

@@ -347,6 +347,7 @@ async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
         line("id", &user.id.to_string()),
         line("email", &user.email),
         line("first_name", &user.first_name),
+        line("role", &user.role),
         line("disabled", &user.disabled.to_string()),
         line("upstream", user.upstream.as_deref().unwrap_or("")),
         line(
