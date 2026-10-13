@@ -134,6 +134,12 @@ services:
       # IPC data layer, and grant the org entitlements its Cowork surface checks.
       # See docs/web-shell.md. Off by default.
       CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
+      # The login shell: this instance serves the renderer's own /login and
+      # refuses the whole API, so it can never proxy the Desktop, hold a session
+      # or run inference, signed in or not. Set it on the deployment's own
+      # instance only, and point the proxy's pre-auth /login and /renderer/* at
+      # that one. See docs/eva-mode.md, "The login shell". Off by default.
+      CLAUDE_REMOTE_LOGIN_SHELL: "${CLAUDE_REMOTE_LOGIN_SHELL:-0}"
       # Display name for the signed-in user in the remote UI (the sidebar user
       # menu and the time-based home greeting). Empty keeps Desktop's own value.
       CLAUDE_REMOTE_USER_NAME: "${CLAUDE_REMOTE_USER_NAME:-}"
