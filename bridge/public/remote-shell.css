@@ -94,6 +94,18 @@ html[data-mode="dark"] .claudesk-login-error {
   color: var(--cds-text-danger, #e08b83);
 }
 
+/* The login shell trims the marketing page down to the sign-in itself (the
+ * preload removes the nav's links, the plans section, the footer and the
+ * desktop-app pitch), so there is nothing left to scroll to — and the page must
+ * not move under a shell that fills the viewport. The class is set by the
+ * preload before the app mounts. */
+html.claudesk-login-shell,
+html.claudesk-login-shell body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* Reuse the official Desktop renderer unchanged. These layout overrides are
  * gated by a class that the preload adds only for a mobile device, so mobile
  * browser tabs and PWAs share them while PC windows keep the official layout. */

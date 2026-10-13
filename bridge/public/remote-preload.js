@@ -1311,6 +1311,9 @@
   if (config.loginShell) {
     const passwordId = "claudesk-login-password";
     const errorId = "claudesk-login-error";
+    // Marks the document for the shell's own stylesheet (the scroll lock), set
+    // here rather than after a mount so it is in place for the first paint.
+    document.documentElement.classList.add("claudesk-login-shell");
 
     function setLoginError(message) {
       let node = document.getElementById(errorId);
@@ -1371,7 +1374,100 @@
       }
     }
 
+    // What the shell serves is claude.ai's *marketing* sign-in page, so it
+    // arrives with a nav full of links and calls to action, a plans section and
+    // footer below the fold, and a desktop-app pitch — all aimed at claude.ai's
+    // visitors, none of it true of this deployment. Keep the wordmark, the card
+    // and nothing else.
+    const LEGAL_TEXT = "Usage is subject to Subrouter limits. Don't be selfish!";
+
+    // The innermost element whose text carries `text`: the nav, the card and the
+    // page wrapper all contain it too, and it is the leaf that is worth
+    // rewriting.
+    function deepestWithText(text, selector) {
+      let deepest;
+      let depth = -1;
+      for (const node of document.querySelectorAll(selector)) {
+        if (!String(node.textContent || "").includes(text)) continue;
+        let levels = 0;
+        for (let parent = node.parentElement; parent; parent = parent.parentElement) levels += 1;
+        if (levels > depth) {
+          depth = levels;
+          deepest = node;
+        }
+      }
+      return deepest;
+    }
+
+    function trimLoginChrome() {
+      const card = document.querySelector('[data-testid="email"]');
+      const block = card?.closest("main") ?? card?.closest("section") ?? null;
+
+      // The nav: walk up from the wordmark, and at every level drop the siblings
+      // of the branch that carries it. Tag-agnostic on purpose — the bundle's
+      // navbar is not necessarily a <nav> — and bounded two ways so it can only
+      // ever strip a navbar: it stops at the block holding the sign-in, and it
+      // refuses outright if the wordmark is inside that block.
+      const logo = document.querySelector('svg[data-cds="ClaudeLogo"]');
+      if (block && logo && !block.contains(logo)) {
+        for (let node = logo; node?.parentElement;) {
+          const parent = node.parentElement;
+          if (parent === document.body || parent.contains(block)) break;
+          for (const child of [...parent.children]) {
+            if (child !== node) child.remove();
+          }
+          node = parent;
+        }
+      }
+
+      // Everything below the sign-in: the plans section, the footer, whatever
+      // the bundle puts after the block that holds the card.
+      if (block?.parentElement) {
+        for (const sibling of [...block.parentElement.children]) {
+          // DOCUMENT_POSITION_FOLLOWING — only what comes after the sign-in.
+          if (sibling !== block && block.compareDocumentPosition(sibling) & 4) {
+            sibling.remove();
+          }
+        }
+      }
+      for (const footer of document.querySelectorAll("footer")) footer.remove();
+
+      // The desktop-app pitch, by its own test id, with a text fallback in case
+      // the bundle stops carrying one.
+      const download = document.querySelector('[data-testid="download-desktop-app"]')
+        ?? [...document.querySelectorAll("a, button")]
+          .find((node) => String(node.textContent || "").trim() === "Download desktop app");
+      if (download) removeWithWrapper(download);
+
+      // The legal line, in the slot the card keeps for it. Rewritten rather
+      // than hidden: it is the one place on the page that speaks for this
+      // deployment. The sentence and the link are separately wrapped in some
+      // builds, so climb from the link to the outermost element that still
+      // reads as that one line — short, and holding no second link — and
+      // replace the line rather than the fragment.
+      const link = deepestWithText("Privacy Policy", "a, span, p, div, small");
+      if (link) {
+        let line = link;
+        for (let level = 0; level < 4; level += 1) {
+          const parent = line.parentElement;
+          // Whatever holds the line and nothing else: still the sentence, short,
+          // no second link, and no control. The card itself would pass the first
+          // two tests but never the last, which is what keeps this from eating
+          // the form.
+          if (!parent || !String(parent.textContent || "").includes("Privacy Policy")
+            || String(parent.textContent || "").trim().length > 200
+            || parent.querySelectorAll("a").length > 1
+            || parent.querySelector("input, textarea, button, form")) break;
+          line = parent;
+        }
+        if (line.textContent !== LEGAL_TEXT) line.textContent = LEGAL_TEXT;
+      }
+    }
+
     const enhanceLoginShell = () => {
+      // Page-level trims first, and independent of the card: the nav and the
+      // footer are up before the card is, and a re-render can put them back.
+      trimLoginChrome();
       const email = document.querySelector('[data-testid="email"]');
       const submit = document.querySelector('[data-testid="continue"]');
       if (!email || !submit) return;
