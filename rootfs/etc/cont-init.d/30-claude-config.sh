@@ -226,24 +226,40 @@ install -o "$user_id" -g "$group_id" -m 0600 "$app_config_tmp" "$app_config"
 rm -f "$app_config_tmp"
 app_config_tmp=""
 
-# Clean only the three fields that older revisions of this image mistakenly
-# wrote to Electron's separate config.json state file. Preserve every other
-# key, including any unrelated preferences that may be added in the future.
+# Electron's separate config.json state file. Preserve every key, including
+# unrelated preferences that may be added in the future; clean only the three
+# fields older revisions of this image mistakenly wrote here.
+#
+# It also carries `deploymentMode`, which the Desktop reads to decide whether
+# this launch is a first run before sign-in. An unset mode makes it defer every
+# credential-dependent boot task — model discovery among them — so the model
+# picker stays empty and starting a session fails with "your organization's
+# model list hasn't loaded yet", while the Setup window's own probe still
+# succeeds and reports models found. The mode chooser is what normally records
+# the choice, and a managed deployment disables it, so record it here. An
+# existing value is left exactly as it is.
 legacy_app_config="$user_data_dir/config.json"
-if [ -f "$legacy_app_config" ] && [ ! -L "$legacy_app_config" ]; then
-    legacy_app_config_tmp="$(mktemp "$user_data_dir/.legacy-config.XXXXXX")"
+if [ -L "$legacy_app_config" ]; then
+    printf '[claude-config] ERROR: app state config must not be a symlink\n' >&2
+    exit 1
+fi
+legacy_app_config_tmp="$(mktemp "$user_data_dir/.legacy-config.XXXXXX")"
+if [ -f "$legacy_app_config" ]; then
     jq '
         del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)
         | if (.preferences | type) == "object" then
             .preferences |= del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)
           else . end
         | if .preferences == {} then del(.preferences) else . end
+        | if (.deploymentMode // "") == "" then . + {deploymentMode: "3p"} else . end
     ' "$legacy_app_config" > "$legacy_app_config_tmp"
-    install -o "$user_id" -g "$group_id" -m 0600 \
-        "$legacy_app_config_tmp" "$legacy_app_config"
-    rm -f "$legacy_app_config_tmp"
-    legacy_app_config_tmp=""
+else
+    jq -n '{deploymentMode: "3p"}' > "$legacy_app_config_tmp"
 fi
+install -o "$user_id" -g "$group_id" -m 0600 \
+    "$legacy_app_config_tmp" "$legacy_app_config"
+rm -f "$legacy_app_config_tmp"
+legacy_app_config_tmp=""
 printf '[claude-config] Cowork VM constrained to %s GiB / %s vCPU; scheduled tasks enabled\n' \
     "$vm_memory_gb" "$vm_cpu_count"
 
