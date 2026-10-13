@@ -1545,23 +1545,56 @@
   // carry a shortcut hint beside its copy ("Sign out ⌘Q"). Both of the bundle's
   // wordings are accepted, and its own test ids and class names are believed
   // over the label when they say "sign out".
+  const signOutLabel = /\b(?:sign|log)\s?out\b/;
+  const signOutHint = /sign-?out|log-?out/i;
+  const identifiesSignOut = (node) => {
+    const hint = `${node.getAttribute("data-testid") || ""} ${node.id || ""}`
+      + ` ${typeof node.className === "string" ? node.className : ""}`;
+    if (signOutHint.test(hint)) return true;
+    const label = String(node.textContent || "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+    // Bounded, so a container that merely wraps the item is not mistaken for it.
+    return label.length > 0 && label.length <= 24 && signOutLabel.test(label);
+  };
+
+  // The app offers its own Sign out only when it believes it holds a login, and
+  // a managed 3P account has none to report (`signOut` comes from the
+  // bootstrap's `login`, which the writable configuration is what writes). The
+  // session still exists — authd's — so offer a row for it: a clone of the last
+  // row the menu already has, wearing the menu's own classes, with its label
+  // swapped. The clone carries no React handler, since React's are keyed to the
+  // tree it built, so the only thing that answers it is the interceptor below.
+  const ensureSignOutRow = () => {
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    if (!items.length) return;
+    if (items.some(identifiesSignOut)) return;
+    const template = items[items.length - 1];
+    const menu = template.parentElement;
+    if (!menu || menu.querySelector("[data-claudesk-sign-out]")) return;
+    const clone = template.cloneNode(true);
+    clone.setAttribute("data-claudesk-sign-out", "1");
+    for (const node of [clone, ...clone.querySelectorAll("[data-testid], [id], [aria-keyshortcuts]")]) {
+      node.removeAttribute("data-testid");
+      node.removeAttribute("id");
+      node.removeAttribute("aria-keyshortcuts");
+    }
+    // Swap the label where it sits, so the row keeps the menu's typography, and
+    // drop any shortcut hint that belonged to the row this was cloned from.
+    const label = String(template.textContent || "").replace(/\s+/g, " ").trim();
+    const labelled = [...clone.querySelectorAll("*")].filter((node) =>
+      String(node.textContent || "").replace(/\s+/g, " ").trim() === label);
+    const target = labelled[labelled.length - 1] ?? clone;
+    target.textContent = "Sign out";
+    for (const hint of clone.querySelectorAll("kbd, [class*='shortcut']")) hint.remove();
+    menu.append(clone);
+  };
+
   const installSignOutInterceptor = () => {
-    const signOutLabel = /\b(?:sign|log)\s?out\b/;
-    const signOutHint = /sign-?out|log-?out/i;
-    const identifies = (node) => {
-      const hint = `${node.getAttribute("data-testid") || ""} ${node.id || ""}`
-        + ` ${typeof node.className === "string" ? node.className : ""}`;
-      if (signOutHint.test(hint)) return true;
-      const label = String(node.textContent || "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
-      // Bounded, so a container that merely wraps the item is not mistaken for it.
-      return label.length > 0 && label.length <= 24 && signOutLabel.test(label);
-    };
     document.addEventListener("click", (event) => {
       const path = typeof event.composedPath === "function" ? event.composedPath() : [];
       const nodes = (path.length ? path : [event.target])
         .filter((node) => node instanceof Element);
       const item = nodes.find((node) =>
-        node.matches?.('[role="menuitem"], button, a, [data-testid]') && identifies(node));
+        node.matches?.('[role="menuitem"], button, a, [data-testid]') && identifiesSignOut(node));
       if (!item) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1569,6 +1602,23 @@
         .catch(() => undefined)
         .then(() => globalThis.location.assign("/login"));
     }, true);
+    ensureSignOutRow();
+    // Only a mutation that brings a menu in is worth a look: the app repaints
+    // constantly, and scanning the document on every one of those would be a
+    // cost paid on every token it streams.
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (node.matches?.('[role="menu"], [role="menuitem"]')
+            || node.querySelector?.('[role="menuitem"]')) {
+            ensureSignOutRow();
+            return;
+          }
+        }
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
     console.info("[claudesk] Sign out ends the session at the auth service, not at claude.ai");
   };
 
