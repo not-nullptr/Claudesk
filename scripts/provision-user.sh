@@ -111,7 +111,7 @@ CLAUDE_GATEWAY_BASE_URL="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://127.0.0.1:4000}"
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 AUTH_IDENTITY_URL='' \
 compose_shared --project-name "claudesk-$slug" \
-    up -d claude-desktop cowork-bridge claude-gateway-loopback
+    up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback
 
 # Route the account to it; authd re-reads this on every request.
 if [ -z "$upstream" ]; then
