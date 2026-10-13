@@ -46,6 +46,10 @@ services:
       # docs/web-shell.md.
       CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
       CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:?Set CLAUDE_GATEWAY_BASE_URL in .env}"
+      # Provisioned accounts set this so re-provisioning moves an endpoint that a
+      # writable Gateway configuration already holds. See CLAUDE_GATEWAY_BASE_URL
+      # in .env.example and rootfs/etc/cont-init.d/30-claude-config.sh.
+      CLAUDE_GATEWAY_ENV_AUTHORITATIVE: "${CLAUDE_GATEWAY_ENV_AUTHORITATIVE:-0}"
       CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:?Set CLAUDE_GATEWAY_API_KEY in .env}"
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:?Set CLAUDE_INFERENCE_MODELS_JSON in .env}"

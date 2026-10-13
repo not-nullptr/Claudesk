@@ -8,6 +8,7 @@ auth_scheme="${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
 models_json="${CLAUDE_INFERENCE_MODELS_JSON:-}"
 remote_gateway_settings="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
+gateway_env_authoritative="${CLAUDE_GATEWAY_ENV_AUTHORITATIVE:-0}"
 remote_desktop_home="${CLAUDE_REMOTE_DESKTOP_HOME:-}"
 allowed_egress_hosts_json="${CLAUDE_EGRESS_ALLOWED_HOSTS_JSON:-}"
 vm_memory_gb="${CLAUDE_COWORK_VM_MEMORY_GB:-2}"
@@ -45,6 +46,15 @@ case "$remote_code_actions" in
         ;;
     *)
         printf '[claude-config] ERROR: CLAUDE_REMOTE_CODE_ACTIONS must be 0 or 1\n' >&2
+        exit 1
+        ;;
+esac
+
+case "$gateway_env_authoritative" in
+    0|1)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDE_GATEWAY_ENV_AUTHORITATIVE must be 0 or 1\n' >&2
         exit 1
         ;;
 esac
@@ -294,6 +304,24 @@ if [ "$remote_gateway_settings" = "1" ]; then
         fi
         printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s\n' \
             "$remote_code_actions"
+        # The inference endpoint is a provisioning value: the Cowork VM makes the
+        # model calls and is confined to the guest, so an account whose endpoint
+        # is not reachable from there simply cannot infer. A deployment that
+        # moves it has to move it in the writable configuration, not merely fail
+        # to write a new one. Opt-in, so a deployment where the endpoint is
+        # edited in the official Gateway panel keeps those edits.
+        if [ "$gateway_env_authoritative" = "1" ] \
+            && [ "$(jq -r '.inferenceGatewayBaseUrl // empty' \
+                "$config_library/$applied_id.json")" != "$base_url" ]; then
+            gateway_tmp="$(mktemp "$config_library/.gateway.XXXXXX")"
+            jq --arg base_url "$base_url" \
+                '. + {inferenceGatewayBaseUrl: $base_url}' \
+                "$config_library/$applied_id.json" > "$gateway_tmp"
+            install -o "$user_id" -g "$group_id" -m 0600 \
+                "$gateway_tmp" "$config_library/$applied_id.json"
+            rm -f "$gateway_tmp"
+            printf '[claude-config] inference endpoint applied from environment\n'
+        fi
         # Unified Claude follows the environment the same way as the Code flag,
         # but only while the variable is set: an unset value leaves whatever the
         # Setup window last wrote to the writable configuration.

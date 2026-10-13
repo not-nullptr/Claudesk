@@ -97,17 +97,36 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 # gateway_net, so this stack never declares shitproxy/gateway. The identity comes
 # from the account, not from authd (each instance is one person).
 # Eva semantics, set here rather than inherited from the shared .env:
-#   - inference goes through this account's relay into the box-level chain
-#     (relay → caddy `gateway` → shitproxy), not straight at the router;
-#   - no Code surface.
+#   - no Code surface;
+#   - inference at the deployment's gateway URL (below).
 # Both are overridable for a deployment that wants something else.
+
+# The Cowork VM makes the model calls, and its only route off the guest is the
+# host's network (QEMU user-mode networking). A loopback gateway URL therefore
+# resolves to the guest itself and can never work there, however well it answers
+# from inside the container. Default the account to the box's routable gateway
+# and let CLAUDESK_ACCOUNT_GATEWAY_URL point it elsewhere.
+account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-${CLAUDE_GATEWAY_BASE_URL:-}}"
+[ -n "$account_gateway_url" ] || {
+    printf 'provision-user: no gateway URL: set CLAUDE_GATEWAY_BASE_URL (or CLAUDESK_ACCOUNT_GATEWAY_URL) in %s/.env\n' \
+        "$project_dir" >&2
+    exit 1
+}
+case "$account_gateway_url" in
+    *127.0.0.1*|*localhost*|*"::1"*)
+        printf 'provision-user: WARNING: gateway URL %s is loopback; the Cowork VM cannot reach it, so inference will fail\n' \
+            "$account_gateway_url" >&2
+        ;;
+esac
+
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
 CLAUDESK_NAME_PREFIX="$slug-" \
 COWORK_WEB_PORT="$port" \
 CLAUDE_REMOTE_ACCOUNT_NAME="$first_name" \
 CLAUDE_REMOTE_ACCOUNT_EMAIL="$user_email" \
-CLAUDE_GATEWAY_BASE_URL="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://127.0.0.1:4000}" \
+CLAUDE_GATEWAY_BASE_URL="$account_gateway_url" \
+CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 AUTH_IDENTITY_URL='' \
 compose_shared --project-name "claudesk-$slug" \
