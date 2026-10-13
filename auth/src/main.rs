@@ -76,9 +76,18 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().any(|arg| arg == "--healthcheck") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--healthcheck") {
         healthcheck();
     }
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+    };
+    let invite_for = flag("--invite");
+    let admin_for = flag("--create-admin");
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -100,6 +109,27 @@ async fn main() {
         cfg,
         dummy_hash: hash_password("authd-timing-equalizer").expect("hash dummy"),
     };
+
+    // Operator tooling: `docker compose exec authd /app/authd --invite <email>`
+    // (or --create-admin). Runs against the same database, prints one thing, exits.
+    if let Some(email) = invite_for.as_deref() {
+        match cli_invite(&state.cfg, &state.store, email).await {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(email) = admin_for.as_deref() {
+        match cli_create_admin(&state.cfg, &state.store, email).await {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Err(error) = bootstrap_admin(&state).await {
         tracing::error!("bootstrap admin failed: {error}");
@@ -161,25 +191,32 @@ fn healthcheck() -> ! {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
-/// Create the first admin from `AXTD_BOOTSTRAP_ADMIN_EMAIL` if no admin exists,
-/// and print its one-time invite link to the log (the only place it is shown).
+/// Create the first admin from `AXTD_BOOTSTRAP_ADMIN_EMAIL` and print its
+/// one-time invite link to the log. Runs whenever no admin can actually sign in
+/// — no admin at all, or the bootstrap admin never accepted its invite — so a
+/// lost or expired link is recovered by simply restarting.
 async fn bootstrap_admin(state: &AppState) -> crate::error::AppResult<()> {
     let Some(email) = state.cfg.bootstrap_admin_email.as_deref() else {
         return Ok(());
     };
     let email = email.trim().to_lowercase();
-    if state.store.list_users().await?.iter().any(|u| u.is_admin()) {
+
+    if state
+        .store
+        .list_users()
+        .await?
+        .iter()
+        .any(|user| user.is_admin() && user.can_sign_in())
+    {
         return Ok(());
     }
 
     let user = match state.store.user_by_email(&email).await? {
         Some(existing) => existing,
-        None => {
-            state
-                .store
-                .create_user(&email, "Admin", "Admin", None)
-                .await?
-        }
+        None => state
+            .store
+            .create_user(&email, "Admin", "Admin", None)
+            .await?,
     };
     if !user.is_admin() {
         state.store.set_role(user.id, "Admin").await?;
@@ -191,5 +228,50 @@ async fn bootstrap_admin(state: &AppState) -> crate::error::AppResult<()> {
     tracing::warn!(
         "bootstrap admin invite for {email}: /accept-invite?token={token} (accept it, then this line can be removed)"
     );
+    Ok(())
+}
+
+/// `authd --invite <email>`: print a fresh invite link for an existing account.
+async fn cli_invite(cfg: &Config, store: &Store, email: &str) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    let user = store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no account for {email}"))?;
+    let token = store
+        .create_invite(user.id, cfg.invite_ttl_secs)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("/accept-invite?token={token}");
+    Ok(())
+}
+
+/// `authd --create-admin <email>`: create (or promote) an admin and print a
+/// fresh invite link for it.
+async fn cli_create_admin(cfg: &Config, store: &Store, email: &str) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    let user = match store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        Some(existing) => existing,
+        None => store
+            .create_user(&email, "Admin", "Admin", None)
+            .await
+            .map_err(|error| error.to_string())?,
+    };
+    if !user.is_admin() {
+        store
+            .set_role(user.id, "Admin")
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let token = store
+        .create_invite(user.id, cfg.invite_ttl_secs)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("/accept-invite?token={token}");
     Ok(())
 }
