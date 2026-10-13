@@ -257,9 +257,34 @@ fn message_page(status: StatusCode, title: &str, body: &str, refresh_secs: Optio
         .into_response()
 }
 
+/// Whether `forward_auth` is answering a page load rather than a sub-resource
+/// fetch. Caddy copies the original request's headers onto the auth request, so
+/// the browser's own `Sec-Fetch-*` hints are here to read; `Accept` covers
+/// clients that send neither.
+fn wants_document(headers: &HeaderMap) -> bool {
+    let flag = |name: &str, value: &str| {
+        headers
+            .get(name)
+            .and_then(|header| header.to_str().ok())
+            .map(|found| found.eq_ignore_ascii_case(value))
+            .unwrap_or(false)
+    };
+    flag("sec-fetch-dest", "document")
+        || flag("sec-fetch-mode", "navigate")
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|header| header.to_str().ok())
+            .map(|accept| accept.contains("text/html"))
+            .unwrap_or(false)
+}
+
 /// Caddy's `forward_auth` endpoint: 200 + `X-Instance-Upstream` when the session
 /// is live and the user has an instance, otherwise a non-2xx and no upstream.
-pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
+pub async fn verify(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Response {
     match current_user(&state, &jar).await {
         Ok(Some(user)) => match user.upstream.as_deref().filter(|u| !u.is_empty()) {
             Some(upstream) => {
@@ -289,11 +314,17 @@ pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
                 )
             }
         },
-        // Signed out. Caddy hands this response straight back to the visitor, so
-        // it has to read as a page rather than an API error — send them to the
-        // sign-in page. It is still non-2xx, which is how `forward_auth` refuses
-        // the request and reports no upstream.
-        Ok(None) => Redirect::to("/login").into_response(),
+        // Signed out. Caddy hands this response straight back to whoever asked,
+        // so a *page load* is sent to the sign-in page rather than shown a JSON
+        // error. A sub-resource fetch keeps the 401: following this redirect
+        // would land the app's own bootstrap on the sign-in page's HTML, which
+        // arrives as a 200, and it would conclude it is still signed in. Both
+        // are non-2xx, which is how `forward_auth` refuses the request and
+        // reports no upstream.
+        Ok(None) if wants_document(&headers) => Redirect::to("/login").into_response(),
+        Ok(None) => {
+            (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response()
+        }
         // A store failure is not a signed-out visitor, and must not be passed
         // off as one.
         Err(error) => error.into_response(),

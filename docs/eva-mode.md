@@ -199,12 +199,16 @@ claude.example.com {
 
 `/api/auth/verify` answers `200` with `X-Instance-Upstream` when the session is
 live and the user has an instance, `503` when they have none yet (a page, since
-`forward_auth` hands the body back), and a **redirect to `/login`** when there is
-no session — for the same reason: that response is what the visitor sees, so it
-must read as a page rather than an API error. It is still non-2xx, which is how
-`forward_auth` refuses the request and reports no upstream. The SPA's assets are
-namespaced under `/auth-assets/` so they never collide with the workspace's own
-`/assets/`.
+`forward_auth` hands the body back), and when there is no session it **redirects
+to `/login` for a page load but keeps the plain `401` for a sub-resource fetch**.
+That split matters: `forward_auth` hands the auth response back to whoever
+asked, so a visitor who lands on a URL should get a page rather than a JSON
+error — but an app fetch that followed that redirect would land on the sign-in
+page's HTML, receive it as a `200`, and conclude it was still signed in. It
+decides with the browser's own `Sec-Fetch-*` hints, falling back to `Accept`.
+Either way it is non-2xx, which is how `forward_auth` refuses the request and
+reports no upstream. The SPA's assets are namespaced under `/auth-assets/` so
+they never collide with the workspace's own `/assets/`.
 
 ### Identity
 
