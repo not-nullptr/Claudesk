@@ -53,9 +53,11 @@ if [ "$disabled" = "1" ]; then
     printf 'provision-user: %s is disabled; skipping\n' "$user_email" >&2
     exit 0
 fi
+# An account that already has an instance is not re-provisioned, but its stack
+# is still brought up to date — so re-running this after a rebuild recreates the
+# containers that changed, without moving the recorded port.
 if [ -n "$upstream" ]; then
-    printf 'provision-user: %s already has %s\n' "$user_email" "$upstream"
-    exit 0
+    printf 'provision-user: %s already has %s; refreshing its stack\n' "$user_email" "$upstream"
 fi
 
 # ASCII-only slug: LC_ALL=C keeps the character classes to a-z0-9, so a
@@ -66,7 +68,12 @@ slug="$(printf '%s' "$user_email" \
     | sed 's/^-*//; s/-*$//')"
 [ -n "$slug" ] || { printf 'provision-user: cannot derive a slug from %s\n' "$user_email" >&2; exit 1; }
 
-port=$((port_base + id))
+# Keep the port already recorded for the account; a new one is 15901 + its id.
+if [ -n "$upstream" ]; then
+    port="${upstream##*:}"
+else
+    port=$((port_base + id))
+fi
 user_root="$data_root/users/$slug"
 
 # Its own directories, owned by the same user the containers run as.
@@ -100,7 +107,9 @@ compose_shared --project-name "claudesk-$slug" \
     up -d claude-desktop cowork-bridge claude-gateway-loopback
 
 # Route the account to it; authd re-reads this on every request.
-authd --set-upstream "$user_email" "127.0.0.1:$port" >&2
+if [ -z "$upstream" ]; then
+    authd --set-upstream "$user_email" "127.0.0.1:$port" >&2
+fi
 
 printf 'provision-user: %s -> 127.0.0.1:%s (project claudesk-%s)\n' \
     "$user_email" "$port" "$slug"

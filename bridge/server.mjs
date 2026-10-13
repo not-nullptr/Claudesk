@@ -222,6 +222,82 @@ function applyAccountIdentity(account, identity) {
 // shell's account context reads; the composer then takes the local path the
 // Desktop client already uses. Merges into the existing settings object;
 // unchanged accounts return the same reference.
+// The uuid for a synthesised account, derived from the sign-in so it stays the
+// same across reloads and bridge restarts (shaped like a name-based UUID v5).
+function syntheticAccountUuid(seed) {
+  const hex = createHash("sha256").update(String(seed || "")).digest("hex");
+  const variant = "89ab"[Number.parseInt(hex[16], 16) & 0b11];
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `5${hex.slice(13, 16)}`,
+    `${variant}${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+// The claude.ai chrome reads the bootstrap's `account` document as "who is
+// signed in", and shows its sign-in page when it is absent. The app builds that
+// document on first run and keeps it inside its browser profile — so a fresh
+// profile (every account of a fresh deployment) answers `account: null` and the
+// chrome never gets past sign-in. Build the document from the identity instead,
+// matching the shape the app itself produces for a 3P gateway deployment.
+function syntheticAccount(identity) {
+  const uuid = syntheticAccountUuid(
+    String(identity.email || identity.name || "").toLowerCase(),
+  );
+  const now = new Date().toISOString();
+  return {
+    tagged_id: `cowork_3p_${uuid}`,
+    uuid,
+    email_address: identity.email || "",
+    full_name: identity.name || "",
+    display_name: identity.name || "",
+    created_at: now,
+    updated_at: now,
+    accepted_clickwrap_versions: {},
+    is_verified: true,
+    age_is_verified: true,
+    memberships: [{
+      role: "admin",
+      seat_tier: "unassigned",
+      created_at: now,
+      updated_at: now,
+      organization: {
+        uuid: "00000000-0000-4000-8000-000000000001",
+        id: 0,
+        name: identity.organization || "Claudesk",
+        settings: {},
+        parent_organization_uuid: null,
+        capabilities: ["chat", "claude_pro"],
+        billing_type: "stripe_subscription",
+        free_credits_status: null,
+        api_disabled_reason: null,
+        api_disabled_until: null,
+        rate_limit_tier: null,
+        data_retention: null,
+        raven_type: null,
+        claude_ai_bootstrap_models_config: [],
+        plan_display_name: identity.plan || "Claudesk",
+      },
+    }],
+    workspace_memberships: [],
+    invites: [],
+    settings: {
+      code_default_transcript_view: "normal",
+      paprika_mode: "auto",
+      dismissed_claudeai_banners: [],
+      enabled_wiggle_egress: true,
+      wiggle_egress_hosts_template: "full_egress",
+      enabled_geolocation: false,
+      // Remote Cowork sessions are not served here; the web-shell account
+      // policy sets this too, and making it explicit keeps the two in step.
+      dramatic_shrimp_enabled: false,
+    },
+    ...(identity.avatar ? { avatar_image_url: identity.avatar } : {}),
+  };
+}
+
 function applyWebShellAccountPolicy(account) {
   if (!account || typeof account !== "object" || Array.isArray(account)) return account;
   const settings = account.settings === undefined ? {} : account.settings;
@@ -1681,11 +1757,22 @@ async function forwardOfficialProtocol(request, response, url) {
     // reference when there is nothing to change.
     if (webShellEnabled && accountIdentityConfigured(requestIdentity)) {
       const identity = requestIdentity;
-      if (bootstrapResponsePath.test(url.pathname) && parsed.account) {
-        const account = applyAccountIdentity(parsed.account, identity);
-        if (account !== parsed.account) {
-          parsed = { ...parsed, account };
+      if (bootstrapResponsePath.test(url.pathname)) {
+        if (parsed.account) {
+          const account = applyAccountIdentity(parsed.account, identity);
+          if (account !== parsed.account) {
+            parsed = { ...parsed, account };
+            rewrote = true;
+          }
+        } else {
+          // A fresh profile has no account yet, so the chrome would sit on its
+          // sign-in page. Supply the shape the app builds for itself.
+          parsed = { ...parsed, account: syntheticAccount(identity) };
           rewrote = true;
+          console.info(
+            "[cowork-bridge] bootstrap carried no account; supplied one for",
+            identity.email || identity.name,
+          );
         }
       } else if (method === "GET" && accountResponsePath.test(url.pathname)) {
         const account = applyAccountIdentity(parsed, identity);
