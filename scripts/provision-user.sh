@@ -33,9 +33,9 @@ port_base="${CLAUDESK_USER_PORT_BASE:-15901}"
 compose_shared() { docker compose -f compose.yaml "$@"; }
 authd() { compose_shared exec -T authd /app/authd "$@"; }
 
-# The role → operator-surfaces decision, driven by a smoke.
-# shellcheck source=scripts/lib/surfaces.sh
-. "$project_dir/scripts/lib/surfaces.sh"
+# The role → account-scope decision, driven by a smoke.
+# shellcheck source=scripts/lib/account-scope.sh
+. "$project_dir/scripts/lib/account-scope.sh"
 
 info="$(authd --show "$email")" || exit 1
 
@@ -132,22 +132,30 @@ case "$account_gateway_url" in
         ;;
 esac
 
-# The operator surfaces belong to whoever administers the box, and a provisioned
-# account is an end user. scripts/lib/surfaces.sh decides three of them by role —
-# an Admin keeps the deployment's own setting, every other account gets none:
+# A provisioned account inherits the deployment's own configuration — the same
+# .env and the same compose.yaml — so what an account must NOT inherit is pinned
+# by scripts/lib/account-scope.sh, by role (an Admin keeps the deployment's
+# setting, every other account is scoped down):
 #
 #   - the writable Gateway/inference configuration library, so an end user can
 #     neither see that page nor edit the endpoint, credential or model list
 #     through the bridge API (their endpoint still comes from the environment);
 #   - the Developer menu's privileged actions and its editor for the app's own
 #     config files;
-#   - the Projects/Spaces, Artifact, Memory and Scheduled-Tasks mutations.
+#   - the Projects/Spaces, Artifact, Memory and Scheduled-Tasks mutations;
+#   - the extra download roots (COWORK_REMOTE_READ_ROOTS), so an account reads
+#     its own workspace and nothing else.
 #
 # (Code is separately off for accounts, and stays off until the deployment turns
 # it on.) Override any of them for every account with the matching
 # CLAUDESK_ACCOUNT_* variable.
-account_operator_surfaces "${role:-User}"
+account_scope "${role:-User}"
 
+# Only the values above are scoped away from the deployment; the rest of its .env
+# (web shell, desktop home, identity org/plan, egress policy, timezone, VM sizing)
+# is inherited on purpose. Host bash is pinned off for every account: this image
+# requires Cowork VM mode and refuses the host-bash mode at build time, so the pin
+# only keeps an account from naming a mode the deployment set for itself.
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
 CLAUDESK_NAME_PREFIX="$slug-" \
@@ -162,6 +170,8 @@ CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \
+COWORK_REMOTE_READ_ROOTS="$ACCOUNT_READ_ROOTS" \
+CLAUDE_COWORK_HOST_BASH=0 \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
 compose_shared --project-name "claudesk-$slug" \
     up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback

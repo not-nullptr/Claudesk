@@ -100,8 +100,12 @@ runtime, and no internet-facing service ever holds the Docker socket.
   mind the memory each instance peaks at.
 
 Putting an instance up is also where an account's **privileges** are decided
-(`scripts/lib/surfaces.sh`, pinned by a smoke). Three operator surfaces are at
-stake, and a provisioned account gets none of them:
+(`scripts/lib/account-scope.sh`, pinned by a smoke). A provisioned account runs
+the deployment's own `compose.yaml` with the deployment's `.env`, so it inherits
+every value the deployment set — most of that is intended (the web shell, the
+desktop home, identity's org/plan, the egress policy, the timezone, the VM
+sizing). What must **not** be inherited is pinned by role; an account gets none
+of these, and an `Admin` account keeps the deployment's own setting:
 
 - `CLAUDE_REMOTE_GATEWAY_SETTINGS` — the writable Gateway/inference
   configuration library: the Setup page and the models/endpoint/credential
@@ -114,13 +118,16 @@ stake, and a provisioned account gets none of them:
   MCP logs and trace downloads.
 - `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` — the Projects/Spaces, Artifact,
   browser-file, Memory and Scheduled-Tasks mutations.
+- `COWORK_REMOTE_READ_ROOTS` — the extra roots the authenticated download route
+  may serve. An account reads its own workspace and nothing else; the operator's
+  own `/config` is not a tenant's to fetch. (`CLAUDE_COWORK_HOST_BASH` is pinned
+  off for every account too: the image requires Cowork VM mode.)
 
-An account whose role is `Admin` keeps the deployment's own setting for each
-instead. `provision-user.sh` reads the role from `authd --show` and decides;
+`provision-user.sh` reads the role from `authd --show` and decides;
 `CLAUDESK_ACCOUNT_GATEWAY_SETTINGS` / `_DEVELOPER_ACTIONS` /
-`_INFRASTRUCTURE_ACTIONS` force a value for every account regardless of role.
-Code stays off for accounts separately, and stays off until the deployment turns
-it on.
+`_INFRASTRUCTURE_ACTIONS` / `_READ_ROOTS` force a value for every account
+regardless of role. Code stays off for accounts separately, and stays off until
+the deployment turns it on.
 
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace`; that page refreshes itself, and reaching it nudges the
