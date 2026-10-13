@@ -54,10 +54,11 @@ flowchart LR
 
 | 入口 | 用途 | 访问边界 |
 | --- | --- | --- |
-| `http://SERVER_IP:15821/` | 局域网/Tailnet 直接访问 Chat、Cowork | 仅可信网络；不继承 Authelia |
-| `https://claude-home.172906573.xyz:28443/` | 安装 PWA、跨网络访问 | 由现有 Nginx Proxy Manager + Authelia 保护 |
+| `https://claude-home.172906573.xyz:28443/` | 使用 WebUI、安装 PWA、跨网络访问 | 由现有 Nginx Proxy Manager + Authelia 保护 |
 
-`15821` 是本 Compose 的唯一公开端口（容器内 `8080`）。HTTPS 入口需要把主机名解析到服务器，并沿用现有 Authelia 两因素规则。浏览器可以直接使用 HTTP，但标准 PWA 安装需要 HTTPS。
+WebUI（`15821`）与移动端（`8081`）端口只绑定宿主机回环地址（`127.0.0.1`），不直接暴露到网络：
+Bridge 没有应用层认证，只应经反向代理（TLS + Authelia）进入，因此不再提供局域网/Tailnet 直连入口。
+HTTPS 入口需要把主机名解析到服务器，并沿用现有 Authelia 两因素规则。标准 PWA 安装需要 HTTPS。
 
 ## 前置条件
 
@@ -94,17 +95,26 @@ CLAUDE_INFERENCE_MODELS_JSON='[{"name":"claude-sonnet-minimax-m3","labelOverride
 
 ```bash
 ./scripts/prepare-seccomp.sh
-docker compose build
-docker compose up -d
+./deploy.sh
 ./scripts/smoke.sh
+```
+
+`deploy.sh` 用两个 Compose 文件构建并强制重建全部服务：`compose.yaml`（Claudesk 本体）叠加
+`compose.gateway.yaml`（本部署私有的网关链，见该文件头部注释；其中的镜像 `local/shitproxy` 由独立项目
+构建，不在本仓库）。等价的命令是：
+
+```bash
+sudo docker compose -f compose.yaml -f compose.gateway.yaml up -d --build --force-recreate \
+    claude-desktop cowork-bridge claude-gateway-loopback \
+    claude-mobile claude-mobile-gateway-loopback shitproxy
 ```
 
 查看状态或停止：
 
 ```bash
-docker compose ps
-docker compose logs -f claude-desktop cowork-bridge
-docker compose down
+sudo docker compose -f compose.yaml -f compose.gateway.yaml ps
+sudo docker compose -f compose.yaml -f compose.gateway.yaml logs -f claude-desktop cowork-bridge
+sudo docker compose -f compose.yaml -f compose.gateway.yaml down
 ```
 
 镜像固定安装 `CLAUDE_DESKTOP_VERSION` 指定的精确版本，容器重启不会执行 APT 升级。生产机使用
@@ -284,11 +294,12 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 
 ## 安全边界
 
-- 直接 `15821` 端口没有应用层认证，只应暴露在可信 LAN/Tailnet；公网访问请使用 Authelia 保护的 HTTPS 入口。
+- `15821`（WebUI）与 `8081`（移动端）只绑定宿主机回环地址，没有应用层认证；入口是 TLS + Authelia 反向代理，不要把它们直接发布到网络。
 - Gateway Key 默认只留在 Desktop 容器与受管配置中，不注入浏览器 bootstrap；跨边界的请求头仅允许 `accept`、`accept-language`、`content-type`。
 - Developer、Infrastructure、Code 和 Gateway 编辑采用独立显式开关，默认值为 `0`；各能力内的删除操作由对应能力开关一并授权。
 - Bridge 拒绝任意文件路径、通用 Electron action、凭据字段和未 allowlist 的 IPC 方法；trace/heap 与配置文件走不缓存的受限端点。
-- 镜像使用 Anthropic 签名 APT 源、固定 digest 的 Rust builder、校验和固定的 `virtiofsd` 1.13.3，以及项目内的窄化 seccomp 规则；容器不使用 `--privileged`、`seccomp=unconfined` 或 `CAP_SYS_ADMIN`。
+- 镜像使用 Anthropic 签名 APT 源、固定 digest 的 Rust builder、校验和固定的 `virtiofsd` 1.13.3，以及项目内的窄化 seccomp 规则。
+- 持久根需要更高的权限，这是本部署与上游默认配置的主要安全差异：`claude-desktop` 使用 `CAP_SYS_ADMIN` 与 `userns_mode: host`（挂载 OverlayFS 并 `pivot_root`），seccomp 用 `security/claude-desktop-persistent.json`（在上面的基线配置上只多放行 `pivot_root`，同样以 `CAP_SYS_ADMIN` 为条件），并关闭 `apparmor`（`apparmor=unconfined`）。因此容器内 root 近似等于宿主机 root——不要再给它 `--privileged`；镜像里的 `app` 用户还拥有免密 `sudo`（供运行时安装持久化到可写层使用）。
 - 静态 Gateway 模式使用 `--password-store=basic` 以避免 headless 启动卡在 Keyring 解锁；不要把它当作交互式登录凭据的加密持久化方案。
 
 ## 验证与故障排查
@@ -326,6 +337,15 @@ Compose 默认挂载：
 | `/config` | `/opt/claudesk/data/config` | Claude Desktop 配置、账户与 Chat/Cowork 会话 |
 | `/workspace` | `/opt/claudesk/data/workspace` | Code/Cowork 工作区、远程上传与项目文件 |
 | `/data`（仅 cowork-bridge） | `/opt/claudesk/data/bridge-data` | 浏览器通知状态：Web Push 订阅、VAPID 密钥与服务端通知偏好；首次启动前请创建该目录并让 `PUID:PGID` 可写 |
+| 容器根 `/`（持久根） | `/var/lib/claudesk-root` | OverlayFS 可写层：运行时安装的软件包与手工改动 |
+
+### 持久根
+
+`claude-desktop` 的入口不是镜像自带的 `/init`，而是仓库根目录的 `persistent-root-entrypoint.sh`：它把新构建的镜像
+挂成只读下层（`/mnt/claudesk-base`），把宿主机 `/var/lib/claudesk-root` 作为可写上层，叠成一个持久 OverlayFS 根后
+`pivot_root` 进去。这样重新构建镜像**不会**抹掉运行时安装的软件包或手工改动。代价是镜像更新永远无法覆盖可写层里已有的
+路径（例如 `dpkg` 记录的旧 Desktop 版本），所以 `rootfs/etc/cont-init.d/19-claude-package-sync.sh` 会在新镜像启动时
+用镜像自带的 `/opt/claude-desktop-package.deb` 覆盖旧包。不要靠删除可写层来修版本不一致——那会丢掉所有运行时安装。
 
 停止 Claude Desktop 后再对 `/config` 做一致性敏感的备份。Cowork VM 与工作数据可能额外占用约 25 GB，长期运行前请检查存储余量。
 

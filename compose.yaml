@@ -8,10 +8,10 @@ services:
     image: local/claudesk-desktop:official-linux
     container_name: claude-desktop
     hostname: claude-desktop
+    # The bridge has no application-layer auth, so publish on loopback only; a
+    # TLS/Authelia reverse proxy is the intended way in (see README).
     ports:
-      - "${COWORK_WEB_PORT:-15821}:8080"
-    extra_hosts:
-      - "fn-i3h510-1.tail0292a9.ts.net:100.102.63.126"
+      - "127.0.0.1:${COWORK_WEB_PORT:-15821}:8080"
     env_file:
       - .env
     environment:
@@ -52,16 +52,38 @@ services:
       # model the gateway serves; empty keeps the built-in resolution. See
       # .env.example.
       CLAUDE_AUTO_MODE_MODEL: "${CLAUDE_AUTO_MODE_MODEL:-}"
+      # Force Code's subagents onto a cheaper gateway route. Empty keeps Claude
+      # Code's own resolution; see .env.example.
+      CLAUDE_CODE_SUBAGENT_MODEL: "${CLAUDE_CODE_SUBAGENT_MODEL:-deepseek/deepseek-flash}"
+      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "${CLAUDE_CODE_SUBAGENT_MODEL_FORCE:-1}"
     volumes:
       - /opt/claudesk/data/config:/config
       - /opt/claudesk/data/workspace:/workspace
+      # Persistent root: the freshly built image is the read-only lower layer
+      # and this host directory is the writable upper, so runtime package
+      # installs and hand-edits survive a rebuild. See
+      # persistent-root-entrypoint.sh.
+      - /var/lib/claudesk-root:/persistent-root
+      - ./persistent-root-entrypoint.sh:/persistent-root-entrypoint.sh:ro
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/vhost-vsock:/dev/vhost-vsock
     group_add:
       - "${KVM_GID:-104}"
+    # The overlay's mount(2) and pivot_root(2) need CAP_SYS_ADMIN, which the
+    # base seccomp profile gates and the persistent variant unlocks (see README
+    # "Security boundary"). userns_mode is host because the container re-roots
+    # itself and Electron needs its own user namespace for the Chromium sandbox.
+    cap_add:
+      - SYS_ADMIN
+    userns_mode: "host"
     security_opt:
-      - "seccomp=./security/claude-desktop.json"
+      - "seccomp=./security/claude-desktop-persistent.json"
+      - "apparmor=unconfined"
+    entrypoint:
+      - /persistent-root-entrypoint.sh
+    command:
+      - /init
     shm_size: "2gb"
     mem_limit: "${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
     networks:
@@ -211,7 +233,7 @@ services:
     container_name: claude-mobile-api
     user: "${PUID:-1000}:${PGID:-1001}"
     ports:
-      - "${CLAUDE_MOBILE_PORT:-8081}:8081"
+      - "127.0.0.1:${CLAUDE_MOBILE_PORT:-8081}:8081"
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       CLAUDE_MOBILE_HOST: "0.0.0.0"

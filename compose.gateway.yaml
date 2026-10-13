@@ -1,0 +1,81 @@
+# Operator's private gateway chain — NOT part of Claudesk.
+#
+# Merge this on top of compose.yaml to reach an inference gateway:
+#
+#   docker compose -f compose.yaml -f compose.gateway.yaml up -d
+#
+# `shitproxy` is a separate project built from its own private repository; it
+# is referenced here by a locally-built image and is deliberately never built
+# or published from this repo. Nothing in this file ships an image name that
+# resolves off this host.
+#
+# Only Claudesk's own services live in compose.yaml; keep that file standalone
+# deployable.
+
+services:
+  # Reach the host from inside the Desktop/mobile network namespaces.
+  claude-desktop:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Local caching/routing proxy in front of the upstream provider. Built from
+  # /opt/shitproxy (its own project) and tagged local/shitproxy; infra, not
+  # Claudesk.
+  shitproxy:
+    image: local/shitproxy:latest
+    container_name: shitproxy
+    restart: unless-stopped
+    env_file:
+      - /etc/shitproxy/gateway.env
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "4000"
+    ports:
+      - "127.0.0.1:14000:4000"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # TLS front door for the proxy, with the gateway routes in its Caddyfile.
+  gateway:
+    image: caddy:2
+    container_name: gateway
+    restart: unless-stopped
+    networks:
+      - default
+      - gateway_net
+    env_file:
+      - /etc/litellm/litellm.env
+    volumes:
+      - /etc/litellm/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - shitproxy
+
+  # Expose the gateway on 127.0.0.1:4000 inside the Desktop / mobile network
+  # namespace, so each service's CLAUDE_GATEWAY_BASE_URL can be a loopback URL.
+  claude-gateway-loopback:
+    image: alpine/socat
+    container_name: claude-gateway-loopback
+    restart: unless-stopped
+    network_mode: "service:claude-desktop"
+    depends_on:
+      - claude-desktop
+      - gateway
+    command:
+      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
+      - "TCP:gateway:4000"
+
+  claude-mobile-gateway-loopback:
+    image: alpine/socat
+    container_name: claude-mobile-gateway-loopback
+    restart: unless-stopped
+    network_mode: "service:claude-mobile"
+    depends_on:
+      - claude-mobile
+      - gateway
+    command:
+      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
+      - "TCP:gateway:4000"

@@ -133,6 +133,14 @@ RUN node -e 'const r=require("/opt/claude-cowork-bridge/release.json");if(r.desk
     set-cont-env APP_NAME "Claude Desktop Official Linux" && \
     set-cont-env APP_VERSION "official-apt"
 
+# git and sudo for the persistent root: the agent and the operator install
+# packages into the writable layer at runtime, which needs host root inside the
+# container — the app user runs Desktop/Code, so it gets passwordless sudo.
+# Kept in its own layer so the large Desktop dependency layer stays cached.
+RUN add-pkg git sudo && \
+    printf '%s\n' 'app ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/app && \
+    chmod 0440 /etc/sudoers.d/app
+
 ENV CLAUDE_DESKTOP_VERSION=${CLAUDE_DESKTOP_VERSION}
 
 LABEL io.claudesk.desktop-version="${CLAUDE_DESKTOP_VERSION}"

@@ -50,6 +50,7 @@ jq -e . \
     bridge/public/manifest.webmanifest \
     bridge-wrapper/package.json \
     security/claude-desktop.json \
+    security/claude-desktop-persistent.json \
     >/dev/null
 
 if command -v shellcheck >/dev/null 2>&1; then
