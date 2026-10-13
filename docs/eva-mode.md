@@ -99,18 +99,28 @@ runtime, and no internet-facing service ever holds the Docker socket.
   Provisioning runs `CLAUDESK_RECONCILE_JOBS` (default 4) accounts at a time —
   mind the memory each instance peaks at.
 
-Putting an instance up is also where an account's **privileges** are decided.
-The remote action surfaces — `CLAUDE_REMOTE_DEVELOPER_ACTIONS` (the Developer
-menu's privileged actions and its editor for `claude_desktop_config.json`,
-`developer_settings.json`, MCP logs and trace downloads) and
-`CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` (the Projects/Spaces, Artifact,
-browser-file, Memory and Scheduled-Tasks mutations) — are operator tooling, so a
-provisioned account gets neither. An account whose role is `Admin` keeps the
-deployment's own setting instead. `provision-user.sh` reads the role from
-`authd --show` and decides; `CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS` /
-`CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS` force a value for every account
-regardless of role. Code stays off for accounts separately, and stays off until
-the deployment turns it on.
+Putting an instance up is also where an account's **privileges** are decided
+(`scripts/lib/surfaces.sh`, pinned by a smoke). Three operator surfaces are at
+stake, and a provisioned account gets none of them:
+
+- `CLAUDE_REMOTE_GATEWAY_SETTINGS` — the writable Gateway/inference
+  configuration library: the Setup page and the models/endpoint/credential
+  editor, reachable in the web shell and through `POST /api/remote/settings`.
+  The account's own endpoint still comes from the environment (the image writes
+  it as a managed setting), so an end user can neither view nor edit it, and the
+  bridge answers 404 for the whole surface.
+- `CLAUDE_REMOTE_DEVELOPER_ACTIONS` — the Developer menu's privileged actions
+  and its editor for `claude_desktop_config.json`, `developer_settings.json`,
+  MCP logs and trace downloads.
+- `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` — the Projects/Spaces, Artifact,
+  browser-file, Memory and Scheduled-Tasks mutations.
+
+An account whose role is `Admin` keeps the deployment's own setting for each
+instead. `provision-user.sh` reads the role from `authd --show` and decides;
+`CLAUDESK_ACCOUNT_GATEWAY_SETTINGS` / `_DEVELOPER_ACTIONS` /
+`_INFRASTRUCTURE_ACTIONS` force a value for every account regardless of role.
+Code stays off for accounts separately, and stays off until the deployment turns
+it on.
 
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace`; that page refreshes itself, and reaching it nudges the

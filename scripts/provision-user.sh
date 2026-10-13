@@ -33,6 +33,10 @@ port_base="${CLAUDESK_USER_PORT_BASE:-15901}"
 compose_shared() { docker compose -f compose.yaml "$@"; }
 authd() { compose_shared exec -T authd /app/authd "$@"; }
 
+# The role → operator-surfaces decision, driven by a smoke.
+# shellcheck source=scripts/lib/surfaces.sh
+. "$project_dir/scripts/lib/surfaces.sh"
+
 info="$(authd --show "$email")" || exit 1
 
 id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""
@@ -128,25 +132,21 @@ case "$account_gateway_url" in
         ;;
 esac
 
-# The remote action surfaces are operator tooling, and a provisioned account is
-# an end user. The Developer menu's privileged actions and its editor for
-# claude_desktop_config.json, developer_settings.json, MCP logs and trace
-# downloads, and the Projects/Spaces, Artifact, browser-file, Memory and
-# Scheduled-Tasks mutations, all belong to whoever administers the box rather
-# than to the person using it. An Admin account keeps the deployment's own
-# setting; every other account gets none of it. (Code is separately off for
-# accounts, and stays off until the deployment turns it on.) Override with
-# CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS / _INFRASTRUCTURE_ACTIONS.
-case "${role:-User}" in
-    Admin)
-        account_developer_actions="${CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS:-${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}}"
-        account_infrastructure_actions="${CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS:-${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}}"
-        ;;
-    *)
-        account_developer_actions="${CLAUDESK_ACCOUNT_DEVELOPER_ACTIONS:-0}"
-        account_infrastructure_actions="${CLAUDESK_ACCOUNT_INFRASTRUCTURE_ACTIONS:-0}"
-        ;;
-esac
+# The operator surfaces belong to whoever administers the box, and a provisioned
+# account is an end user. scripts/lib/surfaces.sh decides three of them by role —
+# an Admin keeps the deployment's own setting, every other account gets none:
+#
+#   - the writable Gateway/inference configuration library, so an end user can
+#     neither see that page nor edit the endpoint, credential or model list
+#     through the bridge API (their endpoint still comes from the environment);
+#   - the Developer menu's privileged actions and its editor for the app's own
+#     config files;
+#   - the Projects/Spaces, Artifact, Memory and Scheduled-Tasks mutations.
+#
+# (Code is separately off for accounts, and stays off until the deployment turns
+# it on.) Override any of them for every account with the matching
+# CLAUDESK_ACCOUNT_* variable.
+account_operator_surfaces "${role:-User}"
 
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
@@ -158,9 +158,10 @@ CLAUDE_GATEWAY_BASE_URL="$account_gateway_url" \
 CLAUDE_GATEWAY_API_KEY="$account_gateway_key" \
 CLAUDE_GATEWAY_AUTH_SCHEME="$account_gateway_scheme" \
 CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
+CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
-CLAUDE_REMOTE_DEVELOPER_ACTIONS="$account_developer_actions" \
-CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$account_infrastructure_actions" \
+CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
+CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
 compose_shared --project-name "claudesk-$slug" \
     up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback
