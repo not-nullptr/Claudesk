@@ -95,8 +95,10 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 
 # Start the instance: its own compose project, names, port and data root. The
 # gateway chain is box-level and already running; the socat relay reaches it over
-# gateway_net, so this stack never declares shitproxy/gateway. The identity comes
-# from the account, not from authd (each instance is one person).
+# gateway_net, so this stack never declares shitproxy/gateway. The name and photo
+# are resolved live from authd (AUTH_IDENTITY_URL below) so an admin edit or a
+# new picture shows without a re-provision; the name/email below stay as the
+# no-session fallback.
 # Eva semantics, set here rather than inherited from the shared .env:
 #   - inference goes through this account's relay into the box-level chain
 #     (relay → caddy `gateway` → shitproxy), not straight at the router;
@@ -159,7 +161,7 @@ CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$account_developer_actions" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$account_infrastructure_actions" \
-AUTH_IDENTITY_URL='' \
+AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
 compose_shared --project-name "claudesk-$slug" \
     up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback
 

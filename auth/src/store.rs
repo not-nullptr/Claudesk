@@ -26,6 +26,10 @@ pub struct User {
     pub role: String,
     pub upstream: Option<String>,
     pub disabled: i64,
+    /// When this account's profile photo last changed; NULL means it has none.
+    /// Serves as the presence flag the bridge reads and the cache-buster in the
+    /// avatar URL.
+    pub avatar_updated_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -108,6 +112,16 @@ impl Store {
             .await?)
     }
 
+    pub async fn set_first_name(&self, user_id: i64, first_name: &str) -> AppResult<()> {
+        sqlx::query("UPDATE users SET first_name = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(user_id)
+            .bind(first_name)
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_password(&self, user_id: i64, hash: &str) -> AppResult<()> {
         sqlx::query("UPDATE users SET password_hash = ?2, updated_at = ?3 WHERE id = ?1")
             .bind(user_id)
@@ -158,13 +172,71 @@ impl Store {
         Ok(())
     }
 
-    /// Deleting a user cascades to their sessions and invites.
+    /// Deleting a user cascades to their sessions, invites and avatar.
     pub async fn delete_user(&self, user_id: i64) -> AppResult<()> {
         sqlx::query("DELETE FROM users WHERE id = ?1")
             .bind(user_id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // --- avatars -----------------------------------------------------------
+
+    /// Store (or replace) a user's profile photo, stamping the change on the
+    /// user row in the same transaction so the presence flag and the bytes never
+    /// disagree.
+    pub async fn set_avatar(
+        &self,
+        user_id: i64,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> AppResult<()> {
+        let ts = now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO avatars (user_id, content_type, bytes, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id) DO UPDATE SET content_type = ?2, bytes = ?3, updated_at = ?4",
+        )
+        .bind(user_id)
+        .bind(content_type)
+        .bind(bytes)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE users SET avatar_updated_at = ?2, updated_at = ?2 WHERE id = ?1")
+            .bind(user_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn clear_avatar(&self, user_id: i64) -> AppResult<()> {
+        let ts = now();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM avatars WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE users SET avatar_updated_at = NULL, updated_at = ?2 WHERE id = ?1")
+            .bind(user_id)
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn avatar(&self, user_id: i64) -> AppResult<Option<(String, Vec<u8>)>> {
+        Ok(sqlx::query_as::<_, (String, Vec<u8>)>(
+            "SELECT content_type, bytes FROM avatars WHERE user_id = ?1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     // --- invites -----------------------------------------------------------

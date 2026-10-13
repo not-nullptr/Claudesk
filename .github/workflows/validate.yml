@@ -52,9 +52,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - name: Build the auth service
+      - name: Build and test the auth service
         working-directory: auth
-        run: cargo clippy --locked -- -D warnings && cargo build --release --locked
+        run: cargo clippy --locked -- -D warnings && cargo test --locked && cargo build --release --locked
 
       - name: Typecheck and build the SPA
         working-directory: web

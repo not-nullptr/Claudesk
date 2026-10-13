@@ -342,6 +342,13 @@ per-session identity; the signed-in account, the sidebar name and the greeting
 all resolve the operator's account name first (`CLAUDE_REMOTE_ACCOUNT_NAME`, else
 the legacy `CLAUDE_REMOTE_USER_NAME`).
 
+**In Eva Mode the photo is per account.** With `AUTH_IDENTITY_URL` set the bridge
+also reads the signed-in account's `avatar_updated_at` and puts a same-origin
+`/api/auth/avatar/<id>?v=<n>` (served by authd) into `avatar_image_url`; a person
+with no photo leaves that field unset, so the chip and menu keep the default mark
+and no image is requested. This overrides the deployment-wide `…_AVATAR` for that
+request, which stays the fallback. See [Eva Mode](eva-mode.md).
+
 ## Why it is fenced
 
 The chrome and the surface set are the same switch in ion-dist (`isClaudeApp`),

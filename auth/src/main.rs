@@ -13,8 +13,8 @@ mod store;
 
 use std::net::SocketAddr;
 
-use axum::extract::State;
-use axum::routing::{any, get, patch, post};
+use axum::extract::{DefaultBodyLimit, State};
+use axum::routing::{any, get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
@@ -224,6 +224,8 @@ async fn main() {
         .route("/api/auth/logout", post(api_auth::logout))
         .route("/api/auth/me", get(api_auth::me))
         .route("/api/auth/accept-invite", post(api_auth::accept_invite))
+        .route("/api/auth/avatar/:id", get(api_auth::avatar))
+        .route("/api/auth/me/avatar", put(api_auth::set_my_avatar))
         .route("/api/auth/verify", any(api_auth::verify))
         .route("/api/admin/users", get(api_admin::list_users).post(api_admin::create_user))
         .route(
@@ -231,11 +233,18 @@ async fn main() {
             patch(api_admin::update_user).delete(api_admin::delete_user),
         )
         .route("/api/admin/users/:id/reset-password", post(api_admin::reset_password))
+        .route(
+            "/api/admin/users/:id/avatar",
+            put(api_admin::set_avatar).delete(api_admin::clear_avatar),
+        )
         // The SPA: every non-API path serves the app shell.
         .fallback_service(
             ServeDir::new(&state.cfg.web_dir)
                 .fallback(ServeFile::new(format!("{}/index.html", state.cfg.web_dir))),
         )
+        // Avatars are uploaded as raw image bytes; the handler enforces the real
+        // cap, this only stops a body large enough to buffer before it looks.
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
@@ -296,9 +305,10 @@ async fn bootstrap_admin(state: &AppState) -> crate::error::AppResult<()> {
 
     let user = match state.store.user_by_email(&email).await? {
         Some(existing) => existing,
+        // No name: the admin sets their own when they accept the invite.
         None => state
             .store
-            .create_user(&email, "Admin", "Admin", None)
+            .create_user(&email, "", "Admin", None)
             .await?,
     };
     if !user.is_admin() {
@@ -349,6 +359,10 @@ async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
         line("first_name", &user.first_name),
         line("role", &user.role),
         line("disabled", &user.disabled.to_string()),
+        line(
+            "avatar",
+            if user.avatar_updated_at.is_some() { "1" } else { "0" },
+        ),
         line("upstream", user.upstream.as_deref().unwrap_or("")),
         line(
             "has_password",
@@ -411,8 +425,9 @@ async fn cli_create_admin(cfg: &Config, store: &Store, email: &str) -> Result<()
         .map_err(|error| error.to_string())?
     {
         Some(existing) => existing,
+        // No name: the admin sets their own when they accept the invite.
         None => store
-            .create_user(&email, "Admin", "Admin", None)
+            .create_user(&email, "", "Admin", None)
             .await
             .map_err(|error| error.to_string())?,
     };

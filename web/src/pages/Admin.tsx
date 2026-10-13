@@ -1,5 +1,17 @@
 import { FormEvent, useEffect, useState } from "react";
-import { api, ApiError, inviteLink, Role, User } from "../api";
+import { api, ApiError, avatarUrl, inviteLink, prepareAvatar, Role, User } from "../api";
+
+/** Open the OS file picker and resolve with the chosen image, or null. */
+function pickImage(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/webp,image/gif,image/avif";
+    input.addEventListener("change", () => resolve(input.files?.[0] ?? null));
+    input.addEventListener("cancel", () => resolve(null));
+    input.click();
+  });
+}
 
 export function AdminPage() {
   const [me, setMe] = useState<User | null>(null);
@@ -9,9 +21,7 @@ export function AdminPage() {
   const [invite, setInvite] = useState<{ label: string; url: string } | null>(null);
 
   const [email, setEmail] = useState("");
-  const [firstName, setFirstName] = useState("");
   const [role, setRole] = useState<Role>("User");
-  const [upstream, setUpstream] = useState("");
 
   useEffect(() => {
     void (async () => {
@@ -52,22 +62,34 @@ export function AdminPage() {
     setBusy(true);
     setError("");
     try {
-      const { user, invite_token } = await api.createUser(
-        email.trim(),
-        firstName.trim(),
-        role,
-        upstream.trim(),
-      );
+      const { user, invite_token } = await api.createUser(email.trim(), role);
       setInvite({ label: user.email, url: inviteLink(invite_token) });
       setEmail("");
-      setFirstName("");
       setRole("User");
-      setUpstream("");
       await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not create the account");
     }
     setBusy(false);
+  }
+
+  /** Admin edits of a person's details — the invitee normally sets these when
+   *  they accept, but an admin can correct them afterwards. */
+  function editName(user: User) {
+    const next = window.prompt(`First name for ${user.email}`, user.first_name);
+    if (next === null) return;
+    void guard(() => api.updateUser(user.id, { first_name: next.trim() }));
+  }
+
+  async function changePhoto(user: User) {
+    const file = await pickImage();
+    if (!file) return;
+    const photo = await prepareAvatar(file);
+    await guard(() => api.setAvatar(user.id, photo));
+  }
+
+  function clearPhoto(user: User) {
+    void guard(() => api.clearAvatar(user.id));
   }
 
   async function reset(user: User) {
@@ -116,6 +138,9 @@ export function AdminPage() {
 
       <form className="card panel" onSubmit={create}>
         <h2>Create a user</h2>
+        <p className="muted" style={{ margin: 0 }}>
+          Invite by email — the person sets their name and photo when they accept.
+        </p>
         <div className="row">
           <label>
             Email
@@ -127,27 +152,11 @@ export function AdminPage() {
             />
           </label>
           <label>
-            First name
-            <input
-              value={firstName}
-              onChange={(event) => setFirstName(event.target.value)}
-              required
-            />
-          </label>
-          <label>
             Role
             <select value={role} onChange={(event) => setRole(event.target.value as Role)}>
               <option value="User">User</option>
               <option value="Admin">Admin</option>
             </select>
-          </label>
-          <label>
-            Instance upstream
-            <input
-              placeholder="127.0.0.1:15901"
-              value={upstream}
-              onChange={(event) => setUpstream(event.target.value)}
-            />
           </label>
         </div>
         <div>
@@ -177,6 +186,7 @@ export function AdminPage() {
       <table>
         <thead>
           <tr>
+            <th />
             <th>Name</th>
             <th>Email</th>
             <th>Role</th>
@@ -188,7 +198,20 @@ export function AdminPage() {
         <tbody>
           {users.map((user) => (
             <tr key={user.id}>
-              <td>{user.first_name}</td>
+              <td>
+                {avatarUrl(user) ? (
+                  <img
+                    className="avatar"
+                    src={avatarUrl(user)}
+                    alt=""
+                    width={28}
+                    height={28}
+                  />
+                ) : (
+                  <span className="avatar placeholder" aria-hidden="true" />
+                )}
+              </td>
+              <td>{user.first_name || "—"}</td>
               <td>{user.email}</td>
               <td>
                 <span className="tag">{user.role}</span>
@@ -199,6 +222,17 @@ export function AdminPage() {
               </td>
               <td>
                 <div className="actions">
+                  <button className="ghost" onClick={() => editName(user)}>
+                    Name…
+                  </button>
+                  <button className="ghost" onClick={() => void changePhoto(user)}>
+                    Photo…
+                  </button>
+                  {user.avatar_updated_at ? (
+                    <button className="ghost" onClick={() => clearPhoto(user)}>
+                      Remove photo
+                    </button>
+                  ) : null}
                   <button
                     className="ghost"
                     onClick={() => {

@@ -62,10 +62,12 @@ sudo docker compose -f compose.yaml up -d authd
 sudo docker compose logs "${CLAUDESK_NAME_PREFIX:-}claude-authd" | grep 'bootstrap admin invite'
 ```
 
-Open the printed `/accept-invite?token=…` link, set a password, and you land in
-`/admin`. From there, **Create a user** returns a one-time invite link (shown
-once) — send it to them; they set their own password and their browser timezone
-is captured then.
+Open the printed `/accept-invite?token=…` link, set your name and a password, and
+you land in `/admin`. From there, **Create a user** takes just an email and a role
+and returns a one-time invite link (shown once) — send it to them; they set their
+own first name, password and (optionally) profile photo, and their browser timezone
+is captured then. The name and photo are theirs: the admin only picks email + role
+at creation, though an admin can still correct them afterwards.
 
 ### Each account gets its own instance
 
@@ -179,6 +181,15 @@ it into the account documents the chrome reads — so the sidebar, the account
 menu and the greeting read as that person rather than the synthetic gateway
 identity. Unset, it falls back to the env-configured identity, which is what a
 default deployment and the `maddie` branch resolve.
+
+The person's **name and profile photo** come from the account too: each
+provisioned instance sets `AUTH_IDENTITY_URL` (see `scripts/provision-user.sh`),
+so an admin edit or a new picture shows live, without a re-provision. A photo is
+served by `authd` itself at `GET /api/auth/avatar/:id` — same-origin for the web
+shell (the proxy already sends `/api/auth/*` to authd), gated on a live session,
+and **404 when the person has no photo**, which is the chrome's cue to fall back
+to the default mark. Photos are stored beside the account in authd's SQLite, up
+to 2 MiB (PNG/JPEG/WebP/GIF/AVIF).
 
 ## Two deployments on one box
 

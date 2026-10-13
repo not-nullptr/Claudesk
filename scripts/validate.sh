@@ -56,7 +56,7 @@ jq -e . \
 # The auth service and its SPA. Skipped, not failed, when a toolchain or the
 # web dependencies are absent locally; the CI job installs both.
 if command -v cargo >/dev/null 2>&1; then
-    ( cd auth && cargo check --quiet --locked )
+    ( cd auth && cargo check --quiet --locked && cargo test --quiet --locked )
 else
     printf '%s\n' 'validate: cargo is unavailable; skipped authd build check' >&2
 fi

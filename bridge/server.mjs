@@ -120,6 +120,18 @@ const authIdentityCache = new Map();
 const AUTH_IDENTITY_TTL_MS = 30 * 1000;
 const AUTH_IDENTITY_CACHE_MAX = 512;
 
+// The signed-in person's own photo, served by the auth service at a fixed
+// same-origin route (the deployment proxy sends /api/auth/* there). `?v=` is the
+// photo's change time, so replacing it busts caches; someone with no photo gets
+// "", which leaves avatar_image_url unset and the chrome on its default mark.
+function accountAvatarUrl(user) {
+  const id = Number(user?.id);
+  const version = Number(user?.avatar_updated_at);
+  if (!Number.isInteger(id) || id <= 0) return "";
+  if (!Number.isInteger(version) || version <= 0) return "";
+  return `/api/auth/avatar/${id}?v=${version}`;
+}
+
 async function fetchAuthIdentity(request) {
   const cookie = request?.headers?.cookie;
   if (!authIdentityUrl || !cookie) return null;
@@ -134,6 +146,7 @@ async function fetchAuthIdentity(request) {
         identity = {
           name: String(user.first_name || user.email || "").trim().slice(0, 80),
           email: String(user.email || "").trim().slice(0, 200),
+          avatar: accountAvatarUrl(user),
         };
       }
     }
@@ -152,7 +165,8 @@ async function resolveRequestAccountIdentity(request) {
     email: user.email,
     organization: accountIdentity.organization,
     plan: accountIdentity.plan,
-    avatar: accountIdentity.avatar,
+    // The person's own photo wins; a deployment-wide avatar stays the fallback.
+    avatar: user.avatar || accountIdentity.avatar,
     deployment: accountIdentity.deployment,
   };
 }

@@ -209,6 +209,25 @@ th {
   color: var(--muted);
 }
 
+.avatar {
+  display: block;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--line);
+}
+
+.avatar.placeholder {
+  background: repeating-linear-gradient(45deg, var(--line), var(--line) 4px, transparent 4px, transparent 8px);
+}
+
+.avatar.preview {
+  width: 64px;
+  height: 64px;
+  margin: 4px 0;
+}
+
 .head {
   display: flex;
   align-items: baseline;

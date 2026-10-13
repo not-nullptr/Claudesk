@@ -1,13 +1,15 @@
 use std::net::{IpAddr, SocketAddr};
 
-use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::api_admin::{normalize_first_name, validate_avatar};
 use crate::crypto::{hash_password, verify_password};
 use crate::error::{AppError, AppResult};
 use crate::store::User;
@@ -23,6 +25,10 @@ pub struct LoginRequest {
 pub struct AcceptInviteRequest {
     pub token: String,
     pub password: String,
+    /// The invited person's own name. Required: the account is created with none
+    /// and named at the first moment they are in the loop.
+    #[serde(default)]
+    pub first_name: Option<String>,
     /// Sent by the browser when the invite is accepted — the first moment the
     /// user's own browser, rather than the admin's, is in the loop.
     #[serde(default)]
@@ -166,11 +172,13 @@ pub async fn accept_invite(
             state.cfg.min_password_len
         )));
     }
+    let first_name = normalize_first_name(body.first_name.as_deref())?;
     let user_id = state.store.consume_invite(&body.token).await?;
     state
         .store
         .set_password(user_id, &hash_password(&body.password)?)
         .await?;
+    state.store.set_first_name(user_id, first_name).await?;
     if let Some(tz) = body.timezone.as_deref().map(str::trim).filter(|t| !t.is_empty() && t.len() <= 64) {
         state.store.set_timezone(user_id, tz).await?;
     }
@@ -180,6 +188,53 @@ pub async fn accept_invite(
         .await?;
     let user = state.store.user(user_id).await?;
     Ok((jar.add(session_cookie(&state.cfg, token)), Json(json!({ "user": user }))))
+}
+
+/// The signed-in person's own profile photo. The accept page calls this right
+/// after the invite mints the session; the body is the raw image bytes.
+pub async fn set_my_avatar(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<serde_json::Value>> {
+    let user = current_user(&state, &jar)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let content_type = validate_avatar(&headers, &body)?;
+    state.store.set_avatar(user.id, content_type, &body).await?;
+    Ok(Json(json!({ "user": state.store.user(user.id).await? })))
+}
+
+/// Serve a user's profile photo, same-origin for the web shell. Any live session
+/// may read it; a user with no photo is a 404, which is the chrome's cue to fall
+/// back to the default mark. The route takes only the id — no path or query — so
+/// it is not an arbitrary-read primitive.
+pub async fn avatar(State(state): State<AppState>, jar: CookieJar, Path(id): Path<i64>) -> Response {
+    match current_user(&state, &jar).await {
+        Ok(Some(_)) => {}
+        _ => return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
+    }
+    match state.store.avatar(id).await {
+        Ok(Some((content_type, bytes))) => {
+            let mut response = (StatusCode::OK, bytes).into_response();
+            let headers = response.headers_mut();
+            if let Ok(value) = HeaderValue::from_str(&content_type) {
+                headers.insert(header::CONTENT_TYPE, value);
+            }
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=3600"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            );
+            response
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// A short page for states a signed-in user lands on directly. The body of a

@@ -34,6 +34,7 @@ function load(env = {}) {
       applyOrg: applyOrganizationIdentity,
       applyPolicy: applyWebShellAccountPolicy,
       avatarIsUrl: avatarValueIsUrl,
+      avatarUrl: accountAvatarUrl,
     };`, sandbox);
   const r = sandbox.result;
   // Round-trip through this realm's JSON so strict deepEqual sees main-realm
@@ -51,7 +52,31 @@ function load(env = {}) {
     applyOrgRaw: (organization, identity) => r.applyOrg(organization, identity),
     applyPolicyRaw: (account) => r.applyPolicy(account),
     avatarIsUrl: (value) => r.avatarIsUrl(value),
+    avatarUrl: (user) => r.avatarUrl(user),
   };
+}
+
+// A user with a photo gets the same-origin auth route with a cache-buster; a user
+// without one gets "", which leaves avatar_image_url unset so the chrome keeps
+// its default mark. The relative URL is applied to the account document verbatim.
+function checkUserAvatarUrl() {
+  const bridge = load({});
+  assert.equal(
+    bridge.avatarUrl({ id: 7, avatar_updated_at: 1700000000 }),
+    "/api/auth/avatar/7?v=1700000000",
+  );
+  assert.equal(bridge.avatarUrl({ id: 7, avatar_updated_at: null }), "");
+  assert.equal(bridge.avatarUrl({ id: 7 }), "", "a missing version is no photo");
+  assert.equal(bridge.avatarUrl({ id: 0, avatar_updated_at: 1 }), "", "a bogus id is dropped");
+  assert.equal(bridge.avatarUrl(null), "");
+  const named = load({ CLAUDE_REMOTE_ACCOUNT_NAME: "Ada" });
+  const withPhoto = named.applyAccount(upstreamAccount, {
+    ...named.identity,
+    avatar: "/api/auth/avatar/7?v=1700000000",
+  });
+  assert.equal(withPhoto.avatar_image_url, "/api/auth/avatar/7?v=1700000000");
+  const noPhoto = named.applyAccount(upstreamAccount, { ...named.identity, avatar: "" });
+  assert.equal(noPhoto.avatar_image_url, undefined, "no photo leaves the field unset");
 }
 
 const upstreamAccount = {
@@ -231,5 +256,8 @@ const upstreamAccount = {
     assert.equal(bridge.avatarIsUrl(path), false, `${path} is a local path`);
   }
 }
+
+// --- per-user avatar URL (the auth seam) ------------------------------------
+checkUserAvatarUrl();
 
 console.log("account-smoke: ok");
