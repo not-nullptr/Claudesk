@@ -43,6 +43,7 @@ function load({ webShell = false, env = {} } = {}) {
      result = {
        skipApprovals: grantCoworkSkipApprovals,
        bypassGate: grantCoworkBypassGate,
+       connectorGate: grantConnectorGates,
        hashed: growthbookKey,
        path: coworkSettingsPath,
        enabled: coworkSkipApprovals,
@@ -52,7 +53,7 @@ function load({ webShell = false, env = {} } = {}) {
   return sandbox.result;
 }
 
-const { skipApprovals, bypassGate, hashed, path } = load();
+const { skipApprovals, bypassGate, connectorGate, hashed, path } = load();
 
 // The settings document is rewritten to enable the row, once.
 const settings = { auto_mode_enabled: true, skip_approvals_enabled: false, other: 1 };
@@ -80,6 +81,26 @@ assert.deepEqual(plain(on.growthbook.features[hashed("cowork_bypass_permissions_
   { defaultValue: true }, "the on gate is preserved");
 
 assert.equal(bypassGate({}), false, "a bootstrap without growthbook is ignored");
+
+// The connectors gate (`papi_mcp`) follows the same shape: added when absent,
+// replaced when evaluated false, and left alone when already on.
+const connectorAbsent = { growthbook: { features: {} } };
+assert.equal(connectorGate(connectorAbsent), true, "an absent connectors gate is added");
+assert.deepEqual(plain(connectorAbsent.growthbook.features[hashed("papi_mcp")]),
+  { defaultValue: true }, "the connectors gate is added on => true");
+
+const connectorOff = { growthbook: { features: { [hashed("papi_mcp")]: { value: false } } } };
+assert.equal(connectorGate(connectorOff), true, "a connectors gate evaluated false is replaced");
+assert.deepEqual(plain(connectorOff.growthbook.features[hashed("papi_mcp")]),
+  { defaultValue: true }, "the replacement reads true");
+
+const connectorOn = { growthbook: { features: { [hashed("papi_mcp")]: { defaultValue: true } } } };
+assert.equal(connectorGate(connectorOn), false, "an already-on connectors gate is a no-op");
+assert.deepEqual(plain(connectorOn.growthbook.features[hashed("papi_mcp")]),
+  { defaultValue: true }, "the on connectors gate is preserved");
+
+assert.equal(connectorGate({}), false, "a bootstrap without growthbook is ignored for connectors");
+assert.equal(connectorGate({ growthbook: {} }), false, "a growthbook without features is ignored");
 
 // Only the org settings path is rewritten, never a sibling org document.
 assert.ok(path.test("/api/organizations/123e4567-e89b-12d3-a456-426614174000/cowork_settings"),

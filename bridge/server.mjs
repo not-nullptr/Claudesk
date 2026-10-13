@@ -1675,6 +1675,27 @@ function grantWebShellGates(value) {
   return changed;
 }
 
+// The connectors surface — the "Add connector" control and the plugin-connector
+// rows — decides whether this account may add connectors from the GrowthBook
+// feature `papi_mcp` (ion-dist's `canInstall`: `(manageFromPersonal ||
+// manageFromOrg) && F("papi_mcp")`). A self-hosted account is not the hosted
+// Enterprise ("raven") case, so `manageFromPersonal` is true and this feature
+// alone decides; an upstream that leaves it off strands the UI on the "Contact
+// an organization owner to add connectors" dead end. Force it on. The sibling
+// `papi_disable_mcp_ui` gate, which would hide the whole surface instead, is
+// deliberately never granted.
+const connectorGrantedGate = "papi_mcp";
+function grantConnectorGates(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey(connectorGrantedGate);
+  const entry = features[key];
+  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+  if (on) return false;
+  features[key] = { defaultValue: true };
+  return true;
+}
+
 // Flip the org's Cowork approval settings so the picker offers "Skip all
 // approvals". The renderer reads `skip_approvals_enabled` off this document to
 // build the composer's mode list (ion-dist's `Lv`: the bypass row appears only
@@ -1830,6 +1851,13 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
+      rewrote = true;
+    }
+    // Connectors ("Add connector" / plugins) are gated on the `papi_mcp`
+    // growthbook feature; make it read true so the control is offered (see
+    // grantConnectorGates).
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
+      && grantConnectorGates(parsed)) {
       rewrote = true;
     }
     // Cowork's "Skip all approvals" needs both the org settings document and
