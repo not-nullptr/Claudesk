@@ -1,0 +1,151 @@
+# Eva Mode
+
+Eva Mode is the multi-user shape of this fork: **main is Eva**, authentication is
+first-class, and every user gets their own light Claude Desktop instance. The
+single-user deployment ("Maddie Mode") lives on the `maddie` branch.
+
+- **Surface:** the unified upstream home (Chat merged into Cowork) with **Code
+  fully disabled**. Not a separate "chat + cowork" pair — internally it is one
+  Cowork surface with the merge flags on.
+- **Auth:** the `authd` service owns users, sessions and invites. It is a plain
+  component — it never touches a container runtime.
+- **Instances:** one per user, owned by **systemd**, not a container daemon.
+
+## Stage 1 — the auth layer (shippable on its own)
+
+### Configure
+
+In `.env`:
+
+```dotenv
+# First admin. While no admin exists, authd creates this account on startup and
+# prints its one-time invite link to the log exactly once. Clear it afterwards.
+AUTH_BOOTSTRAP_ADMIN_EMAIL=you@example.com
+
+# Cookie is Secure by default; the entry is HTTPS via the reverse proxy.
+AUTH_COOKIE_SECURE=1
+
+# The bridge resolves the signed-in user per request so the sidebar and greeting
+# read as that person (see "Identity" below).
+AUTH_IDENTITY_URL=http://authd:8080
+```
+
+Create the state directory writable by `PUID:PGID`:
+
+```bash
+sudo install -d -o "$PUID" -g "$PGID" /opt/claudesk/data/auth-data
+```
+
+### Build and start
+
+```bash
+./scripts/prepare-seccomp.sh
+sudo docker compose -f compose.yaml -f compose.gateway.yaml build authd
+sudo docker compose -f compose.yaml -f compose.gateway.yaml up -d authd
+sudo docker compose logs claude-authd | grep 'bootstrap admin invite'
+```
+
+Open the printed `/accept-invite?token=…` link, set a password, and you land in
+`/admin`. From there, **Create a user** returns a one-time invite link (shown
+once) — send it to them; they set their own password and their browser timezone
+is captured then.
+
+### Reverse proxy
+
+The service is loopback-only; the proxy is the single gate. Everything the auth
+service owns goes to it directly; everything else is the user's workspace behind
+`forward_auth`, which returns the upstream to route to.
+
+```caddyfile
+claude.example.com {
+	# SPA routes, its assets, and the API all belong to authd.
+	@auth path /login /accept-invite /admin /auth-assets/* /api/auth/* /api/admin/*
+	handle @auth {
+		reverse_proxy 127.0.0.1:15830
+	}
+
+	# Everything else is the workspace, behind the session check.
+	handle {
+		forward_auth 127.0.0.1:15830 {
+			uri /api/auth/verify
+			copy_headers X-Instance-Upstream
+		}
+		reverse_proxy {http.request.header.X-Instance-Upstream}
+	}
+
+	# Send unauthenticated visitors to the login page instead of a bare 401.
+	handle_errors {
+		@unauth expression {http.error.status_code} == 401
+		redir @unauth /login?next={http.request.uri} 302
+	}
+}
+```
+
+`/api/auth/verify` answers `200` with `X-Instance-Upstream` when the session is
+live and the user has an instance, `503` when they have none yet, and `401`
+otherwise. The SPA's assets are namespaced under `/auth-assets/` so they never
+collide with the workspace's own `/assets/`.
+
+### Identity
+
+With `AUTH_IDENTITY_URL` set, `bridge/server.mjs` resolves the signed-in user
+from the request's session cookie (a short-lived, cookie-keyed cache) and feeds
+it into the account documents the chrome reads — so the sidebar, the account
+menu and the greeting read as that person rather than the synthetic gateway
+identity. Unset, it falls back to the env-configured identity, which is what a
+default deployment and the `maddie` branch resolve.
+
+## Stage 2 — per-user light instances
+
+**Not built yet — spike first.** The plan is one systemd-owned instance per user;
+the honest unknowns (rootless KVM/vsock, the baseimage init under rootless
+podman, and the update machinery) are all settled by one afternoon on the box.
+
+### The model
+
+- One `claude-desktop` (+ its bridge/office sidecars) per user, as a **systemd
+  unit pair**: a `.socket` that listens on the user's loopback port and a
+  `.container` (rootless-podman quadlet) that the first connection starts through
+  `systemd-socket-proxyd`. On-demand comes from systemd, not from the app.
+- `MemoryMax`/`CPUQuota` cap each unit; `/dev/kvm` and `/dev/vhost-vsock` are
+  passed explicitly.
+- No persistent-root overlay: Eva has no user-controlled container to need it, so
+  an instance drops `CAP_SYS_ADMIN`, `userns_mode: host`, `apparmor=unconfined`
+  and `pivot_root` and runs the base seccomp profile.
+- `authd` registers each user's `upstream`, which Caddy routes to.
+
+### The VM disk is shared, not copied
+
+`rootfs.img` is a 10 GiB image that is 52 % zeros; the pristine bundle is seeded
+once and **reflinked** per user on the same btrfs, so a new user costs only the
+extents their guest actually writes:
+
+```bash
+cp -a --reflink=always "$MASTER/rootfs.img"    "$user_dir/claudevm.bundle/"
+cp -a --reflink=always "$MASTER/rootfs.img.zst" "$user_dir/claudevm.bundle/"
+# ... the static files; deliberately NOT sessiondata.img — each user's is theirs.
+```
+
+Measured on the box: a reflinked copy reports `Exclusive 0.00 B`. Confirm the app
+adopts the seeded bundle instead of re-downloading it, and re-check `btrfs
+filesystem du -s` after real Cowork use to see how much a guest dirties.
+
+### Spike checklist
+
+1. Rootless podman runs *this* image: the jlesage `/init`, Xvfb, the bridge, and
+   the Cowork VM with `/dev/kvm` + `/dev/vhost-vsock` in a rootless container.
+2. A `.socket` + `systemd-socket-proxyd` starts it on first connection.
+3. The VM comes up light (`mem=%dMB` at 1024 in the qemu args) and idle-stops.
+4. A reflinked bundle is adopted without a re-download.
+
+If rootless KVM/vsock or the baseimage init fight back, fall back to
+`systemd-nspawn` (btrfs snapshots give the disk sharing for free), or to
+systemd-managed *rootful* podman units, which still keeps the socket out of the
+app.
+
+### Update machinery
+
+`scripts/monthly-update.sh` is compose-coupled today. Stage 2 rewrites it to
+build the candidate image, gate on `config/release.json`, and restart the N
+units with a rollback image — and to refresh the stale `/vol2/1000/…` paths in
+`ops/systemd`.

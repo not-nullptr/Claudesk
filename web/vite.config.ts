@@ -5,7 +5,13 @@ import react from "@vitejs/plugin-react";
 // /admin alike — axum serves index.html for any of them.
 export default defineConfig({
   plugins: [react()],
-  build: { outDir: "dist", emptyOutDir: true },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    // Assets live under their own prefix so the reverse proxy can route them to
+    // the auth service without shadowing the workspace's own /assets/*.
+    assetsDir: "auth-assets",
+  },
   server: {
     // `bun run dev` proxies the API to a locally running authd.
     proxy: {
