@@ -13,5 +13,10 @@ tmp/
 gpu-embed.zip
 documents.jsonl.gz
 
+# Local compose overrides (per-host build contexts, ports, image names) — never
+# committed; Docker Compose loads compose.override.{yaml,yml} automatically.
+compose.override.yaml
+compose.override.yml
+
 # Instrumented app builds (tools/frida/) — large binaries, never committed.
 *.ipa
