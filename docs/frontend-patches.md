@@ -131,6 +131,18 @@ unlike the card — it is **not** a required patch: a bundle that no longer matc
 leaves a useless picker in place, which is visible rather than silent, so it must
 not block candidate preparation the way the download and preview patches do.
 
+The renderer only learns Code is off after the bootstrap lands — its surface list
+starts from an optimistic default, so the pills paint for a frame before the
+splice removes them. The browser client is covered ahead of that round trip by a
+`remote-shell.css` rule that hides `[data-compact-mode-switcher]` whenever the
+document lacks `claude-remote-code-enabled`, the class the preload adds
+synchronously from the bootstrap config (`CLAUDE_REMOTE_CODE_ACTIONS`) before the
+app mounts. That class is the same switch as the managed
+`isClaudeCodeForDesktopEnabled`, so the two mechanisms agree on a provisioned
+deployment; the CSS is what keeps the control from painting at all, and the
+renderer splice keeps it out of the DOM for the Desktop frame the browser never
+sees.
+
 The sidebar's account chip — the bottom-left identity row — leads with an avatar
 slot, but in this build the component behind that slot still reads the account
 view and then renders the deployment mark, discarding the `src` it just read:

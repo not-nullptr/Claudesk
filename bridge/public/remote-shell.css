@@ -59,6 +59,18 @@ body,
   display: none !important;
 }
 
+/* The compact mode switcher — the "Claude"/"Code" pills at the top right of the
+ * navbar — only moves between the home surface and Code. The renderer's own
+ * availability settles only after the bootstrap lands (its surface list starts
+ * from an optimistic default), so the pills painted for a frame before the
+ * renderer patch removed them. The preload adds `claude-remote-code-enabled`
+ * synchronously from the bootstrap config, before the app mounts, so hide the
+ * control outright when Code is off rather than wait for that round trip; a
+ * deployment with Code enabled keeps it. */
+html:not(.claude-remote-code-enabled) [data-compact-mode-switcher] {
+  display: none !important;
+}
+
 /* Reuse the official Desktop renderer unchanged. These layout overrides are
  * gated by a class that the preload adds only for a mobile device, so mobile
  * browser tabs and PWAs share them while PC windows keep the official layout. */
@@ -404,7 +416,7 @@ html body dialog.remote-folder-picker:not([open]) { display: none; }
 .remote-folder-picker input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--picker-text); cursor: pointer; }
 .remote-folder-picker .remote-folder-picker-folder { flex: 1; justify-content: flex-start; min-width: 0; min-height: 44px; padding: 10px 12px; border: 0; text-align: left; overflow-wrap: anywhere; }
 .remote-folder-picker .remote-folder-picker-folder::before { content: ""; flex-shrink: 0; width: 18px; height: 18px; background: var(--picker-muted); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-width='1.5' stroke-linejoin='round' d='M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z'/%3E%3C/svg%3E") center / contain no-repeat; }
-.remote-folder-picker .remote-folder-picker-folder::after { content: "�"; margin-left: auto; padding-left: 12px; color: var(--picker-muted); font-size: 20px; }
+.remote-folder-picker .remote-folder-picker-folder::after { content: "�"; margin-left: auto; padding-left: 12px; color: var(--picker-muted); font-size: 20px; }
 .remote-folder-picker .remote-folder-picker-status { flex-shrink: 0; padding: 12px 24px; color: var(--picker-muted); font-size: 12px; }
 .remote-folder-picker .remote-folder-picker-footer { display: flex; flex-shrink: 0; justify-content: flex-end; align-items: center; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--picker-border); }
 .remote-folder-picker .remote-folder-picker-primary { background: var(--picker-text); color: var(--picker-surface); border-color: transparent; }
