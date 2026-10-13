@@ -312,18 +312,22 @@ if [ "$remote_gateway_settings" = "1" ]; then
         fi
         printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s\n' \
             "$remote_code_actions"
-        # The inference endpoint is a provisioning value: the Cowork VM makes the
-        # model calls and is confined to the guest, so an account whose endpoint
-        # is not reachable from there simply cannot infer. A deployment that
-        # moves it has to move it in the writable configuration, not merely fail
-        # to write a new one. Opt-in, so a deployment where the endpoint is
-        # edited in the official Gateway panel keeps those edits.
+        # The endpoint and its credential are provisioning values: the Cowork VM
+        # makes the model calls and is confined to the guest, so an account whose
+        # endpoint is not reachable from there simply cannot infer, and one whose
+        # credential or scheme is stale answers 401 on the route caddy sends
+        # straight to the router. A deployment that moves any of the three has to
+        # move it in the writable configuration, not merely fail to write a new
+        # one. Opt-in, so a deployment where they are edited in the official
+        # Gateway panel keeps those edits.
         if [ "$gateway_env_authoritative" = "1" ] \
-            && [ "$(jq -r '.inferenceGatewayBaseUrl // empty' \
-                "$config_library/$applied_id.json")" != "$base_url" ]; then
+            && [ "$(jq -r '[.inferenceGatewayBaseUrl // empty, .inferenceGatewayApiKey // empty, .inferenceGatewayAuthScheme // empty] | @tsv' \
+                "$config_library/$applied_id.json")" \
+                != "$(printf '%s\t%s\t%s' "$base_url" "$api_key" "$auth_scheme")" ]; then
             gateway_tmp="$(mktemp "$config_library/.gateway.XXXXXX")"
-            jq --arg base_url "$base_url" \
-                '. + {inferenceGatewayBaseUrl: $base_url}' \
+            jq --arg base_url "$base_url" --arg api_key "$api_key" --arg auth_scheme "$auth_scheme" \
+                '. + {inferenceGatewayBaseUrl: $base_url, inferenceGatewayApiKey: $api_key,
+                      inferenceGatewayAuthScheme: $auth_scheme}' \
                 "$config_library/$applied_id.json" > "$gateway_tmp"
             install -o "$user_id" -g "$group_id" -m 0600 \
                 "$gateway_tmp" "$config_library/$applied_id.json"

@@ -102,18 +102,28 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 #   - no Code surface.
 # Both are overridable for a deployment that wants something else.
 
-# The account's inference endpoint is the deployment's own unless a deployment
-# says otherwise. It must not be invented here: the Cowork VM makes the model
-# calls, and an endpoint that is only meaningful inside the container — the
-# loopback relay, say — is unreachable from the guest, where it resolves to the
-# guest itself. Inheriting keeps a provisioned account configured exactly like
-# the instance it is provisioned from.
-account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-${CLAUDE_GATEWAY_BASE_URL:-}}"
-[ -n "$account_gateway_url" ] || {
-    printf 'provision-user: no gateway URL: set CLAUDE_GATEWAY_BASE_URL (or CLAUDESK_ACCOUNT_GATEWAY_URL) in %s/.env\n' \
-        "$project_dir" >&2
-    exit 1
-}
+# The gateway a provisioned account talks to, and how it authenticates. The
+# endpoint must be reachable from inside the Cowork VM, which makes the model
+# calls and resolves the name itself: a loopback URL resolves to the guest there,
+# however well it answers in the container. `gateway` is the box-level chain on
+# gateway_net, which the container resolves through Docker DNS and the guest
+# through the container.
+#
+# The key is a placeholder that never leaves the box. caddy `gateway` replaces
+# X-Api-Key with the upstream credential on the one route that goes straight to
+# the router, so a deployment's key never has to be an upstream key — and is
+# never sent as a bearer token the router would reject, which is what an
+# `x-api-key` scheme avoids. Override any of the three with
+# CLAUDESK_ACCOUNT_GATEWAY_URL / _API_KEY / _AUTH_SCHEME.
+account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://gateway:4000}"
+account_gateway_key="${CLAUDESK_ACCOUNT_GATEWAY_API_KEY:-sk-local}"
+account_gateway_scheme="${CLAUDESK_ACCOUNT_GATEWAY_AUTH_SCHEME:-x-api-key}"
+case "$account_gateway_url" in
+    *127.0.0.1*|*localhost*|*"::1"*)
+        printf 'provision-user: WARNING: gateway URL %s is loopback; the Cowork VM resolves that to itself, so inference will fail\n' \
+            "$account_gateway_url" >&2
+        ;;
+esac
 
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
@@ -122,6 +132,8 @@ COWORK_WEB_PORT="$port" \
 CLAUDE_REMOTE_ACCOUNT_NAME="$first_name" \
 CLAUDE_REMOTE_ACCOUNT_EMAIL="$user_email" \
 CLAUDE_GATEWAY_BASE_URL="$account_gateway_url" \
+CLAUDE_GATEWAY_API_KEY="$account_gateway_key" \
+CLAUDE_GATEWAY_AUTH_SCHEME="$account_gateway_scheme" \
 CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 AUTH_IDENTITY_URL='' \
