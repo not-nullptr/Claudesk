@@ -306,13 +306,18 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # Expose the box-level gateway (compose.gateway.yaml) on 127.0.0.1:4000 inside
-  # this deployment's Desktop / mobile network namespaces, so each service's
-  # CLAUDE_GATEWAY_BASE_URL can be a loopback URL. Desktop accepts a gateway that
-  # is HTTPS, or plain HTTP only on the loopback, so this is what lets a
-  # deployment use the plain-HTTP box-level chain at all. The `gateway` service
-  # lives in that shared chain, not here, so there is deliberately no depends_on
-  # for it.
+  # Expose the box-level gateway (compose.gateway.yaml) on port 4000 inside this
+  # deployment's Desktop / mobile network namespaces. The `gateway` service lives
+  # in that shared chain, not here, so there is deliberately no depends_on for it.
+  #
+  # It listens on every interface of the namespace, not just the loopback. The
+  # Cowork VM makes the model calls and can only leave the guest through the
+  # host, where it arrives on the host-facing address QEMU's networking gives it
+  # — not on the container's own 127.0.0.1. A loopback-only bind answers the
+  # container's own processes and nothing the VM can dial, which is why
+  # inference failed inside the VM while the same port answered from the
+  # container. Peers that can reach this relay on gateway_net could already
+  # reach caddy `gateway` on that port, so the wider bind exposes nothing new.
   claude-gateway-loopback:
     image: alpine/socat
     container_name: "${CLAUDESK_NAME_PREFIX:-}claude-gateway-loopback"
@@ -321,7 +326,7 @@ services:
     depends_on:
       - claude-desktop
     command:
-      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
+      - "TCP-LISTEN:4000,reuseaddr,fork"
       - "TCP:gateway:4000"
 
   claude-mobile-gateway-loopback:
