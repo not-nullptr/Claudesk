@@ -27,7 +27,10 @@ RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs \
     && rm -rf src
 COPY auth/migrations ./migrations
 COPY auth/src ./src
-RUN cargo build --release --locked
+# COPY preserves the sources' (older) mtimes, so without this touch Cargo sees
+# the stub build above as up to date and ships the stub — a binary with an empty
+# main that exits 0 immediately. Touch forces the real rebuild.
+RUN find src -type f -exec touch {} + && cargo build --release --locked
 
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
