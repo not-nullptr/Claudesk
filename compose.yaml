@@ -12,6 +12,8 @@ services:
     # TLS/Authelia reverse proxy is the intended way in (see README).
     ports:
       - "127.0.0.1:${COWORK_WEB_PORT:-15821}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     environment:
@@ -299,6 +301,32 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+
+  # Expose the box-level gateway (compose.gateway.yaml) on 127.0.0.1:4000 inside
+  # this deployment's Desktop / mobile network namespaces, so each service's
+  # CLAUDE_GATEWAY_BASE_URL can be a loopback URL. The `gateway` service lives in
+  # that shared chain, not here, so there is deliberately no depends_on for it.
+  claude-gateway-loopback:
+    image: alpine/socat
+    container_name: "${CLAUDESK_NAME_PREFIX:-}claude-gateway-loopback"
+    restart: unless-stopped
+    network_mode: "service:claude-desktop"
+    depends_on:
+      - claude-desktop
+    command:
+      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
+      - "TCP:gateway:4000"
+
+  claude-mobile-gateway-loopback:
+    image: alpine/socat
+    container_name: "${CLAUDESK_NAME_PREFIX:-}claude-mobile-gateway-loopback"
+    restart: unless-stopped
+    network_mode: "service:claude-mobile"
+    depends_on:
+      - claude-mobile
+    command:
+      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
+      - "TCP:gateway:4000"
 
   # Authentication and account service. Owns users, sessions and invites, serves
   # the login/admin SPA, and answers the reverse proxy's `forward_auth`. A plain

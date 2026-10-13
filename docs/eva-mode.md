@@ -44,11 +44,19 @@ data, container names or state — see [Two deployments on one box](#two-deploym
 
 ### Build and start
 
+The gateway chain is box-level and started once per host, on its own:
+
+```bash
+sudo docker compose -f compose.gateway.yaml up -d
+```
+
+Then this deployment:
+
 ```bash
 ./scripts/prepare-seccomp.sh
-sudo docker compose -f compose.yaml -f compose.gateway.yaml build authd
-sudo docker compose -f compose.yaml -f compose.gateway.yaml up -d authd
-sudo docker compose logs claude-authd | grep 'bootstrap admin invite'
+sudo docker compose -f compose.yaml build authd
+sudo docker compose -f compose.yaml up -d authd
+sudo docker compose logs "${CLAUDESK_NAME_PREFIX:-}claude-authd" | grep 'bootstrap admin invite'
 ```
 
 Open the printed `/accept-invite?token=…` link, set a password, and you land in
@@ -124,10 +132,11 @@ AUTH_PORT=15832
 
 Two things are **not** per-checkout:
 
-- **The gateway chain is box-level.** `compose.gateway.yaml`'s `shitproxy` and
-  `gateway` (caddy) are one shared chain — start them once, from one stack only.
-  A second stack cannot publish `127.0.0.1:14000` again. Point the second
-  deployment's `CLAUDE_GATEWAY_BASE_URL` at the shared gateway.
+- **The gateway chain is box-level.** `compose.gateway.yaml` (shitproxy + the
+  caddy `gateway`) is its own stack: start it once with
+  `docker compose -f compose.gateway.yaml up -d`, and every deployment on the
+  host reaches it over `gateway_net`. Neither deployment declares it, so neither
+  fights the other for its name or its host port.
 - **Service aliases on the shared `gateway_net` are not project-scoped.** Both
   stacks attach `authd` and `claude-desktop` to that external network, so a
   bridge asking for `authd` can resolve the *other* deployment's container. The

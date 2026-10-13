@@ -2,5 +2,5 @@
 set -eu
 
 # Rebuild and restart the mobile API and its gateway relay.
-sudo docker compose -f compose.yaml -f compose.gateway.yaml \
+sudo docker compose -f compose.yaml \
     up -d --build --force-recreate claude-mobile claude-mobile-gateway-loopback

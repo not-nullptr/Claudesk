@@ -1,29 +1,22 @@
-# Operator's private gateway chain — NOT part of Claudesk.
+# The operator's gateway chain — box-level, started ONCE per host.
 #
-# Merge this on top of compose.yaml to reach an inference gateway:
+#   docker compose -f compose.gateway.yaml up -d
 #
-#   docker compose -f compose.yaml -f compose.gateway.yaml up -d
+# `shitproxy` (a caching/routing proxy) and `gateway` (a Caddy front door for it)
+# are shared infrastructure. Every Claudesk deployment on the host reaches them
+# over the external `gateway_net`, so a second deployment must NOT start another
+# copy — it just depends on this one running. That is what lets two deployments
+# coexist without fighting over container names or the host port.
 #
-# `shitproxy` is a separate project built from its own private repository; it
-# is referenced here by a locally-built image and is deliberately never built
-# or published from this repo. Nothing in this file ships an image name that
-# resolves off this host.
-#
-# Only Claudesk's own services live in compose.yaml; keep that file standalone
-# deployable.
+# The socat relays that expose the gateway inside each deployment's Desktop /
+# mobile network namespace are NOT here: they follow those services, so they live
+# in compose.yaml and are prefixed per deployment.
 
 services:
-  # Reach the host from inside the Desktop/mobile network namespaces.
-  claude-desktop:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  # Local caching/routing proxy in front of the upstream provider. Built from
-  # /opt/shitproxy (its own project); infra, not Claudesk. It is referenced by
-  # an image, never a build context, so nothing here builds or publishes it.
-  # Set SHITPROXY_IMAGE (in the repo-root .env, which Compose reads for ${}
-  # interpolation, or in the shell) to whatever this host already tags it as;
-  # the default is just a conventional local name.
+  # Local caching/routing proxy in front of the upstream provider. Built from its
+  # own private project; referenced here by an image, never a build context, so
+  # nothing here builds or publishes it. Set SHITPROXY_IMAGE (in .env, or the
+  # shell) to whatever this host tags it as.
   shitproxy:
     image: ${SHITPROXY_IMAGE:-local/shitproxy:latest}
     container_name: shitproxy
@@ -34,7 +27,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "4000"
     ports:
-      - "127.0.0.1:14000:4000"
+      - "127.0.0.1:${SHITPROXY_PORT:-14000}:4000"
     init: true
     read_only: true
     security_opt:
@@ -57,28 +50,6 @@ services:
     depends_on:
       - shitproxy
 
-  # Expose the gateway on 127.0.0.1:4000 inside the Desktop / mobile network
-  # namespace, so each service's CLAUDE_GATEWAY_BASE_URL can be a loopback URL.
-  claude-gateway-loopback:
-    image: alpine/socat
-    container_name: claude-gateway-loopback
-    restart: unless-stopped
-    network_mode: "service:claude-desktop"
-    depends_on:
-      - claude-desktop
-      - gateway
-    command:
-      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
-      - "TCP:gateway:4000"
-
-  claude-mobile-gateway-loopback:
-    image: alpine/socat
-    container_name: claude-mobile-gateway-loopback
-    restart: unless-stopped
-    network_mode: "service:claude-mobile"
-    depends_on:
-      - claude-mobile
-      - gateway
-    command:
-      - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
-      - "TCP:gateway:4000"
+networks:
+  gateway_net:
+    external: true

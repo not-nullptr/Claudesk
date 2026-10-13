@@ -103,22 +103,26 @@ CLAUDE_INFERENCE_MODELS_JSON='[{"name":"claude-sonnet-minimax-m3","labelOverride
 ./scripts/smoke.sh
 ```
 
-`deploy.sh` 用两个 Compose 文件构建并强制重建全部服务：`compose.yaml`（Claudesk 本体）叠加
-`compose.gateway.yaml`（本部署私有的网关链，见该文件头部注释；其中的镜像 `local/shitproxy` 由独立项目
-构建，不在本仓库）。等价的命令是：
+`deploy.sh` 构建并强制重建本部署的全部服务。网关链（`compose.gateway.yaml`：缓存代理 `shitproxy` 与
+caddy `gateway`）是**主机级基础设施**，每台机器只启动一次，不随部署启动——这样同一台机器上可以同时跑
+多个部署。等价的命令是：
 
 ```bash
-sudo docker compose -f compose.yaml -f compose.gateway.yaml up -d --build --force-recreate \
+# 每台主机一次（网关链；其中的镜像 local/shitproxy 由独立项目构建，不在本仓库）
+sudo docker compose -f compose.gateway.yaml up -d
+
+# 每次部署
+sudo docker compose -f compose.yaml up -d --build --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \
-    claude-mobile claude-mobile-gateway-loopback shitproxy
+    claude-mobile claude-mobile-gateway-loopback authd
 ```
 
 查看状态或停止：
 
 ```bash
-sudo docker compose -f compose.yaml -f compose.gateway.yaml ps
-sudo docker compose -f compose.yaml -f compose.gateway.yaml logs -f claude-desktop cowork-bridge
-sudo docker compose -f compose.yaml -f compose.gateway.yaml down
+sudo docker compose -f compose.yaml ps
+sudo docker compose -f compose.yaml logs -f claude-desktop cowork-bridge
+sudo docker compose -f compose.yaml down
 ```
 
 镜像固定安装 `CLAUDE_DESKTOP_VERSION` 指定的精确版本，容器重启不会执行 APT 升级。生产机使用

@@ -1,11 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Build and (re)start every service: Claudesk itself plus the operator's
-# gateway chain in compose.gateway.yaml (shitproxy is a locally-built image,
-# see that file). Deploy runs on the host against rootful Docker.
-exec sudo docker compose \
-    -f compose.yaml -f compose.gateway.yaml \
+# Bring up this deployment. The gateway chain (compose.gateway.yaml) is box-level
+# and started once per host — separately — so it is not part of this.
+exec sudo docker compose -f compose.yaml \
     up -d --build --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \
-    claude-mobile claude-mobile-gateway-loopback shitproxy
+    claude-mobile claude-mobile-gateway-loopback authd
