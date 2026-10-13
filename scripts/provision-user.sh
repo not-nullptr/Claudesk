@@ -101,20 +101,18 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 #   - inference at the deployment's gateway URL (below).
 # Both are overridable for a deployment that wants something else.
 
-# The Cowork VM makes the model calls, and its only route off the guest is the
-# host's network (QEMU user-mode networking). A loopback gateway URL therefore
-# resolves to the guest itself and can never work there, however well it answers
-# from inside the container. Default the account to the box's routable gateway
-# and let CLAUDESK_ACCOUNT_GATEWAY_URL point it elsewhere.
-account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-${CLAUDE_GATEWAY_BASE_URL:-}}"
-[ -n "$account_gateway_url" ] || {
-    printf 'provision-user: no gateway URL: set CLAUDE_GATEWAY_BASE_URL (or CLAUDESK_ACCOUNT_GATEWAY_URL) in %s/.env\n' \
-        "$project_dir" >&2
-    exit 1
-}
+# The Cowork VM makes the model calls. Its egress is dialed by this container
+# (QEMU user-mode networking), so the VM reaches anything the container reaches;
+# only name resolution differs, and the guest does that itself. A loopback URL
+# therefore resolves to the guest inside the VM and can never work, however well
+# it answers in the container. Reach the box-level chain by a name both sides
+# resolve — caddy `gateway` on gateway_net, via Docker DNS in the container and
+# through the container's resolver from the guest — and let
+# CLAUDESK_ACCOUNT_GATEWAY_URL point an account somewhere else.
+account_gateway_url="${CLAUDESK_ACCOUNT_GATEWAY_URL:-http://gateway:4000}"
 case "$account_gateway_url" in
     *127.0.0.1*|*localhost*|*"::1"*)
-        printf 'provision-user: WARNING: gateway URL %s is loopback; the Cowork VM cannot reach it, so inference will fail\n' \
+        printf 'provision-user: WARNING: gateway URL %s is loopback; the Cowork VM resolves that to itself, so inference will fail\n' \
             "$account_gateway_url" >&2
         ;;
 esac
