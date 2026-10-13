@@ -274,13 +274,55 @@ lives in the preload rather than a renderer patch on purpose: the card belongs
 to React, so the additions have to survive its re-renders, and this way a tweak
 costs a bridge restart instead of a renderer rebuild.
 
-The proxy side is host-side (the Caddyfile is not in this repo): send `/login`
-and `/renderer/*` to the login instance — the SPA's assets are rewritten to that
-prefix by the index shim, so they never collide with the workspace's own — while
-`/api/auth/*` and `/api/admin/*` keep going to authd, and everything else stays
-behind `forward_auth`. Add `CLAUDE_REMOTE_WEB_SHELL=1` on that instance to
-render the browser chrome (the marketing sign-in page with the hero) instead of
-the Desktop chrome.
+The proxy side is host-side (the Caddyfile is not in this repo). The login page
+needs its own handler ahead of the session gate — `/login` comes **out** of the
+authd matcher, or authd's own page is what shows, and the paths the page loads
+have to bypass `forward_auth` too, or they 401 and the browser is handed the
+login HTML in place of a module or a stylesheet:
+
+```caddyfile
+	# The login shell: the renderer's own sign-in page and everything it loads,
+	# served by the deployment's own instance (CLAUDE_REMOTE_LOGIN_SHELL=1). It
+	# refuses its own API, so it can never proxy the Desktop or run inference.
+	# The bootstrap is in here because the page renders *because* it answers an
+	# error.
+	@loginshell path /login /renderer/* /remote-preload.js /remote-main-menu.js \
+		/remote-main-menu.css /remote-shell.css /remote-folder-picker.js \
+		/fonts/* /favicon.ico /manifest.webmanifest \
+		/api/bootstrap /api/bootstrap/* /edge-api/bootstrap /edge-api/bootstrap/*
+	handle @loginshell {
+		reverse_proxy 127.0.0.1:15831
+	}
+
+	# Everything authd owns. /login is deliberately absent, above.
+	@authd path /accept-invite /admin /auth-assets/* /api/auth/* /api/admin/*
+	handle @authd {
+		reverse_proxy 127.0.0.1:15832
+	}
+
+	handle {
+		forward_auth 127.0.0.1:15832 {
+			uri /api/auth/verify
+			copy_headers X-Instance-Upstream
+		}
+		reverse_proxy {http.request.header.X-Instance-Upstream}
+	}
+
+	handle_errors {
+		@unauth expression {http.error.status_code} == 401
+		redir @unauth /login 302
+	}
+```
+
+The port is the deployment's own `COWORK_WEB_PORT`. Because a `handle` matcher
+is an allow-list, a path the page needs but that is missing here fails visibly —
+as an asset the browser refuses to run — rather than subtly; add it to the
+matcher if a future build asks for one. (A `handle_errors` branch that
+`reverse_proxy`es the 401 to the same instance would cover every path at once;
+it is not used here because Caddy keeps the original status on that branch,
+which would serve the page and its scripts under a 401.) Add
+`CLAUDE_REMOTE_WEB_SHELL=1` on the instance to render the browser chrome (the
+marketing sign-in page with the hero) instead of the Desktop chrome.
 
 Worth knowing before you expect a pixel match: the hero media is **not** in the
 bundle — the still is fetched from the web root and the video from

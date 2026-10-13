@@ -153,7 +153,11 @@ account_scope "${role:-User}"
 
 # Only the values above are scoped away from the deployment; the rest of its .env
 # (web shell, desktop home, identity org/plan, egress policy, timezone, VM sizing)
-# is inherited on purpose. Host bash is pinned off for every account: this image
+# is inherited on purpose. CLAUDE_REMOTE_LOGIN_SHELL is scoped away too, and to
+# 0 specifically: it is set on the deployment's own instance, which compose
+# reads from this same .env, and an account carrying it would refuse its own API
+# and serve a sign-in page in place of the workspace. Host bash is pinned off for
+# every account: this image
 # requires Cowork VM mode and refuses the host-bash mode at build time, so the pin
 # only keeps an account from naming a mode the deployment set for itself.
 CLAUDESK_DATA_ROOT="$user_root" \
@@ -168,6 +172,7 @@ CLAUDE_GATEWAY_AUTH_SCHEME="$account_gateway_scheme" \
 CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
+CLAUDE_REMOTE_LOGIN_SHELL=0 \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \
 COWORK_REMOTE_READ_ROOTS="$ACCOUNT_READ_ROOTS" \
