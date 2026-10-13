@@ -13,6 +13,7 @@ import {
 import { createPreviewHandler } from "./preview.mjs";
 import { shimOfficialIndex } from "./official-index.mjs";
 import { createNotificationController } from "./notifications.mjs";
+import { createConnectorStore } from "./connectors.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { listWorkspaceFolders } from "./workspace-folders.mjs";
@@ -35,6 +36,16 @@ const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 // entitlements, so enabling this also grants them in the bootstrap/access
 // documents the app reads. See docs/web-shell.md.
 const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
+// The Connectors surface (remote MCP servers a user adds under Settings →
+// Connectors, and the plugin-connector rows) needs the Desktop's MCP IPC to
+// connect and list tools — the same machinery the Developer menu's privileged
+// actions use, but a plain account must have it, since the Developer menu is an
+// operator's and the connector list is a user's. It therefore rides its own
+// flag, and follows the web shell the way `coworkSkipApprovals` does: on with the
+// web shell, off without it, and CLAUDE_REMOTE_MCP_CONNECTORS pins either way
+// (`=1` on, `=0` off). See bridge/connectors.mjs.
+const connectorsEnabled = process.env.CLAUDE_REMOTE_MCP_CONNECTORS === "1"
+  || (webShellEnabled && process.env.CLAUDE_REMOTE_MCP_CONNECTORS !== "0");
 // The login shell: this instance exists only to put Claude's own sign-in page in
 // front of the deployment, before anyone has a session. It serves the renderer
 // and nothing else — every API request is refused (see the gate in handleApi),
@@ -638,24 +649,11 @@ if (infrastructureActionsEnabled) {
 
 if (developerActionsEnabled) {
   for (const method of [
-    "authorizeDirectMcpServer",
     "deleteLocalSkill",
-    "directMcpCallTool",
-    "directMcpListResources",
-    "directMcpReadResource",
-    "disconnectDirectMcpServer",
-    "getDirectMcpServerStatuses",
-    "getLocalMcpServers",
     "getLocalSkillFiles",
     "listLocalSkills",
-    "mcpAuthenticate",
-    "mcpReconnect",
-    "mcpSubmitOAuthCallbackUrl",
-    "replaceEnabledMcpTools",
-    "replaceRemoteMcpServers",
     "saveLocalSkill",
     "setLocalSkillEnabled",
-    "setMcpServers",
     "syncSkills",
   ]) {
     allowedMethods.get("LocalAgentModeSessions").add(method);
@@ -697,6 +695,26 @@ if (developerActionsEnabled) {
     "uploadPlugin",
   ]));
   allowedMethods.set("PluginBridgeMcp", new Set(["listServers"]));
+}
+
+if (connectorsEnabled) {
+  for (const method of [
+    "authorizeDirectMcpServer",
+    "directMcpCallTool",
+    "directMcpListResources",
+    "directMcpReadResource",
+    "disconnectDirectMcpServer",
+    "getDirectMcpServerStatuses",
+    "getLocalMcpServers",
+    "mcpAuthenticate",
+    "mcpReconnect",
+    "mcpSubmitOAuthCallbackUrl",
+    "replaceEnabledMcpTools",
+    "replaceRemoteMcpServers",
+    "setMcpServers",
+  ]) {
+    allowedMethods.get("LocalAgentModeSessions").add(method);
+  }
 }
 
 if (codeActionsEnabled) {
@@ -886,11 +904,14 @@ if (codeActionsEnabled) {
 }
 
 if (developerActionsEnabled) {
+  remoteListenerMethods.set("CustomPlugins", new Set(["onInstallProgress"]));
+  remoteListenerMethods.set("LocalPlugins", new Set(["onOnCliOpAlwaysAllowed"]));
+}
+
+if (connectorsEnabled) {
   remoteListenerMethods.get("LocalAgentModeSessions").add(
     "onOnDirectMcpServerStatusesChanged",
   );
-  remoteListenerMethods.set("CustomPlugins", new Set(["onInstallProgress"]));
-  remoteListenerMethods.set("LocalPlugins", new Set(["onOnCliOpAlwaysAllowed"]));
   remoteListenerMethods.set("PluginBridgeMcp", new Set(["onChanged"]));
 }
 
@@ -923,6 +944,13 @@ const protocolRules = [
 // never forwarded to the upstream API.
 const notificationPreferencesPath = /^\/api\/organizations\/[0-9a-f-]+\/notification\/preferences$/i;
 const notificationChannelsPath = /^\/api\/organizations\/[0-9a-f-]+\/notification\/channels$/i;
+
+// The connectors surface (Settings → Connectors, the "Add connector" control and
+// the plugin-connector rows) talks to claude.ai's connectors API. A self-hosted
+// deployment has no such backend, so the bridge answers the family itself (see
+// bridge/connectors.mjs). Capture [1] the resource and [2] the raw tail
+// (`/{id}/{sub}/{subname}`), which the handler splits.
+const connectorsPath = /^\/api\/organizations\/[0-9a-f-]+\/mcp\/(remote_servers(?:_with_connection)?|ema_health)(\/[^?#]*)?\/?$/i;
 
 const officialAssetPrefixes = [
   "/_frame-rt/",
@@ -1177,6 +1205,14 @@ const notifications = createNotificationController({
   stateDir: process.env.COWORK_BRIDGE_STATE_DIR || "/data",
   hasRecentRealtimeClient: () => realtime.hasRecentClient(),
   pushSubject: process.env.CLAUDE_REMOTE_PUSH_SUBJECT || "mailto:claudesk@localhost",
+});
+
+// Connectors (remote MCP servers): the definitions a user adds under Settings →
+// Connectors, answered and stored locally because a self-hosted deployment has
+// no claude.ai connectors backend (see bridge/connectors.mjs). Per-instance —
+// the bridge data directory is already one account's.
+const connectors = createConnectorStore({
+  stateDir: process.env.COWORK_BRIDGE_STATE_DIR || "/data",
 });
 
 const realtime = createRealtimeController({
@@ -2266,6 +2302,105 @@ async function handleApi(request, response, url) {
       status: "ACTIVE",
     });
     return;
+  }
+
+  // Connectors (remote MCP servers). The official bundle's Connectors surface
+  // speaks claude.ai's connectors API — the list/create/edit/delete family under
+  // /api/organizations/{org}/mcp/remote_servers — and this deployment has no such
+  // backend, so the bridge answers it from its own store (bridge/connectors.mjs).
+  // Responses are bare claude.ai documents (the renderer parses the body with its
+  // own schema), never the bridge envelope. Never forwarded upstream: the org id
+  // is the bridge's synthetic one, which no upstream org would recognize. The
+  // renderer still drives connection and tool listing over the Desktop IPC
+  // itself, so the connection fields here are deliberately null and the client's
+  // own hydration fills them.
+  const connectorsMatch = connectorsPath.exec(url.pathname);
+  if (connectorsMatch) {
+    const resource = connectorsMatch[1].toLowerCase();
+    const segments = (connectorsMatch[2] || "").split("/").filter(Boolean).map(decodeURIComponent);
+    const id = segments[0];
+    const sub = segments[1];
+    const subName = segments[2];
+    if (resource === "ema_health") {
+      // Per-connector EMA health analytics claude.ai computes; nothing to report.
+      sendOfficialDocument(response, { results: [], as_of: new Date().toISOString() });
+      return;
+    }
+    if (resource === "remote_servers_with_connection" && !id) {
+      if (request.method !== "GET") throw new ApiError(405, "method not allowed");
+      sendOfficialDocument(response, await connectors.listWithConnection());
+      return;
+    }
+    if (!id) {
+      if (request.method === "GET") {
+        sendOfficialDocument(response, await connectors.list());
+        return;
+      }
+      if (request.method === "POST") {
+        const body = await readJson(request);
+        sendOfficialDocument(response, (await connectors.create(body)).document);
+        return;
+      }
+      throw new ApiError(405, "method not allowed");
+    }
+    if (!sub) {
+      if (request.method === "GET") {
+        const document = await connectors.get(id);
+        if (!document) throw new ApiError(404, "connector not found");
+        sendOfficialDocument(response, document);
+        return;
+      }
+      if (request.method === "PUT" || request.method === "PATCH") {
+        const body = await readJson(request);
+        const document = await connectors.update(id, body);
+        if (!document) throw new ApiError(404, "connector not found");
+        sendOfficialDocument(response, document);
+        return;
+      }
+      if (request.method === "DELETE") {
+        await connectors.remove(id);
+        sendOfficialDocument(response, { ok: true });
+        return;
+      }
+      throw new ApiError(405, "method not allowed");
+    }
+    if (sub === "tools" && request.method === "GET") {
+      // The renderer lists a connector's tools from the Desktop runtime over IPC;
+      // this admin-shaped view is not driven here, so report none.
+      sendOfficialDocument(response, { tools: [] });
+      return;
+    }
+    if (sub === "reenable" && request.method === "POST") {
+      const body = await readJson(request);
+      const document = await connectors.setEnabled(id, body?.enabled !== false);
+      if (!document) throw new ApiError(404, "connector not found");
+      sendOfficialDocument(response, await connectors.toolPolicies(id));
+      return;
+    }
+    if (sub === "tool_policies") {
+      if (request.method === "GET") {
+        const policies = await connectors.toolPolicies(id);
+        if (!policies) throw new ApiError(404, "connector not found");
+        sendOfficialDocument(response, policies);
+        return;
+      }
+      if (request.method === "PUT" && subName) {
+        const body = await readJson(request);
+        const policies = await connectors.setToolPolicy(id, subName, body?.max_permission ?? null);
+        if (!policies) throw new ApiError(404, "connector not found");
+        sendOfficialDocument(response, policies);
+        return;
+      }
+    }
+    if (sub === "ema_health" && request.method === "GET") {
+      sendOfficialDocument(response, { results: [], as_of: new Date().toISOString() });
+      return;
+    }
+    if (sub === "admin_tools" && request.method === "GET") {
+      sendOfficialDocument(response, { tools: [], scopes: [] });
+      return;
+    }
+    throw new ApiError(404, "not found");
   }
 
   if (protocolRules.some((rule) => rule.path.test(url.pathname))) {

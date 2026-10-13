@@ -175,6 +175,24 @@ your workspace`; that page refreshes itself, and reaching it nudges the
 reconciler, so the account is provisioned on demand rather than on the timer's
 next tick.
 
+### Connectors (remote MCP servers)
+
+The bundle's Connectors surface (Settings → Connectors, the "Add connector"
+control, the plugin-connector rows) speaks claude.ai's connectors API —
+`/api/organizations/{org}/mcp/remote_servers…`. A self-hosted account's org is
+the bridge's own synthetic one, so there is no upstream to forward to; the bridge
+answers the family itself and stores the definitions in `bridge/connectors.mjs`
+(one `connectors.json` under the account's `bridge-data`). Adding a connector
+from the web shell therefore needs no claude.ai account.
+
+Connection and tool listing are driven by the renderer over the Desktop IPC
+(`getDirectMcpServerStatuses`, `authorizeDirectMcpServer`, `directMcpListResources`,
+…). Those methods used to sit behind the Developer-menu gate, which a plain
+account does not have, so they now ride their own flag instead of
+`CLAUDE_REMOTE_DEVELOPER_ACTIONS`: on with the web shell, off without it, and
+`CLAUDE_REMOTE_MCP_CONNECTORS` (`=1` / `=0`) pins either way.
+`scripts/bridge-parity-smoke.mjs` keeps the outer and inner allowlists in step.
+
 ### Deleting an account reclaims its instance
 
 Deleting a user in `/admin` is the mirror of creating one, and just as hands-off:

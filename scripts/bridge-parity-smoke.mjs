@@ -46,11 +46,12 @@ const wrapperMethods = section(
   "const allowedSettingsMethods",
 );
 
-for (let mask = 0; mask < 8; mask += 1) {
+for (let mask = 0; mask < 16; mask += 1) {
   const flags = {
     infrastructureActionsEnabled: Boolean(mask & 1),
     developerActionsEnabled: Boolean(mask & 2),
     codeActionsEnabled: Boolean(mask & 4),
+    connectorsEnabled: Boolean(mask & 8),
   };
   const prelude = Object.entries(flags)
     .map(([name, value]) => `const ${name} = ${value};`)
@@ -99,12 +100,14 @@ const wrapperListeners = section(
   "const relayedListeners",
   "const relayedBootFeatures",
 );
-for (let mask = 0; mask < 4; mask += 1) {
+for (let mask = 0; mask < 8; mask += 1) {
   const developerActionsEnabled = Boolean(mask & 1);
   const codeActionsEnabled = Boolean(mask & 2);
+  const connectorsEnabled = Boolean(mask & 4);
   const prelude = `
     const developerActionsEnabled = ${developerActionsEnabled};
     const codeActionsEnabled = ${codeActionsEnabled};
+    const connectorsEnabled = ${connectorsEnabled};
   `;
   assert.deepEqual(
     evaluate(`${prelude}\n${serverListeners}`, normalizedMap("remoteListenerMethods")),

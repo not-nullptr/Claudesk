@@ -44,6 +44,12 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Connectors (remote MCP servers) need the Desktop MCP IPC even for an ordinary
+// account, so they ride their own flag rather than the Developer-menu gate. Kept
+// in lockstep with bridge/server.mjs — same expression, since
+// scripts/bridge-parity-smoke.mjs compares the two allowlists.
+const connectorsEnabled = process.env.CLAUDE_REMOTE_MCP_CONNECTORS === "1"
+  || (process.env.CLAUDE_REMOTE_WEB_SHELL === "1" && process.env.CLAUDE_REMOTE_MCP_CONNECTORS !== "0");
 const coworkHostBashEnabled = process.env.CLAUDE_COWORK_HOST_BASH === "1";
 const rendererReadyTimeoutMs = 15 * 1000;
 const rendererReadyPollMs = 250;
@@ -310,24 +316,11 @@ if (infrastructureActionsEnabled) {
 
 if (developerActionsEnabled) {
   for (const method of [
-    "authorizeDirectMcpServer",
     "deleteLocalSkill",
-    "directMcpCallTool",
-    "directMcpListResources",
-    "directMcpReadResource",
-    "disconnectDirectMcpServer",
-    "getDirectMcpServerStatuses",
-    "getLocalMcpServers",
     "getLocalSkillFiles",
     "listLocalSkills",
-    "mcpAuthenticate",
-    "mcpReconnect",
-    "mcpSubmitOAuthCallbackUrl",
-    "replaceEnabledMcpTools",
-    "replaceRemoteMcpServers",
     "saveLocalSkill",
     "setLocalSkillEnabled",
-    "setMcpServers",
     "syncSkills",
   ]) {
     allowedMethods.get("LocalAgentModeSessions").add(method);
@@ -369,6 +362,26 @@ if (developerActionsEnabled) {
     "uploadPlugin",
   ]));
   allowedMethods.set("PluginBridgeMcp", new Set(["listServers"]));
+}
+
+if (connectorsEnabled) {
+  for (const method of [
+    "authorizeDirectMcpServer",
+    "directMcpCallTool",
+    "directMcpListResources",
+    "directMcpReadResource",
+    "disconnectDirectMcpServer",
+    "getDirectMcpServerStatuses",
+    "getLocalMcpServers",
+    "mcpAuthenticate",
+    "mcpReconnect",
+    "mcpSubmitOAuthCallbackUrl",
+    "replaceEnabledMcpTools",
+    "replaceRemoteMcpServers",
+    "setMcpServers",
+  ]) {
+    allowedMethods.get("LocalAgentModeSessions").add(method);
+  }
 }
 
 if (codeActionsEnabled) {
@@ -1114,11 +1127,14 @@ async function handleNotificationClick(tag, action) {
 // --- end desktop notification relay ---
 
 if (developerActionsEnabled) {
+  relayedListeners.set("CustomPlugins", new Set(["onInstallProgress"]));
+  relayedListeners.set("LocalPlugins", new Set(["onOnCliOpAlwaysAllowed"]));
+}
+
+if (connectorsEnabled) {
   relayedListeners.get("LocalAgentModeSessions").add(
     "onOnDirectMcpServerStatusesChanged",
   );
-  relayedListeners.set("CustomPlugins", new Set(["onInstallProgress"]));
-  relayedListeners.set("LocalPlugins", new Set(["onOnCliOpAlwaysAllowed"]));
   relayedListeners.set("PluginBridgeMcp", new Set(["onChanged"]));
 }
 
