@@ -1,5 +1,13 @@
 # One Cowork VM per host — and the per-instance port that fixes it
 
+> **Superseded.** The per-instance port move described here was only ever
+> half-proven — the host constant is locatable and rewritable, but the guest's
+> dial site was never found, and without both halves it is not usable. The clean
+> path is a kernel with the AF_VSOCK namespace feature, where each container's
+> namespace partitions the listener table and no binary needs touching. See
+> `cowork-vsock-netns-solution.md` and `cowork-vm-vsock-port.md`. This file is
+> kept for the mechanism and the measurements, not as a recommendation.
+
 ## The problem
 
 The Cowork VM talks back to the host over vsock. The host side,

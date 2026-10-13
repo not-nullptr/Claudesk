@@ -4,6 +4,14 @@ A problem statement for someone who wants to take a run at it. Everything below
 is either a measurement taken on the box or a fact read out of the binaries, with
 the command or file noted. Inferences are labelled as such.
 
+> **The clean fix is known, and it is a kernel, not a patch.** Kernels carrying
+> the AF_VSOCK network-namespace feature (`/proc/sys/net/vsock/{ns_mode,child_ns_mode}`,
+> mainline 7.0 or a verified backport) partition the listener table per namespace,
+> so Docker's per-container namespace is enough and nothing here needs touching.
+> See `cowork-vsock-netns-solution.md`. This host runs 6.8 and has no such
+> feature, which is why everything below looks host-global — that is the
+> pre-feature behaviour, not a permanent property.
+
 ## The deployment
 
 - One Linux host (Docker + KVM). One Docker **container per tenant account**;
@@ -65,6 +73,16 @@ is making *is* the first exchange.
 ## Measurements
 
 ### 1. The vsock listener table is not partitioned by network namespace
+
+**On this host, whose kernel is 6.8.0-142-generic and has no
+`/proc/sys/net/vsock/`.** This is version-dependent, and the version is the whole
+story: kernels that carry the AF_VSOCK network-namespace feature — documented at
+`/proc/sys/net/vsock/{ns_mode,child_ns_mode}`, mainline 7.0 and later, or a
+distribution backport — *do* partition it, and a namespace created with
+`ns_mode=local` gets its own vsock listener table. On such a kernel a
+container-per-tenant layout can run one VM per tenant with no binary changes at
+all. See `cowork-vsock-netns-solution.md` for that path. The measurement below is
+what a pre-feature kernel does, and is why the failure reproduces here.
 
 Run inside the container, then again in a fresh network namespace:
 
@@ -148,8 +166,10 @@ Any solution has to satisfy all of:
 1. The host side needs a vsock listener to reach the guest; the guest dials
    `(host CID 2, <port>)` unilaterally at boot.
 2. The host listener table observed above is shared across network namespaces on
-   this kernel, and the underlying device (`/dev/vhost-vsock`) is a single host
-   device passed into each container with `devices:`.
+   this kernel (6.8), and the underlying device (`/dev/vhost-vsock`) is a single
+   host device passed into each container with `devices:`. On a kernel with the
+   AF_VSOCK namespace feature this constraint dissolves — a `local`-mode
+   namespace partitions the table, and Docker already creates one per container.
 3. A listener cannot be bound to a specific guest CID.
 4. Neither end exposes a port, and the guest's dial happens before it can be told
    anything by the host.
@@ -176,7 +196,16 @@ without a port (`root=/dev/vda1 ro console=hvc0 console=hvc1 fsck.repair=yes`).
 
 ## Directions not yet explored — the interesting ones
 
-- **A kernel boundary instead of a namespace boundary.** Two VMs have two kernels
+- **A kernel with the AF_VSOCK network-namespace feature.** The clean answer, and
+  the one that needs no binary or image changes: on such a kernel a namespace
+  created with `ns_mode=local` has its own vsock listener table, so each tenant
+  container — which Docker already gives its own namespace — binds 51234
+  privately. `cowork-vsock-netns-solution.md` lays out the prerequisites, the
+  write-once `child_ns_mode` trap, and the acceptance test. What is left is a
+  host kernel with the feature (mainline 7.0+, or a verified backport) and a
+  boot-time policy so tenant namespaces are created in `local` mode.
+- **A kernel boundary below the container.** If the host kernel cannot be moved,
+  two VMs have two kernels
   and therefore two vsock tables; each could bind 51234 without knowing the other
   exists. Running each tenant's Desktop inside its own microVM (Kata,
   Firecracker, …) rather than a container is the obvious instance of this. The
