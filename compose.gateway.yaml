@@ -19,10 +19,13 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Local caching/routing proxy in front of the upstream provider. Built from
-  # /opt/shitproxy (its own project) and tagged local/shitproxy; infra, not
-  # Claudesk.
+  # /opt/shitproxy (its own project); infra, not Claudesk. It is referenced by
+  # an image, never a build context, so nothing here builds or publishes it.
+  # Set SHITPROXY_IMAGE (in the repo-root .env, which Compose reads for ${}
+  # interpolation, or in the shell) to whatever this host already tags it as;
+  # the default is just a conventional local name.
   shitproxy:
-    image: local/shitproxy:latest
+    image: ${SHITPROXY_IMAGE:-local/shitproxy:latest}
     container_name: shitproxy
     restart: unless-stopped
     env_file:
