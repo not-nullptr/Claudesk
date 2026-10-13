@@ -198,9 +198,13 @@ claude.example.com {
 ```
 
 `/api/auth/verify` answers `200` with `X-Instance-Upstream` when the session is
-live and the user has an instance, `503` when they have none yet, and `401`
-otherwise. The SPA's assets are namespaced under `/auth-assets/` so they never
-collide with the workspace's own `/assets/`.
+live and the user has an instance, `503` when they have none yet (a page, since
+`forward_auth` hands the body back), and a **redirect to `/login`** when there is
+no session — for the same reason: that response is what the visitor sees, so it
+must read as a page rather than an API error. It is still non-2xx, which is how
+`forward_auth` refuses the request and reports no upstream. The SPA's assets are
+namespaced under `/auth-assets/` so they never collide with the workspace's own
+`/assets/`.
 
 ### Identity
 

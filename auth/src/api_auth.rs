@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
@@ -289,6 +289,13 @@ pub async fn verify(State(state): State<AppState>, jar: CookieJar) -> Response {
                 )
             }
         },
-        _ => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
+        // Signed out. Caddy hands this response straight back to the visitor, so
+        // it has to read as a page rather than an API error — send them to the
+        // sign-in page. It is still non-2xx, which is how `forward_auth` refuses
+        // the request and reports no upstream.
+        Ok(None) => Redirect::to("/login").into_response(),
+        // A store failure is not a signed-out visitor, and must not be passed
+        // off as one.
+        Err(error) => error.into_response(),
     }
 }
