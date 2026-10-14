@@ -267,6 +267,60 @@ notification action buttons at all; macOS drops them for its own notification
 center. When a card falls back to a button-less notification, or push is
 unavailable, the page says so once on the browser console.
 
+## Restart notice
+
+Every deploy, update or `docker compose restart` recreates the bridge, and a browser
+user got no warning: the `/api/events` stream simply dropped, the preload retried it
+with backoff, and the only disconnect surface was the server-rendered 503 interstitial
+that appears on a document navigation. An in-flight turn died silently.
+
+The bridge now warns the connected pages first, through the app's **own toast**, in
+three parts.
+
+- **Publish (`toast-global` renderer patch).** The app's toast manager is not
+  reachable from outside React — it lives in a context only its components read — so
+  the patch publishes it on `globalThis.__CLAUDESK_TOAST__` from the one place that
+  already holds it: the toast card host, the component the provider host renders when
+  the viewport is visible. The card host is the branch of that host's
+  `quiet ? <quietHost> : <cardHost>` choice that actually reads the app's toast hook
+  (the quiet branch only clears toasts), and the publish is spliced at the end of its
+  own destructuring rather than the top of the body, because the bindings are `let`.
+  Provider binding, hook binding and the destructured `add`/`close` names are all read
+  back from the graph. Spliced only in web-shell mode, and required there: a bundle
+  that no longer matches fails preparation rather than warn nobody.
+- **Display (`bridge/public/remote-preload.js`).** A `notice` event on the existing
+  stream is rendered through that manager — sticky (`timeout: 0`), so it outlives the
+  SSE drop that follows and the reconnect after. A renderer older than the patch has no
+  such global; the preload says so once on the console and drops the notice rather than
+  throwing on the event stream.
+- **Send (`bridge/server.mjs`, `bridge/realtime.mjs`).** On SIGTERM the bridge
+  broadcasts the notice, holds `CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS` (default 5s) so the
+  write flushes and the reader has a moment to see it, and only then exits — the stream
+  dies right after, so this is the last thing the page hears. A second signal exits at
+  once, and the compose service's `stop_grace_period` (20s) keeps the hold from being
+  cut short by a SIGKILL. Registering the handler is also what makes it run at all:
+  the node process is PID 1 in the container.
+
+The notice is cached while it is live and replayed to a page that connects during the
+window (a tab opened mid-restart must still hear it), and expires after five minutes so
+a stale "restarting" warning does not greet every tab afterwards.
+
+For planned maintenance, `scripts/announce-restart.sh` fires the same notice on demand
+(`docker exec` into the container over loopback, since the image has no curl and the
+route must not be reachable through the proxy), so people can be told a minute or two
+before the stack is stopped. It is gated on `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`,
+the operator scope, so a provisioned account never inherits it.
+
+Two things to know: `redeploy-desktop.sh` recreates `claude-desktop`,
+`cowork-bridge` **and** `claude-gateway-loopback` in one `up -d --force-recreate`, so
+the gateway can cut the browser's connection before the bridge's flush lands — the
+automatic path is dependable for `docker compose stop|restart cowork-bridge`, and the
+manual trigger is the dependable route for a planned deploy. And one bridge serves one
+instance, so a notice reaches that tenant's tabs only; a box-wide restart needs it
+fired per instance. The publish half needs the `claude-desktop` service rebuilt and a
+`patchRelease` bump (the prepared renderer is served under an immutable path); the
+bridge and preload half alone would log-and-drop.
+
 ## Code routes
 
 ion-dist resolves its internal code route to the local Code surface (`/code` →

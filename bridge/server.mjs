@@ -28,6 +28,16 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// The restart warning. On SIGTERM the bridge tells every connected page the VM
+// is going down, holds for this long so the write flushes and the reader has a
+// moment to see it, and only then exits — the browser's SSE stream drops right
+// after, so this is the last thing the page hears. Overridable for a longer
+// heads-up; the compose service's stop_grace_period must stay above it.
+const shutdownNoticeMs = Number(process.env.CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS || 5000);
+const restartNotice = Object.freeze({
+  title: "Your VM is restarting",
+  description: "Your task has been interrupted. Please wait a minute or so before trying again.",
+});
 // Experimental: render ion-dist's browser (claude.ai) chrome instead of the
 // Desktop chrome. ion-dist picks its shell from the `Claude/<version>` token the
 // preload appends to the user agent; dropping it makes the renderer believe it
@@ -2500,6 +2510,26 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  // Operator notice: warn the connected pages that the VM is about to restart,
+  // ahead of a planned deploy (the SIGTERM handler below sends the same notice
+  // automatically). Gated like the other privileged bridge actions — it reaches
+  // every tab on the instance — and driven from the host, not the browser.
+  if (request.method === "POST" && url.pathname === "/api/remote/notice") {
+    if (!infrastructureActionsEnabled) throw new ApiError(404, "Remote infrastructure actions are disabled");
+    const body = await readJson(request);
+    const notice = {
+      title: typeof body.title === "string" && body.title ? body.title.slice(0, 200) : restartNotice.title,
+      description: typeof body.description === "string"
+        ? body.description.slice(0, 500)
+        : restartNotice.description,
+    };
+    const ttlMs = Number.isFinite(body.ttlMs) && body.ttlMs > 0
+      ? Math.min(body.ttlMs, 60 * 60 * 1000)
+      : undefined;
+    sendJson(response, 200, { ok: true, value: realtime.notify(notice, ttlMs) });
+    return;
+  }
+
   // The Desktop main process opens an OS folder dialog for Cowork's folder
   // grant (`mcp__cowork__request_cowork_directory`) and the other folder flows;
   // in this container that dialog renders on a headless display nobody sees, so
@@ -3200,6 +3230,29 @@ server.listen(port, host, () => {
       + "only the renderer shell and its assets are served");
   }
 });
+
+// The node process is PID 1 in the container, so registering these is also what
+// gets them run at all — and it buys the window this feature exists for. A
+// browser's SSE subscription dies with the bridge, so the restart warning has to
+// go out *before* we exit: broadcast it, hold while it flushes, then stop. A
+// second signal (an impatient `docker kill`, or the grace period running out)
+// exits at once.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) {
+    console.log(`[cowork-bridge] ${signal} again; exiting now`);
+    process.exit(0);
+  }
+  shuttingDown = true;
+  console.log(`[cowork-bridge] ${signal}: warning connected pages, exiting in ${shutdownNoticeMs}ms`);
+  try {
+    realtime.notify(restartNotice, shutdownNoticeMs + 60 * 1000);
+  } catch (error) {
+    console.error(`[cowork-bridge] could not send the restart notice: ${error.message}`);
+  }
+  setTimeout(() => process.exit(0), shutdownNoticeMs);
+}
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => shutdown(signal));
 
 const realtimePoller = setInterval(() => void realtime.pollState(), 1000);
 realtimePoller.unref();

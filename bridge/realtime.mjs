@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 
 const transcriptSnapshotLimit = 16;
 const transcriptSnapshotTtlMs = 15 * 60 * 1000;
+// How long an operator notice is replayed to newly connected pages. Long enough
+// to cover a restart window, short enough that a stale "restarting" warning does
+// not greet every tab opened afterwards.
+const noticeTtlMs = 5 * 60 * 1000;
 
 function digest(value) {
   return createHash("sha256")
@@ -37,6 +41,11 @@ export function createRealtimeController({
   const transcripts = new Map();
   let latestSessions = null;
   let latestSessionsDigest = "";
+  // The most recent operator notice (a restart warning), kept so a page that
+  // connects while one is live still sees it. Expires on its own — the manual
+  // trigger leaves the process running, and a cached notice must not pop in
+  // every tab opened long after the maintenance window closed.
+  let latestNotice = null;
   let revision = 0;
   let statePollInFlight = false;
   let eventPollInFlight = false;
@@ -65,6 +74,27 @@ export function createRealtimeController({
     for (const [response, subscription] of clients) {
       if (predicate(subscription)) send(response, event, data);
     }
+  }
+
+  // Tell every connected page something the bridge itself decided — today only
+  // the restart warning the shutdown handler sends. Unlike the session relays
+  // this is not driven by a poll, so it deliberately does not check
+  // `clients.size`: a notice with nobody connected is still cached for whoever
+  // connects during the window that follows.
+  function notify(payload, ttlMs = noticeTtlMs) {
+    latestNotice = { ...payload, expiresAt: Date.now() + ttlMs };
+    broadcast("notice", payload);
+    return latestNotice;
+  }
+
+  function liveNotice() {
+    if (!latestNotice) return null;
+    if (Date.now() >= latestNotice.expiresAt) {
+      latestNotice = null;
+      return null;
+    }
+    const { expiresAt, ...payload } = latestNotice;
+    return payload;
   }
 
   async function pollState() {
@@ -220,6 +250,8 @@ export function createRealtimeController({
       sessionId,
     });
     if (latestSessions) send(response, "sessions", latestSessions);
+    const notice = liveNotice();
+    if (notice) send(response, "notice", notice);
     // Reconcile from a fresh read after draining pending native events. A
     // cached transcript could predate a turn that started before reconnect.
     void pollState();
@@ -268,5 +300,5 @@ export function createRealtimeController({
     }
   }
 
-  return { hasRecentClient, heartbeat, open, pollDesktopEvents, pollState };
+  return { hasRecentClient, heartbeat, notify, open, pollDesktopEvents, pollState };
 }

@@ -1784,6 +1784,35 @@
         });
       } catch {}
     });
+    events.addEventListener("notice", (event) => {
+      try {
+        showNotice(JSON.parse(event.data));
+      } catch {}
+    });
+  }
+
+  // An operator notice (the bridge's restart warning) rendered through the
+  // Claude app's own toast, which the `toast-global` renderer patch publishes on
+  // `globalThis.__CLAUDESK_TOAST__`. Sticky on purpose: the toast must outlive
+  // the SSE drop that follows it and the reconnect after, so only the reader
+  // closes it. A renderer that predates the patch has no such global — say so
+  // once and drop the notice rather than throwing on the event stream.
+  let noticeRenderWarned = false;
+  function showNotice(payload) {
+    if (!payload || typeof payload !== "object") return;
+    const toast = globalThis.__CLAUDESK_TOAST__;
+    if (!toast || typeof toast.add !== "function") {
+      if (!noticeRenderWarned) {
+        noticeRenderWarned = true;
+        console.warn("[claudesk] server notice received, but this renderer has no toast to show it in");
+      }
+      return;
+    }
+    toast.add({
+      title: typeof payload.title === "string" ? payload.title : "",
+      description: typeof payload.description === "string" ? payload.description : undefined,
+      timeout: 0,
+    });
   }
 
   for (const method of ["pushState", "replaceState"]) {

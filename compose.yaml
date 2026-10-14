@@ -214,6 +214,10 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    # The bridge holds after SIGTERM to warn connected pages before it exits
+    # (CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS, default 5s). Docker's 10s default would
+    # usually cover it, but the hold must never be cut short by a SIGKILL.
+    stop_grace_period: 20s
     restart: unless-stopped
 
   # Office/PDF preview converter. LibreOffice is the engine Desktop uses for the

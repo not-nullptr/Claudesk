@@ -172,6 +172,30 @@ const scheduledTaskHostsDecoy = 'function hostsDecoyModule(){'
   + 'return effect(()=>(settingsStore.setState({activeSession:1}),void 0),[]),null});'
   + 'function subscribeOnly(){return dispatch?.onOnScheduledTaskEvent?.(()=>{})}'
   + 'function readyOnly(){return api?.markListenerReady?.()}}';
+// The toast provider host and its card host. The provider host renders the app's
+// toast provider with a `viewportClassName` prop and a first child that is the
+// `quiet ? <quietHost> : <cardHost>` choice; of those two branches only the card
+// host reads the app's toast hook, so it is the one the `toast-global` splice
+// publishes the manager from — and it publishes after the hook's own
+// destructuring, not at the top of the body, because the bindings are `let`. The
+// provider and hook names are mangled here and read back from the graph.
+const toastHost = 'function toastHostModule(){'
+  + 'function toastProvider({children:e,quiet:t=!1,viewportClassName:n}){'
+  + 'return h(Provider,{timeout:5e3,viewportClassName:t?"hidden":n,'
+  + 'children:[h(t?QuietCards:ToastCards,{}),e]})}'
+  + 'function QuietCards(){let{toasts:e}=useToasts(),{clearToast:t}=useClear();'
+  + 'return effect(()=>{for(let n of e)t(n.id)},[e,t]),null}'
+  + 'function ToastCards(){let{toasts:e}=useToasts(),{clearToast:t}=useClear(),'
+  + '{add:n,close:r}=useToastManager(),i=ref({});'
+  + 'return effect(()=>()=>i.current?.(),[]),null}}';
+// A provider-shaped host whose first child is a single component rather than the
+// quiet/card choice, and a component that never destructures the toast hook:
+// neither may be spliced, and a host the patch cannot resolve must refuse
+// instead of publishing the manager from the wrong place.
+const toastHostDecoy = 'function toastDecoyModule(){'
+  + 'function providerish({children:e,viewportClassName:t}){'
+  + 'return h(Provider,{viewportClassName:t,children:[h(Plain,{}),e]})}'
+  + 'function Plain(){return null}}';
 // The Cowork scheduled-task runner: the Desktop-identity check is read back from
 // the `flag || refuse(id, log, copy)` short-circuit whose copy only this runner
 // carries, then forced true so a routine can be run from the web shell. The
@@ -267,7 +291,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 7);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -287,8 +311,23 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 17,
-    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate and the scheduled-task hosts");
+  assert.equal(webResult.patches.length, 18,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  assert.equal(webResult.patches.filter(p => p.id === "toast-global").length, 1,
+    "the toast manager must be published exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes(";globalThis.__CLAUDESK_TOAST__={add:n,close:r};"),
+    "the publish must name the toast hook's own bindings and follow their destructuring");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes("{add:n,close:r}=useToastManager(),i=ref({});"),
+    "the splice must land after the destructuring, not at the top of the body");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes("function Plain(){return null}}"),
+    "a provider-shaped host with no quiet/card choice must not be spliced");
+  assert.equal(result.patches.filter(p => p.id === "toast-global").length, 0,
+    "the toast global is a web-shell splice and must not appear in the Desktop shell");
+  assert.ok(!output.includes("__CLAUDESK_TOAST__"),
+    "a Desktop-shell renderer must stay byte-identical");
   assert.equal(webResult.patches.filter(p => p.id === "web-scheduled-task-runner").length, 1,
     "the scheduled-task runner's Desktop gate must be spliced exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
@@ -531,7 +570,7 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
 // and for the Desktop-checks success case.
 const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}`
   + `\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`
-  + `\n${scheduledTaskHosts}\n${scheduledTaskRunner}`;
+  + `\n${scheduledTaskHosts}\n${scheduledTaskRunner}\n${toastHost}`;
 // ...and the user-menu identity: a renderer whose identity reader no longer
 // matches must be refused rather than ship a menu whose title flips to the
 // account name a frame after it opens.
