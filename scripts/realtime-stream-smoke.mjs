@@ -101,12 +101,14 @@ const noticeSource = preload.slice(
   preload.indexOf('  for (const method of ["pushState"'));
 const added = [];
 const warnings = [];
-vm.runInNewContext(`${noticeSource}\nshowNotice({title:"T",description:"D"});`, {
+vm.runInNewContext(`${noticeSource}\nshowNotice({title:"T",description:"D"});`
+  + 'showNotice({title:"T",description:"D"});', {
   globalThis: { __CLAUDESK_TOAST__: { add: (options) => added.push(options) } },
   console: { warn: (message) => warnings.push(message) },
 });
 assert.deepEqual(added.map(o => [o.title, o.description, o.timeout]), [['T', 'D', 0]],
-  'the notice must reach the app toast as a sticky card');
+  'the notice must reach the app toast as a sticky card, and a replay of the same '
+  + 'notice — which every reconnect is — must not stack a second one');
 assert.equal(warnings.length, 0);
 vm.runInNewContext(`${noticeSource}\nshowNotice({title:"T"});showNotice({title:"T"});`, {
   globalThis: {},

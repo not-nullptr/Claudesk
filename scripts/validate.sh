@@ -49,6 +49,7 @@ node scripts/cowork-skip-approvals-smoke.mjs
 node scripts/web-shell-gates-smoke.mjs
 node scripts/model-selector-state-smoke.mjs
 node scripts/realtime-stream-smoke.mjs
+node scripts/restart-notice-smoke.mjs
 node scripts/renderer-relay-smoke.mjs
 
 jq -e . \

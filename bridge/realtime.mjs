@@ -97,6 +97,16 @@ export function createRealtimeController({
     return payload;
   }
 
+  // Seed a notice left by the previous bridge, without broadcasting it: nobody
+  // is connected yet, and every page that reconnects from here on is served it
+  // by `open()`. This is the half that reaches the people whose connection died
+  // before the notice went out.
+  function restore(record) {
+    if (!record || typeof record.expiresAt !== "number") return;
+    if (record.expiresAt <= Date.now()) return;
+    latestNotice = record;
+  }
+
   async function pollState() {
     if (!clients.size || statePollInFlight) return;
     statePollInFlight = true;
@@ -300,5 +310,5 @@ export function createRealtimeController({
     }
   }
 
-  return { hasRecentClient, heartbeat, notify, open, pollDesktopEvents, pollState };
+  return { hasRecentClient, heartbeat, notify, open, pollDesktopEvents, pollState, restore };
 }

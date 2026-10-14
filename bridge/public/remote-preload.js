@@ -1798,8 +1798,18 @@
   // closes it. A renderer that predates the patch has no such global — say so
   // once and drop the notice rather than throwing on the event stream.
   let noticeRenderWarned = false;
+  let noticeShown = "";
   function showNotice(payload) {
     if (!payload || typeof payload !== "object") return;
+    const title = typeof payload.title === "string" ? payload.title : "";
+    const description = typeof payload.description === "string" ? payload.description : "";
+    if (!title && !description) return;
+    // The bridge replays a live notice to every page that (re)connects, and a
+    // reconnect is exactly what follows the outage this is warning about — so
+    // the same notice must not stack a second card each time. A reload starts a
+    // new page and shows it again, which is the point.
+    const key = `${title}\u0000${description}`;
+    if (key === noticeShown) return;
     const toast = globalThis.__CLAUDESK_TOAST__;
     if (!toast || typeof toast.add !== "function") {
       if (!noticeRenderWarned) {
@@ -1808,11 +1818,8 @@
       }
       return;
     }
-    toast.add({
-      title: typeof payload.title === "string" ? payload.title : "",
-      description: typeof payload.description === "string" ? payload.description : undefined,
-      timeout: 0,
-    });
+    noticeShown = key;
+    toast.add({ title, description: description || undefined, timeout: 0 });
   }
 
   for (const method of ["pushState", "replaceState"]) {

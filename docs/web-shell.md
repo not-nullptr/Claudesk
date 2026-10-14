@@ -300,6 +300,21 @@ three parts.
   once, and the compose service's `stop_grace_period` (20s) keeps the hold from being
   cut short by a SIGKILL. Registering the handler is also what makes it run at all:
   the node process is PID 1 in the container.
+- **Survive the restart (`bridge/notices.mjs`).** The bridge serves the browser from
+  the *desktop* container's network namespace (`network_mode: service:claude-desktop`),
+  so a deploy that recreates both at once takes that route down at the same moment the
+  notice goes out — the write lands in a namespace nothing is listening on, and the
+  connection is cut before the page can be told anything. The notice is therefore also
+  written to the state directory, and the next bridge reads it back at startup and
+  replays it to every page that reconnects inside the window, which is exactly the
+  population that missed it. It expires on its own, so a window that closed while the
+  bridge was down does not come back as a greeting on every later tab. `deploy.sh`
+  closes the remaining gap from the other side: it stops the bridge **on its own,
+  first**, before recreating anything, so the notice goes out while the route to it is
+  still up; the recreate follows once it has exited.
+
+The preload shows a given notice once per page, not once per delivery: a reconnect
+replays it, and a reconnect is what follows the outage the notice is about.
 
 The notice is cached while it is live and replayed to a page that connects during the
 window (a tab opened mid-restart must still hear it), and expires after five minutes so
@@ -311,15 +326,11 @@ route must not be reachable through the proxy), so people can be told a minute o
 before the stack is stopped. It is gated on `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`,
 the operator scope, so a provisioned account never inherits it.
 
-Two things to know: `redeploy-desktop.sh` recreates `claude-desktop`,
-`cowork-bridge` **and** `claude-gateway-loopback` in one `up -d --force-recreate`, so
-the gateway can cut the browser's connection before the bridge's flush lands — the
-automatic path is dependable for `docker compose stop|restart cowork-bridge`, and the
-manual trigger is the dependable route for a planned deploy. And one bridge serves one
-instance, so a notice reaches that tenant's tabs only; a box-wide restart needs it
-fired per instance. The publish half needs the `claude-desktop` service rebuilt and a
-`patchRelease` bump (the prepared renderer is served under an immutable path); the
-bridge and preload half alone would log-and-drop.
+Two things to know. One bridge serves one instance, so a notice reaches that tenant's
+tabs only; a box-wide restart needs it fired per instance. And the publish half needs
+the `claude-desktop` service rebuilt and a `patchRelease` bump (the prepared renderer
+is served under an immutable path) — the bridge and preload half alone would
+log-and-drop, saying so once on the browser console.
 
 ## Code routes
 

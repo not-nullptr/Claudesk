@@ -73,6 +73,19 @@ if [ "$deploy_gateway" = 1 ]; then
     fi
 fi
 
+# Stop the bridge on its own first, before anything else is touched. It serves
+# the browser's event stream from the *desktop* container's network namespace
+# (network_mode: service:claude-desktop), so recreating the two together tears
+# that route down at the same moment the bridge would be warning anyone — the
+# notice goes out into a namespace nothing is listening on any more. Stopping
+# the bridge alone leaves the route up while it broadcasts, holds
+# CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS and exits; the pages keep the warning after
+# their stream drops, and the next bridge replays it to whoever reconnects.
+if sudo docker compose -f compose.yaml ps --status running --services 2>/dev/null \
+    | grep -qx cowork-bridge; then
+    sudo docker compose -f compose.yaml stop -t 30 cowork-bridge
+fi
+
 sudo docker compose -f compose.yaml \
     up -d --build --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \

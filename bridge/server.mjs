@@ -16,6 +16,7 @@ import { createNotificationController } from "./notifications.mjs";
 import { createConnectorStore } from "./connectors.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
+import { loadNotice, saveNotice } from "./notices.mjs";
 import { createWorkspaceFolder, listWorkspaceFolders } from "./workspace-folders.mjs";
 
 const host = process.env.BRIDGE_HOST || "0.0.0.0";
@@ -33,11 +34,19 @@ const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 // moment to see it, and only then exits — the browser's SSE stream drops right
 // after, so this is the last thing the page hears. Overridable for a longer
 // heads-up; the compose service's stop_grace_period must stay above it.
+//
+// Recreating `claude-desktop` takes the network namespace the bridge serves from
+// with it, so a deploy that recreates both at once can cut a page's connection
+// before this notice lands. That is why the notice is also written to the state
+// directory and replayed by the next bridge (bridge/notices.mjs), and why
+// deploy.sh stops the bridge on its own first — while the route to it is still
+// up — before recreating the stack.
 const shutdownNoticeMs = Number(process.env.CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS || 5000);
 const restartNotice = Object.freeze({
   title: "Your VM is restarting",
   description: "Your task has been interrupted. Please wait a minute or so before trying again.",
 });
+const bridgeStateDir = process.env.COWORK_BRIDGE_STATE_DIR || "/data";
 // Experimental: render ion-dist's browser (claude.ai) chrome instead of the
 // Desktop chrome. ion-dist picks its shell from the `Claude/<version>` token the
 // preload appends to the user agent; dropping it makes the renderer believe it
@@ -1261,7 +1270,7 @@ function isDocumentNavigation(request) {
 // is connected, the event relay must know whether a category is enabled).
 const notifications = createNotificationController({
   desktop,
-  stateDir: process.env.COWORK_BRIDGE_STATE_DIR || "/data",
+  stateDir: bridgeStateDir,
   hasRecentRealtimeClient: () => realtime.hasRecentClient(),
   pushSubject: process.env.CLAUDE_REMOTE_PUSH_SUBJECT || "mailto:claudesk@localhost",
 });
@@ -1271,7 +1280,7 @@ const notifications = createNotificationController({
 // no claude.ai connectors backend (see bridge/connectors.mjs). Per-instance —
 // the bridge data directory is already one account's.
 const connectors = createConnectorStore({
-  stateDir: process.env.COWORK_BRIDGE_STATE_DIR || "/data",
+  stateDir: bridgeStateDir,
 });
 
 const realtime = createRealtimeController({
@@ -1280,6 +1289,21 @@ const realtime = createRealtimeController({
   ApiError,
   eventAllowed: (payload) => notifications.notificationAllowed(payload),
 });
+// A notice from the previous bridge — its restart warning — is read back before
+// anything connects, so pages whose stream died mid-restart still learn why when
+// they reconnect. Publishing one writes it out (see bridge/notices.mjs).
+realtime.restore(loadNotice(bridgeStateDir));
+function publishNotice(payload, ttlMs) {
+  const record = realtime.notify(payload, ttlMs);
+  try {
+    saveNotice(bridgeStateDir, record);
+  } catch (error) {
+    // A read-only state directory only costs the replay to pages that reconnect
+    // after this bridge is gone; the live broadcast has already gone out.
+    console.error(`[cowork-bridge] could not persist the notice: ${error.message}`);
+  }
+  return record;
+}
 const uploads = createUploadHandler({
   ApiError,
   workspaceRoot,
@@ -2526,7 +2550,7 @@ async function handleApi(request, response, url) {
     const ttlMs = Number.isFinite(body.ttlMs) && body.ttlMs > 0
       ? Math.min(body.ttlMs, 60 * 60 * 1000)
       : undefined;
-    sendJson(response, 200, { ok: true, value: realtime.notify(notice, ttlMs) });
+    sendJson(response, 200, { ok: true, value: publishNotice(notice, ttlMs) });
     return;
   }
 
@@ -3246,7 +3270,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log(`[cowork-bridge] ${signal}: warning connected pages, exiting in ${shutdownNoticeMs}ms`);
   try {
-    realtime.notify(restartNotice, shutdownNoticeMs + 60 * 1000);
+    publishNotice(restartNotice, shutdownNoticeMs + 60 * 1000);
   } catch (error) {
     console.error(`[cowork-bridge] could not send the restart notice: ${error.message}`);
   }
