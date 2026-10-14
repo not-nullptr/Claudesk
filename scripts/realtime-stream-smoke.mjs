@@ -115,4 +115,32 @@ vm.runInNewContext(`${noticeSource}\nshowNotice({title:"T"});showNotice({title:"
   console: { warn: (message) => warnings.push(message) },
 });
 assert.equal(warnings.length, 1, 'a renderer without the toast publish must warn once and never throw');
-console.log('realtime-stream-smoke: restart notice broadcast, replayed while live, and rendered as a sticky app toast');
+// Without the app's toast the notice is drawn by the preload rather than
+// dropped: a renderer that does not carry the patch — or a page whose module
+// graph did not come from the prepared one — must still be warned.
+function elementStub() {
+  const el = {
+    style: { cssText: '' }, attributes: {}, children: [], className: '', textContent: '',
+    isConnected: true,
+    setAttribute(name, value) { el.attributes[name] = value; },
+    addEventListener(name, fn) { el[name] = fn; },
+    append(...children) { el.children.push(...children); },
+    remove() { el.isConnected = false; },
+  };
+  return el;
+}
+const documentStub = { body: elementStub(), createElement: () => elementStub() };
+vm.runInNewContext(`${noticeSource}\nshowNotice({title:"Server",description:"restarting"});`, {
+  globalThis: { document: documentStub },
+  console: { warn: (message) => warnings.push(message) },
+});
+assert.equal(documentStub.body.children.length, 1,
+  'with no app toast the preload must still put the notice on screen');
+const card = documentStub.body.children[0];
+assert.equal(card.className, 'claudesk-server-notice');
+assert.deepEqual([card.children[0].children[0].textContent, card.children[0].children[1].textContent],
+  ['Server', 'restarting'], 'the fallback carries the operator copy verbatim');
+assert.ok(card.style.cssText.includes('position: fixed'),
+  'the fallback must be pinned in the app’s own corner, not flow with the page');
+assert.equal(warnings.length, 2, 'and it says once that it drew the notice itself');
+console.log('realtime-stream-smoke: restart notice broadcast, replayed while live, and rendered as a sticky app toast — or by the preload when the app’s toast is not there');

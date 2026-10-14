@@ -1799,6 +1799,7 @@
   // once and drop the notice rather than throwing on the event stream.
   let noticeRenderWarned = false;
   let noticeShown = "";
+  let noticeElement = null;
   function showNotice(payload) {
     if (!payload || typeof payload !== "object") return;
     const title = typeof payload.title === "string" ? payload.title : "";
@@ -1810,16 +1811,84 @@
     // new page and shows it again, which is the point.
     const key = `${title}\u0000${description}`;
     if (key === noticeShown) return;
+    noticeShown = key;
     const toast = globalThis.__CLAUDESK_TOAST__;
-    if (!toast || typeof toast.add !== "function") {
-      if (!noticeRenderWarned) {
-        noticeRenderWarned = true;
-        console.warn("[claudesk] server notice received, but this renderer has no toast to show it in");
-      }
+    if (toast && typeof toast.add === "function") {
+      toast.add({ title, description: description || undefined, timeout: 0 });
       return;
     }
-    noticeShown = key;
-    toast.add({ title, description: description || undefined, timeout: 0 });
+    // The app's toast is published by the `toast-global` renderer patch, and it
+    // is the nicer path: the app's own component, its own stack and dismiss
+    // affordance. But the notice must not depend on it. A prepared renderer that
+    // predates the patch, or a page whose module graph did not come from the
+    // prepared one at all, leaves the global unset — and a restart warning that
+    // only shows up when everything else went right is not a warning. So draw it
+    // here instead, in the same corner and the same design tokens the app themes
+    // itself with, and say once on the console that it came from here.
+    if (!noticeRenderWarned) {
+      noticeRenderWarned = true;
+      console.warn("[claudesk] server notice drawn by the preload; the app's own toast was unavailable");
+    }
+    renderNotice(title, description);
+  }
+
+  function renderNotice(title, description) {
+    const document = globalThis.document;
+    if (!document?.body || typeof document.createElement !== "function") return;
+    if (noticeElement?.isConnected) noticeElement.remove();
+    const card = document.createElement("div");
+    card.className = "claudesk-server-notice";
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    // Inline rather than a stylesheet: this file is served no-store while the
+    // stylesheets are versioned with the release, so keeping the notice here
+    // means it can ship without a patchRelease bump. Every value falls back, so
+    // a renderer that defines none of these tokens still gets a readable card.
+    card.style.cssText = [
+      "position: fixed",
+      "right: 1rem",
+      "bottom: 1rem",
+      "z-index: var(--cds-z-toast, 60)",
+      "display: flex",
+      "align-items: flex-start",
+      "gap: 0.75rem",
+      "width: 360px",
+      "max-width: calc(100vw - 2rem)",
+      "padding: 1rem",
+      "border: 1px solid var(--cds-border, rgba(127, 127, 127, 0.35))",
+      "border-radius: var(--cds-radius--lg, 12px)",
+      "background: var(--cds-surface-popover, var(--cds-surface-1, #2b2b2b))",
+      "color: var(--cds-text-primary, #f5f4ef)",
+      "font-family: var(--cds-font-sans, inherit)",
+      "font-size: 0.875rem",
+      "line-height: 1.45",
+      "box-shadow: var(--cds-shadow-popover, 0 12px 32px rgba(0, 0, 0, 0.3))",
+      "pointer-events: auto",
+    ].join(";");
+    const text = document.createElement("div");
+    text.style.cssText = "flex: 1 1 auto; min-width: 0";
+    if (title) {
+      const heading = document.createElement("div");
+      heading.textContent = title;
+      heading.style.cssText = "font-weight: 600; margin-bottom: 0.25rem";
+      text.append(heading);
+    }
+    if (description) {
+      const body = document.createElement("div");
+      body.textContent = description;
+      body.style.cssText = "color: var(--cds-text-secondary, inherit); white-space: pre-wrap";
+      text.append(body);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.style.cssText = "flex: 0 0 auto; padding: 0 0.25rem; border: 0; background: transparent;"
+      + " color: inherit; font: inherit; font-size: 1.1rem; line-height: 1; cursor: pointer; opacity: 0.7";
+    close.addEventListener("click", () => card.remove());
+    card.append(text, close);
+    document.body.append(card);
+    noticeElement = card;
   }
 
   for (const method of ["pushState", "replaceState"]) {

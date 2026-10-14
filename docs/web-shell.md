@@ -290,9 +290,14 @@ three parts.
   that no longer matches fails preparation rather than warn nobody.
 - **Display (`bridge/public/remote-preload.js`).** A `notice` event on the existing
   stream is rendered through that manager — sticky (`timeout: 0`), so it outlives the
-  SSE drop that follows and the reconnect after. A renderer older than the patch has no
-  such global; the preload says so once on the console and drops the notice rather than
-  throwing on the event stream.
+  SSE drop that follows and the reconnect after. The manager is preferred but not
+  required: when the global is absent — a renderer older than the patch, or a page whose
+  module graph did not come from the prepared renderer at all — the preload draws the
+  card itself, in the app's corner and its design tokens (`--cds-*`, with fallbacks),
+  and says once on the console that it did. A restart warning that only appears when
+  every other layer went right is not a warning. The fallback is built inline rather
+  than in `remote-shell.css` on purpose: this preload is served `no-store`, so it can
+  change without a `patchRelease` bump, while the stylesheets cannot.
 - **Send (`bridge/server.mjs`, `bridge/realtime.mjs`).** On SIGTERM the bridge
   broadcasts the notice, holds `CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS` (default 5s) so the
   write flushes and the reader has a moment to see it, and only then exits — the stream
