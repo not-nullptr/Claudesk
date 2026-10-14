@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.textContent = ""; this.dataset = {}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.textContent = ""; this.dataset = {}; this.hidden = false; }
   setAttribute(name, value) { this[name] = value; }
   append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
@@ -17,25 +17,38 @@ class Element {
   remove() { this.parent.children = this.parent.children.filter(node => node !== this); }
 }
 const body = new Element("body");
-const requests = [], created = [];
-let missing = false;
+const requests = [], created = [], posts = [];
+let missing = false, createFails = null;
+function listingFor(path) {
+  return { root: "/workspace", path,
+    parent: path === "/workspace" ? null : "/workspace",
+    folders: path === "/workspace"
+      ? [{ name: "a", path: "/workspace/a" }, { name: "b", path: "/workspace/b" }] : [],
+    truncated: false };
+}
 const context = { document: { body, activeElement: new Element("button"),
   createElement(tag) { const element = new Element(tag); created.push(element); return element; } },
-  AbortController, fetch: async (url, options) => {
+  AbortController, fetch: async (url, options = {}) => {
     assert.ok(options.signal);
-    const path = new URL(url, "https://claudesk.invalid").searchParams.get("path") || "/workspace";
+    const parsed = new URL(url, "https://claudesk.invalid");
+    if (options.method === "POST" && parsed.pathname === "/api/remote/folders") {
+      const body = JSON.parse(options.body);
+      posts.push(body);
+      if (createFails) return { ok: false, json: async () => ({ ok: false, error: createFails }) };
+      return { ok: true, json: async () => ({ ok: true, value: { path: `${body.path}/${body.name}`, name: body.name } }) };
+    }
+    const path = parsed.searchParams.get("path") || "/workspace";
     requests.push(path);
     if (path === "/outside" || (missing && path === "/workspace/a")) {
       return { ok: false, json: async () => ({ ok: false, error: "Folder unavailable" }) };
     }
-    return { ok: true, json: async () => ({ ok: true, value: { root: "/workspace", path,
-      parent: path === "/workspace" ? null : "/workspace", folders: path === "/workspace"
-        ? [{ name: "a", path: "/workspace/a" }, { name: "b", path: "/workspace/b" }] : [], truncated: false } }) };
+    return { ok: true, json: async () => ({ ok: true, value: listingFor(path) }) };
   } };
 vm.runInNewContext(await readFile(new URL("../bridge/public/remote-folder-picker.js", import.meta.url), "utf8"), context);
 const pick = context.__CLAUDE_PICK_SERVER_FOLDERS__;
 function all(node = body) { return [node, ...node.children.flatMap(child => all(child))]; }
 function button(label) { return all().find(node => node.tag === "button" && node.textContent === label); }
+function nameInput() { return all().find(node => node["aria-label"] === "New folder name"); }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 let result = pick({ title: "Choose project folder" });
@@ -57,13 +70,17 @@ for (const name of ["a", "b"]) {
 button("Choose folders (2)").click();
 assert.deepEqual(Array.from(await result), ["/workspace/a", "/workspace/b"]);
 
+// A caller may hand a start folder outside the browsable workspace (Desktop's
+// own default is the home directory); the picker falls back to the root rather
+// than stranding the reader on an error.
 result = pick({ initialPath: "/outside" });
 await settle();
-assert.ok(all().some(node => node.textContent === "Folder unavailable"));
+assert.ok(all().some(node => node.textContent === "/workspace"), "an off-workspace start folder falls back to the root");
 button("Workspace").click();
 await settle();
 body.children[0].dispatch("cancel");
 assert.equal(await result, null);
+
 result = pick();
 await settle();
 const search = all().find(node => node.type === "search");
@@ -85,6 +102,44 @@ await settle();
 all().find(node => node["aria-label"] === "Close folder picker").click();
 assert.equal(await result, null);
 
+// "New folder": creating a directory is part of the native dialog the picker
+// replaces, so it is offered here, posts to the confinement-checked bridge
+// route, and navigates into the folder it created.
+result = pick({ title: "Select Directory to Share", allowCreate: true });
+await settle();
+assert.equal(button("Create folder").parent.hidden, true, "the create row starts hidden");
+button("New folder").click();
+assert.equal(button("Create folder").parent.hidden, false);
+nameInput().value = "shared";
+button("Create folder").click();
+await settle();
+assert.deepEqual(posts.at(-1), { path: "/workspace", name: "shared" });
+assert.ok(all().some(node => node.textContent === "/workspace/shared"), "the picker opens the created folder");
+assert.ok(all().some(node => node.textContent === "Created /workspace/shared."));
+button("Choose this folder").click();
+assert.deepEqual(Array.from(await result), ["/workspace/shared"]);
+
+// A refused create reports the bridge's message and keeps the dialog open.
+createFails = "a folder with that name already exists";
+result = pick({ allowCreate: true });
+await settle();
+button("New folder").click();
+nameInput().value = "a";
+button("Create folder").click();
+await settle();
+assert.ok(all().some(node => node.textContent === "a folder with that name already exists"));
+button("Cancel").click();
+assert.equal(await result, null);
+createFails = null;
+
+// A dialog that forbids creating does not offer the affordance.
+result = pick({ allowCreate: false });
+await settle();
+assert.equal(all().some(node => node.tag === "button" && node.textContent === "New folder"), false,
+  "creation is hidden when the dialog does not allow it");
+body.children[0].dispatch("cancel");
+assert.equal(await result, null);
+
 result = pick({ multiple: true });
 await settle();
 const input = all().find(node => node["aria-label"] === "Select a");
@@ -99,4 +154,4 @@ button("Cancel").click();
 assert.equal(await result, null);
 assert.ok(!created.some(node => node.type === "file"), "never create a native file picker");
 assert.ok(requests.includes("/workspace/a"));
-console.log("folder-picker-ui-smoke: navigation, multi-select, Escape, errors and server revalidation passed");
+console.log("folder-picker-ui-smoke: navigation, multi-select, new folder, Escape, errors and server revalidation passed");

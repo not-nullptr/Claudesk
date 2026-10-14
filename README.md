@@ -244,6 +244,18 @@ Cowork 与 Code 的 `FileSystem.browseFolder` / `browseFolders` 现在打开网�
 但该组件依赖官方 React Query / Intl 环境，当前没有从任意 Cowork/Code 页面调用它的公共入口。
 此实现通过 preload 替换现有选目录 API，不新增 frontend bundle 补丁，保留官方信任确认与会话处理。
 
+选择器还带有“New folder”：`POST /api/remote/folders`（`{path, name}`）在与列表相同的
+工作区限制下创建单个目录段，重名返回 409，越界或非法文件名返回 400/403。
+
+Cowork 自身的“Choose folder”授权卡（`mcp__cowork__request_cowork_directory` 工具以及
+“add a folder to this session”等流程）不走上面的 preload IPC：Desktop 主进程直接调用
+`electron.dialog.showOpenDialog({properties:["openDirectory","createDirectory"]})`。容器里的原生
+对话框只画在无人查看的 headless 显示器上，所以按钮看起来毫无反应。开启 web shell 时
+（`CLAUDE_REMOTE_FOLDER_PICKER` 默认跟随 `CLAUDE_REMOTE_WEB_SHELL`），wrapper 会把这类目录
+对话框改道到浏览器：请求经事件队列送达 preload，由同一个网页选择器作答，再把所选路径回传到
+`POST /api/remote/folder-pick`，包装成原生对话框结果 `{canceled, filePaths}` 交给主进程继续挂载。
+路径仍会通过官方校验（必须是允许范围内的真实目录），无人作答时超时当作取消。
+
 ### 文件面板下载
 
 点击消息中的文件路径会打开官方文件面板。文件面板顶栏在“Files settings”左侧新增一个官方样式的下载图标

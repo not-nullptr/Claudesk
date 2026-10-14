@@ -456,10 +456,19 @@ html body dialog.remote-folder-picker:not([open]) { display: none; }
 .remote-folder-picker .remote-folder-picker-footer { display: flex; flex-shrink: 0; justify-content: flex-end; align-items: center; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--picker-border); }
 .remote-folder-picker .remote-folder-picker-primary { background: var(--picker-text); color: var(--picker-surface); border-color: transparent; }
 .remote-folder-picker .remote-folder-picker-primary:hover { background: var(--picker-text); filter: brightness(.9); }
+/* "New folder": the picker stands in for the native dialog, whose
+ * createDirectory property lets the user make a folder before choosing it. */
+.remote-folder-picker .remote-folder-picker-create { display: flex; flex-shrink: 0; gap: 8px; padding: 0 24px 12px; }
+.remote-folder-picker .remote-folder-picker-create[hidden] { display: none; }
+.remote-folder-picker .remote-folder-picker-name { appearance: none; box-sizing: border-box; flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--picker-border); border-radius: 8px; background: var(--cds-surface-0, hsl(var(--bg-000, 0 0% 100%))); color: inherit; font: inherit; }
+.remote-folder-picker .remote-folder-picker-name::placeholder { color: var(--picker-muted); }
+.remote-folder-picker .remote-folder-picker-create button { flex-shrink: 0; }
+.remote-folder-picker .remote-folder-picker-new { margin-right: auto; }
 @media (max-width: 480px) {
   .remote-folder-picker .remote-folder-picker-header { padding: 20px 16px 16px; }
   .remote-folder-picker .remote-folder-picker-navigation { padding: 0 16px 12px; }
   .remote-folder-picker .remote-folder-picker-search { width: calc(100% - 32px); margin: 0 16px 10px; }
   .remote-folder-picker .remote-folder-picker-entries { padding: 0 8px; }
+  .remote-folder-picker .remote-folder-picker-create { padding: 0 16px 10px; }
   .remote-folder-picker .remote-folder-picker-footer { padding: 16px; }
 }

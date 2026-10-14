@@ -638,14 +638,18 @@
         return async () => (await browseBrowserFiles(false))?.paths ?? null;
       }
       if (method === "browseFolder") {
-        return async (title, _allowCreate, _trust, initialPath) => {
-          const paths = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({ title, initialPath });
+        return async (title, allowCreate, _trust, initialPath) => {
+          const paths = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({
+            title, initialPath, allowCreate: allowCreate !== false,
+          });
           return paths?.[0] ?? null;
         };
       }
       if (method === "browseFolders") {
-        return async (title, _allowCreate, _trust, initialPath) =>
-          globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({ title, multiple: true, initialPath });
+        return async (title, allowCreate, _trust, initialPath) =>
+          globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({
+            title, multiple: true, initialPath, allowCreate: allowCreate !== false,
+          });
       }
       if (method === "getSystemPath") return async () => "/workspace";
       if (method === "writeFileDownload" || method === "writeFileDownloadAndOpen") {
@@ -858,6 +862,37 @@
     } catch {
       return null;
     }
+  }
+
+  // Answer a folder dialog the main process opened (relayed by the wrapper) with
+  // the in-page picker, then report the selection back. A cancelled pick — or a
+  // picker that is not available — reports a cancel so the pending dialog
+  // settles instead of hanging.
+  async function answerRemoteFolderPick(request) {
+    const id = typeof request?.id === "string" ? request.id : "";
+    if (!id) return false;
+    let paths = null;
+    if (typeof globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ === "function") {
+      try {
+        paths = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({
+          title: typeof request.title === "string" && request.title ? request.title : undefined,
+          multiple: request.multiple === true,
+          initialPath: typeof request.defaultPath === "string" ? request.defaultPath : undefined,
+          allowCreate: request.allowCreate !== false,
+        });
+      } catch {}
+    }
+    const selected = Array.isArray(paths)
+      ? paths.filter((path) => typeof path === "string" && path).slice(0, 64)
+      : [];
+    try {
+      await bridgeRequest("/api/remote/folder-pick", {
+        id,
+        canceled: selected.length === 0,
+        paths: selected,
+      }, { retryable: true });
+    } catch {}
+    return true;
   }
 
   function closeRemoteNotification(tag) {
@@ -1184,6 +1219,20 @@
   });
   subscribe("DesktopNotifications", "onNotificationClosed", (record) => {
     if (typeof record?.tag === "string") closeRemoteNotification(record.tag);
+  });
+
+  // The Desktop main process opens an OS folder dialog for Cowork's folder
+  // grant (`mcp__cowork__request_cowork_directory`) and the other folder flows.
+  // In this container that dialog renders on a display nobody is watching, so
+  // the wrapper routes it here: answer it with the same in-page picker the
+  // folder IPCs use, then post the chosen paths back so the main process can
+  // mount the folder and the agent turn can continue.
+  subscribe("RemoteFolderPicker", "onRequest", (request) => {
+    try {
+      return Promise.resolve(answerRemoteFolderPick(request)).catch(() => false);
+    } catch {
+      return Promise.resolve(false);
+    }
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", (event) => {

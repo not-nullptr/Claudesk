@@ -51,6 +51,15 @@ const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
 const connectorsEnabled = process.env.CLAUDE_REMOTE_MCP_CONNECTORS === "1"
   || (process.env.CLAUDE_REMOTE_WEB_SHELL === "1" && process.env.CLAUDE_REMOTE_MCP_CONNECTORS !== "0");
 const coworkHostBashEnabled = process.env.CLAUDE_COWORK_HOST_BASH === "1";
+// The Desktop main process collects Cowork's folder grant — the
+// `mcp__cowork__request_cowork_directory` tool and the other folder flows
+// behind the "Choose folder" cards — with an OS folder dialog. In this
+// container that dialog renders on the headless display nobody is looking at,
+// so the button appears to do nothing. When this is on, directory dialogs are
+// routed to the browser's in-page picker instead (see "Remote folder picker"
+// below). Default follows the web shell: on with it, off otherwise.
+const remoteFolderPickerEnabled = process.env.CLAUDE_REMOTE_FOLDER_PICKER === "1"
+  || (process.env.CLAUDE_REMOTE_WEB_SHELL === "1" && process.env.CLAUDE_REMOTE_FOLDER_PICKER !== "0");
 const rendererReadyTimeoutMs = 15 * 1000;
 const rendererReadyPollMs = 250;
 
@@ -93,6 +102,14 @@ const coworkVmScheduleGuardMinutes = boundedInteger(
   24 * 60,
 );
 const coworkVmIdlePollMs = 60 * 1000;
+// How long a routed folder dialog waits for the browser before it answers as a
+// cancel, so an agent turn cannot hang forever when nobody is at a tab.
+const remoteFolderPickTimeoutMs = boundedInteger(
+  process.env.CLAUDE_REMOTE_FOLDER_PICK_TIMEOUT_MS,
+  5 * 60 * 1000,
+  1000,
+  60 * 60 * 1000,
+);
 let coworkVmLastActivityAt = Date.now();
 
 function noteCoworkVmActivity() {
@@ -573,6 +590,10 @@ const relayedListeners = new Map([
   // the official Desktop decides to show, for the remote preload to render in
   // the browser (see the notification relay section below).
   ["DesktopNotifications", new Set(["onNotification", "onNotificationClosed"])],
+  // Also wrapper-published: a directory dialog the official main process opened
+  // (Cowork's folder grant), for the remote preload to answer with the in-page
+  // picker (see the remote folder picker section below).
+  ["RemoteFolderPicker", new Set(["onRequest"])],
 ]);
 
 // Renderer events must be pushed into the main process as they happen. Pulling
@@ -2461,6 +2482,111 @@ async function generateTitle(message, model) {
   return result.value;
 }
 
+// ---------------------------------------------------------------------------
+// Remote folder picker
+//
+// The official main process collects the folder for Cowork's "Choose folder"
+// cards — `mcp__cowork__request_cowork_directory`, and the folder-grant flows
+// behind `pickAndValidateMountFolder` — with
+// `electron.dialog.showOpenDialog({ properties: ["openDirectory", ...] })`.
+// This container has no display a person is watching, so that native dialog
+// never appears and the card's button looks dead. When the picker is enabled a
+// directory dialog is handed to the browser's in-page picker instead: the
+// request is relayed over the event queue (the preload opens
+// `__CLAUDE_PICK_SERVER_FOLDERS__`), and the browser posts its answer back to
+// `/folder-pick`, which resolves the pending dialog promise with the native
+// result shape (`{ canceled, filePaths }`). The picked path is still passed
+// through the official validation — a real, permitted directory — so the
+// normal mount runs. A dialog nobody answers answers as a cancel after
+// `remoteFolderPickTimeoutMs`, so an agent turn cannot hang forever.
+// ---------------------------------------------------------------------------
+
+const folderPickRelay = {
+  pending: new Map(),
+  sequence: 0,
+  served: 0,
+  canceled: 0,
+  timeouts: 0,
+};
+
+function settleRemoteFolderPick(id, value) {
+  const pending = folderPickRelay.pending.get(id);
+  if (!pending) return;
+  folderPickRelay.pending.delete(id);
+  clearTimeout(pending.timer);
+  pending.resolve(value);
+}
+
+function requestRemoteFolderPick(options) {
+  const id = `folder-pick-${++folderPickRelay.sequence}-${randomBytes(8).toString("hex")}`;
+  const properties = Array.isArray(options.properties) ? options.properties : [];
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (folderPickRelay.pending.delete(id)) {
+        folderPickRelay.timeouts += 1;
+        resolve({ canceled: true, filePaths: [] });
+      }
+    }, remoteFolderPickTimeoutMs);
+    timer.unref?.();
+    folderPickRelay.pending.set(id, { resolve, timer });
+    enqueueRelayedEvent({
+      surface: "RemoteFolderPicker",
+      method: "onRequest",
+      payload: {
+        id,
+        title: typeof options.title === "string" ? options.title.slice(0, 200) : "",
+        message: typeof options.message === "string" ? options.message.slice(0, 500) : "",
+        defaultPath: typeof options.defaultPath === "string" && options.defaultPath.length <= 4096
+          ? options.defaultPath
+          : null,
+        multiple: properties.includes("multiSelections"),
+        allowCreate: properties.includes("createDirectory"),
+        at: Date.now(),
+      },
+    });
+  });
+}
+
+function resolveRemoteFolderPick(body) {
+  const id = typeof body?.id === "string" ? body.id.slice(0, 200) : "";
+  if (!id || !folderPickRelay.pending.has(id)) return { handled: false, stale: true };
+  const paths = Array.isArray(body?.paths)
+    ? body.paths.filter((path) => typeof path === "string" && path).slice(0, 64)
+    : [];
+  if (body?.canceled === true || paths.length === 0) {
+    folderPickRelay.canceled += 1;
+    settleRemoteFolderPick(id, { canceled: true, filePaths: [] });
+  } else {
+    folderPickRelay.served += 1;
+    settleRemoteFolderPick(id, { canceled: false, filePaths: paths });
+  }
+  return { handled: true };
+}
+
+if (remoteFolderPickerEnabled) {
+  const electronDialog = require("electron").dialog;
+  if (electronDialog && typeof electronDialog.showOpenDialog === "function") {
+    const originalShowOpenDialog = electronDialog.showOpenDialog.bind(electronDialog);
+    // The dialog is called both as showOpenDialog(options) and
+    // showOpenDialog(window, options); only the options carry `properties`.
+    electronDialog.showOpenDialog = function routedShowOpenDialog(...args) {
+      try {
+        const first = args[0];
+        const options = args.length > 1 && first && typeof first === "object"
+          && typeof first.isDestroyed === "function"
+          ? args[1]
+          : first;
+        if (options && typeof options === "object"
+          && Array.isArray(options.properties)
+          && options.properties.includes("openDirectory")) {
+          return requestRemoteFolderPick(options);
+        }
+      } catch {}
+      return originalShowOpenDialog(...args);
+    };
+  }
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", "http://localhost");
@@ -2506,6 +2632,13 @@ const server = http.createServer(async (request, response) => {
             discovery: notificationRelay.discovery,
             pending: notificationRelay.pending.length,
             shown: notificationRelay.shown,
+          },
+          folderPicker: {
+            canceled: folderPickRelay.canceled,
+            enabled: remoteFolderPickerEnabled,
+            pending: folderPickRelay.pending.size,
+            served: folderPickRelay.served,
+            timeouts: folderPickRelay.timeouts,
           },
           platform: process.platform,
           renderer: rendererManifest,
@@ -2580,6 +2713,11 @@ const server = http.createServer(async (request, response) => {
         lastNotificationClickAt.delete(lastNotificationClickAt.keys().next().value);
       }
       sendJson(response, 200, { ok: true, value: await handleNotificationClick(tag, action) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/folder-pick") {
+      const body = await readJson(request);
+      sendJson(response, 200, { ok: true, value: resolveRemoteFolderPick(body) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/invoke") {

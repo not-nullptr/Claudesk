@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile, readFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
-import { listWorkspaceFolders } from "../bridge/workspace-folders.mjs";
+import { createWorkspaceFolder, listWorkspaceFolders } from "../bridge/workspace-folders.mjs";
 
 const temporary = await mkdtemp(join(tmpdir(), "claudesk-folders-"));
 try {
@@ -24,6 +24,27 @@ try {
   }
   await assert.rejects(listWorkspaceFolders(root, join(root, "missing")), error => error.statusCode === 404);
   await assert.rejects(listWorkspaceFolders(root, join(root, "file.txt")), error => error.statusCode === 400);
+  // "New folder" from the picker. The name is one confinement-checked segment,
+  // a collision is a conflict rather than an overwrite, and a parent that
+  // resolves outside the workspace (a symlink, an absolute outside path) is
+  // refused exactly as the listing refuses it.
+  assert.equal(
+    (await createWorkspaceFolder(root, join(root, "empty"), "new folder")).path,
+    join(root, "empty", "new folder"),
+  );
+  assert.deepEqual(
+    (await listWorkspaceFolders(root, join(root, "empty"))).folders.map(folder => folder.name),
+    ["new folder"],
+  );
+  assert.equal((await createWorkspaceFolder(root, undefined, "root folder")).path, join(root, "root folder"));
+  await assert.rejects(createWorkspaceFolder(root, join(root, "empty"), "new folder"), error => error.statusCode === 409);
+  await assert.rejects(createWorkspaceFolder(root, root, "file.txt"), error => error.statusCode === 409);
+  for (const name of ["", ".", "..", "a/b", "a\\b", "x".repeat(256), "bad\u0000name"]) {
+    await assert.rejects(createWorkspaceFolder(root, join(root, "empty"), name), error => error.statusCode === 400);
+  }
+  for (const parent of [outside, join(root, "escape"), join(root, "..", "outside")]) {
+    await assert.rejects(createWorkspaceFolder(root, parent, "nope"), error => error.statusCode === 403);
+  }
   const preload = await readFile(new URL("../bridge/public/remote-preload.js", import.meta.url), "utf8");
   const start = preload.indexOf("  function browserMethod(");
   const end = preload.indexOf("  const root = Object.create(null);", start);

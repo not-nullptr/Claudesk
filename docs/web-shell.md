@@ -72,7 +72,8 @@ Not wired up yet (tracked here so it is not mistaken for done):
 - **Cowork-on-web device model.** Cowork's *web* product also expects a paired
   "computer" device for browsing that machine's folders. Not needed for Code
   (folder browsing there goes through the Code file picker), so it is only
-  relevant if the merged Cowork-in-chat surface is ever wanted.
+  relevant if the merged Cowork-in-chat surface is ever wanted. The folder
+  *grant* is separate and does work — see "Folder access" below.
 
 ## Chat and Cowork sessions
 
@@ -134,6 +135,47 @@ output still matches; a second slot, or one that no longer matches, refuses rath
 than splicing the call into the wrong component. Like the other chrome patches it
 is spliced and required only when `CLAUDE_REMOTE_WEB_SHELL=1`, so a default
 deployment prepares a byte-identical renderer.
+
+## Folder access
+
+Cowork asks for a folder with two different mechanisms, and only one of them is
+renderer-side.
+
+The renderer-side ones — Code's project picker, "add a folder to this session",
+the Cowork composer's target picker — go through the `FileSystem.browseFolder` /
+`browseFolders` IPC, which the preload already answers with the in-page picker
+(`__CLAUDE_PICK_SERVER_FOLDERS__`, backed by `GET /api/remote/folders` over the
+mounted `/workspace`). Those work with no extra wiring.
+
+The **grant card** — `Claude would like to **Cowork** in a folder`, the
+`mcp__cowork__request_cowork_directory` tool — is different. Its handler runs in
+the Desktop **main process** and collects the folder with a native
+`electron.dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] })`
+(the shared `pickAndValidateMountFolder` helper, which every folder-grant flow
+calls). This container has no display anybody watches, so that dialog never
+appears and the card's **Choose folder** button looks dead.
+
+With `CLAUDE_REMOTE_FOLDER_PICKER` on (default: following
+`CLAUDE_REMOTE_WEB_SHELL`) the wrapper routes those directory dialogs to the
+browser instead. The request is relayed over the event queue as a
+`RemoteFolderPicker.onRequest` event (the same `desktop-ipc` path the
+notifications use); the preload opens the in-page picker and posts the chosen
+paths back to `POST /api/remote/folder-pick`, which the wrapper resolves into the
+native dialog result shape (`{ canceled, filePaths }`). The path is still put
+through the official validation — a real, permitted directory — so the normal
+mount runs. A dialog nobody answers times out as a cancel
+(`CLAUDE_REMOTE_FOLDER_PICK_TIMEOUT_MS`, default 5 minutes), so an agent turn
+cannot hang forever.
+
+The picker also gains a **New folder** action (the native dialog's
+`createDirectory`): `POST /api/remote/folders` creates a single, validated folder
+segment under the same workspace confinement as the listing, and the picker then
+opens it.
+
+Note this is the *grant* path; the Cowork-on-web *device model* for browsing a
+paired computer's folders (above) is still unwired, and a deployment that
+authors `workspace.allowedFolders` restricts which roots the grant can mount —
+keep the browsable root (`COWORK_REMOTE_WORKSPACE_ROOT`, `/workspace`) in it.
 
 ## Notifications
 

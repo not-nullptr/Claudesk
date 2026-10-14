@@ -7,7 +7,7 @@
     if (!response.ok || !result.ok) throw new Error(result.error || "Could not browse server folders");
     return result.value;
   }
-  globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ = function ({ title, multiple = false, initialPath } = {}) {
+  globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ = function ({ title, multiple = false, initialPath, allowCreate = true } = {}) {
     if (active) return active;
     active = new Promise(resolve => {
       const previousFocus = document.activeElement;
@@ -79,6 +79,35 @@
       const close = button("×", () => finish(null), header);
       close.className = "remote-folder-picker-close";
       close.setAttribute("aria-label", "Close folder picker");
+      // "New folder": creating a directory is part of the native dialog these
+      // flows replace — its `properties` carries `createDirectory` — so the
+      // in-page picker offers it too. The name is a single path segment, and the
+      // bridge re-validates it against the same workspace confinement as the
+      // listing before it creates anything.
+      const createRow = document.createElement("div");
+      createRow.className = "remote-folder-picker-create";
+      createRow.hidden = true;
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "remote-folder-picker-name";
+      nameInput.placeholder = "New folder name";
+      nameInput.setAttribute("aria-label", "New folder name");
+      nameInput.addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          void create();
+        }
+      });
+      createRow.append(nameInput);
+      const createButton = button("Create folder", () => void create(), createRow);
+      createButton.className = "remote-folder-picker-primary";
+      const newFolder = allowCreate
+        ? button("New folder", () => {
+          createRow.hidden = !createRow.hidden;
+          if (!createRow.hidden) nameInput.focus();
+        }, footer)
+        : null;
+      if (newFolder) newFolder.className = "remote-folder-picker-new";
       const cancel = button("Cancel", () => finish(null), footer);
       const choose = button("Choose folder", async () => {
         if (busy || !current) return;
@@ -124,7 +153,7 @@
         status.textContent = "Loading server folders…";
         try {
           const value = await listing(path, controller.signal);
-          if (finished || request !== generation) return;
+          if (finished || request !== generation) return false;
           current = value;
           pathLabel.textContent = value.path;
           pathLabel.title = value.path;
@@ -151,8 +180,10 @@
             entries.append(row);
           }
           status.textContent = value.truncated ? "Showing the first 1,000 folders." : value.folders.length ? "" : "This folder has no subfolders.";
+          return true;
         } catch (error) {
           if (!finished && request === generation) status.textContent = error.message;
+          return false;
         } finally {
           if (!finished && request === generation) {
             busy = false;
@@ -160,8 +191,44 @@
           }
         }
       }
+      async function create() {
+        if (busy || !current) return;
+        const name = nameInput.value.trim();
+        if (!name) {
+          status.textContent = "Enter a folder name.";
+          return;
+        }
+        busy = true;
+        createButton.disabled = true;
+        choose.disabled = true;
+        status.textContent = "Creating folder…";
+        try {
+          const response = await fetch("/api/remote/folders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: current.path, name }),
+            signal: controller.signal,
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok || !result.ok) throw new Error(result.error || "Could not create the folder");
+          const created = result.value?.path;
+          nameInput.value = "";
+          createRow.hidden = true;
+          // Navigate into the new folder so it is what "Choose this folder"
+          // selects; in multi-select, tick it as well.
+          if (multiple && created) selected.add(created);
+          await load(created || current.path);
+          if (created) status.textContent = `Created ${created}.`;
+        } catch (error) {
+          if (!finished) status.textContent = error.message;
+        } finally {
+          busy = false;
+          createButton.disabled = false;
+          updateSelection();
+        }
+      }
       navigation.append(pathLabel);
-      dialog.append(header, navigation, search, entries, status, footer);
+      dialog.append(header, navigation, search, entries, status, createRow, footer);
       // Native dialog backdrop events target the dialog itself. Require both
       // pointer-down and click outside so dragging from inside never dismisses.
       let pressedOutside = false;
@@ -180,7 +247,12 @@
       document.body.append(dialog);
       dialog.showModal();
       cancel.focus();
-      load(initialPath);
+      // A caller may offer a starting folder outside the browsable workspace
+      // (Desktop's own default is the home directory); fall back to the
+      // workspace root rather than leaving the picker stuck on an error.
+      load(initialPath).then(ok => {
+        if (!ok && initialPath) load();
+      });
     }).finally(() => { active = undefined; });
     return active;
   };

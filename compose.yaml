@@ -51,6 +51,11 @@ services:
       # web shell on it also splices the desktop Code route alias. See
       # docs/web-shell.md.
       CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
+      # Route the Desktop main process's folder dialogs (Cowork's "Choose
+      # folder" grant, which the native dialog cannot show on the headless
+      # display) to the browser's in-page picker. Defaults on with the web shell.
+      # See docs/web-shell.md, "Folder access".
+      CLAUDE_REMOTE_FOLDER_PICKER: "${CLAUDE_REMOTE_FOLDER_PICKER:-}"
       CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:?Set CLAUDE_GATEWAY_BASE_URL in .env}"
       # Provisioned accounts set this so re-provisioning moves an endpoint that a
       # writable Gateway configuration already holds. See CLAUDE_GATEWAY_BASE_URL

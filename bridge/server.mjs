@@ -16,7 +16,7 @@ import { createNotificationController } from "./notifications.mjs";
 import { createConnectorStore } from "./connectors.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
-import { listWorkspaceFolders } from "./workspace-folders.mjs";
+import { createWorkspaceFolder, listWorkspaceFolders } from "./workspace-folders.mjs";
 
 const host = process.env.BRIDGE_HOST || "0.0.0.0";
 const port = Number(process.env.BRIDGE_PORT || 8080);
@@ -910,6 +910,10 @@ const remoteListenerMethods = new Map([
   // notifications the official app decides to show, for the remote preload to
   // render in the browser (see bridge/notifications.mjs for the push side).
   ["DesktopNotifications", new Set(["onNotification", "onNotificationClosed"])],
+  // Also wrapper-published: a directory dialog the Desktop main process opened
+  // (Cowork's folder grant), handed to the browser's in-page picker because the
+  // native one renders on the container's headless display.
+  ["RemoteFolderPicker", new Set(["onRequest"])],
 ]);
 
 if (codeActionsEnabled) {
@@ -1130,6 +1134,14 @@ class DesktopInternalClient {
     const body = await this.request("/notification-click", {
       method: "POST",
       body: JSON.stringify({ tag, action }),
+    });
+    return body.value;
+  }
+
+  async folderPick(id, canceled, paths) {
+    const body = await this.request("/folder-pick", {
+      method: "POST",
+      body: JSON.stringify({ id, canceled, paths }),
     });
     return body.value;
   }
@@ -2290,6 +2302,12 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, value });
     return;
   }
+  if (request.method === "POST" && url.pathname === "/api/remote/folders") {
+    const body = await readJson(request);
+    const value = await createWorkspaceFolder(workspaceRoot, body.path, body.name);
+    sendJson(response, 200, { ok: true, value });
+    return;
+  }
   // The notification settings panel talks to claude.ai's server-side push
   // preferences (per-feature `enable_push`) and registers its push channel
   // there. This deployment has no such backend — the toggles would never stick
@@ -2450,6 +2468,25 @@ async function handleApi(request, response, url) {
       ? body.action
       : "default";
     sendJson(response, 200, { ok: true, value: await desktop.notificationClick(tag, action) });
+    return;
+  }
+
+  // The Desktop main process opens an OS folder dialog for Cowork's folder
+  // grant (`mcp__cowork__request_cowork_directory`) and the other folder flows;
+  // in this container that dialog renders on a headless display nobody sees, so
+  // the wrapper routes it to the browser's in-page picker and awaits the answer
+  // here (see the "Remote folder picker" section of bridge-wrapper/main.cjs).
+  if (request.method === "POST" && url.pathname === "/api/remote/folder-pick") {
+    const body = await readJson(request);
+    const id = typeof body.id === "string" ? body.id.slice(0, 200) : "";
+    if (!id) throw new ApiError(400, "folder pick id is required");
+    const paths = Array.isArray(body.paths)
+      ? body.paths.filter((path) => typeof path === "string" && path).slice(0, 64)
+      : [];
+    sendJson(response, 200, {
+      ok: true,
+      value: await desktop.folderPick(id, body.canceled === true, paths),
+    });
     return;
   }
 
