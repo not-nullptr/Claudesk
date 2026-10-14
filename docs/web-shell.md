@@ -409,8 +409,9 @@ scale, so the photo is pinned to the mark's exact size instead of the token, or
 it overflows the slot the row reserves and eats the chip's padding. Like the
 other chrome patches it is spliced only in web-shell mode. The account menu's
 own identity line reads from a different source — Desktop's interactive auth
-store (`principalDisplayName`, which the bridge rewrites the same way as the
-account name) — through a hook that paints a loading state on the popover's
+store (`principalDisplayName`, which the bridge rewrites to the same name it
+puts on the account document, resolved from the request in Eva Mode and from
+`CLAUDE_REMOTE_ACCOUNT_NAME` otherwise) — through a hook that paints a loading state on the popover's
 first frame and only fills from an async store read. In the web shell that read
 is a bridge round trip, so the menu's name line showed the deployment label for
 one frame and then flipped to the account name. The `web-account-menu-name`
@@ -442,16 +443,23 @@ to an image inside the container. A path is served by the bridge at
 `/api/remote/account/avatar`, same-origin; that route returns only the one file
 resolved at startup, so it is not an arbitrary-file-read primitive.
 `resolveAccountIdentity()` is the seam a future auth layer fills with a
-per-session identity; the signed-in account, the sidebar name and the greeting
-all resolve the operator's account name first (`CLAUDE_REMOTE_ACCOUNT_NAME`, else
-the legacy `CLAUDE_REMOTE_USER_NAME`).
+per-session identity; the signed-in account document, the sidebar name (the
+`interactiveAuthStore` the preload seeds and the account-menu reader falls back
+to) and the greeting all resolve that identity first when the request carries a
+session, and the operator's account name otherwise (`CLAUDE_REMOTE_ACCOUNT_NAME`,
+else the legacy `CLAUDE_REMOTE_USER_NAME`).
 
 **In Eva Mode the photo is per account.** With `AUTH_IDENTITY_URL` set the bridge
 also reads the signed-in account's `avatar_updated_at` and puts a same-origin
 `/api/auth/avatar/<id>?v=<n>` (served by authd) into `avatar_image_url`; a person
 with no photo leaves that field unset, so the chip and menu keep the default mark
 and no image is requested. This overrides the deployment-wide `…_AVATAR` for that
-request, which stays the fallback. See [Eva Mode](eva-mode.md).
+request, which stays the fallback. **The name is per account the same way:** the
+bridge resolves the signed-in user's `first_name` (else email) and uses it for
+the account document, the greeting and the sidebar identity, so an account whose
+name is set at invite-accept — or renamed later — reads correctly without the
+deployment-wide `CLAUDE_REMOTE_ACCOUNT_NAME` being re-applied by a re-provision.
+See [Eva Mode](eva-mode.md).
 
 ## Why it is fenced
 

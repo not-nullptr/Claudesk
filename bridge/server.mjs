@@ -205,6 +205,14 @@ async function resolveRequestAccountIdentity(request) {
     deployment: accountIdentity.deployment,
   };
 }
+// The request identity for the store-sanitizing seam, with the env identity as
+// the no-session fallback: resolveRequestAccountIdentity answers null when a
+// session cookie resolves to nobody (a disabled account, a stale cookie) and the
+// env identity when no auth service is wired up at all, so the caller wants one
+// object either way.
+async function resolveStoreIdentity(request) {
+  return (await resolveRequestAccountIdentity(request).catch(() => null)) || accountIdentity;
+}
 // An avatar value is either a URL the browser loads directly, or a path to an
 // image on this container that the bridge serves itself (see accountAvatar).
 function avatarValueIsUrl(value) {
@@ -1459,17 +1467,25 @@ function validateModelSelectorUpdate(method, pathname, body) {
   }
 }
 
-function sanitizeStoreValue(surface, store, value) {
+function sanitizeStoreValue(surface, store, value, identity) {
   if (surface === "LocalAgentModeSessions" && store === "sessionsBridgeStatusStore") {
     return { remoteToolsDeviceName: value?.remoteToolsDeviceName ?? null };
   }
   if (surface === "LocalAgentModeSessions" && store === "interactiveAuthStore") {
-    // Desktop reports the OS app user as the renderer's principal display name,
-    // which the sidebar user menu prints beside the provider label. The
-    // operator's account name (else the legacy user-name override) replaces it;
-    // unset keeps whatever Desktop reported, so the name matches the account
-    // document and the greeting.
-    const name = accountIdentity.name || remoteUserName || value?.principalDisplayName;
+    // Desktop reports the OS app user ("app" in this image) as the renderer's
+    // principal display name, which the sidebar user menu prints beside the
+    // provider label. The signed-in person's own name replaces it, resolved from
+    // the request the way the account document and the greeting already are:
+    // `identity` is that name when the request carries a live session (see
+    // resolveRequestAccountIdentity), so an account named at invite-accept — or
+    // renamed since — reads correctly without the deployment-wide override
+    // having to be re-applied by a re-provision. The operator's account name
+    // (else the legacy user-name override) is the fallback for a request with no
+    // session; unset keeps whatever Desktop reported.
+    const name = identity?.name
+      || accountIdentity.name
+      || remoteUserName
+      || value?.principalDisplayName;
     return { principalDisplayName: typeof name === "string" && name ? name : null };
   }
   if (surface === "ClaudeVM" && store === "apiReachabilityStore") {
@@ -2718,6 +2734,7 @@ async function handleApi(request, response, url) {
       body.surface,
       body.store,
       await desktop.readStore(body.surface, body.store),
+      await resolveStoreIdentity(request),
     );
     sendJson(response, 200, { ok: true, value });
     return;
@@ -2960,7 +2977,13 @@ async function servePreparedRendererAsset(response, pathname) {
   response.end(body);
 }
 
-async function initialRemoteStores() {
+async function initialRemoteStores(request) {
+  // The page-load snapshot feeds the preload's synchronous store reads (the
+  // account menu paints its identity from it before any async fetch lands), so
+  // it resolves the same request identity the async store route does; otherwise
+  // the first paint would show the env fallback and only the later refresh the
+  // signed-in name.
+  const identity = await resolveStoreIdentity(request);
   const specs = [
     ["LocalAgentModeSessions", "sessionsBridgeStatusStore"],
     ["LocalAgentModeSessions", "interactiveAuthStore"],
@@ -2970,7 +2993,7 @@ async function initialRemoteStores() {
   const entries = await Promise.all(specs.map(async ([surface, store]) => {
     try {
       const value = await desktop.readStore(surface, store);
-      return [`${surface}.${store}`, sanitizeStoreValue(surface, store, value)];
+      return [`${surface}.${store}`, sanitizeStoreValue(surface, store, value, identity)];
     } catch {
       return [`${surface}.${store}`, {}];
     }
@@ -2999,7 +3022,7 @@ function htmlSafeJson(value) {
     .replaceAll("\u2029", "\\u2029");
 }
 
-async function serveOfficialIndex(response) {
+async function serveOfficialIndex(request, response) {
   const desktopRuntime = await desktop.runtime();
   const rendererBase = desktopRuntime?.renderer?.basePath;
   if (
@@ -3030,7 +3053,7 @@ async function serveOfficialIndex(response) {
     developerActionsEnabled,
     gatewaySettingsEnabled,
     webShell: webShellEnabled,
-    initialStores: loginShellEnabled ? {} : await initialRemoteStores(),
+    initialStores: loginShellEnabled ? {} : await initialRemoteStores(request),
     listeners: Object.fromEntries(
       [...remoteListenerMethods].map(([surface, methods]) => [surface, [...methods]]),
     ),
@@ -3137,7 +3160,7 @@ const server = http.createServer(async (request, response) => {
       });
       response.end(body);
     } else {
-      await serveOfficialIndex(response);
+      await serveOfficialIndex(request, response);
     }
   } catch (error) {
     const status = error.statusCode || (error.message === "not found" ? 404 : 500);

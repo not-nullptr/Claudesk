@@ -260,4 +260,66 @@ const upstreamAccount = {
 // --- per-user avatar URL (the auth seam) ------------------------------------
 checkUserAvatarUrl();
 
+// The sidebar identity the account menu prints (and the preload seeds
+// synchronously at page load) comes from the sanitized `interactiveAuthStore`.
+// In Eva Mode the signed-in person's name is resolved live from the request —
+// the same source the account document and the greeting already use — so an
+// account named at invite-accept, or renamed since, reads correctly without the
+// deployment-wide override being re-applied. Desktop's own value ("app", the OS
+// app user) is only the last resort.
+const storeSection = section(
+  serverSource,
+  "function sanitizeStoreValue(",
+  "// Both bootstrap prefixes",
+);
+
+function loadStore(env = {}) {
+  const sandbox = { process: { env } };
+  vm.runInNewContext(`${identitySection}
+    const webShellEnabled = true;
+    ${storeSection}
+    result = { sanitize: sanitizeStoreValue };`, sandbox);
+  const sanitize = sandbox.result.sanitize;
+  return (surface, store, value, identity) =>
+    JSON.parse(JSON.stringify(sanitize(surface, store, value, identity)));
+}
+
+function checkStoreIdentity() {
+  const store = ["LocalAgentModeSessions", "interactiveAuthStore"];
+  const desktop = { principalDisplayName: "app" };
+
+  // A request that carries a live session: the person's own name wins over
+  // Desktop's OS-app-user value, so the menu matches the account document.
+  const live = loadStore({});
+  assert.deepEqual(
+    live(...store, desktop, { name: "Ada" }),
+    { principalDisplayName: "Ada" },
+    "the resolved session name replaces Desktop's principal display name",
+  );
+  assert.deepEqual(
+    live(...store, desktop, { name: "Ada", organization: "Home Lab" }),
+    { principalDisplayName: "Ada" },
+    "only the name is surfaced from the resolved identity",
+  );
+
+  // The operator's account name (else the legacy override) stays the fallback
+  // for a request with no session — and for one that resolved nobody.
+  const env = loadStore({ CLAUDE_REMOTE_ACCOUNT_NAME: "Ada" });
+  assert.deepEqual(env(...store, desktop, undefined), { principalDisplayName: "Ada" },
+    "an unconfigured session keeps the env account name");
+  assert.deepEqual(env(...store, desktop, { name: "" }), { principalDisplayName: "Ada" },
+    "a session that resolved nobody falls through to the env account name");
+  const legacy = loadStore({ CLAUDE_REMOTE_USER_NAME: "Ada" });
+  assert.deepEqual(legacy(...store, desktop, undefined), { principalDisplayName: "Ada" },
+    "the legacy user-name override still applies with no account name");
+
+  // Neither: Desktop's own value is kept as it always was (and a store with no
+  // name at all stays null rather than inventing one).
+  const bare = loadStore({});
+  assert.deepEqual(bare(...store, desktop, undefined), { principalDisplayName: "app" },
+    "with nothing configured, Desktop's own value is kept");
+  assert.deepEqual(bare(...store, {}, undefined), { principalDisplayName: null });
+}
+checkStoreIdentity();
+
 console.log("account-smoke: ok");
