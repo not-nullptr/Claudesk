@@ -27,7 +27,8 @@ try {
   // the web shell itself — the deployment's actual mode, which adds the chrome
   // patches (route alias, session Desktop gate, local session placement,
   // account chip avatar, account photo fallback, identity seed, permission
-  // wiring, notification enable).
+  // wiring, notification enable, the scheduled-task runner gate and the
+  // scheduled-task hosts).
   // A selector that drifts against a new official bundle must fail here, not
   // in production.
   for (const [gateway, webShell] of [["0", "0"], ["1", "0"], ["1", "1"]]) {
@@ -41,7 +42,7 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, webShell === "1" ? 16 : gateway === "1" ? 8 : 6);
+    assert.equal(manifest.patches.length, webShell === "1" ? 18 : gateway === "1" ? 8 : 6);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");

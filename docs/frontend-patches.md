@@ -263,6 +263,46 @@ splice reads the request object back from `arguments[0]` rather than naming the
 minified binding. A missing or duplicated target refuses. Spliced only in
 web-shell mode.
 
+Cowork scheduled tasks ("routines") are reachable in the web shell — the bridge
+allows the task collection and the preload relays the Desktop main process's
+`onOnScheduledTaskEvent` — but every part of the feature that identifies the
+Desktop runtime is false there, so a task could be added and then never run. Two
+`web-*` patches close that, both keyed off the same platform check the chrome
+patches deliberately avoid forcing globally.
+
+`web-scheduled-task-runner` forces the runner's own gate.
+`runScheduledCoworkTask` opens with the zero-argument platform check and aborts
+when it is false, answering "Local scheduled tasks can only run in the Claude
+desktop app" — which the Routines list reports through its generic run failure,
+with no IPC call ever made. The check is read back from the `flag || refuse(id,
+log, copy)` short-circuit, whose third argument is the copy only this runner
+carries, and then resolved to the zero-argument call its declaring scope
+initialises it from — the same read-back the session-layout gate uses, so a
+renamed minifier output still matches. The runner's own starter-timeout refusal
+passes a conditional rather than the copy, so it is not a target.
+
+`web-scheduled-task-hosts` mounts the two hosts the runner and the dispatcher
+depend on. Firing a local task is the main process's job, but it only checks due
+tasks once a renderer has declared itself ready (`markListenerReady`), and the
+hook that does so — and that receives the dispatches — is mounted from the
+Desktop-checks slot behind that slot's identity gate, as is the starter host
+that publishes the session starter the runner waits on. In the web shell neither
+is rendered, so the scheduler defers on every check and a run that gets past the
+gate above still fails waiting for a starter nobody published. The patch mounts
+exactly those two hosts from the slot's own absent-identity branch, reusing the
+slot's wrapper element, element factory and props, so the hosts render into the
+same boundary the app uses; the branch renders only when the gate is false, and
+the app's own mount only when it is true, so nothing is ever mounted twice. Both
+hosts are read back by behaviour — the starter host is the declarator whose body
+writes `startSession` through `setState`, the listener host is the component
+whose whole body calls the hook that subscribes to `onOnScheduledTaskEvent` and
+declares `markListenerReady` — and either one missing, ambiguous, or landing in a
+different chunk refuses rather than mount the wrong component. Spliced only in
+web-shell mode. Both patches are **required**, like the rest of the web-shell
+set: without them the Routines list still offers creation and the failure is
+silent, which is exactly the shape a required patch exists to refuse.
+
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and

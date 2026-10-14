@@ -143,6 +143,54 @@ const desktopChecks = 'function desktopChecks(){return isDesktopApp()'
   + 'children:[el(desktopRoot,{}),el(otherChecks,{})]}):null}';
 const desktopChecksDecoy = 'const label="DesktopChecks";'
   + 'function notTheSlot(){return render(label);}';
+// The Cowork scheduled-task hosts. The starter host is the declarator whose body
+// writes `startSession` through `setState` — the store the runner waits on — and
+// the listener host is the component whose whole body calls the hook that
+// subscribes to the main process's dispatches and declares the listener ready.
+// In web-shell mode both are mounted from the Desktop-checks slot's
+// absent-identity branch, reusing the slot's own wrapper element, element factory
+// and props, so a desktop-identified client keeps its own mount.
+const scheduledTaskHosts = 'function hostsModule(){'
+  + 'const starterHost=memo(function(){'
+  + 'let start=useStarter();'
+  + 'return effect(()=>(sessionStore.setState({startSession:start}),'
+  + '()=>{sessionStore.getState().startSession===start'
+  + '&&sessionStore.setState({startSession:null})}),[start]),'
+  + 'bind(start,{source:"desktop_open_with"}),useOpenHandlers(),null});'
+  + 'function scheduledTaskHook(){let api=desktopBridge();'
+  + 'return effect(()=>{let gone=!1,off=api?.onOnScheduledTaskEvent?.(()=>{});'
+  + 'return waitForStarter().then(()=>{gone||(api?.setEventAckSupported?.(),'
+  + 'api?.markListenerReady?.())}),()=>{gone=!0,off?.()}},[])}'
+  + 'function listenerHost(){return scheduledTaskHook(),null}'
+  + 'function listenerGate(){return isDesktopApp()?el(listenerHost,{}):null}}';
+// A lookalike for each host: a setter for a different store key, and a pair of
+// functions that use the same two properties but are not one hook plus the
+// component that renders it. Kept inside an uncalled function, like the hosts
+// themselves, so the gateway variants can execute the module.
+const scheduledTaskHostsDecoy = 'function hostsDecoyModule(){'
+  + 'const otherHost=memo(function(){'
+  + 'return effect(()=>(settingsStore.setState({activeSession:1}),void 0),[]),null});'
+  + 'function subscribeOnly(){return dispatch?.onOnScheduledTaskEvent?.(()=>{})}'
+  + 'function readyOnly(){return api?.markListenerReady?.()}}';
+// The Cowork scheduled-task runner: the Desktop-identity check is read back from
+// the `flag || refuse(id, log, copy)` short-circuit whose copy only this runner
+// carries, then forced true so a routine can be run from the web shell. The
+// runner's own starter-timeout refusal passes a conditional, not the copy.
+const scheduledTaskRunner = 'function runScheduledTaskModule(){'
+  + 'function runScheduledTask(){'
+  + 'let desktop=desktopFromUserAgent(),{storedModel:m}=coworkState(),stale=staleModel();'
+  + 'return memo(async task=>{desktop||refuse(task.scheduledTaskId,'
+  + '"Local scheduled task run requested outside the desktop app — aborting run",'
+  + '"Local scheduled tasks can only run in the Claude desktop app");'
+  + 'let starter=await waitForStarter({timeoutMs:1e4}).catch(e=>refuse(task.scheduledTaskId,'
+  + '"Cowork session starter unavailable for scheduled task run — aborting run",'
+  + 'e instanceof Error?e.message:String(e)));'
+  + 'return buildRun(task,starter)});}}';
+const scheduledTaskRunnerDecoy = 'function otherRunnerModule(){'
+  + 'function otherRunner(){'
+  + 'let desktop=desktopFromUserAgent();'
+  + 'return memo(task=>{desktop||refuse(task.id,"x","Local scheduled task started elsewhere");'
+  + 'return buildRun(task)});}}';
 // The push-enablement function: guards Notification.requestPermission, tracks the
 // permission result under its own analytics key and answers failures with
 // browser_or_permissions. In web-shell mode the patcher splices a bridge-first
@@ -219,7 +267,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 7);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -239,8 +287,31 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 15,
-    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring and the notification-enable bridge");
+  assert.equal(webResult.patches.length, 17,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate and the scheduled-task hosts");
+  assert.equal(webResult.patches.filter(p => p.id === "web-scheduled-task-runner").length, 1,
+    "the scheduled-task runner's Desktop gate must be spliced exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('desktop||refuse(task.scheduledTaskId,"Local scheduled task run requested outside'),
+    "the runner must keep its abort, keyed on the forced flag");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('let desktop=!0,{storedModel:m}=coworkState()'),
+    "the runner's platform check must be forced true, leaving its other bindings alone");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('return memo(task=>{desktop||refuse(task.id,"x","Local scheduled task started elsewhere")'),
+    "a runner with different copy must not be spliced");
+  assert.equal(webResult.patches.filter(p => p.id === "web-scheduled-task-hosts").length, 1,
+    "the scheduled-task hosts must be mounted exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('children:[el(starterHost,{}),el(listenerHost,{})]'),
+    "the slot's absent-identity branch must mount both scheduled-task hosts");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('componentName:"DesktopChecks",fallback:null,children:[el(desktopRoot,{}),'
+      + 'el(otherChecks,{})]}):(wrap(Boundary,{componentName:"DesktopChecks",fallback:null'),
+    "the slot's identity branch must keep its own hosts, and the hoisted ones must render into the same wrapper");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('const otherHost=memo(function(){'),
+    "a setter for another store key is not the starter host");
   assert.equal(webResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1);
   assert.equal(webResult.patches.filter(p => p.id === "web-notifications-enable-bridge").length, 1,
     "the push-enablement function must be spliced exactly once");
@@ -459,7 +530,8 @@ assert.equal(inspectRenderer(chipCompiled.code, false, true).patches
 // The full web-shell fixture set, reused for the identity-reader refusals below
 // and for the Desktop-checks success case.
 const webShellFixtures = `${native}\n${filePane}\n${bannerCard}\n${previewComponent}\n${accountSignOut}\n${aliasResolver}`
-  + `\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`;
+  + `\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${desktopRoot}\n${desktopChecks}\n${pushEnable}`
+  + `\n${scheduledTaskHosts}\n${scheduledTaskRunner}`;
 // ...and the user-menu identity: a renderer whose identity reader no longer
 // matches must be refused rather than ship a menu whose title flips to the
 // account name a frame after it opens.
@@ -660,6 +732,34 @@ const checksCompiled = await minify(`${desktopRoot}\n${desktopChecks}`, {
 assert.equal(inspectRenderer(checksCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-cowork-permission-wiring").length, 1,
   "a mangled Desktop root and slot must still be spliced");
+// ...and the two scheduled-task gates. A renderer whose runner no longer matches,
+// or whose slot cannot give up both hosts, must be refused rather than ship a
+// Routines list that can be added to but never run.
+assert.throws(() => patchRendererSources(new Map([["no-runner.js",
+  `${webShellFixtures.replace(scheduledTaskRunner, "const nothing={};")}\n${accountMenuName}`]]),
+  false, true), /web-scheduled-task-runner expected once, found 0/,
+  "the web shell must refuse a renderer without the scheduled-task runner");
+assert.throws(() => patchRendererSources(new Map([["dup-runner.js",
+  `${webShellFixtures}\n${accountMenuName}\n${scheduledTaskRunner.replaceAll("runScheduledTask", "runScheduledTaskB")}`]]),
+  false, true), /web-scheduled-task-runner expected once, found 2/,
+  "a second scheduled-task runner must refuse rather than double-splice");
+assert.throws(() => patchRendererSources(new Map([["no-hosts.js",
+  `${webShellFixtures.replace(scheduledTaskHosts, "const noHosts={};")}\n${accountMenuName}`]]),
+  false, true), /web-scheduled-task-hosts expected once, found 0/,
+  "the web shell must refuse a renderer whose scheduled-task hosts cannot be read back");
+// Both splices are structural read-backs, so they survive minification.
+const scheduledTaskCompiled = await minify(
+  `${desktopRoot}\n${desktopChecks}\n${scheduledTaskHosts}\n${scheduledTaskRunner}`,
+  { mangle: true, compress: { unused: false }, format: { quote_style: 1 } });
+const scheduledTaskIds = inspectRenderer(scheduledTaskCompiled.code, false, true).patches
+  .map(patch => patch.id);
+assert.ok(scheduledTaskIds.includes("web-scheduled-task-runner")
+  && scheduledTaskIds.includes("web-scheduled-task-hosts"),
+  "a mangled scheduled-task runner and slot must still be spliced");
+assert.equal(inspectRenderer(
+  `${desktopChecks.replace("DesktopChecks", "OtherLabel")}\n${scheduledTaskHosts}`, false, true).patches
+  .filter(patch => patch.id === "web-scheduled-task-hosts").length, 0,
+  "a slot that is not the Desktop-checks slot is not a mount point for the scheduled-task hosts");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

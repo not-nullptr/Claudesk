@@ -139,6 +139,45 @@ const accountPhotoPatchId = "web-account-photo-first-frame";
 // are read back, so a renamed minifier output still matches. Spliced only in
 // web-shell mode.
 const coworkPermissionWiringPatchId = "web-cowork-permission-wiring";
+// Cowork scheduled tasks ("routines"). The feature is reachable in the web shell
+// — the bridge allows the task collection and the preload relays the Desktop
+// main process's `onOnScheduledTaskEvent` — but every part of it that identifies
+// the Desktop runtime is false there, so a task could be created and then never
+// run. Two independent gates have to be forced, both keyed off the same platform
+// check the chrome patches avoid touching globally.
+//
+// The runner. `runScheduledCoworkTask` opens with the same zero-argument
+// platform check and aborts the whole run when it is false, answering
+// "Local scheduled tasks can only run in the Claude desktop app" — which the
+// Routines list reports through its generic run failure, with no IPC call ever
+// made. The check is read back from its own guard: the `flag || refuse(id, …,
+// "…desktop app")` short-circuit, whose third argument is the copy only this
+// runner carries. The flag is then resolved to the zero-argument call its
+// declaring scope initialises it from, exactly like the session-layout gate, so
+// a renamed minifier output still matches. Forced true, which is what the
+// runner already is on a desktop-identified client. Spliced only in web-shell
+// mode.
+const scheduledTaskRunnerPatchId = "web-scheduled-task-runner";
+const scheduledTaskRunRefusal = "Local scheduled tasks can only run in the Claude desktop app";
+// The hosts the runner and the dispatcher depend on. Firing a local task is the
+// Desktop main process's job, but it only checks due tasks once a renderer has
+// declared itself ready (`markListenerReady`), and the renderer that starts the
+// session is the one whose hook subscribes to `onOnScheduledTaskEvent`. Both the
+// starter host — which publishes the session starter the runner waits on — and
+// that listener host are mounted from the Desktop-checks slot, behind the slot's
+// identity gate, so in the web shell neither is ever rendered: the scheduler
+// defers on every check and a run that gets past the gate above still fails
+// waiting for a starter nobody published. This patch mounts exactly those two
+// hosts from the slot's own absent-identity branch, so a desktop-identified
+// client keeps its own mount and nothing is rendered twice. Both hosts are read
+// back from the graph by behaviour — the starter host is the declarator whose
+// body writes `startSession` through `setState`, the listener host is the
+// component that only calls the hook using `onOnScheduledTaskEvent` and
+// `markListenerReady` — and the wrapper element, its props and the element
+// factory are reused from the slot itself, so a renamed minifier output still
+// matches. Spliced only in web-shell mode.
+const scheduledTaskHostsPatchId = "web-scheduled-task-hosts";
+const desktopChecksLabel = "DesktopChecks";
 // The web shell's "enable notifications" actions — the chat card and the
 // settings panel's rows — grant the browser permission and then register with
 // claude.ai's Firebase Cloud Messaging project, persisting a server-side push
@@ -747,7 +786,7 @@ function desktopChecksComponent(node) {
     if (found || child.type !== "CallExpression") return;
     const props = child.arguments.map(unwrap).find((argument) => argument?.type === "ObjectExpression");
     if (props?.properties.some((entry) => key(entry, "componentName")
-      && literal(entry.value, "DesktopChecks"))) found = true;
+      && literal(entry.value, desktopChecksLabel))) found = true;
   });
   return found ? node : undefined;
 }
@@ -771,6 +810,103 @@ function coworkWiringCall(ast) {
   });
   return calls.length === 1 ? calls[0] : undefined;
 }
+// The scheduled-task runner's identity gate: `flag || refuse(id, log, copy)`,
+// where `copy` is the run refusal only this runner carries. Read the flag back
+// from the short-circuit so the splice names whatever the minifier chose; the
+// copy is matched only as a parsed third argument, so the runner's own
+// `.catch(… "…unavailable …")` (whose third argument is a conditional) and a
+// string or comment that merely spells the copy are not targets.
+function scheduledTaskRunnerGate(node) {
+  if (node.type !== "LogicalExpression" || node.operator !== "||") return undefined;
+  const call = unwrap(node.right);
+  if (call?.type !== "CallExpression" || call.arguments.length !== 3) return undefined;
+  if (!literal(unwrap(call.arguments[2]), scheduledTaskRunRefusal)) return undefined;
+  return identifier(node.left);
+}
+// The Desktop-checks slot's shape: a single `return gate() ? wrapper(element,
+// {…children:[…]}) : null`. The alternate is where this patch mounts the
+// scheduled-task hosts, so a client the gate already admits keeps its own mount
+// and nothing renders twice. Everything the replacement needs — the wrapper
+// component, the element factory, the props except `children` — is read back
+// from the consequent, so only the two hoisted hosts are new text.
+function desktopChecksGate(slot) {
+  const statements = slot.body?.type === "BlockStatement" ? slot.body.body : [];
+  if (statements.length !== 1 || statements[0].type !== "ReturnStatement") return undefined;
+  const argument = unwrap(statements[0].argument);
+  if (argument?.type !== "ConditionalExpression") return undefined;
+  if (!literal(unwrap(argument.alternate), null)) return undefined;
+  const consequent = unwrap(argument.consequent);
+  if (consequent?.type !== "CallExpression" || consequent.arguments.length !== 2) return undefined;
+  const wrapper = identifier(consequent.arguments[0]);
+  const elementFactory = identifier(consequent.callee);
+  const props = unwrap(consequent.arguments[1]);
+  if (!wrapper || !elementFactory || props?.type !== "ObjectExpression") return undefined;
+  const children = props.properties.find(entry => key(entry, "children"));
+  const array = unwrap(children?.value);
+  if (array?.type !== "ArrayExpression" || !array.elements.length) return undefined;
+  const hostFactory = identifier(unwrap(array.elements[0])?.callee);
+  if (!hostFactory) return undefined;
+  return { alternate: unwrap(argument.alternate), wrapper, elementFactory, hostFactory, props, children };
+}
+function scheduledTaskHostsReplacement(gate, source, starter, listener) {
+  const head = source.slice(gate.props.start + 1, gate.children.start);
+  // `props.end` is one past the closing brace; the brace is kept explicitly
+  // because the children property is removed and re-emitted here.
+  const tail = source.slice(gate.children.end, gate.props.end - 1);
+  return `(${gate.elementFactory}(${gate.wrapper},{${head}children:[`
+    + `${gate.hostFactory}(${starter},{}),${gate.hostFactory}(${listener},{})]${tail}}))`;
+}
+// The Cowork session-starter host: the component that publishes the session
+// starter into the app's own store — the declarator whose initialiser writes an
+// object literal with a `startSession` key through `setState`. The scheduled-task
+// runner waits on that store, so the host has to mount in either shell. Any
+// other count refuses the splice rather than guess which binding publishes it.
+function scheduledTaskStarterHost(ast) {
+  const names = new Set();
+  walk(ast, [], (node) => {
+    if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier") return;
+    if (!contains(node.init, child => child.type === "CallExpression"
+      && property(child.callee, "setState")
+      && child.arguments.some(argument => unwrap(argument)?.type === "ObjectExpression"
+        && unwrap(argument).properties.some(entry => key(entry, "startSession"))))) return;
+    names.add(node.id.name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
+}
+// The Cowork scheduled-task listener host: the component whose whole body calls
+// the hook that subscribes to the main process's dispatches and declares the
+// listener ready. The hook is read back as the nearest enclosing *declaration*
+// of the `onOnScheduledTaskEvent` subscription itself — the subscription sits in
+// an effect callback, so the nearest function is not the hook — and must carry
+// `markListenerReady` in the same body; the host is the component whose whole
+// body calls it and renders null. A second candidate on either count refuses
+// rather than mount the wrong one.
+function scheduledTaskListenerHost(ast) {
+  const hooks = new Set();
+  walk(ast, [], (node, ancestors) => {
+    if (node.type !== "CallExpression" || !property(node.callee, "onOnScheduledTaskEvent")) return;
+    const scope = [...ancestors].reverse().find(parent => parent.type === "FunctionDeclaration");
+    if (scope?.body?.type !== "BlockStatement" || !scope.id) return;
+    if (!contains(scope.body, child => child.type === "MemberExpression"
+      && property(child, "markListenerReady"))) return;
+    hooks.add(scope.id.name);
+  });
+  if (hooks.size !== 1) return undefined;
+  const hook = [...hooks][0];
+  const hosts = new Set();
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || !node.id || node.body?.type !== "BlockStatement") return;
+    const statements = node.body.body;
+    if (statements.length !== 1 || statements[0].type !== "ReturnStatement") return;
+    const sequence = unwrap(statements[0].argument);
+    if (sequence?.type !== "SequenceExpression" || sequence.expressions.length !== 2) return;
+    const call = unwrap(sequence.expressions[0]);
+    if (call?.type !== "CallExpression" || call.arguments.length) return;
+    if (identifier(call.callee) !== hook || !literal(sequence.expressions[1], null)) return;
+    hosts.add(node.id.name);
+  });
+  return hosts.size === 1 ? [...hosts][0] : undefined;
+}
 
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
@@ -785,14 +921,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // and the user-menu identity reader in the same chunk by `principalDisplayName`;
   // the Desktop-checks slot by its own component label; the session-placement
   // helper by the force-local shrimp literal only it carries; the compact mode
-  // switcher by its own `data-compact-mode-switcher` label.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher/.test(source)) {
+  // switcher by its own `data-compact-mode-switcher` label; the scheduled-task
+  // runner by the run refusal only it carries (its chunk is also reached by
+  // `keyCode`, and the two scheduled-task hosts live in the Desktop-checks
+  // chunk).
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const redirectScopes = new Map();
   let button;
   let avatarComponent;
+  let starterHost;
+  let listenerHost;
   walk(ast, [], (node, ancestors) => {
     if (filePaneDownloadTarget(node, ancestors)) {
       button ??= ghostIconButton(ast);
@@ -866,6 +1007,31 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
           patches.push({ id: coworkPermissionWiringPatchId,
             start: wiringHost.body.start + 1, end: wiringHost.body.start + 1,
             original: "", replacement: `${wiring.callee}(${wiring.api});` });
+        }
+        const gate = desktopChecksGate(wiringHost);
+        if (gate) {
+          starterHost ??= scheduledTaskStarterHost(ast);
+          listenerHost ??= scheduledTaskListenerHost(ast);
+          if (starterHost && listenerHost) {
+            patches.push({ id: scheduledTaskHostsPatchId,
+              start: gate.alternate.start, end: gate.alternate.end,
+              original: source.slice(gate.alternate.start, gate.alternate.end),
+              replacement: scheduledTaskHostsReplacement(gate, source, starterHost, listenerHost) });
+          }
+        }
+      }
+      const runnerGate = scheduledTaskRunnerGate(node);
+      if (runnerGate) {
+        // The guard sits in the runner's returned closure, so walk out to the
+        // nearest enclosing scope that actually declares the flag, as the
+        // session-layout gate does.
+        const init = [...ancestors].reverse()
+          .filter(parent => functionTypes.has(parent.type))
+          .map(scope => flagInitializer(scope, runnerGate))
+          .find(Boolean);
+        if (init) {
+          patches.push({ id: scheduledTaskRunnerPatchId, start: init.start, end: init.end,
+            original: source.slice(init.start, init.end), replacement: "!0" });
         }
       }
       const enableTarget = notificationEnableTarget(node);
@@ -972,7 +1138,8 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
     ...(webShellEnabled
       ? [routeAliasPatchId, sessionViewerPatchId, localSessionPlacementPatchId,
           accountChipPatchId, accountPhotoPatchId,
-          coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId]
+          coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId,
+          scheduledTaskRunnerPatchId, scheduledTaskHostsPatchId]
       : []),
     ...(gatewayEnabled
       ? ["gateway-setup-signin-web-guard", "gateway-setup-route-web-guard"] : [])];
