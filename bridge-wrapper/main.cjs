@@ -298,8 +298,12 @@ if (infrastructureActionsEnabled) {
     allowedMethods.get("CoworkMemory").add(method);
   }
   for (const method of [
+    "ackEvent",
     "createScheduledTask",
     "markListenerReady",
+    "releaseDispatchClaim",
+    "setEventAckSupported",
+    "setHostRunsSupported",
     "updateScheduledTask",
     "updateScheduledTaskFileContent",
     "updateScheduledTaskStatus",

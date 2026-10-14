@@ -337,6 +337,23 @@ task's History column stays empty for a task that has run. Both policies — the
 bridge's and the wrapper's — carry it on both surfaces; `bridge-parity-smoke`
 holds them to it.
 
+Firing a task is a handshake, and it is the same allow-list that decides whether
+a client can take part in it. The main process emits a dispatch, the renderer
+acks it, and `ackEvent` answering "no longer pending in main" is what stops the
+renderer starting a run it has already started — the renderer's only guard
+against appending the same run's prompt to its session twice. A client that
+cannot ack does not fail loudly: the call is optional-chained with a `?? true`
+fallback, so every re-delivery of the same dispatch (main's retry after an
+unacknowledged dispatch, or a relayed event replayed to a reconnecting page)
+starts the session again, and the transcript grows another "Ran scheduled task"
+card for a run that happened once. `setEventAckSupported` declares the client
+into that protocol (its absence leaves main consuming slots before it emits),
+`setHostRunsSupported` says the client can start runs itself, and
+`releaseDispatchClaim` gives a claim back. All four ride the same
+`infrastructureActionsEnabled` group as `markListenerReady` and
+`createScheduledTask`: without that group a web-shell deployment cannot create a
+task in the first place, so nothing fires and nothing needs acking.
+
 ## Home greeting
 
 The home greeting is not local copy: ion-dist reads `personalized_greeting` out

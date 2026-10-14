@@ -81,6 +81,18 @@ for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMe
     `the ${policy} allowlist must serve the scheduled-task runs lookup on LocalAgentModeSessions`);
   assert.ok(methods.LocalSessions.includes("getSessionsForScheduledTask"),
     `the ${policy} allowlist must keep the Code surface's own copy of the runs lookup`);
+  // The dispatch handshake, without which main process keeps re-emitting a
+  // dispatch this client can never acknowledge: the renderer starts a session
+  // for every `session_started` it receives and its only guard against starting
+  // the same run twice is the acknowledgement (a dispatch main no longer holds
+  // pending answers false, and the renderer skips it). With `ackEvent` absent
+  // the renderer's `?? true` fallback silently returns "acked", so every
+  // re-delivery appends the run's prompt to the session again.
+  for (const method of ["ackEvent", "releaseDispatchClaim", "setEventAckSupported",
+    "setHostRunsSupported"]) {
+    assert.ok(methods.CoworkScheduledTasks.includes(method),
+      `the ${policy} allowlist must let the Cowork scheduled-task client ${method}`);
+  }
 }
 
 const serverSettings = section(
