@@ -63,6 +63,26 @@ for (let mask = 0; mask < 16; mask += 1) {
   );
 }
 
+// A Cowork scheduled task's run history is read off
+// `claude.web.LocalAgentModeSessions.getSessionsForScheduledTask` — the session
+// manager answers it by filtering the sessions that carry the task's
+// `scheduledTaskId` — and the preload publishes exactly the methods its surface
+// carries. So allowing it on `LocalSessions` alone leaves the browser's facade
+// without it: the task page's loader has nothing to call, bails silently, and
+// its History column renders empty for a task that has run. Both surfaces and
+// both policies must carry it.
+const allCapabilities = `const infrastructureActionsEnabled = true;
+  const developerActionsEnabled = true;
+  const codeActionsEnabled = true;
+  const connectorsEnabled = true;`;
+for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMethods]]) {
+  const methods = evaluate(`${allCapabilities}\n${source}`, normalizedMap("allowedMethods"));
+  assert.ok(methods.LocalAgentModeSessions.includes("getSessionsForScheduledTask"),
+    `the ${policy} allowlist must serve the scheduled-task runs lookup on LocalAgentModeSessions`);
+  assert.ok(methods.LocalSessions.includes("getSessionsForScheduledTask"),
+    `the ${policy} allowlist must keep the Code surface's own copy of the runs lookup`);
+}
+
 const serverSettings = section(
   serverSource,
   "const allowedSettingsMethods",

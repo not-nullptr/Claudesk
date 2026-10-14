@@ -524,6 +524,7 @@ const allowedMethods = new Map([
     "getAll",
     "getDefaultWorkspaceFolders",
     "getSession",
+    "getSessionsForScheduledTask",
     "getSupportedCommands",
     "getTranscript",
     "searchSessions",

@@ -282,6 +282,19 @@ patches (`web-scheduled-task-runner`, `web-scheduled-task-hosts` — see
 listener and session-starter hosts are mounted from the Desktop-checks slot,
 behind that slot's identity gate.
 
+Showing a task's runs is a third, and it lives in the IPC allow-list rather than
+in a patch. The task page reads its run history from
+`claude.web.LocalAgentModeSessions.getSessionsForScheduledTask` — Desktop's
+session manager answers it by filtering the sessions that carry the task's
+`scheduledTaskId` — while the preload publishes exactly the methods its surface
+carries (`config.methods`, which the bridge fills from `allowedMethods`). The
+method is a Code-surface method too (`LocalSessions`, under the Code actions
+flag), so an allow-list that carries only that copy leaves the browser's facade
+without one, the page's loader finds nothing to call, bails silently, and the
+task's History column stays empty for a task that has run. Both policies — the
+bridge's and the wrapper's — carry it on both surfaces; `bridge-parity-smoke`
+holds them to it.
+
 ## Home greeting
 
 The home greeting is not local copy: ion-dist reads `personalized_greeting` out
