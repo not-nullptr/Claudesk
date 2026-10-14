@@ -63,7 +63,22 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // (ion-dist keys them by a Java-style hash of the name). `bad_moon_rising` is the
 // "Claude Code web access" gate: without it the Code pill does not navigate to
 // the code surface, it raises the "download the desktop app" upsell instead.
-const webShellGrantedGates = ["bad_moon_rising"];
+//
+// `yukon_silver_dramatic_shrimp_clocks` is the scheduled-tasks term of the same
+// kind of web-Cowork capability check. ion-dist computes
+// `coworkEnabled = (isDesktopApp && …) || (coworkWebEnabled && thisGate) ||
+// hubRoutinesServed`, and `coworkEnabled` is what puts the "Scheduled" entry in
+// the hub sidebar — the only route to the Cowork scheduled-task list. A browser
+// client fails the first term by construction (it is not the Desktop app, which
+// is the identity the chrome patches withhold) and the last is cloud state this
+// deployment never serves, so without this gate the entry is filtered out even
+// though the surface behind it works: those tasks are the local ones the Desktop
+// IPC this bridge backs runs, and the runner mounts in the web shell. A task can
+// then be scheduled and executed with no way to reach its list, history or status
+// from the product. `coworkWebEnabled` itself already reads true there — it is
+// `!isDesktopApp && dramatic_shrimp && the web-Cowork gate` — so this only
+// supplies the rollout flag the same way `bad_moon_rising` supplies Code's.
+const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`

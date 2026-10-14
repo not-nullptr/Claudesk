@@ -45,6 +45,7 @@ node scripts/notifications-smoke.mjs
 node scripts/docker-copy-smoke.mjs
 node scripts/start-permission-mode-smoke.mjs
 node scripts/cowork-skip-approvals-smoke.mjs
+node scripts/web-shell-gates-smoke.mjs
 node scripts/model-selector-state-smoke.mjs
 node scripts/realtime-stream-smoke.mjs
 node scripts/renderer-relay-smoke.mjs

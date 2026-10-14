@@ -250,6 +250,38 @@ adds `bad_moon_rising` to the bootstrap's `growthbook.features` (addressed by
 ion-dist's Java-style name hash), so the pill navigates to the route above
 instead of upselling.
 
+## Cowork scheduled tasks
+
+The Cowork scheduled-task list has one route in — the hub sidebar's **Scheduled**
+entry — and its visibility is derived, not a flag. The entry carries
+`modes:["cowork","code"]`, and the hub offers it only once `coworkEnabled` (or,
+in the Code frame, `codeEnabled`) holds. ion-dist computes
+
+```
+coworkEnabled = (isDesktopApp && coworkGate)
+             || (coworkWebEnabled && yukon_silver_dramatic_shrimp_clocks)
+             || hubRoutinesServed
+```
+
+A browser client fails the first term by construction — that is the Desktop
+identity the chrome patches withhold, and which the session-gate and placement
+patches force only where they must — and the last is cloud state nothing here
+serves. The middle term is the web-Cowork path this deployment does back
+(`coworkWebEnabled` is `!isDesktopApp && dramatic_shrimp && the web-Cowork
+gate`, all true in the web shell), so the only missing piece is the rollout flag.
+The bridge grants it exactly as it grants `bad_moon_rising` (`webShellGrantedGates`;
+only an absent gate is added, so an upstream value is left alone). Without it the
+entry is filtered out of the sidebar even though the surface behind it works:
+those tasks are local, they run over the Desktop IPC this bridge backs, and one
+can be scheduled and executed with no way to reach its list, next-run time or run
+history from the product.
+
+Reaching the list *and* running from it are two more pieces, both renderer
+patches (`web-scheduled-task-runner`, `web-scheduled-task-hosts` — see
+`docs/frontend-patches.md`): the runner aborts on the Desktop check, and the
+listener and session-starter hosts are mounted from the Desktop-checks slot,
+behind that slot's identity gate.
+
 ## Home greeting
 
 The home greeting is not local copy: ion-dist reads `personalized_greeting` out
