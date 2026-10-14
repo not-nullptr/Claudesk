@@ -244,10 +244,22 @@ const allowedMethods = new Map([
     "readAccountMemory",
     "readGlobalMemory",
   ])],
+  // Cowork scheduled tasks are the account's own and stay unconditional (see the
+  // bridge's copy): the renderer gates its "New task" button and its delete on
+  // these methods' presence, so withholding them only breaks the UI.
   ["CoworkScheduledTasks", new Set([
+    "ackEvent",
+    "createScheduledTask",
     "getAllScheduledTasks",
     "getScheduledTaskFileContent",
     "getWatcherHistory",
+    "markListenerReady",
+    "releaseDispatchClaim",
+    "setEventAckSupported",
+    "setHostRunsSupported",
+    "updateScheduledTask",
+    "updateScheduledTaskFileContent",
+    "updateScheduledTaskStatus",
   ])],
   ["CoworkSpaces", new Set([
     "classifySessions",
@@ -297,17 +309,6 @@ if (infrastructureActionsEnabled) {
   for (const method of ["deleteAccountMemory", "writeAccountMemory", "writeGlobalMemory"]) {
     allowedMethods.get("CoworkMemory").add(method);
   }
-  for (const method of [
-    "ackEvent",
-    "createScheduledTask",
-    "markListenerReady",
-    "releaseDispatchClaim",
-    "setEventAckSupported",
-    "setHostRunsSupported",
-    "updateScheduledTask",
-    "updateScheduledTaskFileContent",
-    "updateScheduledTaskStatus",
-  ]) allowedMethods.get("CoworkScheduledTasks").add(method);
   for (const method of [
     "addFolderToSpace",
     "addLinkToSpace",

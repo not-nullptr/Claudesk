@@ -579,10 +579,30 @@ const allowedMethods = new Map([
     "show",
   ])],
   ["CoworkMemory", new Set(["listAccountMemories", "readAccountMemory", "readGlobalMemory"])],
+  // Cowork scheduled tasks ("routines") are the account's own, not an operator
+  // surface: they run in the account's own instance, and the renderer gates its
+  // "New task" button and its delete on the presence of these very methods
+  // (`!!claude.web.CoworkScheduledTasks.createScheduledTask`, an
+  // optional-chained `updateScheduledTaskStatus`) — so withholding them does not
+  // deny the capability, it only breaks the UI while the same account can still
+  // create and delete routines by asking its agent (whose path never crosses
+  // this browser allow-list). The reads feed the list; the writes feed creation,
+  // enable/disable and delete; the rest are the dispatch handshake the web shell
+  // mounts the runner and host for, so a client that can be scheduled must be
+  // able to take part. All of them stay unconditional.
   ["CoworkScheduledTasks", new Set([
+    "ackEvent",
+    "createScheduledTask",
     "getAllScheduledTasks",
     "getScheduledTaskFileContent",
     "getWatcherHistory",
+    "markListenerReady",
+    "releaseDispatchClaim",
+    "setEventAckSupported",
+    "setHostRunsSupported",
+    "updateScheduledTask",
+    "updateScheduledTaskFileContent",
+    "updateScheduledTaskStatus",
   ])],
   ["CoworkSpaces", new Set([
     "classifySessions",
@@ -636,17 +656,6 @@ if (infrastructureActionsEnabled) {
     "writeAccountMemory",
     "writeGlobalMemory",
   ]) allowedMethods.get("CoworkMemory").add(method);
-  for (const method of [
-    "ackEvent",
-    "createScheduledTask",
-    "markListenerReady",
-    "releaseDispatchClaim",
-    "setEventAckSupported",
-    "setHostRunsSupported",
-    "updateScheduledTask",
-    "updateScheduledTaskFileContent",
-    "updateScheduledTaskStatus",
-  ]) allowedMethods.get("CoworkScheduledTasks").add(method);
   for (const method of [
     "addFolderToSpace",
     "addLinkToSpace",

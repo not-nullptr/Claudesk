@@ -158,7 +158,11 @@ of these, and an `Admin` account keeps the deployment's own setting:
   and its editor for `claude_desktop_config.json`, `developer_settings.json`,
   MCP logs and trace downloads.
 - `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` — the Projects/Spaces, Artifact,
-  browser-file, Memory and Scheduled-Tasks mutations.
+  browser-file and Memory mutations. (Cowork **scheduled tasks** are *not*
+  scoped here: they are the account's own routines, run in its own instance, and
+  the renderer hides its "New task" button and its delete when their methods are
+  withheld — so a non-Admin account keeps them, and can manage routines from the
+  UI rather than only by asking its agent.)
 - `COWORK_REMOTE_READ_ROOTS` — the extra roots the authenticated download route
   may serve. An account reads its own workspace and nothing else; the operator's
   own `/config` is not a tenant's to fetch. (`CLAUDE_COWORK_HOST_BASH` is pinned

@@ -155,7 +155,9 @@ esac
 #     through the bridge API (their endpoint still comes from the environment);
 #   - the Developer menu's privileged actions and its editor for the app's own
 #     config files;
-#   - the Projects/Spaces, Artifact, Memory and Scheduled-Tasks mutations;
+#   - the Projects/Spaces, Artifact, browser-file and Memory mutations (Cowork
+#     scheduled tasks are the account's own and stay allowed, so an end user can
+#     manage routines from the UI rather than only by asking their agent);
 #   - the extra download roots (COWORK_REMOTE_READ_ROOTS), so an account reads
 #     its own workspace and nothing else.
 #

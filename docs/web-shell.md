@@ -349,10 +349,15 @@ starts the session again, and the transcript grows another "Ran scheduled task"
 card for a run that happened once. `setEventAckSupported` declares the client
 into that protocol (its absence leaves main consuming slots before it emits),
 `setHostRunsSupported` says the client can start runs itself, and
-`releaseDispatchClaim` gives a claim back. All four ride the same
-`infrastructureActionsEnabled` group as `markListenerReady` and
-`createScheduledTask`: without that group a web-shell deployment cannot create a
-task in the first place, so nothing fires and nothing needs acking.
+`releaseDispatchClaim` gives a claim back. All four sit on the
+`CoworkScheduledTasks` allow-list beside `markListenerReady` and
+`createScheduledTask`, and — like them — are **unconditional**, not part of the
+`infrastructureActionsEnabled` group. Routines belong to the account, and the
+renderer keys its own "New task" button and delete on `createScheduledTask` /
+`updateScheduledTaskStatus` being present, so gating them away does not deny the
+capability (the account can still create and delete routines by asking its
+agent) — it only takes the controls out of the UI. The client that can be
+scheduled must be able to ack, or every re-delivery starts the run again.
 
 ## Home greeting
 

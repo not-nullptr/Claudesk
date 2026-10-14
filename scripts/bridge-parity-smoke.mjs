@@ -95,6 +95,29 @@ for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMe
   }
 }
 
+// Routines are the account's own, not an operator surface, so these methods are
+// present even with the infrastructure group off: the renderer gates its
+// "New task" button and its delete on their presence
+// (`!!claude.web.CoworkScheduledTasks.createScheduledTask`, an optional-chained
+// `updateScheduledTaskStatus`), so withholding them from a non-Admin account
+// breaks the UI rather than denying the capability — the account can still
+// create and delete routines by asking its agent. Anything that moves them back
+// behind a flag would silently take the controls away again.
+const noOperatorSurfaces = `const infrastructureActionsEnabled = false;
+  const developerActionsEnabled = false;
+  const codeActionsEnabled = false;
+  const connectorsEnabled = false;`;
+for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMethods]]) {
+  const methods = evaluate(`${noOperatorSurfaces}\n${source}`, normalizedMap("allowedMethods"));
+  for (const method of ["createScheduledTask", "updateScheduledTask",
+    "updateScheduledTaskFileContent", "updateScheduledTaskStatus", "ackEvent",
+    "markListenerReady", "releaseDispatchClaim", "setEventAckSupported",
+    "setHostRunsSupported"]) {
+    assert.ok(methods.CoworkScheduledTasks.includes(method),
+      `the ${policy} allowlist must keep ${method} without the operator surfaces`);
+  }
+}
+
 const serverSettings = section(
   serverSource,
   "const allowedSettingsMethods",
