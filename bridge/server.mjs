@@ -3290,6 +3290,7 @@ async function serveOfficialIndex(request, response) {
       overrideStyles,
       rendererBase,
       bootstrapJson,
+      webShell: webShellEnabled,
     });
   } catch (error) {
     throw new ApiError(502, error.message);

@@ -48,13 +48,14 @@ function bootstrapOf(html) {
   return html.slice(start, end);
 }
 
-function shim(config) {
+function shim(config, options = {}) {
   const bootstrapJson = escapeBootstrap(config);
-  const html = shimOfficialIndex(entry, {
+  const html = shimOfficialIndex(options.entry ?? entry, {
     injection: `<script>globalThis.__CLAUDE_REMOTE_BOOTSTRAP__=${bootstrapJson}</script>`,
     overrideStyles: '<link rel="stylesheet" href="/remote-shell.css">',
     rendererBase: base,
     bootstrapJson,
+    ...(options.webShell === undefined ? {} : { webShell: options.webShell }),
   });
   return { html, bootstrapJson };
 }
@@ -111,5 +112,29 @@ assert.throws(
   /refusing a mixed renderer module graph/,
   "an entry with no rewritten asset root must be refused",
 );
+
+// The Desktop package's entry carries neither of the two attributes claude.ai's
+// server fills in, and they are what the first paint reads: the smaller home
+// greeting is keyed off `html[data-new-page-layout=home]`, and the marlin card
+// off `data-composer-arm=marlin`. The web shell fills them in; every other mode
+// serves the entry exactly as it came.
+const desktopEntry = '<!doctype html><html lang="en" class="cds-root"><head>'
+  + '<link rel="manifest" href="/manifest.json">'
+  + '<script type="module" crossorigin src="/assets/v1/index-DrchryRN.js"></script>'
+  + '</head><body><div id="static-composer" hidden></div></body></html>';
+const plain = shim(configs[0], { entry: desktopEntry }).html;
+assert.ok(!plain.includes("data-new-page-layout") && !plain.includes("data-composer-arm"),
+  "a non-web-shell entry must be served unchanged");
+const shell = shim(configs[0], { entry: desktopEntry, webShell: true });
+assert.ok(shell.html.includes('<html data-new-page-layout="home" lang="en"'),
+  "the web shell must mark the entry's home layout");
+assert.ok(shell.html.includes('<div id="static-composer" data-composer-arm="marlin" hidden>'),
+  "the web shell must mark the entry's composer arm");
+assert.ok(shell.html.includes(shell.bootstrapJson), "the bootstrap must survive the annotations");
+assert.ok(shell.html.includes(`${base}/assets/`), "the asset roots must still be rewritten");
+// An entry without that markup is annotated nowhere rather than refused: this
+// only changes which design paints first, so it must never fail preparation.
+const bare = shim(configs[0], { webShell: true }).html;
+assert.ok(!bare.includes("data-composer-arm"), "an entry without the skeleton is left alone");
 
 console.log("official-index-smoke: bootstrap splice survives $&/$'/$`/$$ and refuses drift");

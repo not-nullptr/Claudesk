@@ -315,6 +315,19 @@ Unlike the rest of the web-shell set this one is deliberately **not required**:
 if a future bundle stops matching, the classic layout comes back rather than
 renderer preparation failing.
 
+`web-composer-design-forced` forces the **marlin** arm itself. The home layout
+above is gated on it — the renderer forces the classic layout whenever the arm
+reads as off — so an off arm silently reverts the whole New page even though the
+bridge grants the feature in every bootstrap it serves. The renderer's own read
+can still answer off: the arm it remembers on the device wins whenever the
+feature is absent from the table the client built, the first read is frozen for
+the life of the page, and a feature table persisted from before the grant can
+answer in place of the fresh one. The patch selects the predicates by reading the
+feature *by name* — through the binding that holds the name or as the literal —
+among the declarations that end their answer with `… && !isSidePanel()`, and
+splices only the left operand of that guard, so the side-panel check still
+applies. Spliced only in web-shell mode, and not required.
+
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

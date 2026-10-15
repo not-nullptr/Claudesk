@@ -488,6 +488,29 @@ served under an immutable `/renderer/<version>/<patchRelease>/…` path, the pat
 ships with a `patchRelease` bump and needs the `claude-desktop` service rebuilt
 (the preparer runs from its init).
 
+That layout is gated on the **marlin** arm: the renderer forces the classic
+layout whenever the arm reads as off, so an off arm silently reverts the whole
+New page. The bridge grants the arm in every bootstrap, but the renderer's own
+read can still answer "off" for reasons the bridge cannot see — the arm it
+remembers on the device wins whenever the feature is not in the table the client
+built, the first read is frozen for the life of the page, and a feature table
+persisted from before the grant can answer in place of the fresh one. The
+`web-composer-design-forced` patch therefore forces each design predicate's own
+flag operand true, leaving the side-panel guard they all end with in place.
+Spliced only in web-shell mode, and not required: a bundle that no longer
+matches leaves the arm to the flag.
+
+Finally, the entry **document** carries two attributes claude.ai's *server*
+fills in and the Desktop package ships with neither — `data-new-page-layout="home"`
+on `<html>` and `data-composer-arm="marlin"` on the static composer skeleton.
+They are what the first paint reads: the skeleton's own CSS keys the smaller home
+greeting off `html[data-new-page-layout=home]`, and every `data-composer-arm=marlin`
+rule in the shell keys the marlin card off the attribute, so without them the
+painted-before-hydration skeleton is always the classic one. The bridge rewrites
+the entry it already shims from the desktop container (`shimOfficialIndex`), so
+both are filled in there, in web-shell mode only; an entry that no longer carries
+that markup is served unchanged rather than refused.
+
 ## Account identity
 
 The account menu and sidebar footer would otherwise read as a gateway config: a

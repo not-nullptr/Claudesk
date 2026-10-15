@@ -112,6 +112,21 @@ const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
   "stringsVouched", "stringsUndelivered"];
 const homeLayoutReplacement = "{eligible:!0,settled:!0,assignment:!0,"
   + "stringsDelivered:!0,stringsVouched:!0,stringsUndelivered:!1}";
+// The unified-composer ("marlin") design is an experiment arm, and the renderer
+// decides it from that GrowthBook feature by name. The bridge grants the feature
+// in every bootstrap it serves, but the renderer's own read can still answer
+// "off" for reasons the bridge cannot see: the arm it remembers on the device
+// wins whenever the feature is not in the table the client built, the first read
+// is frozen for the life of the page, and a feature table persisted from before
+// the grant can answer in place of the fresh one. The layout above is gated on
+// this arm (the renderer forces the classic layout whenever it is off), so an
+// "off" read silently reverts the whole New page. In web-shell mode the
+// deployment has already made the choice — the bridge grants the feature — so
+// each predicate's own flag operand is forced true, leaving the side-panel guard
+// they end with in place. Spliced only in web-shell mode, and deliberately not
+// required: a bundle that no longer matches leaves the arm to the flag.
+const composerDesignPatchId = "web-composer-design-forced";
+const composerDesignFeature = "voyage_composer_marlin";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -572,6 +587,34 @@ function homeLayoutAssignment(node) {
     && homeLayoutKeys.includes(entry.key.name ?? entry.key.value));
 }
 
+// The flag operand of every unified-composer design predicate: a declaration
+// whose body reads the feature — through the binding that holds its name, or as
+// the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
+// left operand is spliced, so the side-panel guard still applies. Reading the
+// feature by name is what separates these from the other guards in the chunk,
+// which mention it nowhere.
+function composerDesignOperands(ast) {
+  const names = new Set();
+  walk(ast, [], (node) => {
+    if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier") return;
+    if (literal(unwrap(node.init), composerDesignFeature)) names.add(node.id.name);
+  });
+  const operands = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return;
+    if (!contains(node.body, child => (child.type === "Identifier" && names.has(child.name))
+      || literal(child, composerDesignFeature))) return;
+    walk(node.body, [], (child) => {
+      if (child.type !== "LogicalExpression" || child.operator !== "&&") return;
+      const right = unwrap(child.right);
+      if (right?.type !== "UnaryExpression" || right.operator !== "!"
+        || right.argument.type !== "CallExpression") return;
+      operands.push(child.left);
+    });
+  });
+  return operands;
+}
+
 // The account view a component reads from the profile hook:
 // `let{name:i,src:a}=iQ()`. Only a destructuring of a zero-argument call
 // establishes it — an object literal that merely carries a `src` property (the
@@ -1024,7 +1067,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // `keyCode`, and the two scheduled-task hosts live in the Desktop-checks
   // chunk); the home-layout assignment by its own `stringsVouched` property,
   // which appears nowhere else in the renderer graph.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched/.test(source)) {
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched|voyage_composer_marlin|/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -1036,6 +1079,11 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   let toastBinding;
   let toastPublished = false;
   if (webShellEnabled) {
+    // The unified-composer design predicates are forced to their flag operand.
+    for (const operand of composerDesignOperands(ast)) {
+      patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
+        original: source.slice(operand.start, operand.end), replacement: "!0" });
+    }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.
     const assignments = [];

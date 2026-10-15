@@ -839,6 +839,42 @@ const homeLayoutCompiled = await minify(homeLayoutChunk, {
 assert.equal(inspectRenderer(homeLayoutCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-new-page-home-layout").length, 1,
   "a mangled assignment object must still be spliced once");
+// The unified-composer design predicates: functions that answer "is the marlin
+// design on?" from the GrowthBook feature by name, ending with the side-panel
+// guard. In web-shell mode their flag operand is forced true, leaving that guard
+// alone; a function that does not read the feature is not a target.
+const designPredicates = 'var marlinFlag="voyage_composer_marlin";'
+  + 'function designFromFlag(){let{on:e,inPayload:t}=features(marlinFlag);'
+  + 'return(e||t)&&!inSidePanel()}'
+  + 'function designByName(){return reads("voyage_composer_marlin")&&!inSidePanel()}'
+  + 'function latchAware(){let{on:e}=features(marlinFlag),n=deviceLatch();return pick(n)&&!inSidePanel()}'
+  + 'function unrelatedGate(){let e=otherSignal();return e&&!inSidePanel()}';
+const designDecoy = 'function other(){let e=reads("some_other_feature");return e&&!inSidePanel()}';
+assert.equal(inspectRenderer(designPredicates, false, false).patches
+  .filter(patch => patch.id === "web-composer-design-forced").length, 0,
+  "the design predicates are left alone outside web-shell mode");
+const designIds = inspectRenderer(`${designPredicates}\n${designDecoy}`, false, true).patches
+  .filter(patch => patch.id === "web-composer-design-forced");
+assert.equal(designIds.length, 3,
+  "each predicate that reads the feature must be forced, and no other guard");
+assert.deepEqual(designIds.map(patch => patch.original).sort(),
+  ["e||t", "pick(n)", 'reads("voyage_composer_marlin")'],
+  "only the flag operand is spliced, never the side-panel guard");
+const designOut = patchRendererSources(
+  new Map([["design.js", `${webShellFixtures}\n${accountMenuName}\n${designPredicates}`]]), false, true)
+  .sources.get("design.js");
+assert.ok(designOut.includes("return(!0)&&!inSidePanel()")
+  && designOut.includes("return(!0)&&!inSidePanel()"),
+  "the forced operand must leave the side-panel guard in place");
+assert.ok(!designOut.includes("pick(n)&&"), "the latch-aware predicate's operand must be replaced");
+assert.ok(designOut.includes("return e&&!inSidePanel()"),
+  "a guard that does not read the feature must survive untouched");
+const designCompiled = await minify(designPredicates, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(designCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-composer-design-forced").length, 3,
+  "a mangled set of design predicates must still be forced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
