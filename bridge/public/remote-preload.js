@@ -1893,6 +1893,23 @@
           const value = globalThis[name];
           return value === undefined ? "-" : JSON.stringify(value);
         };
+        // The offset that should move the greeting and card down is a class the
+        // page's own layout map supplies, and whether it reached the element — or
+        // reached it and computed to nothing — is the difference between a patch
+        // that missed and one that is being overridden. Walk the greeting's
+        // ancestors and print the spacing each actually computed.
+        const spacing = (element) => {
+          const chain = [];
+          for (let at = element, depth = 0; at && depth < 7; at = at.parentElement, depth += 1) {
+            const style = getComputedStyle(at);
+            const tokens = String(at.className || "").split(/\s+/)
+              .filter(name => /(^|:)(pt|mt|my|py)-|px-14|justify-center|gap-/.test(name));
+            chain.push(`${at.tagName.toLowerCase()}${at.id ? "#" + at.id : ""}`
+              + ` pt=${style.paddingTop} mt=${style.marginTop}`
+              + (tokens.length ? ` [${tokens.join(" ").slice(0, 90)}]` : ""));
+          }
+          return chain.join(" < ");
+        };
         const lines = [
           `doc layout=${root.getAttribute("data-new-page-layout") ?? "-"}`
             + ` chrome=${root.getAttribute("data-sidebar-chrome-preference") ?? "-"}`,
@@ -1904,6 +1921,14 @@
             + `/${localStorage.getItem("new-page-layout-latch") ?? "-"}`,
           `probe layout=${probe("__CLAUDESK_LAYOUT__")} arm=${probe("__CLAUDESK_ARM__")}`
             + ` surface=${probe("__CLAUDESK_SURFACE__")}`,
+          // Which route chunk actually drew this page. The page component is
+          // imported by exactly one chunk in the graph and the predicates that
+          // chunk calls are not the ones running here, so name the chunks that
+          // loaded rather than infer which one is on screen.
+          `spacing ${reserve ? spacing(reserve) : (greetings[0] ? spacing(greetings[0]) : "none")}`,
+          `chunks ${[...document.querySelectorAll("script[src]")]
+            .map(script => script.src.split("/").pop().replace(/[?#].*$/, ""))
+            .filter(name => /^c[0-9a-f]{8}|^shared-\d+/.test(name)).join(" ")}`,
         ];
         let box = document.getElementById("claudesk-layout-report");
         if (!box) {
