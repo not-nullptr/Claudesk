@@ -279,25 +279,24 @@ three parts.
 
 - **Publish (`toast-global` renderer patch).** The app's toast manager is not
   reachable from outside React — it lives in a context only its components read — so
-  the patch publishes it on `globalThis.__CLAUDESK_TOAST__` from the one place that
-  already holds it: the toast card host, the component the provider host renders when
-  the viewport is visible. The card host is the branch of that host's
-  `quiet ? <quietHost> : <cardHost>` choice that actually reads the app's toast hook
-  (the quiet branch only clears toasts), and the publish is spliced at the end of its
-  own destructuring rather than the top of the body, because the bindings are `let`.
-  Provider binding, hook binding and the destructured `add`/`close` names are all read
-  back from the graph. Spliced only in web-shell mode, and required there: a bundle
-  that no longer matches fails preparation rather than warn nobody.
+  the patch publishes it on `globalThis.__CLAUDESK_TOAST__` from the component that
+  renders the app's toast **viewport**: the one whose output is the element carrying
+  `data-cds: "Toast"`, which the provider mounts itself whenever toasts are shown at
+  all. That is the anchor because it is the one that can be observed from outside. An
+  earlier cut published from the card host the provider renders *beside* the viewport,
+  and on a live web-shell deployment the viewport was in the page while the global was
+  never set, so the notice went nowhere; anchoring on the component whose output is
+  actually present is what fixed it. The app's toast hook is read back by shape — a
+  parameterless declaration that opens by binding two calls and returns an object
+  carrying `add` and `close`, in the same chunk — and the publish is spliced after the
+  viewport's own opening declaration rather than at the top of the body, because the
+  bindings are `let`. Spliced only in web-shell mode, and required there: a bundle that
+  no longer matches fails preparation rather than warn nobody.
 - **Display (`bridge/public/remote-preload.js`).** A `notice` event on the existing
   stream is rendered through that manager — sticky (`timeout: 0`), so it outlives the
-  SSE drop that follows and the reconnect after. The manager is preferred but not
-  required: when the global is absent — a renderer older than the patch, or a page whose
-  module graph did not come from the prepared renderer at all — the preload draws the
-  card itself, in the app's corner and its design tokens (`--cds-*`, with fallbacks),
-  and says once on the console that it did. A restart warning that only appears when
-  every other layer went right is not a warning. The fallback is built inline rather
-  than in `remote-shell.css` on purpose: this preload is served `no-store`, so it can
-  change without a `patchRelease` bump, while the stylesheets cannot.
+  SSE drop that follows and the reconnect after. A renderer older than the patch has no
+  such global; the preload says so once on the console and drops the notice rather than
+  throwing on the event stream.
 - **Send (`bridge/server.mjs`, `bridge/realtime.mjs`).** On SIGTERM the bridge
   broadcasts the notice, holds `CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS` (default 5s) so the
   write flushes and the reader has a moment to see it, and only then exits — the stream

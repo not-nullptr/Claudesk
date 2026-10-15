@@ -172,30 +172,29 @@ const scheduledTaskHostsDecoy = 'function hostsDecoyModule(){'
   + 'return effect(()=>(settingsStore.setState({activeSession:1}),void 0),[]),null});'
   + 'function subscribeOnly(){return dispatch?.onOnScheduledTaskEvent?.(()=>{})}'
   + 'function readyOnly(){return api?.markListenerReady?.()}}';
-// The toast provider host and its card host. The provider host renders the app's
-// toast provider with a `viewportClassName` prop and a first child that is the
-// `quiet ? <quietHost> : <cardHost>` choice; of those two branches only the card
-// host reads the app's toast hook, so it is the one the `toast-global` splice
-// publishes the manager from — and it publishes after the hook's own
-// destructuring, not at the top of the body, because the bindings are `let`. The
-// provider and hook names are mangled here and read back from the graph.
+// The app's own toast, in the chunk that defines it (shared-19 in the shipping
+// bundle): the manager hook and the viewport component the provider itself
+// mounts. The `toast-global` splice goes into the viewport — after its own
+// opening declaration, because the bindings are `let` and the top of the body
+// would hit the temporal dead zone — and names the hook read back from the same
+// graph. The viewport is the anchor because it is the component whose output can
+// be observed from outside: an earlier cut published from the card host rendered
+// beside it, which a live web shell mounted without the global ever appearing.
 const toastHost = 'function toastHostModule(){'
-  + 'function toastProvider({children:e,quiet:t=!1,viewportClassName:n}){'
-  + 'return h(Provider,{timeout:5e3,viewportClassName:t?"hidden":n,'
-  + 'children:[h(t?QuietCards:ToastCards,{}),e]})}'
-  + 'function QuietCards(){let{toasts:e}=useToasts(),{clearToast:t}=useClear();'
-  + 'return effect(()=>{for(let n of e)t(n.id)},[e,t]),null}'
-  + 'function ToastCards(){let{toasts:e}=useToasts(),{clearToast:t}=useClear(),'
-  + '{add:n,close:r}=useToastManager(),i=ref({});'
-  + 'return effect(()=>()=>i.current?.(),[]),null}}';
-// A provider-shaped host whose first child is a single component rather than the
-// quiet/card choice, and a component that never destructures the toast hook:
-// neither may be spliced, and a host the patch cannot resolve must refuse
-// instead of publishing the manager from the wrong place.
+  + 'function useToastManager(){let e=useToastStore(),t=useToastContext();'
+  + 'return{add:useCallback(o=>e.add(o),[]),close:e.close,setPinned:t?.setPinned}}'
+  + 'function ToastViewport({className:e}){let{toasts:t}=useToastStore(),n=useToastContext();'
+  + 'useEffect(()=>{n?.syncLiveToasts(t)},[t,n]);'
+  + 'return jsx(Frame,{children:jsx(Surface,{surface:"popover",render:jsx("div",{'
+  + '"data-cds":"Toast",className:cx("cds-reset fixed right-4 bottom-4",e)})})})}}';
+// Lookalikes: a component carrying a marker that is not the toast one, and a
+// hook-shaped function whose returned object has neither `add` nor `close`.
+// Neither may be spliced — the patch refuses rather than publish the manager
+// from whatever happens to look closest.
 const toastHostDecoy = 'function toastDecoyModule(){'
-  + 'function providerish({children:e,viewportClassName:t}){'
-  + 'return h(Provider,{viewportClassName:t,children:[h(Plain,{}),e]})}'
-  + 'function Plain(){return null}}';
+  + 'function markerOnly(){return jsx("div",{"data-cds":"Toast-Extra",className:"x"})}'
+  + 'function useSomethingElse(){let e=useToastStore(),t=useToastContext();'
+  + 'return{mode:e.mode,setMode:t?.setMode}}}';
 // The Cowork scheduled-task runner: the Desktop-identity check is read back from
 // the `flag || refuse(id, log, copy)` short-circuit whose copy only this runner
 // carries, then forced true so a routine can be run from the web shell. The
@@ -316,14 +315,15 @@ for (const [i, variant] of variants.entries()) {
   assert.equal(webResult.patches.filter(p => p.id === "toast-global").length, 1,
     "the toast manager must be published exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes(";globalThis.__CLAUDESK_TOAST__={add:n,close:r};"),
-    "the publish must name the toast hook's own bindings and follow their destructuring");
+    .includes(";globalThis.__CLAUDESK_TOAST__=useToastManager();"),
+    "the publish must name the toast hook read back from the graph");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes("{add:n,close:r}=useToastManager(),i=ref({});"),
-    "the splice must land after the destructuring, not at the top of the body");
-  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
-    .includes("function Plain(){return null}}"),
-    "a provider-shaped host with no quiet/card choice must not be spliced");
+    .includes("let{toasts:t}=useToastStore(),n=useToastContext();;globalThis.__CLAUDESK_TOAST__"),
+    "the splice must land after the viewport's own declaration, not at the top of the body");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("function useSomethingElse()"),
+    "a hook-shaped function without add/close must not be published");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes('"data-cds":"Toast-Extra"'),
+    "a component carrying some other marker must not be mistaken for the viewport");
   assert.equal(result.patches.filter(p => p.id === "toast-global").length, 0,
     "the toast global is a web-shell splice and must not appear in the Desktop shell");
   assert.ok(!output.includes("__CLAUDESK_TOAST__"),

@@ -264,29 +264,33 @@ const modePickerPatchId = "titlebar-mode-picker-without-code";
 const modePickerMarker = "data-compact-mode-switcher";
 // The app's own toast, published for the remote preload. The bridge warns
 // connected pages when the VM is about to restart (its SIGTERM handler), but the
-// connection it would carry that on is the SSE stream that dies with it, and the
 // renderer's toast is not reachable from outside React: the manager lives in a
 // context only its own components read. So the manager is published on a global
-// from the one place that already has it — the toast card host, the component
-// the provider host renders when the viewport is visible, whose body destructures
-// `{add, close}` from the app's toast hook. The bridge sends a `notice` over SSE
-// and the preload calls it, giving the warning the app's real toast (its
-// styling, its stack position, its dismiss affordance) instead of a bespoke
-// banner. The manager's `add` takes the app's own options — title, description,
-// variant, action, timeout — and the preload passes timeout 0 (sticky) so the
-// message outlives the outage it is about.
+// from a component that is mounted whenever toasts are shown at all, and the
+// bridge's `notice` over SSE becomes the app's real toast — its styling, its
+// stack position, its dismiss affordance — rather than a bespoke banner. The
+// manager's `add` takes the app's own options (title, description, variant,
+// action, timeout) and the preload passes timeout 0 (sticky) so the message
+// outlives the outage it is about.
 //
-// Read back from the graph, never hardcoded: the provider host is the component
-// rendering the toast provider binding with a `viewportClassName` prop (a React
-// prop name, not minified) and a children array whose first element is the
-// `quiet ? <quietHost> : <cardHost>` choice; of those two the card host is the
-// one that actually reads the toast hook, which is what identifies it — the
-// quiet branch only clears toasts and is not a target. `add`/`close` are read
-// from its own destructuring, and the publish goes at the end of that
-// declaration rather than the top of the body, because the bindings are `let`
-// and a body-start splice would hit the temporal dead zone. Spliced only in
-// web-shell mode, and required there: the restart notice is the point, and a
-// bundle that no longer matches must fail preparation rather than warn nobody.
+// The publish goes in the **viewport** — the component that renders the element
+// carrying `data-cds: "Toast"`, which the toast provider mounts itself, in the
+// chunk that defines the app's toast. That is the anchor precisely because it is
+// the one that can be observed: an earlier cut published from the card host the
+// provider renders *beside* the viewport, and on a live web-shell deployment the
+// viewport was in the DOM while the global was never set — so the anchor has to
+// be the component whose output is actually present, not its sibling.
+//
+// Read back from the graph, never hardcoded: the viewport is identified by that
+// marker property, and the manager by shape — a parameterless declaration whose
+// body opens by binding two zero-argument calls and closes by returning an object
+// carrying `add` and `close` — which is the app's toast hook, in scope beside the
+// viewport because both live in the same chunk. The publish is spliced after the
+// viewport's own opening declaration (the bindings are `let`, so the top of the
+// body would hit the temporal dead zone) and calls the hook unconditionally, so
+// hook order is stable across renders. Spliced only in web-shell mode, and
+// required there: the restart notice is the point, and a bundle that no longer
+// matches must fail preparation rather than warn nobody.
 const toastGlobalPatchId = "toast-global";
 const toastGlobalName = "__CLAUDESK_TOAST__";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
@@ -419,74 +423,40 @@ function notificationEnableTarget(node) {
   });
   return requestsPermission && tracksResult && deniedSource ? node : undefined;
 }
-// The toast provider host: the component that renders the app's toast provider
-// with a `viewportClassName` prop (a React prop name the minifier leaves alone)
-// and a children array. Only its children matter — the array's first element is
-// the quiet/card choice the card host is read out of.
-function toastProviderHost(node) {
+// The toast viewport: the component that renders the element carrying the app's
+// own `data-cds: "Toast"` marker. The provider mounts it itself whenever toasts
+// are shown at all, so it is the component whose rendering can be observed from
+// outside — which is what makes it the right place to publish from.
+function toastViewportComponent(node) {
   if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return undefined;
-  let elements;
-  walk(node.body, [], (child) => {
-    if (elements || child.type !== "CallExpression") return;
-    const props = child.arguments.map(unwrap)
-      .find((argument) => argument?.type === "ObjectExpression");
-    if (!props?.properties.some((entry) => key(entry, "viewportClassName"))) return;
-    const children = unwrap(props.properties.find((entry) => key(entry, "children"))?.value);
-    if (children?.type === "ArrayExpression" && children.elements.length) elements = children;
-  });
-  return elements;
+  const renders = contains(node.body, (child) => child.type === "Property"
+    && (child.key?.name === "data-cds" || child.key?.value === "data-cds")
+    && literal(child.value, "Toast"));
+  return renders ? node : undefined;
 }
-// The component named by `name` — a hoisted declaration, or the function a
-// declarator binds — so a branch identifier can be resolved to its body.
-function componentByName(ast, name) {
-  let found;
+// The app's toast hook, read back by shape: a parameterless declaration whose
+// body opens by binding two calls — the toast store and the app's toast context,
+// the second of which takes that context as its argument — and closes by
+// returning an object carrying `add` and `close`. It lives in the same chunk as
+// the viewport, so the spliced call can name it.
+function toastManagerHook(ast) {
+  const found = [];
   walk(ast, [], (node) => {
-    if (found) return;
-    if (node.type === "FunctionDeclaration" && node.id?.name === name) found = node;
-    else if (node.type === "VariableDeclarator" && node.id?.type === "Identifier"
-      && node.id.name === name && functionTypes.has(node.init?.type)) found = node.init;
+    if (node.type !== "FunctionDeclaration" || !node.id || node.params.length) return;
+    const body = node.body?.body;
+    if (!Array.isArray(body) || body.length < 2) return;
+    const opening = body[0];
+    if (opening.type !== "VariableDeclaration" || opening.declarations.length !== 2) return;
+    if (!opening.declarations.every((entry) => unwrap(entry.init)?.type === "CallExpression")) return;
+    const returned = body[body.length - 1];
+    if (returned.type !== "ReturnStatement") return;
+    const object = unwrap(returned.argument);
+    if (object?.type !== "ObjectExpression") return;
+    const names = object.properties.map((entry) => entry.key?.name ?? entry.key?.value);
+    if (!names.includes("add") || !names.includes("close")) return;
+    found.push(node.id.name);
   });
-  return found;
-}
-// Where the card host can publish from: its own destructuring of the toast
-// hook — an `{add, close}` pattern bound from a zero-argument call — and the
-// statement it lives in, whose end is the insertion point.
-function toastHookBinding(component) {
-  if (!functionTypes.has(component.type) || component.body?.type !== "BlockStatement") return undefined;
-  let binding;
-  walk(component.body, [], (node, ancestors) => {
-    if (binding || node.type !== "VariableDeclarator") return;
-    const pattern = node.id;
-    if (pattern?.type !== "ObjectPattern") return;
-    if (!pattern.properties.some((entry) => key(entry, "add"))
-      || !pattern.properties.some((entry) => key(entry, "close"))) return;
-    const init = unwrap(node.init);
-    if (init?.type !== "CallExpression" || init.arguments.length !== 0) return;
-    const declaration = ancestors[ancestors.length - 1];
-    if (declaration?.type !== "VariableDeclaration") return;
-    const add = identifier(pattern.properties.find((entry) => key(entry, "add")).value);
-    const close = identifier(pattern.properties.find((entry) => key(entry, "close")).value);
-    if (!add || !close) return;
-    binding = { add, close, insertAt: declaration.end };
-  });
-  return binding;
-}
-// The card host, from the provider host's first child: the `quiet ? <quietHost>
-// : <cardHost>` choice, resolved to whichever branch reads the toast hook. The
-// quiet branch only clears toasts, so exactly one branch qualifies; anything
-// else — no choice, no resolvable branch, both branches — refuses rather than
-// publish the manager from the wrong component.
-function toastCardHost(ast, elements) {
-  const first = unwrap(elements.elements[0]);
-  if (first?.type !== "CallExpression") return undefined;
-  const choice = unwrap(first.arguments[0]);
-  const branches = choice?.type === "ConditionalExpression"
-    ? [choice.consequent, choice.alternate]
-    : [choice];
-  const bindings = branches.map(identifier).filter(Boolean)
-    .map((name) => componentByName(ast, name)).filter(Boolean)
-    .map((component) => toastHookBinding(component)).filter(Boolean);
-  return bindings.length === 1 ? bindings[0] : undefined;
+  return found.length === 1 ? found[0] : undefined;
 }
 // The compact mode switcher's rendered element: the sole call whose props carry
 // the `data-compact-mode-switcher` label, wrapping a switcher call whose props
@@ -1056,20 +1026,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         original, replacement: "!0" });
     }
     if (webShellEnabled) {
-      // Both the provider host and the app root pass `viewportClassName`, so the
-      // resolver is reached twice; `toastBinding` caches the answer and
-      // `toastPublished` keeps the one splice from being emitted again for the
-      // second match.
+      // The manager name is read from the whole chunk, so it is resolved once
+      // and cached; `toastPublished` keeps the splice from being emitted twice
+      // if the marker property were ever rendered by more than one component.
       if (!toastPublished) {
-        const elements = toastProviderHost(node);
-        if (elements) {
-          toastBinding ??= toastCardHost(ast, elements);
-          if (toastBinding) {
+        const viewport = toastViewportComponent(node);
+        if (viewport) {
+          toastBinding ??= toastManagerHook(ast);
+          const opening = viewport.body.body[0];
+          if (toastBinding && opening?.type === "VariableDeclaration") {
             toastPublished = true;
             patches.push({ id: toastGlobalPatchId,
-              start: toastBinding.insertAt, end: toastBinding.insertAt, original: "",
-              replacement: `;globalThis.${toastGlobalName}`
-                + `={add:${toastBinding.add},close:${toastBinding.close}};` });
+              start: opening.end, end: opening.end, original: "",
+              replacement: `;globalThis.${toastGlobalName}=${toastBinding}();` });
           }
         }
       }
