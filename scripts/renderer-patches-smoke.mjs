@@ -1331,6 +1331,56 @@ const bypassCompiled = await minify(bypassRow(), {
 assert.equal(inspectRenderer(bypassCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-permission-bypass-row").length, 1,
   "a mangled picker call must still have its bypass flag cleared");
+// The draft's two permission-mode mappers. The New page's picker writes the
+// *pending draft's* mode, and that pair knows only `auto` and the default — so a
+// click on Skip all approvals is dropped by the writer and, even if stored, read
+// back as the default. Both are widened; widening one alone does nothing.
+// The chunk prefilter is a string test, so the fixture must carry a token the
+// patcher looks for — the composer feature name stands in for one.
+const draftMappers = () =>
+  'var marlinFlag="voyage_composer_marlin",aM="auto",oM="acceptEdits";function defaultMode(){return manual}'
+  + 'function toWire(e){if(e==="auto")return aM;if(e===defaultMode())return oM}'
+  + 'function fromWire(e){if(e==="auto")return"auto";if(e==="acceptEdits")return defaultMode()}'
+  + 'function unrelated(e){if(e==="auto")return aM}';
+assert.equal(inspectRenderer(draftMappers(), false, false).patches
+  .filter(patch => patch.id === "web-draft-bypass-mode").length, 0,
+  "the draft mappers are left alone outside web-shell mode");
+const mapperPatches = inspectRenderer(draftMappers(), false, true).patches
+  .filter(patch => patch.id === "web-draft-bypass-mode");
+assert.equal(mapperPatches.length, 2, "both mappers must be widened");
+assert.deepEqual(mapperPatches.map(patch => patch.replacement).sort(), [
+  '{if(e==="auto")return"auto";if(e==="acceptEdits")return defaultMode();'
+    + 'if(e==="bypassPermissions")return "bypassPermissions";}',
+  '{if(e==="auto")return aM;if(e===defaultMode())return oM;'
+    + 'if(e==="bypassPermissions")return "bypassPermissions";}',
+].sort(), "each mapper keeps its body and gains the bypass wire value");
+// A function that opens on "auto" but has only one branch, or a second branch
+// that is neither a call nor the expected literal, is not a mapper.
+assert.equal(inspectRenderer('var marlinFlag="voyage_composer_marlin";function half(e){if(e==="auto")return aM}', false, true).patches
+  .filter(patch => patch.id === "web-draft-bypass-mode").length, 0,
+  "a one-branch function must survive untouched");
+assert.equal(inspectRenderer('var marlinFlag="voyage_composer_marlin";function other(e){if(e==="auto")return aM;if(e==="plan")return pM}',
+  false, true).patches.filter(patch => patch.id === "web-draft-bypass-mode").length, 0,
+  "a function whose second mode is neither must survive untouched");
+const mapperOut = patchRendererSources(
+  new Map([["draft.js", `${webShellFixtures}\n${accountMenuName}\n${draftMappers()}`]]), false, true)
+  .sources.get("draft.js");
+assert.ok(mapperOut.includes('if(e===defaultMode())return oM;if(e==="bypassPermissions")return "bypassPermissions";'),
+  "the writer must keep its body and gain the value");
+assert.ok(mapperOut.includes('if(e==="acceptEdits")return defaultMode();if(e==="bypassPermissions")return "bypassPermissions";'),
+  "the reader must keep its body and gain the value");
+assert.ok(mapperOut.includes("function unrelated(e){if(e===\"auto\")return aM}"),
+  "an unrelated function must survive untouched");
+// Names mangled, structure kept: that is what the selector pins, and what the
+// real bundle's mappers are. Compression is off here because folding these two
+// one-liners into a conditional is a reshape the real build does not do, and a
+// fixture that does it is testing the fixture rather than the patch.
+const mapperCompiled = await minify(draftMappers(), {
+  mangle: true, compress: false, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(mapperCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-draft-bypass-mode").length, 2,
+  "mangled mappers must still be widened");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

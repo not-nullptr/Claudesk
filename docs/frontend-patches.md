@@ -438,8 +438,16 @@ picker asks for its mode list with `excludeBypass: true`, which drops it, and th
 deployment offers that row deliberately through its own settings and rollout gate.
 Clearing the flag is right for a picker scoped to a session. It is pinned as the
 `excludeBypass` property of the object that also carries `sessionBinding`, so the
-component's other callers are untouched. All eleven are spliced only in web-shell
-mode, and none is required.
+component's other callers are untouched.
+
+`web-draft-bypass-mode` makes that row actually *do* something. The New page's
+picker writes the pending draft's permission mode, and the two mappers carrying a
+mode through that draft know only `auto` and the default — so the writer drops the
+click and the reader would read any stored bypass value back as the default. Both
+are widened to `bypassPermissions`; the wire vocabulary is the mode ids, so the
+value carries as itself. Each is identified as the one-argument function that
+opens on `"auto"` and then tests either a call (writer) or `"acceptEdits"`
+(reader). All twelve are spliced only in web-shell mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate

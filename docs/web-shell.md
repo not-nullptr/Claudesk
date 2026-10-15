@@ -751,7 +751,29 @@ session picker; two sites match — the composer's and the one the session surfa
 draws — and both get the row back. Callers that pass `excludeBypass` without a
 binding are untouched. Spliced only in web-shell mode, and not required.
 
-All eleven change prepared-renderer bytes, so they ship with a `patchRelease` bump
+Making that row *selectable* was not enough either: a click on it did nothing.
+The New page's picker sets the **pending draft's** permission mode, and the pair
+of mappers that carry a mode in and out of that draft know two modes:
+
+```js
+const aM = "auto", oM = "acceptEdits";
+function toWire(mode){ if (mode === "auto") return aM; if (mode === defaultMode()) return oM; }
+function fromWire(value){ if (value === "auto") return "auto"; if (value === "acceptEdits") return defaultMode(); }
+```
+
+so the writer drops the click and, even stored, the reader would read it back as
+the default — the row would look unpicked again. The wire vocabulary is the mode
+ids themselves (`acceptEdits` being the id of the mode the picker labels
+"Manual"), so `web-draft-bypass-mode` widens both maps to `bypassPermissions`.
+Both, not one: either alone leaves the click with no visible effect. Each mapper
+is identified as the one-argument function that opens by testing its argument
+against `"auto"` and then either against a call (the writer) or against
+`"acceptEdits"` (the reader). Spliced only in web-shell mode, and not required —
+which matters here, because a build that folded those two-liners into a
+conditional expression would stop matching, and the click would go quiet rather
+than loud.
+
+All twelve change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

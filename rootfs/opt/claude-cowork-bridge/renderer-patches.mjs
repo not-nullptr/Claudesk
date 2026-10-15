@@ -362,6 +362,25 @@ const permissionBindingOn = "!0";
 // matching the day it moved.
 const permissionBypassPatchId = "web-permission-bypass-row";
 const permissionBypassOff = "!1";
+// Making that row clickable was not enough: the New page's picker sets the
+// *pending draft's* permission mode, and that pair of mappers knows two modes:
+//
+//   const aM = "auto", oM = "acceptEdits";
+//   function toWire(mode){ if (mode === "auto") return aM; if (mode === defaultMode()) return oM; }
+//   function fromWire(value){ if (value === "auto") return "auto"; if (value === "acceptEdits") return defaultMode(); }
+//
+// The wire vocabulary *is* the mode ids — "auto" and "acceptEdits" are stored
+// verbatim, `acceptEdits` being the id of the mode the picker labels "Manual" —
+// so `bypassPermissions` carries through the same way, and both maps are widened
+// to it. Widening the writer alone would leave the row unclicked: the reader
+// turns the stored value back into the mode the picker checks, and an unmapped
+// value reads as the default. Each mapper is identified as the one-argument
+// function that opens by testing its argument against `"auto"` and then either
+// against a call (the writer) or against `"acceptEdits"` (the reader), so no
+// other function in the graph can match. Spliced only in web-shell mode, and not
+// required.
+const draftBypassPatchId = "web-draft-bypass-mode";
+const draftBypassWire = '"bypassPermissions"';
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -1072,6 +1091,37 @@ function permissionBypassTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The draft's two permission-mode mappers. Both take one argument, and both open
+// by testing it against `"auto"`; the writer's second test is a call, the
+// reader's is the `"acceptEdits"` literal. Returns each one's body so the caller
+// can widen it, keyed by role.
+function draftModeMapper(ast) {
+  const found = new Map();
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return;
+    if (node.params.length !== 1 || node.params[0].type !== "Identifier") return;
+    const statements = node.body.body;
+    if (statements.length !== 2 || statements.some(entry => entry.type !== "IfStatement")) return;
+    const test = unwrap(statements[0].test);
+    const parameter = node.params[0].name;
+    if (test?.type !== "BinaryExpression" || !["===", "=="].includes(test.operator)) return;
+    const subject = literal(test.left, "auto") ? test.right : test.left;
+    if (identifier(subject) !== parameter) return;
+    const second = unwrap(statements[1].test);
+    if (second?.type !== "BinaryExpression") return;
+    // The operand that is not the parameter is what distinguishes the two: a call
+    // is the writer's default-mode getter, the literal is the reader's wire value.
+    const left = unwrap(second.left);
+    const right = unwrap(second.right);
+    const other = identifier(left) === parameter ? right : left;
+    const role = other?.type === "CallExpression" ? "writer"
+      : literal(other, "acceptEdits") ? "reader" : undefined;
+    if (role === undefined || found.has(role)) return;
+    found.set(role, node);
+  });
+  return found;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1645,6 +1695,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
+    }
+    // The draft's mode mappers, widened so the bypass row's setting survives the
+    // round trip through the pending draft rather than reading back as default.
+    const mappers = draftModeMapper(ast);
+    for (const node of mappers.values()) {
+      const inner = source.slice(node.body.start + 1, node.body.end - 1);
+      const parameter = node.params[0].name;
+      patches.push({ id: draftBypassPatchId, start: node.body.start, end: node.body.end,
+        original: source.slice(node.body.start, node.body.end),
+        replacement: `{${inner};if(${parameter}===${draftBypassWire})return ${draftBypassWire};}` });
     }
     // The composer's picker asks for its mode list without the bypass row; the
     // deployment offers that row deliberately, so the flag is cleared.

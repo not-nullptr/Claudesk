@@ -43,7 +43,7 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, webShell === "1" ? 38 : gateway === "1" ? 8 : 6);
+    assert.equal(manifest.patches.length, webShell === "1" ? 40 : gateway === "1" ? 8 : 6);
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
