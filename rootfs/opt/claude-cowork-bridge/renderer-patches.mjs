@@ -346,6 +346,15 @@ const projectsPickerSectionOn = "!0";
 // web-shell mode, and not required.
 const permissionBindingPatchId = "web-permission-binding";
 const permissionBindingOn = "!0";
+// The composer's permission picker asks for the mode list with
+// `excludeBypass: true`, which drops "Skip all approvals" — the row the
+// deployment's own settings and rollout gate exist to offer. It used to be in
+// the control this replaced, so the flag is cleared: the picker is scoped to a
+// session, and a session can hold that mode. Pinned as the `excludeBypass`
+// property of the object that also carries `sessionBinding`, which is the
+// composer's own picker and not the other callers of the same component.
+const permissionBypassPatchId = "web-permission-bypass-row";
+const permissionBypassOff = "!1";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -1038,6 +1047,24 @@ function permissionBindingTarget(ast) {
   return tests.length === 1 ? tests[0] : undefined;
 }
 
+// The `excludeBypass` value of the picker props that also carry `sessionBinding`
+// — the composer's own picker, and exactly one such object per chunk.
+function permissionBypassTarget(ast) {
+  const found = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const names = new Set(node.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value));
+    if (!names.has("excludeBypass") || !names.has("sessionBinding")) return;
+    for (const entry of node.properties) {
+      if (entry.type === "Property" && (entry.key.name ?? entry.key.value) === "excludeBypass") {
+        found.push(entry.value);
+      }
+    }
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1611,6 +1638,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
+    }
+    // The composer's picker asks for its mode list without the bypass row; the
+    // deployment offers that row deliberately, so the flag is cleared.
+    const permissionBypass = permissionBypassTarget(ast);
+    if (permissionBypass) {
+      patches.push({ id: permissionBypassPatchId, start: permissionBypass.start,
+        end: permissionBypass.end, original: source.slice(permissionBypass.start, permissionBypass.end),
+        replacement: permissionBypassOff });
     }
     // The permission binding's guard, so the composer's permission control is
     // handed a binding instead of drawing its skeleton indefinitely.

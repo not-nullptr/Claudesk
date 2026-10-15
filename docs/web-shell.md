@@ -734,7 +734,15 @@ binding it would have had one render later. The guard is identified by the objec
 it returns, which carries `autoPickIsDraftOnly` — a name that appears nowhere
 else in the renderer graph. Spliced only in web-shell mode, and not required.
 
-All ten change prepared-renderer bytes, so they ship with a `patchRelease` bump
+The picker also asks for its mode list with `excludeBypass: true`, which drops the
+"Skip all approvals" row — the row the deployment's own settings and rollout gate
+exist to offer, and which the control this replaced used to show.
+`web-permission-bypass-row` clears that flag: the picker is scoped to a session
+and a session can hold that mode. It is pinned as the `excludeBypass` property of
+the object that also carries `sessionBinding`, so the other callers of the same
+component are untouched. Spliced only in web-shell mode, and not required.
+
+All eleven change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

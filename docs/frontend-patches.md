@@ -431,8 +431,15 @@ forever. Forcing its guard open hands the picker the binding it would have had
 one render later, since everything the returned object reads comes from the
 pending draft's own settings and the default-mode helper. The guard is pinned by
 the object it returns, which carries `autoPickIsDraftOnly`, a name that appears
-nowhere else in the graph. All ten are spliced only in web-shell mode, and none
-is required.
+nowhere else in the graph.
+
+`web-permission-bypass-row` restores the "Skip all approvals" row: the composer's
+picker asks for its mode list with `excludeBypass: true`, which drops it, and the
+deployment offers that row deliberately through its own settings and rollout gate.
+Clearing the flag is right for a picker scoped to a session. It is pinned as the
+`excludeBypass` property of the object that also carries `sessionBinding`, so the
+component's other callers are untouched. All eleven are spliced only in web-shell
+mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate

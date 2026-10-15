@@ -1302,6 +1302,35 @@ const bindingCompiled = await minify(permissionBinding(), {
 assert.equal(inspectRenderer(bindingCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-permission-binding").length, 1,
   "a mangled binding hook must still have its guard forced");
+// The composer's picker asks for its mode list with `excludeBypass: true`, which
+// drops the "Skip all approvals" row the deployment deliberately offers.
+const bypassRow = (props = 'excludeBypass:!0,sessionBinding:t') =>
+  `function Pickers({collapsed:e,binding:t}){return S(ModePicker,{variant:"session",placement:"chin",`
+  + `${props},triggerSize:"inherit"})}`;
+assert.equal(inspectRenderer(bypassRow(), false, false).patches
+  .filter(patch => patch.id === "web-permission-bypass-row").length, 0,
+  "the bypass flag is left alone outside web-shell mode");
+const bypassPatches = inspectRenderer(bypassRow(), false, true).patches
+  .filter(patch => patch.id === "web-permission-bypass-row");
+assert.equal(bypassPatches.length, 1, "the bypass flag must be cleared once");
+assert.equal(bypassPatches[0].original, "!0");
+assert.equal(bypassPatches[0].replacement, "!1", "only that property's value is spliced");
+// A picker that excludes bypass without a session binding is a different call
+// site and must survive.
+assert.equal(inspectRenderer(bypassRow("excludeBypass:!0,other:t"), false, true).patches
+  .filter(patch => patch.id === "web-permission-bypass-row").length, 0,
+  "a call site without a session binding must survive untouched");
+const bypassOut = patchRendererSources(
+  new Map([["bypass.js", `${webShellFixtures}\n${accountMenuName}\n${bypassRow()}`]]), false, true)
+  .sources.get("bypass.js");
+assert.ok(bypassOut.includes("excludeBypass:!1,sessionBinding:t"),
+  "the bypass row must be restored in place");
+const bypassCompiled = await minify(bypassRow(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(bypassCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-permission-bypass-row").length, 1,
+  "a mangled picker call must still have its bypass flag cleared");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
