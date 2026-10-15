@@ -51,6 +51,13 @@ and the component returns null instead of drawing. That is why the composer's
 permission control was empty. Auto mode is weaker than the bypass mode already
 offered here, so enabling it alongside costs nothing.
 
+The same call grants `ccr_mcp_permission_mode_override`, without which the picker
+still *disables* the bypass row — present but unclickable, tooltipped "Skip all
+approvals only runs locally". Every session here is local, backed over the
+Desktop IPC, so the condition that flag encodes is one this deployment satisfies
+by construction; the other two grants already say the same thing about the same
+row.
+
 This is a real safety switch — Skip all approvals runs
 Cowork with no tool prompts — so it is off without the web shell and `…=0`
 restores the upstream value.

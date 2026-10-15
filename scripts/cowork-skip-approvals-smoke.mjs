@@ -75,11 +75,10 @@ assert.equal(bypassGate(off), true, "a gate evaluated false is replaced");
 assert.deepEqual(plain(off.growthbook.features[hashed("cowork_bypass_permissions_mode")]),
   { defaultValue: true }, "the replacement reads true");
 
-const on = { growthbook: { features: {
-  [hashed("cowork_bypass_permissions_mode")]: { defaultValue: true },
-  [hashed("cowork_auto_permission_mode")]: { defaultValue: true },
-} } };
-assert.equal(bypassGate(on), false, "both gates already on is a no-op");
+const on = { growthbook: { features: Object.fromEntries(
+  ["cowork_bypass_permissions_mode", "cowork_auto_permission_mode", "ccr_mcp_permission_mode_override"]
+    .map(name => [hashed(name), { defaultValue: true }])) } };
+assert.equal(bypassGate(on), false, "every gate already on is a no-op");
 assert.deepEqual(plain(on.growthbook.features[hashed("cowork_auto_permission_mode")]),
   { defaultValue: true }, "the on auto gate is preserved");
 
@@ -90,9 +89,13 @@ assert.deepEqual(plain(on.growthbook.features[hashed("cowork_auto_permission_mod
 const onlyBypass = { growthbook: { features: {
   [hashed("cowork_bypass_permissions_mode")]: { defaultValue: true },
 } } };
-assert.equal(bypassGate(onlyBypass), true, "an absent auto gate is added beside bypass");
+assert.equal(bypassGate(onlyBypass), true, "the other two gates are added beside bypass");
 assert.deepEqual(plain(onlyBypass.growthbook.features[hashed("cowork_auto_permission_mode")]),
   { defaultValue: true }, "the auto gate reads true");
+// Without this one the picker still *disables* the row, with the tooltip "Skip
+// all approvals only runs locally" — present but unclickable.
+assert.deepEqual(plain(onlyBypass.growthbook.features[hashed("ccr_mcp_permission_mode_override")]),
+  { defaultValue: true }, "the override gate reads true, so the row is selectable");
 
 assert.equal(bypassGate({}), false, "a bootstrap without growthbook is ignored");
 

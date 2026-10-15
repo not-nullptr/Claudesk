@@ -2026,11 +2026,21 @@ function grantCoworkSkipApprovals(value) {
 // one option hides itself. Auto mode is strictly weaker than the bypass mode
 // this deployment already offers, so enabling it alongside costs nothing and is
 // what gives the control a list.
+//
+// `ccr_mcp_permission_mode_override` is the third leg: the picker *disables* the
+// bypass row whenever it is off (`disabled = mode === "bypassPermissions" &&
+// !override`), with the tooltip "Skip all approvals only runs locally". So the
+// row can be present and still unclickable, which is the state this deployment
+// was in. Whatever the flag means upstream, here every session *is* local — the
+// bridge backs them over the Desktop IPC — so the condition it encodes is one
+// this deployment satisfies by construction, and the other two grants already
+// say the same thing about the same row.
 function grantCoworkPermissionGates(value) {
   const features = value?.growthbook?.features;
   if (!features || typeof features !== "object") return false;
   let changed = false;
-  for (const name of ["cowork_bypass_permissions_mode", "cowork_auto_permission_mode"]) {
+  for (const name of ["cowork_bypass_permissions_mode", "cowork_auto_permission_mode",
+    "ccr_mcp_permission_mode_override"]) {
     const key = growthbookKey(name);
     const entry = features[key];
     const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
