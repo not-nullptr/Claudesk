@@ -475,26 +475,30 @@ dropped from that cache at startup. With the gate off, the store repairs a
 hard-linked routine file for every writer — the web shell, the Desktop window's own
 routines list, the agent's `update_scheduled_task` tool.
 
-The wrapper also repairs the file itself: at a write, off the task id in the call,
-under every root the Desktop's resolver can answer with (the configured
-`coworkUserFilesPath` and the fallbacks it resolves for itself), and once at
-startup by sweeping those roots — which is what heals a routine that was already
-stuck, and what covers builds whose refusal has no gate at all (the Desktop
-version pinned here refuses unconditionally). The bridge does the same where it
-can, off the path Desktop's own task list answers for the task, since a store is
-free not to name the task's directory for its id. In the topology that runs the
-web shell as its own container with `/config` mounted read-only (`compose.yaml`),
-that container can only ever *report* one of these files — the app container owns
-the writes — so its report names the path, the link count and the error the repair
-hit, and appends what the app process says about its own repairs (`/health`
-carries `routineFileLinkRepair`).
+Two repairs do what the refusal asks, and both are a **copy at the same path** —
+the same bytes in a fresh inode, published by `rename`. It has to stay at that
+path rather than move out of the way: the store reads the file back to merge a
+prompt-only or description-only update, so a file that is not there fails that
+read (ENOENT) before any write happens. The wrapper repairs at a write, off the
+task id the call carries, under every root the Desktop's resolver can answer with
+(the configured `coworkUserFilesPath` and the fallbacks it resolves for itself),
+and once at startup by sweeping those roots — which is what heals a routine that
+was already stuck, and what covers a build whose refusal has no gate at all (the
+Desktop version pinned here refuses unconditionally, so that layer is the whole
+fix for it). The bridge does the same where it can, off the path Desktop's own
+task list answers for the task, since a store is free not to name the task's
+directory for its id. In the topology that runs the web shell as its own container
+with `/config` mounted read-only (`compose.yaml`), that container can only ever
+*report* one of these files — the app container owns the writes — so its report
+names the path, the link count and the error the repair hit, and appends what the
+app process says about its own repairs (`/health` carries `routineFileLinkRepair`).
 
-Neither repair writes through the link, so the other name keeps its bytes, and the
-moved file stays beside the task for inspection. When a refusal survives them, the
-error the client sees carries what the repair saw — the path Desktop answered, or
-the reason it answered none, how many links the file had, and what the app process
-reports about itself — so a routine stuck on a machine nobody logs into is
-diagnosable from the browser that hit it.
+Neither repair writes through the link, so whatever other name the inode carried
+keeps its own bytes (and, once the copy is published, keeps that inode to itself).
+When a refusal survives them, the error the client sees carries what the repair
+saw — the path Desktop answered, or the reason it answered none, how many links
+the file had, and what the app process reports about itself — so a routine stuck
+on a machine nobody logs into is diagnosable from the browser that hit it.
 
 ## Home greeting
 

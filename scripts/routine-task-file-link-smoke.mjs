@@ -117,10 +117,20 @@ async function storeWrite(args) {
   storeCalls.push({ id, dir, names: dir ? await readdir(dir).catch(() => null) : null });
   if (!dir) return "no-such-task";
   const file = join(dir, "SKILL.md");
+  // Desktop's writer reads the file back first — a prompt-only update merges into
+  // the description already in it — then refuses a path that carries a second
+  // link. A repair that moved the file out of the way fails that read, which is
+  // the shape this repair has to survive.
+  let existing;
+  try {
+    existing = await readFile(file, "utf8");
+  } catch {
+    throw new Error(`ENOENT: no such file or directory, open '${file}'`);
+  }
   const info = await lstat(file).catch(() => null);
   if (info?.isFile() && info.nlink > 1) throw new Error(refusal);
   if (info?.isSymbolicLink()) throw new Error("symlink detected before open; refusing to open");
-  await writeFile(file, "written by the store\n");
+  await writeFile(file, `${existing}written by the store\n`);
   return "updated";
 }
 ipcMain.handle(channelPrefix + "updateScheduledTask", async (_event, ...args) => storeWrite(args));
@@ -145,18 +155,16 @@ assert.equal((await lstat(codeFile)).nlink, 2, "the fixture starts hard-linked")
 
 assert.equal(await update([{ scheduledTaskId: codeId, prompt: "new" }]), "updated");
 assert.equal(storeCalls.length, 1, "the store's write runs once — the repair did not need a retry");
-assert.ok(!storeCalls[0].names.includes("SKILL.md"), "the linked file is moved aside before the write");
-assert.deepEqual(storeCalls[0].names.filter((name) => !name.startsWith("SKILL.md")), ["watching.js"],
-  "a plain neighbour is untouched");
+assert.deepEqual(storeCalls[0].names, ["SKILL.md", "watching.js"],
+  "the task's own file is still at its own path, and its plain neighbour with it");
 
-// The aside copy is the linked file itself, so nothing was written through the
-// link, and the other name still has its bytes.
-const aside = (await readdir(codeDir)).find((name) => name.startsWith("SKILL.md.hardlinked-"));
-assert.equal(await readFile(join(codeDir, aside), "utf8"), "ssh-rsa AAAA the other name's bytes\n");
-assert.equal((await lstat(twin)).nlink, 2, "the other name keeps its own link and its bytes");
+// The repair replaced the file: same bytes read back by the store, a fresh inode
+// with a single link, and the other name left with the old inode and its bytes.
+assert.equal(await readFile(codeFile, "utf8"),
+  "ssh-rsa AAAA the other name's bytes\nwritten by the store\n");
+assert.equal((await lstat(codeFile)).nlink, 1, "the task file is a plain copy");
+assert.equal((await lstat(twin)).nlink, 1, "the other name is left with the old inode, alone");
 assert.equal(await readFile(twin, "utf8"), "ssh-rsa AAAA the other name's bytes\n");
-assert.equal((await lstat(codeFile)).nlink, 1, "the store's write landed on a plain file");
-assert.equal(await readFile(codeFile, "utf8"), "written by the store\n");
 assert.ok(warnings.some((line) => line.includes(codeId) && line.includes("nlink 2")),
   "the repair is reported with the link count it saw");
 
@@ -171,9 +179,10 @@ await writeFile(join(coworkDir, "SKILL.md"), "cowork task\n");
 linkSync(join(coworkDir, "SKILL.md"), join(home, "cowork-twin"));
 storeDirs.set(coworkId, coworkDir);
 assert.equal(await update([{ scheduledTaskId: coworkId }]), "updated");
-assert.equal(await readFile(join(coworkDir, "SKILL.md"), "utf8"), "written by the store\n",
+assert.equal(await readFile(join(coworkDir, "SKILL.md"), "utf8"), "cowork task\nwritten by the store\n",
   "the Cowork store's linked file was repaired under the home root");
-assert.equal((await lstat(join(home, "cowork-twin"))).nlink, 2, "and the twin it shared an inode with is there");
+assert.equal((await lstat(join(home, "cowork-twin"))).nlink, 1,
+  "and the name it shared an inode with keeps that inode to itself");
 
 // --- the id can arrive on its own -------------------------------------------
 // The write channels are the official API's shape, not ours: a caller that sends
@@ -185,7 +194,7 @@ await writeFile(join(bareDir, "SKILL.md"), "bare\n");
 linkSync(join(bareDir, "SKILL.md"), join(home, "bare-twin"));
 storeDirs.set(bareId, bareDir);
 assert.equal(await update([bareId]), "updated");
-assert.equal(await readFile(join(bareDir, "SKILL.md"), "utf8"), "written by the store\n");
+assert.equal(await readFile(join(bareDir, "SKILL.md"), "utf8"), "bare\nwritten by the store\n");
 
 // --- a refusal the id cannot explain is swept -------------------------------
 // The directory holding a routine's file need not be named for the task id the
@@ -203,9 +212,11 @@ const sweptCallsBefore = storeCalls.length;
 assert.equal(await update([{ scheduledTaskId: sweptId }]), "updated",
   "the sweep's repair lets the retry through");
 assert.equal(storeCalls.length - sweptCallsBefore, 2, "one refusal, one retry");
-assert.equal(await readFile(join(sweptDir, "SKILL.md"), "utf8"), "written by the store\n");
-assert.ok((await readdir(sweptDir)).some((name) => name.startsWith("SKILL.md.hardlinked-")),
-  "the file the id did not point at is the one moved aside");
+assert.equal(await readFile(join(sweptDir, "SKILL.md"), "utf8"), "swept\nwritten by the store\n");
+assert.equal((await lstat(join(sweptDir, "SKILL.md"))).nlink, 1,
+  "the file the id did not point at is the one that was replaced");
+assert.ok(!(await readdir(sweptDir)).some((name) => name.includes(".hardlinked")),
+  "and the repair leaves no temporary beside it");
 
 // --- a refusal the repair cannot clear says what it saw ---------------------
 // The machine this happens on is one nobody logs into, so the message the client
@@ -245,6 +256,7 @@ const plainCallsBefore = storeCalls.length;
 assert.equal(await update([{ scheduledTaskId: plainId }]), "updated");
 assert.equal(storeCalls.length - plainCallsBefore, 1, "a plain task is written once");
 assert.deepEqual(await readdir(plainDir), ["SKILL.md"], "and nothing is left beside it");
+assert.equal(await readFile(join(plainDir, "SKILL.md"), "utf8"), "plain task\nwritten by the store\n");
 
 const linkId = "schedule-symlink";
 const linkDir = join(codeRoot, linkId);
@@ -499,14 +511,23 @@ async function handleStubRequest(request, response) {
     desktop.send(response, { ok: false, error: desktopRefusal });
     return;
   }
-  // The store's own writer: a path that carries a second link is refused, and
-  // anything else is written — created, when the repair left nothing there.
+  // The store's own writer, in the order Desktop's uses: it reads the file back
+  // first — a prompt-only update merges into the description already there — and
+  // then refuses a path that carries a second link. A repair that left no file to
+  // read fails here, which is exactly the shape this repair has to survive.
+  let existing;
+  try {
+    existing = await readFile(file, "utf8");
+  } catch (error) {
+    desktop.send(response, { ok: false, error: `ENOENT: no such file or directory, open '${file}'` });
+    return;
+  }
   const info = await lstat(file).catch(() => null);
   if (info?.isFile() && info.nlink > 1) {
     desktop.send(response, { ok: false, error: desktopRefusal });
     return;
   }
-  await writeFile(file, "written by the store\n");
+  await writeFile(file, `${existing}written by the store\n`);
   desktop.send(response, { ok: true, value: { scheduledTaskId } });
 }
 
@@ -554,14 +575,12 @@ try {
   const updated = await call(bridgeTask);
   assert.equal(updated.status, 200, `the write should succeed, got ${JSON.stringify(updated.body)}`);
   assert.equal(updated.body.ok, true);
-  assert.equal(await readFile(bridgeFile, "utf8"), "written by the store\n",
-    "the store's write landed after the repair");
-  assert.equal((await lstat(bridgeFile)).nlink, 1, "on a plain file");
-  const aside = (await readdir(join(storeRoot, "imported-9f3c")))
-    .find((name) => name.startsWith("SKILL.md.hardlinked-"));
-  assert.ok(aside, "the linked file was moved aside, beside the task");
-  assert.equal(await readFile(join(storeRoot, "imported-9f3c", aside), "utf8"),
-    "ssh-rsa AAAA the other name's bytes\n", "and it is the linked file itself, not a copy of a write");
+  assert.equal(await readFile(bridgeFile, "utf8"),
+    "ssh-rsa AAAA the other name's bytes\nwritten by the store\n",
+    "the store read the repaired file back and wrote it");
+  assert.equal((await lstat(bridgeFile)).nlink, 1, "the task file is a plain copy");
+  assert.ok(!(await readdir(join(storeRoot, "imported-9f3c"))).some((name) => name.includes(".hardlinked")),
+    "and no temporary is left beside it");
   assert.equal(await readFile(bridgeTwin, "utf8"), "ssh-rsa AAAA the other name's bytes\n",
     "the other name keeps its bytes");
   const listIndex = desktop.calls.findIndex((entry) => entry.method === "getAllScheduledTasks");
@@ -576,7 +595,7 @@ try {
   assert.match(String(stubborn.body.error), /hard-linked to another file/,
     "the store's own refusal is preserved");
   assert.match(String(stubborn.body.error),
-    /\[cowork-bridge: routine file repair saw .*moved aside \(was nlink 2\)/,
+    /\[cowork-bridge: routine file repair saw .*replaced with a plain copy \(was nlink 2\)/,
     "and it names the repair it performed");
   assert.equal(
     desktop.writes.filter((entry) => entry.scheduledTaskId === stubbornTask).length, 2,

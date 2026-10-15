@@ -1,7 +1,7 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { lstat, readFile, readdir, rename, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 import {
@@ -2823,11 +2823,10 @@ async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = fals
 //
 // Do what the refusal asks, in the bridge, where the call already passes: ask
 // Desktop for the task's own `filePath` — its task list carries it, and that is
-// the store's own answer, so the repair does not have to guess a directory that
-// a store is free not to name for the task id — move the linked file aside, and
-// let the store's write create a plain one. Nothing is ever written through the
-// link, so the other name keeps its bytes; the moved file stays beside the task
-// for inspection, and a refusal that survives says what the repair saw.
+// the store's own answer, so the repair does not have to guess a directory that a
+// store is free not to name for the task id — and replace that file with a plain
+// copy of the same bytes. Nothing is ever written through the link, so the other
+// name keeps its own bytes, and a refusal that survives says what the repair saw.
 const routineTaskFileWriteMethods = new Set([
   "updateScheduledTask",
   "updateScheduledTaskFileContent",
@@ -2860,8 +2859,12 @@ async function routineTaskFilePath(scheduledTaskId) {
   return { state: "path", filePath };
 }
 
-// Moves one linked file out of the way, and answers with what it saw — the note
-// travels back to the client when the write is refused anyway.
+// Replaces one linked file with a plain copy of the same bytes, in a fresh inode,
+// published by `rename` so the path is never missing — the store reads the file
+// back to merge a prompt-only or description-only update, so a file moved out of
+// the way would fail that read. Nothing is written through the link, so whatever
+// other name the inode carries keeps its own bytes. Answers with what it saw: the
+// note travels back to the client when the write is refused anyway.
 async function repairLinkedRoutineFile(filePath) {
   let info;
   try {
@@ -2871,18 +2874,20 @@ async function repairLinkedRoutineFile(filePath) {
   }
   if (!info.isFile()) return `${filePath}: not a file`;
   if (info.nlink <= 1) return `${filePath}: plain (nlink ${info.nlink})`;
-  const aside = `${filePath}${routineFileLinkSuffix}-${Date.now()}`;
   try {
-    await rename(filePath, aside);
+    const content = await readFile(filePath);
+    const temporary = `${filePath}${routineFileLinkSuffix}${Date.now()}`;
+    await writeFile(temporary, content, { mode: info.mode & 0o777 });
+    await rename(temporary, filePath);
   } catch (error) {
-    return `${filePath}: hard-linked (nlink ${info.nlink}), could not be moved aside (${error?.message || error})`;
+    return `${filePath}: hard-linked (nlink ${info.nlink}), could not be replaced with a copy (${error?.message || error})`;
   }
   console.log(
     `[cowork-bridge] routine file repair: ${filePath} was hard-linked to another name`
-      + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
-      + " so the Desktop writes a plain file",
+      + ` (nlink ${info.nlink}, inode ${info.ino}); replaced it with a plain copy`
+      + " so the Desktop can write it",
   );
-  return `${filePath}: moved aside (was nlink ${info.nlink})`;
+  return `${filePath}: replaced with a plain copy (was nlink ${info.nlink})`;
 }
 
 async function repairRoutineTaskFileForWrite(method, args) {

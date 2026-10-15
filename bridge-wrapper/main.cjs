@@ -207,11 +207,12 @@ function noteCoworkVmActivity() {
 // fails, from every client, until somebody with shell access on that machine
 // replaces the file by hand.
 //
-// Do what the refusal asks, from here, at the main process boundary: move the
-// linked file aside and let the store's own write create a plain one. Nothing is
-// ever written through the link, so the other name keeps its bytes, and moving
-// the file away is the whole repair — the store writes a fresh SKILL.md on the
-// attempt that follows. The channels below are the ones that write task files,
+// Do what the refusal asks, from here, at the main process boundary: replace the
+// linked file with a plain copy of the same bytes, at the same path. Nothing is
+// ever written through the link, so the other name keeps its bytes, and the copy
+// is the whole repair — the store's write then lands on it. It has to stay at
+// that path rather than move aside: the store reads the file back to merge a
+// prompt-only or description-only update. The channels below write task files,
 // so a routine heals on the first edit any client attempts, and stays healed:
 // the agent's own `update_scheduled_task` tool path (which never crosses an IPC)
 // finds a plain file afterwards.
@@ -278,9 +279,24 @@ function routineTaskIdsFromArgs(args) {
   return [...new Set(ids)].filter((id) => routineTaskIdPattern.test(id));
 }
 
-// Moves every hard-linked file out of the way in one routine's directory, and
-// answers with what it moved. Returns the moved paths so the caller can report
-// them; a link that is not there is not an error, and is not logged.
+// Replaces one linked file with a plain copy: the same bytes, in a fresh inode,
+// published by `rename` so the task's path is never missing. Nothing is written
+// through the link, so whatever other name the inode has keeps its own bytes.
+//
+// The copy has to stay *at* the path — not moved aside — because the store reads
+// the file back to merge a prompt-only or description-only update, and a file
+// that is not there fails that read (ENOENT) before any write happens. This is
+// what the refusal's own sentence asks for: "Replace it with a plain copy."
+async function plainCopyRoutineFile(path, info) {
+  const content = await readFile(path);
+  const temporary = `${path}${routineFileLinkSuffix}${Date.now()}`;
+  await writeFile(temporary, content, { mode: info.mode & 0o777 });
+  await rename(temporary, path);
+  return content.length;
+}
+
+// Repairs every hard-linked file in one routine's directory, and answers with
+// what it replaced. A link that is not there is not an error, and is not logged.
 async function repairRoutineDirectory(taskDir) {
   const moved = [];
   let entries;
@@ -300,8 +316,8 @@ async function repairRoutineDirectory(taskDir) {
     // the store's own symlink refusal is a different failure, and one this
     // repair must not paper over.
     if (!entry.isFile()) continue;
-    // The repair's own leftovers are hard-linked by construction (they are the
-    // linked inode, renamed), so moving them again would only rename them again.
+    // A temporary the repair was interrupted between writing and renaming.
+    // It is a copy, not a routine file, and is not the store's to write.
     if (entry.name.includes(routineFileLinkSuffix)) continue;
     const path = join(taskDir, entry.name);
     let info;
@@ -311,20 +327,20 @@ async function repairRoutineDirectory(taskDir) {
       continue;
     }
     if (!info.isFile() || info.nlink <= 1) continue;
-    const aside = `${path}${routineFileLinkSuffix}-${Date.now()}`;
+    let copied;
     try {
-      await rename(path, aside);
+      copied = await plainCopyRoutineFile(path, info);
     } catch (error) {
       console.warn(
-        `[cowork-wrapper] ${path} is hard-linked (nlink ${info.nlink}) and could not be moved aside: ${error?.message || error}`,
+        `[cowork-wrapper] ${path} is hard-linked (nlink ${info.nlink}) and could not be replaced with a copy: ${error?.message || error}`,
       );
       continue;
     }
     moved.push(path);
     console.warn(
       `[cowork-wrapper] ${path} was hard-linked to another name`
-      + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
-      + " so the Desktop writes a plain file",
+      + ` (nlink ${info.nlink}, inode ${info.ino}); replaced it with a plain copy`
+      + ` of the same ${copied} bytes so the Desktop can write it`,
     );
   }
   return moved;
@@ -366,17 +382,18 @@ function isLinkedRoutineFileRefusal(error) {
 // to repair stays linked forever, because every write is what the store refuses.
 // Sweep once when the app comes up, so a stuck routine heals on a restart instead
 // of waiting for an edit that cannot land. Same repair, same limits: only files
-// carrying a second link, only inside a routine's own directory.
+// carrying a second link, only inside a routine's own directory, and each is
+// replaced by a copy at its own path rather than moved out of the way.
 let routineFileLinkSweep = "pending";
 
 async function sweepHardLinkedRoutineFiles() {
   try {
     const moved = await repairLinkedRoutineFiles({ sweep: true });
-    routineFileLinkSweep = moved.length > 0 ? `moved ${moved.length}` : "clean";
+    routineFileLinkSweep = moved.length > 0 ? `repaired ${moved.length}` : "clean";
     if (moved.length > 0) {
       console.warn(
-        `[cowork-wrapper] routine file sweep at startup: moved ${moved.length} hard-linked file(s)`
-        + " aside so the store can write them",
+        `[cowork-wrapper] routine file sweep at startup: replaced ${moved.length} hard-linked file(s)`
+        + " with plain copies so the store can write them",
       );
     }
   } catch (error) {
