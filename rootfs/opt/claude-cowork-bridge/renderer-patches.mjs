@@ -342,38 +342,35 @@ const projectsPickerSectionOn = "!0";
 // Spliced only in web-shell mode, and not required.
 const projectsAtriumPatchId = "web-projects-atrium";
 const projectsAtriumFeature = "yukon_silver_dramatic_shrimp_atrium";
-// The picker's *server-side* project list — claude.ai's projects, which this
-// deployment does not have and cannot have. One component fetches them and
-// reports the result up to the picker:
+// The predicate every *server-side* project query is gated on. claude.ai's
+// projects are not a surface this deployment has: the routes are
+// `GET /api/organizations/<org>/projects_v2` (a creator list, a starred one, an
+// overflow page, a `uuids=` batch, a prefetch), the bridge forwards none of them,
+// and the platform refuses the family anyway — the Desktop answers
+// `custom_3p_not_available` for the org routes it does carry.
 //
-//   let r = serverProjectsAvailable(), {own, starred} = projectQueries(r), …
-//   te = memo(() => r
-//     ? { browse: ee, browseLoading: W, all: A, allLoading: !k && !E, failed: V || E }
-//     : NO_PROJECTS, […]);
-//   useEffect(() => { report(te); }, [te, report]);
+//   function serverProjectsAvailable() {
+//     let { activeOrganization } = useSession(), plan = projectsPredicate(),
+//         probe = accountProbe().isAvailable;
+//     return !!activeOrganization && plan && probe;
+//   }
 //
-// Those queries are `GET /api/organizations/<org>/projects` (a creator list, a
-// starred one, an overflow page and a `uuids=` batch). A third-party instance
-// answers the route with `custom_3p_not_available`, so they never settle: the
-// picker is told its projects are still loading and draws its skeleton rows
-// forever, and its empty state — `!loading && no projects` — is unreachable.
-//
-// The projects this deployment *does* have are the Desktop's **spaces**, which
-// reach the same picker by an entirely different route: as folder targets marked
-// `isProject` through the folders gate, drawn by the same rows. So the fix is not
-// to serve a second project store — it is to report the server list the way this
-// deployment's answer actually is: none, and not in flight. The patch forces the
-// three computed terms of that report (`browseLoading`, `allLoading`, `failed`)
-// to `false`, leaving the memo, the queries and every hook call where they were;
-// the picker then draws its spaces, its folders, and — on an account with neither
-// — the "No projects yet." empty state claude.ai shows. Pinned by the report's
-// own five keys (the module's "no projects" constant carries the same keys, as
-// literals, which is what the `allLoading` test separates), and spliced only in
-// web-shell mode. Not required.
-const projectsRemoteListPatchId = "web-projects-remote-list";
-const projectsRemoteReportKeys = ["browse", "browseLoading", "all", "allLoading", "failed"];
-const projectsRemoteReportForced = ["browseLoading", "allLoading", "failed"];
-const projectsRemoteReportOff = "!1";
+// It is read in two places, and both are the whole of the surface: the projects
+// page passes it as the list query's `enabled` (and prefetches behind it), so a
+// false stops the request outright, and the composer picker's report component
+// passes it to its project queries, so a false makes it report the module's
+// `NO_PROJECTS` constant — empty, not loading, not failed. With the queries
+// unsent the picker stops skeleton-drawing, the page stops asking, and the
+// projects this deployment actually has — the Desktop's **spaces**, which reach
+// the composer as folder targets marked `isProject` under the folders gate —
+// are what the surfaces draw. Splicing the returned expression keeps the
+// declarators, which is where the hooks are, so hook order is unchanged. Pinned
+// as a zero-argument function returning an `&&` chain whose last operand is a
+// call's `isAvailable` — the account probe — which is the shape no other
+// predicate in the graph has. Spliced only in web-shell mode, and not required:
+// a bundle that no longer matches leaves the requests to 404 as they do today.
+const projectsServerProjectsPatchId = "web-projects-remote-list";
+const projectsServerProjectsOff = "!1";
 // The permission picker's own binding, which is the same missing store once
 // more. The composer picks that control's content from a hook:
 //
@@ -1134,23 +1131,40 @@ function projectsAtriumTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
-// The picker's server-projects report, and the entries of it the patch forces.
-// The module's own "no projects" constant carries the same five keys, so the
-// report is the one whose `allLoading` is computed — `!k && !E`, where the
-// constant answers the minified `!1` the same key holds there.
-function projectsRemoteReportTarget(ast) {
-  const reports = [];
+// The server-projects predicate. `let first = …, probe = read().isAvailable;
+// return a && b && probe` is how this bundle spells *every* capability
+// predicate — the search one, the Cowork one, another feature's — so the shape
+// alone would match four of them. What separates this one is what it reads: the
+// account's active organization (the same `activeOrganization` destructuring the
+// rest of the chrome uses) beside the probe, and a three-operand chain ending in
+// the probe rather than the two the others have. Exactly one function in the
+// bundle matches, which is asserted by the smoke fixture.
+function projectsServerProjectsTarget(ast) {
+  const isProbe = (node) => {
+    const member = unwrap(node);
+    return member?.type === "MemberExpression" && identifier(member.property) === "isAvailable"
+      && unwrap(member.object)?.type === "CallExpression";
+  };
+  const found = [];
   walk(ast, [], (node) => {
-    if (node.type !== "ObjectExpression") return;
-    const keys = node.properties.filter(entry => entry.type === "Property")
-      .map(entry => entry.key.name ?? entry.key.value);
-    if (keys.length !== projectsRemoteReportKeys.length) return;
-    if (!projectsRemoteReportKeys.every(name => keys.includes(name))) return;
-    if (!node.properties.some(entry => key(entry, "allLoading")
-      && unwrap(entry.value)?.type === "LogicalExpression")) return;
-    reports.push(node);
+    if (node.type !== "FunctionDeclaration" || node.params.length !== 0) return;
+    const statements = node.body?.body;
+    if (statements?.length !== 2) return;
+    const [declaration, returned] = statements;
+    if (declaration.type !== "VariableDeclaration" || returned.type !== "ReturnStatement") return;
+    const [account] = declaration.declarations;
+    if (declaration.declarations.length !== 3 || account.id?.type !== "ObjectPattern") return;
+    if (!account.id.properties.some(entry =>
+      (entry.key?.name ?? entry.key?.value) === "activeOrganization")) return;
+    const probe = declaration.declarations
+      .filter(entry => entry.id?.type === "Identifier" && isProbe(entry.init))
+      .map(entry => entry.id.name);
+    if (probe.length !== 1) return;
+    const operands = flattenLogical(returned.argument, "&&");
+    if (operands.length !== 3 || identifier(operands.at(-1)) !== probe[0]) return;
+    found.push(returned.argument);
   });
-  return reports.length === 1 ? reports[0] : undefined;
+  return found.length === 1 ? found[0] : undefined;
 }
 
 // The permission binding hook's guard: the `if` whose body hands back the object
@@ -1903,16 +1917,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         original: source.slice(atrium.start, atrium.end),
         replacement: source.slice(read.start, read.end) });
     }
-    // The picker's server-side project list: this deployment has no such list, so
-    // the report stops claiming to be loading it or to have failed to.
-    const report = projectsRemoteReportTarget(ast);
-    if (report) {
-      for (const entry of report.properties) {
-        if (!projectsRemoteReportForced.includes(entry.key.name ?? entry.key.value)) continue;
-        patches.push({ id: projectsRemoteListPatchId, start: entry.value.start,
-          end: entry.value.end, original: source.slice(entry.value.start, entry.value.end),
-          replacement: projectsRemoteReportOff });
-      }
+    // The server-projects predicate: this deployment has no such backend, so the
+    // queries it gates are never asked and the picker reports none.
+    const serverProjects = projectsServerProjectsTarget(ast);
+    if (serverProjects) {
+      patches.push({ id: projectsServerProjectsPatchId, start: serverProjects.start,
+        end: serverProjects.end, original: source.slice(serverProjects.start, serverProjects.end),
+        replacement: projectsServerProjectsOff });
     }
     // The slot's bound-project branch, so the slot draws the selector instead of
     // the component that answers null without a resolved device binding.

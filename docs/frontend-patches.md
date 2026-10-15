@@ -498,31 +498,36 @@ spells only there, and by the two-expression sequence's shape, so an unrelated
 sequence — or the same reader discarding a different feature's read — cannot
 match. Spliced only in web-shell mode, and not required.
 
-`web-projects-remote-list` reports the picker's **server-side** project list the
-way this deployment's answer actually is: none, and not in flight. Those rows come
-from claude.ai's own projects API — `GET /api/organizations/<org>/projects`, a
-creator list, a starred one, an overflow page and a `uuids=` batch — which one
-component fetches and reports up to the picker as a five-key object:
+`web-projects-remote-list` turns off the predicate every **server-side** project
+query is gated on, because claude.ai's projects are not a surface this deployment
+has. Those queries are `GET /api/organizations/<org>/projects_v2` — a creator
+list, a starred one, an overflow page, a `uuids=` batch, and a prefetch the
+projects page runs — and this predicate is what arms all of them:
 
 ```js
-let r = serverProjectsAvailable(), {own, starred} = projectQueries(r), …;
-te = memo(() => r ? { browse, browseLoading, all, allLoading: !k && !E, failed: V || E }
-                  : NO_PROJECTS, […]);
+function serverProjectsAvailable() {
+  let { activeOrganization } = useSession(), plan = projectsPredicate(),
+      probe = accountProbe().isAvailable;
+  return !!activeOrganization && plan && probe;
+}
 ```
 
-A third-party instance refuses that route (`custom_3p_not_available`), so the
-queries never settle, the picker is told they are still loading, and it draws its
-skeleton rows forever — its empty state is defined as "not loading and no
-projects", which nothing can reach. The projects this deployment does have are the
-Desktop's **spaces**, which arrive in the same picker by a different route
-entirely: as folder targets marked `isProject`, through the folders gate, drawn by
-the same rows. So the patch forces the report's three computed terms
-(`browseLoading`, `allLoading`, `failed`) to false, leaving its memo, its queries
-and every hook call untouched. The picker then draws its spaces and its folders,
-and on an account with neither, the "No projects yet." empty state claude.ai
-shows. Pinned by the report's five keys and by the computed `allLoading` that
-separates it from the module's own no-projects object, which carries the same keys
-as constants. Spliced only in web-shell mode, and not required.
+It has exactly two callers and they are the whole of the surface. The projects
+page passes it as the list query's `enabled`, and prefetches behind it, so a false
+stops those requests outright. The composer picker's report component passes it to
+its own project queries, so a false makes that component report the module's
+`NO_PROJECTS` constant — empty, not loading, not failed — and the picker stops
+skeleton-drawing on a list that will never arrive. The projects this deployment
+does have are the Desktop's **spaces**, which reach the composer by a different
+route: as folder targets marked `isProject`, through the folders gate, drawn by
+the same rows. The patch splices the returned expression alone, so the
+declarators — where the feature reads and the account probe live, both hooks — stay
+put and hook order is unchanged. The function is pinned as the only predicate in
+the graph that reads `activeOrganization` beside its capability probe, because
+`let first = …, probe = read().isAvailable; return a && b && probe` is how the
+bundle spells *every* capability predicate, and three others match the shape
+alone. Spliced only in web-shell mode, and not required: a bundle that no longer
+matches leaves the requests to fail as they do today.
 
 `web-permission-binding` fixes the composer's permission control, which is the
 same missing store again: the hook that feeds it answers only while the

@@ -1027,55 +1027,52 @@ const atriumCompiled = await minify(atriumChunk, {
 assert.equal(inspectRenderer(atriumCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-atrium").length, 1,
   "a mangled capability must still be unwrapped once");
-// The picker's server-side project list. The component that fetches claude.ai's
-// projects reports them up as a five-key object; a third-party instance never
-// answers the route, so the report has to stop claiming to be loading them. The
-// three computed terms are forced and the memo, the queries and the module's own
-// "no projects" object are left exactly where they were.
-const projectsRemoteReport = (name = "projectsReport") => `function ${name}(r){`
-  + "let k=settled(),E=failed(),W=working(),V=errored();return useMemo(()=>r?"
-  + "{browse:list(W),browseLoading:W,all:all(k),allLoading:!k&&!E,failed:V||E}"
-  + ":NO_PROJECTS,[r,E,k,W,V])}";
-const noProjectsConstant = "var NO_PROJECTS="
-  + "{browse:EMPTY,browseLoading:!1,all:EMPTY,allLoading:!1,failed:!1};";
-const projectsRemoteChunk = `${noProjectsConstant}${projectsRemoteReport()}`
-  // The same five keys answered entirely by constants, as the module's own object
-  // is: nothing in it is computed, so it is not a report.
-  + "var OTHER={browse:EMPTY,browseLoading:!1,all:EMPTY,allLoading:!1,failed:!1};";
-assert.equal(inspectRenderer(`${webShellFixtures}\n${projectsRemoteChunk}`, false, false).patches
+// The server-projects predicate. Every capability predicate in the bundle is
+// spelled `let first = …, probe = read().isAvailable; return a && b && …`, so the
+// shape alone matches four of them — the search one, the Cowork one and another
+// feature's. The patch pins the one that also reads the account's active
+// organization and chains three operands rather than two; the fixture carries the
+// sibling spellings to prove they are left alone.
+const serverProjectsPredicate = (name = "serverProjectsAvailable") =>
+  `function ${name}(){let{activeOrganization:e}=session(),t=projectsPredicate(),`
+  + "n=accountProbe().isAvailable;return!!e&&t&&n}";
+const siblingCapabilityPredicates =
+  "function searchAvailable(){let e=flag(),t=searchProbe().isAvailable;return e&&t}"
+  + "function coworkAvailable(){let e=otherFlag(),t=coworkProbe().isAvailable;return e&&t}";
+const serverProjectsChunk = `${serverProjectsPredicate()}${siblingCapabilityPredicates}`;
+assert.equal(inspectRenderer(`${webShellFixtures}\n${serverProjectsChunk}`, false, false).patches
   .filter(patch => patch.id === "web-projects-remote-list").length, 0,
-  "the report is left alone outside web-shell mode");
-const projectsRemotePatches = inspectRenderer(`${webShellFixtures}\n${projectsRemoteChunk}`,
+  "the predicate is left alone outside web-shell mode");
+const serverProjectsPatches = inspectRenderer(`${webShellFixtures}\n${serverProjectsChunk}`,
   false, true).patches.filter(patch => patch.id === "web-projects-remote-list");
-assert.equal(projectsRemotePatches.length, 3,
-  "exactly the report's three computed terms must be forced");
-assert.deepEqual(projectsRemotePatches.map(patch => patch.original), ["W", "!k&&!E", "V||E"],
-  "only the loading and failure terms are spliced, not the lists");
-assert.ok(projectsRemotePatches.every(patch => patch.replacement === "!1"),
-  "each forced term answers false");
+assert.equal(serverProjectsPatches.length, 1,
+  "exactly the projects predicate must be spliced, and its siblings not");
+assert.equal(serverProjectsPatches[0].original, "!!e&&t&&n",
+  "only the returned expression is spliced");
+assert.equal(serverProjectsPatches[0].replacement, "!1",
+  "the predicate must answer false");
 assert.equal(inspectRenderer(
-  `${webShellFixtures}\n${projectsRemoteReport()}\n${projectsRemoteReport("otherReport")}`,
+  `${webShellFixtures}\n${serverProjectsPredicate()}\n${serverProjectsPredicate("other")}`,
   false, true).patches.filter(patch => patch.id === "web-projects-remote-list").length, 0,
   "two candidates must refuse the splice rather than force one of two");
-const projectsRemoteOut = patchRendererSources(new Map([["remote.js",
-  `${webShellFixtures}\n${accountMenuName}\n${projectsRemoteChunk}`]]), false, true)
-  .sources.get("remote.js");
-assert.ok(projectsRemoteOut.includes("{browse:list(W),browseLoading:!1,all:all(k),"
-  + "allLoading:!1,failed:!1}"),
-  "the report must answer empty, not loading and not failed");
-assert.ok(projectsRemoteOut.includes(noProjectsConstant),
-  "the module's own no-projects object must survive byte-for-byte");
-assert.ok(projectsRemoteOut.includes("var OTHER={browse:EMPTY,browseLoading:!1,all:EMPTY,"
-  + "allLoading:!1,failed:!1};"),
-  "a same-keys object of constants must not be mistaken for the report");
-assert.ok(projectsRemoteOut.includes("browse:list(W),browseLoading:!1"),
-  "the component's own list terms must stay in the object");
-const projectsRemoteCompiled = await minify(projectsRemoteChunk, {
+const serverProjectsOut = patchRendererSources(new Map([["server.js",
+  `${webShellFixtures}\n${accountMenuName}\n${serverProjectsChunk}`]]), false, true)
+  .sources.get("server.js");
+assert.ok(serverProjectsOut.includes("{let{activeOrganization:e}=session(),"
+  + "t=projectsPredicate(),n=accountProbe().isAvailable;return!1}"),
+  "the declarators, and the hooks in them, must survive the splice");
+assert.ok(serverProjectsOut.includes("function searchAvailable(){let e=flag(),"
+  + "t=searchProbe().isAvailable;return e&&t}"),
+  "a two-operand capability predicate must survive untouched");
+assert.ok(serverProjectsOut.includes("function coworkAvailable(){let e=otherFlag(),"
+  + "t=coworkProbe().isAvailable;return e&&t}"),
+  "the Cowork capability predicate must survive untouched");
+const serverProjectsCompiled = await minify(serverProjectsChunk, {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
-assert.equal(inspectRenderer(`${webShellFixtures}\n${projectsRemoteCompiled.code}`, false, true)
-  .patches.filter(patch => patch.id === "web-projects-remote-list").length, 3,
-  "a mangled report must still be forced three times");
+assert.equal(inspectRenderer(`${webShellFixtures}\n${serverProjectsCompiled.code}`, false, true)
+  .patches.filter(patch => patch.id === "web-projects-remote-list").length, 1,
+  "a mangled predicate must still be spliced once");
 // The sidebar's Projects entry. Both builds filter their nav items through one
 // negated `||` chain, and both clauses about the entry itself are false on
 // claude.ai while being true here: one is Desktop-only (built on

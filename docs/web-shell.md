@@ -738,21 +738,29 @@ unchanged. The function is pinned by the feature-name literal, which the bundle
 spells only there, and by the two-expression sequence's shape. Spliced only in
 web-shell mode, and not required.
 
-**The list inside that popup** is a different project surface again, and the one
-that leaves it spinning. Its rows come from claude.ai's *server-side* projects —
-`GET /api/organizations/<org>/projects`, in a creator list, a starred one, an
-overflow page and a `uuids=` batch — which one component fetches and reports up as
-a five-key object. On a third-party instance that route answers
-`custom_3p_not_available`, so the queries never settle, the picker is told they are
-still loading, and the skeleton is what is left: its empty state is defined as
-"not loading, and no projects", which nothing reaches while the flag says
-otherwise. The projects this deployment *does* have are the Desktop's **spaces**,
-and they reach this same picker by another route — as folder targets marked
-`isProject`, through the folders gate, drawn by the same rows. So
-`web-projects-remote-list` forces the computed terms of that report to false
-rather than serving a second project store: the picker draws its spaces and its
-folders, and an account with neither gets the "No projects yet." state claude.ai
-shows. The memo, the queries and the hooks stay where they were.
+**The server-side project list** is a different surface again, and the one that
+keeps asking. Its queries are `GET /api/organizations/<org>/projects_v2` — a
+creator list, a starred one, an overflow page, a `uuids=` batch, and a prefetch
+the projects page runs — all armed by one predicate:
+
+```js
+function serverProjectsAvailable() {
+  let { activeOrganization } = useSession(), plan = projectsPredicate(),
+      probe = accountProbe().isAvailable;
+  return !!activeOrganization && plan && probe;
+}
+```
+
+The bridge forwards none of those routes and the platform refuses the family, so
+they never settle: the projects page waits on them and the composer picker is told
+its projects are still loading, which is what leaves it skeleton-drawing (its
+empty state is defined as "not loading, and no projects", and nothing reaches that
+while the loading term is true). The projects this deployment *does* have are the
+Desktop's **spaces**, and they reach this same picker by another route — as folder
+targets marked `isProject`, through the folders gate, drawn by the same rows. So
+`web-projects-remote-list` splices that predicate to false: the page stops asking,
+the picker reports the module's own no-projects constant, and both surfaces draw
+what exists here. The declarators stay, so the hooks in them still run.
 
 The permission control is the same missing store showing up once more. The
 composer chooses that slot's content from a hook:
