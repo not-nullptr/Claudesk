@@ -2009,19 +2009,36 @@ function grantCoworkSkipApprovals(value) {
   return true;
 }
 
-// Force the `cowork_bypass_permissions_mode` rollout gate on in the bootstrap's
-// growthbook table. `grantWebShellGates` only adds an absent gate; this one may
-// already be carried (evaluated false), so it is replaced outright to make
-// `T("cowork_bypass_permissions_mode")` read true alongside the settings above.
-function grantCoworkBypassGate(value) {
+// Force the two Cowork permission-mode rollout gates on in the bootstrap's
+// growthbook table. `grantWebShellGates` only adds an absent gate; these may
+// already be carried (evaluated false), so they are replaced outright.
+//
+// `cowork_bypass_permissions_mode` puts the "Skip all approvals" row in the
+// picker, alongside the org setting forced above.
+//
+// `cowork_auto_permission_mode` is what makes the picker exist at all. The
+// renderer builds its set of selectable modes from these two flags alone
+// (`resolved = []` when both are off, plus `auto` and `bypassPermissions` for
+// whichever is on), and the Cowork mode list itself is a single entry — so with
+// only bypass on, and bypass excluded for a session-scoped picker, the list has
+// nothing to choose between and the component returns null instead of drawing.
+// That is why the composer's permission control was an empty slot: a picker with
+// one option hides itself. Auto mode is strictly weaker than the bypass mode
+// this deployment already offers, so enabling it alongside costs nothing and is
+// what gives the control a list.
+function grantCoworkPermissionGates(value) {
   const features = value?.growthbook?.features;
   if (!features || typeof features !== "object") return false;
-  const key = growthbookKey("cowork_bypass_permissions_mode");
-  const entry = features[key];
-  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
-  if (on) return false;
-  features[key] = { defaultValue: true };
-  return true;
+  let changed = false;
+  for (const name of ["cowork_bypass_permissions_mode", "cowork_auto_permission_mode"]) {
+    const key = growthbookKey(name);
+    const entry = features[key];
+    const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+    if (on) continue;
+    features[key] = { defaultValue: true };
+    changed = true;
+  }
+  return changed;
 }
 
 function containsSensitiveCredential(value) {
@@ -2179,7 +2196,7 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (coworkSkipApprovals && bootstrapResponsePath.test(url.pathname)
-      && grantCoworkBypassGate(parsed)) {
+      && grantCoworkPermissionGates(parsed)) {
       rewrote = true;
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");

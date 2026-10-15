@@ -42,7 +42,16 @@ self-hosted, single-user deployment has no org admin to flip the first, so with
 `CLAUDE_REMOTE_COWORK_SKIP_APPROVALS` on (default with the web shell) the bridge
 rewrites the org's `cowork_settings` document and the bootstrap's growthbook
 table to answer both as enabled (`grantCoworkSkipApprovals`,
-`grantCoworkBypassGate`). This is a real safety switch — Skip all approvals runs
+`grantCoworkPermissionGates`). The same call also grants `cowork_auto_permission_mode`, which is not a safety
+switch but the thing that gives the picker a list at all: the renderer builds its
+set of selectable Cowork modes from those two flags and nothing else, the Cowork
+mode list itself is a single entry, and the bypass entry is excluded for a
+session-scoped picker — so with bypass alone there is nothing to choose between
+and the component returns null instead of drawing. That is why the composer's
+permission control was empty. Auto mode is weaker than the bypass mode already
+offered here, so enabling it alongside costs nothing.
+
+This is a real safety switch — Skip all approvals runs
 Cowork with no tool prompts — so it is off without the web shell and `…=0`
 restores the upstream value.
 

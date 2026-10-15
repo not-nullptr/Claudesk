@@ -42,7 +42,7 @@ function load({ webShell = false, env = {} } = {}) {
     `${flagSource}${settingsPathLine}${grantSection}
      result = {
        skipApprovals: grantCoworkSkipApprovals,
-       bypassGate: grantCoworkBypassGate,
+       bypassGate: grantCoworkPermissionGates,
        connectorGate: grantConnectorGates,
        hashed: growthbookKey,
        path: coworkSettingsPath,
@@ -75,10 +75,24 @@ assert.equal(bypassGate(off), true, "a gate evaluated false is replaced");
 assert.deepEqual(plain(off.growthbook.features[hashed("cowork_bypass_permissions_mode")]),
   { defaultValue: true }, "the replacement reads true");
 
-const on = { growthbook: { features: { [hashed("cowork_bypass_permissions_mode")]: { defaultValue: true } } } };
-assert.equal(bypassGate(on), false, "an already-on gate is a no-op");
-assert.deepEqual(plain(on.growthbook.features[hashed("cowork_bypass_permissions_mode")]),
-  { defaultValue: true }, "the on gate is preserved");
+const on = { growthbook: { features: {
+  [hashed("cowork_bypass_permissions_mode")]: { defaultValue: true },
+  [hashed("cowork_auto_permission_mode")]: { defaultValue: true },
+} } };
+assert.equal(bypassGate(on), false, "both gates already on is a no-op");
+assert.deepEqual(plain(on.growthbook.features[hashed("cowork_auto_permission_mode")]),
+  { defaultValue: true }, "the on auto gate is preserved");
+
+// The auto gate is what gives the picker a list: the mode set is these two flags
+// and nothing else, the Cowork list itself is a single entry, and the bypass
+// entry is excluded for a session-scoped picker — so with bypass alone there is
+// nothing to choose between and the control hides itself.
+const onlyBypass = { growthbook: { features: {
+  [hashed("cowork_bypass_permissions_mode")]: { defaultValue: true },
+} } };
+assert.equal(bypassGate(onlyBypass), true, "an absent auto gate is added beside bypass");
+assert.deepEqual(plain(onlyBypass.growthbook.features[hashed("cowork_auto_permission_mode")]),
+  { defaultValue: true }, "the auto gate reads true");
 
 assert.equal(bypassGate({}), false, "a bootstrap without growthbook is ignored");
 
