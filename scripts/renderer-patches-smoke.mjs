@@ -863,9 +863,8 @@ assert.deepEqual(designIds.map(patch => patch.original).sort(),
 const designOut = patchRendererSources(
   new Map([["design.js", `${webShellFixtures}\n${accountMenuName}\n${designPredicates}`]]), false, true)
   .sources.get("design.js");
-assert.match(designOut,
-  /return\(+globalThis\.__CLAUDESK_ARM__=globalThis\.__CLAUDESK_ARM__\|\|\[\],globalThis\.__CLAUDESK_ARM__\[0\]=e\|\|t,!0\)+&&!inSidePanel\(\)/,
-  "the forced operand must publish its input and leave the side-panel guard in place");
+assert.ok(designOut.includes("return(!0)&&!inSidePanel()"),
+  "the forced operand must leave the side-panel guard in place");
 assert.ok(!designOut.includes("pick(n)&&"), "the latch-aware predicate's operand must be replaced");
 assert.ok(designOut.includes("return e&&!inSidePanel()"),
   "a guard that does not read the feature must survive untouched");
@@ -898,8 +897,8 @@ assert.deepEqual(forced.map(patch => patch.id).sort(),
 assert.deepEqual(forced.map(patch => patch.original).sort(),
   ['e?"hub":t?"outside":"none"', 'isStart()?defaultVariant:t'],
   "only the consuming ternary and the three-name conditional are spliced");
-assert.ok(forced.every(patch => /__CLAUDESK_/.test(patch.replacement)),
-  "each forced decision must publish the value it replaced");
+assert.deepEqual(forced.map(patch => patch.replacement).sort(), ['"home"', '"outside"'],
+  "each decision is forced to the deployed answer");
 // A ternary whose consequent is not the component's own prop default is not a
 // target, and two candidates in one chunk refuse rather than pick one.
 assert.ok(!inspectRenderer(`${variantFixture()}\n${surfaceFixture()}`, false, true).patches
@@ -914,9 +913,9 @@ assert.equal(inspectRenderer(`${surfaceFixture()}\n${surfaceFixture("B")}`, fals
 const decisionsOut = patchRendererSources(
   new Map([["decisions.js", `${webShellFixtures}\n${accountMenuName}\n${variantFixture()}\n${surfaceFixture()}`]]),
   false, true).sources.get("decisions.js");
-assert.ok(decisionsOut.includes('(globalThis.__CLAUDESK_LAYOUT__=isStart()?defaultVariant:t,"home")'),
+assert.ok(decisionsOut.includes('let h="home"'),
   "the consuming ternary must be spliced to the home arm");
-assert.ok(decisionsOut.includes('return (globalThis.__CLAUDESK_SURFACE__=e?"hub":t?"outside":"none","outside")'),
+assert.ok(decisionsOut.includes('return "outside"'),
   "the route surface kind must be spliced to the outside arm");
 assert.ok(decisionsOut.includes('let h=isStart()?firstDefault:t'),
   "a ternary naming another component's default must survive untouched");

@@ -140,14 +140,6 @@ const homeVariantPatchId = "web-new-page-home-variant";
 const homeVariantReplacement = '"home"';
 const homeArrangementPatchId = "web-home-composer-arrangement";
 const homeArrangementReplacement = '"outside"';
-// What each forced decision published on the way: the value it was about to
-// replace, and the surface kind's single one. Read by the preload's on-page
-// report, and the only way to tell a force that worked from one that was never
-// reached. The layout variable is the ternary's own value; the arm is an array
-// because several predicates answer the same question from different readings.
-const layoutProbe = "globalThis.__CLAUDESK_LAYOUT__";
-const armProbe = "globalThis.__CLAUDESK_ARM__";
-const surfaceProbe = "globalThis.__CLAUDESK_SURFACE__";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -1137,33 +1129,27 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   let toastPublished = false;
   if (webShellEnabled) {
     // The unified-composer design predicates are forced to their flag operand.
-    // Each one also publishes the value it replaced, so the on-page report can
-    // tell a force that took from one whose input now shares the site.
-    composerDesignOperands(ast).forEach((operand, index) => {
-      const original = source.slice(operand.start, operand.end);
+    for (const operand of composerDesignOperands(ast)) {
       patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
-        original,
-        replacement: `(${armProbe}=${armProbe}||[],${armProbe}[${index}]=${original},!0)` });
-    });
+        original: source.slice(operand.start, operand.end), replacement: "!0" });
+    }
     // The layout variant and the surface kind that selects the home composer
     // arrangement are forced to the deployed answer, each from its own shape and
-    // only when that shape is unambiguous in the chunk. Each publishes the value
-    // it replaced for the same reason.
+    // only when that shape is unambiguous in the chunk.
     const variants = [];
     const surfaces = [];
     walk(ast, [], (node, ancestors) => {
       if (homeLayoutVariantTarget(node, ancestors)) variants.push(node);
       if (homeSurfaceKindTarget(node)) surfaces.push(node);
     });
-    for (const [targets, id, probe, forced] of [
-      [variants, homeVariantPatchId, layoutProbe, homeVariantReplacement],
-      [surfaces, homeArrangementPatchId, surfaceProbe, homeArrangementReplacement],
+    for (const [targets, id, forced] of [
+      [variants, homeVariantPatchId, homeVariantReplacement],
+      [surfaces, homeArrangementPatchId, homeArrangementReplacement],
     ]) {
       if (targets.length !== 1) continue;
       const [target] = targets;
-      const original = source.slice(target.start, target.end);
-      patches.push({ id, start: target.start, end: target.end, original,
-        replacement: `(${probe}=${original},${forced})` });
+      patches.push({ id, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end), replacement: forced });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.
