@@ -629,6 +629,24 @@ const configuredModels = (() => {
     return [];
   }
 })();
+// The same list with the label each entry displays as: the operator's
+// `labelOverride` when they set one, else the id itself. This is what the admin
+// page's model-picker card shows beside the id, so a name like "MiniMax M3" is
+// recognisable without knowing the route name behind it.
+const configuredModelCatalogue = (() => {
+  try {
+    const value = JSON.parse(process.env.CLAUDE_INFERENCE_MODELS_JSON || "[]");
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((model) => {
+      if (typeof model === "string") return model ? [{ id: model, name: model }] : [];
+      if (typeof model?.name !== "string" || !model.name) return [];
+      const label = typeof model.labelOverride === "string" ? model.labelOverride.trim() : "";
+      return [{ id: model.name, name: label || model.name }];
+    });
+  } catch {
+    return [];
+  }
+})();
 const allowedModels = new Set(configuredModels);
 const allowedDeveloperActions = new Set([
   "record-memory-trace",
@@ -2221,6 +2239,71 @@ function applyModelPickerLayout(value, mainModels) {
   return changed;
 }
 
+// The picker's model list as the last bootstrap response carried it — the data
+// the admin page's model-picker card offers (GET /api/chat/model-catalog), so the
+// card can name the models the way the menu does instead of asking an operator to
+// type route names. Reading it from the served document is also the only way to
+// see models that came from gateway discovery: when nothing pins the list, the
+// endpoint is what knows them and no env value does.
+//
+// The picker's own surface is the one the unified home renders; the chat surface
+// is the fallback for a build without it. Empty until a page has been served, so
+// the card asks the Desktop itself once (see refreshPickerModels) and falls back
+// to the env list only if that fails (see configuredModelCatalogue).
+const pickerModelsSeen = { models: [] };
+// When the Desktop was last asked for the list, and the read in flight. A
+// deployment in discovery mode has no env list to fall back to, so a failed read
+// is retried, but not on every request the card makes.
+const pickerModelsRead = { attemptedAt: 0, inFlight: null };
+const PICKER_MODELS_READ_TTL_MS = 30 * 1000;
+
+function rememberPickerModels(value) {
+  const surfaces = value?.model_selector_config;
+  if (!Array.isArray(surfaces)) return;
+  const surface = surfaces.find((item) => item?.id === "cowork" && Array.isArray(item.models))
+    ?? surfaces.find((item) => item?.id === "chat" && Array.isArray(item.models))
+    ?? surfaces.find((item) => Array.isArray(item?.models));
+  if (!surface) return;
+  const models = [];
+  for (const model of surface.models) {
+    if (typeof model?.id !== "string" || !model.id) continue;
+    const name = typeof model.name === "string" && model.name ? model.name : model.id;
+    models.push({ id: model.id, name });
+  }
+  if (models.length) pickerModelsSeen.models = models;
+}
+
+/** Ask the Desktop for the model list itself, for a card opened before any page
+ *  has loaded. `/api/bootstrap` is the same document the renderer fetches for its
+ *  app_start (one builder, and this path carries no organization), so the card
+ *  gets the picker's own list without waiting for a browser. */
+async function refreshPickerModels() {
+  if (pickerModelsRead.inFlight) return pickerModelsRead.inFlight;
+  if (Date.now() - pickerModelsRead.attemptedAt < PICKER_MODELS_READ_TTL_MS) return undefined;
+  pickerModelsRead.attemptedAt = Date.now();
+  pickerModelsRead.inFlight = (async () => {
+    try {
+      const result = await desktop.protocol({
+        method: "GET",
+        pathname: "/api/bootstrap",
+        headers: { "anthropic-client-platform": "desktop_app" },
+        bodyBase64: "",
+      });
+      const body = Buffer.from(result.bodyBase64 || "", "base64");
+      rememberPickerModels(JSON.parse(body.toString("utf8")));
+    } catch { /* the card falls back to the env list, or to nothing */ }
+    pickerModelsRead.inFlight = null;
+  })();
+  return pickerModelsRead.inFlight;
+}
+
+/** The models the picker offers: what this instance last served, else the
+ *  Desktop's own list, else what the deployment's env names. */
+async function modelPickerCatalogue() {
+  if (!pickerModelsSeen.models.length) await refreshPickerModels();
+  return pickerModelsSeen.models.length ? pickerModelsSeen.models : configuredModelCatalogue;
+}
+
 function containsSensitiveCredential(value) {
   if (!value || typeof value !== "object") return false;
   const sensitiveName = /^(?:api_?key|gateway_?api_?key|access_?token|refresh_?token|authorization|password|secret)$/i;
@@ -2379,13 +2462,15 @@ async function forwardOfficialProtocol(request, response, url) {
       && grantCoworkPermissionGates(parsed)) {
       rewrote = true;
     }
-    // The composer's model picker, laid out from the deployment's main-model list
-    // (see applyModelPickerLayout). Every shell reads the same document, so the
-    // picker looks the same in the browser and in the Desktop window; with no
-    // operator list, the document is left exactly as upstream wrote it.
-    if (bootstrapResponsePath.test(url.pathname)
-      && applyModelPickerLayout(parsed, await resolveMainModels())) {
-      rewrote = true;
+    // The composer's model picker: record the deployment's models for the admin
+    // page's card (see modelPickerCatalogue), then lay them out from the
+    // deployment's main-model list (see applyModelPickerLayout). Every shell reads
+    // the same document, so the picker looks the same in the browser and in the
+    // Desktop window; with no operator list, the document is left exactly as
+    // upstream wrote it.
+    if (bootstrapResponsePath.test(url.pathname)) {
+      rememberPickerModels(parsed);
+      if (applyModelPickerLayout(parsed, await resolveMainModels())) rewrote = true;
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");
     if (containsSensitiveCredential(parsed)) {
@@ -3275,6 +3360,15 @@ async function handleApi(request, response, url) {
 
   if (request.method === "GET" && url.pathname === "/api/chat/models") {
     sendJson(response, 200, { ok: true, value: configuredModels });
+    return;
+  }
+
+  // The same models with the label each one displays as, for the admin page's
+  // model-picker card (see modelPickerCatalogue). Not an admin route: like
+  // /api/chat/models it answers whoever the proxy let through to this instance,
+  // and it names only models the picker already offers that person.
+  if (request.method === "GET" && url.pathname === "/api/chat/model-catalog") {
+    sendJson(response, 200, { ok: true, value: await modelPickerCatalogue() });
     return;
   }
 

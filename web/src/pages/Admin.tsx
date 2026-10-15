@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { api, ApiError, avatarUrl, inviteLink, prepareAvatar, Role, User } from "../api";
+import { api, ApiError, avatarUrl, inviteLink, ModelOption, prepareAvatar, Role, User } from "../api";
 
 /** Open the OS file picker and resolve with the chosen image, or null. */
 function pickImage(): Promise<File | null> {
@@ -27,7 +27,11 @@ export function AdminPage() {
   // the deployment currently has, so the form can tell whether it is dirty.
   const [mainModels, setMainModels] = useState<string[]>([]);
   const [savedModels, setSavedModels] = useState<string[]>([]);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [catalogue, setCatalogue] = useState<ModelOption[]>([]);
+  // Why the card has no models to offer, when that is a failure rather than a
+  // deployment that discovers its list. Shown so an empty card explains itself.
+  const [catalogueError, setCatalogueError] = useState("");
+  const [modelFilter, setModelFilter] = useState("");
   const [newModel, setNewModel] = useState("");
 
   useEffect(() => {
@@ -63,20 +67,33 @@ export function AdminPage() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not load the deployment settings");
     }
-    // Only a convenience: a gateway that discovers its models serves no list, and
-    // this origin may not reach a bridge at all. Neither is an error.
+    // An empty answer is normal — a gateway in discovery mode reports nothing
+    // until its instance has served a page — but a failed one is worth saying out
+    // loud, or the card is just an unexplained empty list.
     try {
-      setSuggestions(await api.configuredModels());
-    } catch {
-      setSuggestions([]);
+      setCatalogue(await api.modelCatalogue());
+      setCatalogueError("");
+    } catch (err) {
+      setCatalogue([]);
+      setCatalogueError(err instanceof ApiError ? `HTTP ${err.status}` : "no answer");
     }
   }
 
-  /** Every model id the card can show: the chosen ones first, in their order. */
-  function pickerRows(): string[] {
-    const rows = [...mainModels];
-    for (const id of suggestions) {
-      if (!rows.some((chosen) => chosen.toLowerCase() === id.toLowerCase())) rows.push(id);
+  /** Every model the card can show: the chosen ones first, in their order, then
+   *  the rest of the catalogue. A pinned id the catalogue does not carry is still
+   *  a row — it came from the setting and must stay visible and removable — and
+   *  the filter narrows only the unchosen rows, so a chosen model cannot be
+   *  filtered out of sight. */
+  function pickerRows(): ModelOption[] {
+    const rows: ModelOption[] = mainModels.map((id) => ({
+      id,
+      name: catalogue.find((model) => model.id.toLowerCase() === id.toLowerCase())?.name ?? id,
+    }));
+    const needle = modelFilter.trim().toLowerCase();
+    for (const model of catalogue) {
+      if (rows.some((row) => row.id.toLowerCase() === model.id.toLowerCase())) continue;
+      if (needle && !`${model.name} ${model.id}`.toLowerCase().includes(needle)) continue;
+      rows.push(model);
     }
     return rows;
   }
@@ -387,13 +404,34 @@ export function AdminPage() {
           models". Every other configured model moves into that submenu, where it
           is still selectable. Takes effect the next time a page loads.
         </p>
+        {catalogue.length > 8 && (
+          <label>
+            Filter
+            <input
+              value={modelFilter}
+              onChange={(event) => setModelFilter(event.target.value)}
+              // Enter belongs to the filter, not to the surrounding form: saving
+              // a half-typed search would be a surprise.
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.preventDefault();
+              }}
+              placeholder="name or id"
+            />
+          </label>
+        )}
         {pickerRows().length === 0 ? (
           <p className="muted" style={{ margin: 0 }}>
-            This deployment reports no configured models to list. Add one by id below.
+            {catalogue.length > 0
+              ? "No model matches that filter."
+              : catalogueError
+                ? `Could not read this instance's model list (${catalogueError}) — add a `
+                  + "model by id below, or reload once the app has opened."
+                : "This page's instance has not reported its model list yet — open the app "
+                  + "once, or add a model by id below."}
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {pickerRows().map((id) => {
+            {pickerRows().map(({ id, name }) => {
               const chosen = mainModels.findIndex(
                 (model) => model.toLowerCase() === id.toLowerCase(),
               );
@@ -403,9 +441,16 @@ export function AdminPage() {
                     type="checkbox"
                     checked={chosen >= 0}
                     onChange={() => toggleModel(id)}
-                    aria-label={`Keep ${id} at the root`}
+                    aria-label={`Keep ${name ?? id} at the root`}
                   />
-                  <code style={{ flex: 1, overflowWrap: "anywhere" }}>{id}</code>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    {name ?? id}
+                    {name && name !== id ? (
+                      <code className="muted" style={{ marginLeft: 8, overflowWrap: "anywhere" }}>
+                        {id}
+                      </code>
+                    ) : null}
+                  </span>
                   {chosen >= 0 && (
                     <span className="actions">
                       <button
@@ -413,7 +458,7 @@ export function AdminPage() {
                         className="ghost"
                         onClick={() => moveModel(mainModels[chosen], -1)}
                         disabled={chosen === 0}
-                        aria-label={`Move ${id} up`}
+                        aria-label={`Move ${name ?? id} up`}
                       >
                         ↑
                       </button>
@@ -422,7 +467,7 @@ export function AdminPage() {
                         className="ghost"
                         onClick={() => moveModel(mainModels[chosen], 1)}
                         disabled={chosen === mainModels.length - 1}
-                        aria-label={`Move ${id} down`}
+                        aria-label={`Move ${name ?? id} down`}
                       >
                         ↓
                       </button>
@@ -434,26 +479,28 @@ export function AdminPage() {
           </div>
         )}
 
-        <div className="row">
-          <label>
-            Add a model id
-            <input
-              value={newModel}
-              onChange={(event) => setNewModel(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                addModel();
-              }}
-              placeholder="claude-opus-5-5"
-            />
-          </label>
-          <div className="actions" style={{ alignItems: "flex-end" }}>
-            <button type="button" className="ghost" onClick={addModel} disabled={!newModel.trim()}>
-              Add
-            </button>
+        {catalogue.length === 0 && (
+          <div className="row">
+            <label>
+              Add a model id
+              <input
+                value={newModel}
+                onChange={(event) => setNewModel(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  addModel();
+                }}
+                placeholder="claude-opus-5-5"
+              />
+            </label>
+            <div className="actions" style={{ alignItems: "flex-end" }}>
+              <button type="button" className="ghost" onClick={addModel} disabled={!newModel.trim()}>
+                Add
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         <p className="muted" style={{ margin: 0 }}>
           {mainModels.length === 0

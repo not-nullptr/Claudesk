@@ -112,13 +112,21 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
-  /** The deployment's configured model ids, as the bridge itself serves them
-   *  (`GET /api/chat/models`). Not an admin route, and empty when the gateway
+  /** The models this deployment's picker offers, each with the label it displays
+   *  as (`GET /api/chat/model-catalog` on the instance this page's owner is
+   *  routed to). Not an admin route: it reports the models the menu already shows
+   *  that person. Empty when no page has been served yet and the deployment
    *  discovers its models instead of being handed a list, so the card must treat
-   *  an empty or failed answer as "no suggestions" rather than "no models". */
-  configuredModels: () =>
-    request<{ value: string[] }>("/api/chat/models").then((body) => body.value ?? []),
+   *  an empty or failed answer as "nothing to offer", not "no models". */
+  modelCatalogue: () =>
+    request<{ value: ModelOption[] }>("/api/chat/model-catalog").then((body) => body.value ?? []),
 };
+
+/** A model as the picker offers it: the id to pin, and the name it shows. */
+export interface ModelOption {
+  id: string;
+  name: string;
+}
 
 /** The invitee's own timezone, read from their browser at the moment they accept. */
 export function browserTimezone(): string {

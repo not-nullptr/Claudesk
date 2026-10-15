@@ -118,6 +118,13 @@ of the composer's model menu. The **Model picker** card on `/admin` names the mo
 that should stay there and in what order; every other model is moved under a
 **More models** submenu, where it is still selectable — the layout claude.ai uses.
 
+The card lists the models the page's own instance serves, each by the name the menu
+shows and the id behind it (`GET /api/chat/model-catalog` — the picker's list, which
+is also how models the gateway discovered appear, since no env value names them). An
+instance that has not answered a page load yet falls back to the
+`CLAUDE_INFERENCE_MODELS_JSON` entries' labels, and with neither the card asks for an
+id by hand.
+
 The setting is deployment-wide and lives in `authd` (`settings` table, read back
 through `GET /api/auth/deployment`, which answers that one key and nothing else).
 Each account's bridge reads it and rewrites the model list in the bootstrap document

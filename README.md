@@ -304,6 +304,7 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 ### Chat 回退与诊断接口
 
 - `GET /api/chat/models`
+- `GET /api/chat/model-catalog`（模型 ID 加选择器里显示的名字，供 `/admin` 的 Model picker 卡片使用）
 - `GET|POST /api/chat/sessions`
 - `GET /api/chat/sessions/:id` 与 `/transcript`
 - `POST /api/chat/sessions/:id/messages` 与 `/stop`

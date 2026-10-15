@@ -35,19 +35,32 @@ const layoutSection = section(
 // through this realm's JSON before strict deep comparison.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function load({ env = {} } = {}) {
+function load({ env = {}, envCatalogue = [], desktop } = {}) {
   const logs = [];
   const sandbox = {
     process: { env: { ...env } },
     console: { log: (...args) => logs.push(args.join(" ")), warn: () => {} },
+    Buffer,
+    ...(desktop ? { desktop } : {}),
   };
   vm.runInNewContext(
     `${envSection}${layoutSection}
+     const configuredModelCatalogue = ${JSON.stringify(envCatalogue)};
      result = { parse: parseModelList, envList: envMainModels, max: MODEL_PICKER_MAX_MODELS,
-       layout: applyModelPickerLayout, key: modelPickerKey };`,
+       layout: applyModelPickerLayout, key: modelPickerKey, remember: rememberPickerModels,
+       catalogue: modelPickerCatalogue, seen: pickerModelsSeen };`,
     sandbox,
   );
   return { ...sandbox.result, logs };
+}
+
+/** A Desktop that answers the bridge's own bootstrap read with `document`. */
+function desktopServing(document) {
+  return {
+    protocol: async () => ({
+      bodyBase64: Buffer.from(JSON.stringify(document), "utf8").toString("base64"),
+    }),
+  };
 }
 
 const { parse, envList, max, layout, key, logs } = load();
@@ -161,14 +174,67 @@ for (const [label, value] of [
     `${label} is left alone`);
 }
 
+// --- the catalogue the admin page's card offers ------------------------------
+//
+// The card shows the deployment's models with the label each displays as, which
+// the served document carries and no env list knows under discovery.
+const envOnly = [{ id: "env-model", name: "Env Model" }];
+const returned = ["m-alpha", "m-alpha[1m]", "m-beta", "m-gamma", "m-delta"]
+  .map((id) => ({ id, name: id }));
+
+const withEnv = load({ envCatalogue: envOnly, desktop: desktopServing(bootstrap()) });
+assert.deepEqual(plain(await withEnv.catalogue()), returned,
+  "a card opened before any page load asks the Desktop for the picker's list");
+
+const served = bootstrap();
+assert.equal(withEnv.remember(served), undefined, "recording is a side effect");
+assert.deepEqual(plain(await withEnv.catalogue()), returned,
+  "the served picker list is the catalogue, with the names the menu shows");
+
+// A Desktop that will not answer — a bridge that cannot reach it — leaves the
+// env list, and no env list at all leaves an empty card rather than a crash.
+const broken = load({
+  envCatalogue: envOnly,
+  desktop: { protocol: async () => { throw new Error("no desktop"); } },
+});
+assert.deepEqual(plain(await broken.catalogue()), envOnly,
+  "a Desktop read that fails falls back to the env list");
+const bare = load({});
+assert.deepEqual(plain(await bare.catalogue()), [],
+  "no Desktop and no env list is an empty catalogue, not a failure");
+
+// The unified home renders the cowork surface; chat is the fallback for a build
+// without it, and any surface beats leaving the card empty.
+const chatOnly = { model_selector_config: [surface("chat", ["m-one"])] };
+const chatFallback = load({ envCatalogue: envOnly, desktop: desktopServing(chatOnly) });
+assert.deepEqual(plain(await chatFallback.catalogue()), [{ id: "m-one", name: "m-one" }],
+  "a document without a cowork surface falls back to chat");
+
+const emptyServed = load({
+  envCatalogue: envOnly,
+  desktop: desktopServing({ model_selector_config: [surface("cowork", [])] }),
+});
+assert.deepEqual(plain(await emptyServed.catalogue()), envOnly,
+  "a served list with no models in it leaves the env list in place");
+
+const names = load({ desktop: desktopServing({ model_selector_config: [
+  { id: "cowork", models: [{ id: "m-1", name: "Nice Name" }, { id: "m-2" }, { name: "no id" }] },
+] }) });
+assert.deepEqual(plain(await names.catalogue()),
+  [{ id: "m-1", name: "Nice Name" }, { id: "m-2", name: "m-2" }],
+  "each entry is named by its own label, an id with no label by its id, and an entry "
+    + "with no id is dropped");
+assert.equal(names.remember({}), undefined, "a document with no model config is ignored");
+assert.equal(names.remember(null), undefined, "no document is ignored");
+
 // The layout is only ever applied to the bootstrap response the picker reads, and
 // the list comes from the auth service's narrow deployment route.
 assert.match(serverSource,
-  /if \(bootstrapResponsePath\.test\(url\.pathname\)\s*&& applyModelPickerLayout\(parsed, await resolveMainModels\(\)\)\) \{\s*rewrote = true;\s*\}/,
-  "the layout is limited to bootstrap responses");
+  /if \(bootstrapResponsePath\.test\(url\.pathname\)\) \{\s*rememberPickerModels\(parsed\);\s*if \(applyModelPickerLayout\(parsed, await resolveMainModels\(\)\)\) rewrote = true;\s*\}/,
+  "the layout and the catalogue are limited to bootstrap responses");
 assert.match(serverSource, /fetch\(`\$\{authIdentityUrl\}\/api\/auth\/deployment`/,
   "the operator's list is read from authd's deployment route");
 assert.match(serverSource, /const envMainModels = parseModelList\(process\.env\.CLAUDE_MODEL_PICKER_MAIN_MODELS\)/,
   "the env list is parsed once at startup");
 
-console.log("model-picker-smoke: layout rewrite, no-op cases and the env list passed");
+console.log("model-picker-smoke: layout rewrite, catalogue and no-op cases passed");
