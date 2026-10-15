@@ -140,6 +140,30 @@ const homeVariantPatchId = "web-new-page-home-variant";
 const homeVariantReplacement = '"home"';
 const homeArrangementPatchId = "web-home-composer-arrangement";
 const homeArrangementReplacement = '"outside"';
+// "Projects" — the `/projects` and `/project/<id>` routes, and the composer's
+// project slot — is decided by one predicate: the GrowthBook feature
+// `claude_ai_projects_limits` (its `max_free_projects` field), the plan
+// capabilities `claude_pro` / `claude_max` / `raven`, or all three. On claude.ai
+// that predicate is live, and the free plan reaches projects through the
+// feature's own field. The Desktop build compiles it out: the function still
+// calls the three capability readers and the feature reader, but its value is a
+// module constant that is never assigned anywhere in the bundle, so it answers
+// false however the feature would evaluate and the route guard redirects every
+// projects route while the composer renders no project slot. The web shell is
+// meant to be claude.ai here, so the predicate's body is rebuilt as the
+// disjunction claude.ai ships: the same four reads, in the same order (the
+// reads are hooks, so hoisting them into declarators — rather than
+// short-circuiting them behind the first truthy one — keeps hook order fixed),
+// compared exactly as the bundle's own sibling limit helper already compares
+// them (`> 0`). The function is pinned by the feature name and field literals it
+// reads, which the bundle spells only there, plus its comma-sequence shape, and
+// the whole body is replaced only when exactly one such function is in the
+// chunk. Spliced only in web-shell mode, and deliberately not required: a
+// bundle that no longer matches leaves projects off rather than failing
+// renderer preparation.
+const projectsAllowedPatchId = "web-projects-allowed";
+const projectsLimitsFeature = "claude_ai_projects_limits";
+const projectsLimitsField = "max_free_projects";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -636,6 +660,42 @@ function homeSurfaceKindTarget(node) {
   return literal(alternate.consequent, "outside") && literal(alternate.alternate, "none");
 }
 
+// The projects-allowed predicate: a function whose whole body returns the comma
+// sequence the build compiled its disjunction into — three zero-argument plan
+// readers, the limits-feature read, and then the identifier the build folds the
+// answer to. Pinned by the feature name and field literals, which the bundle
+// spells only here, so an unrelated sequence-shaped function cannot match.
+function projectsAllowedTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return false;
+  const statements = node.body.body;
+  if (statements.length !== 1 || statements[0].type !== "ReturnStatement") return false;
+  const sequence = unwrap(statements[0].argument);
+  if (sequence?.type !== "SequenceExpression" || sequence.expressions.length !== 5) return false;
+  if (!sequence.expressions.slice(0, 3).every(expression => expression.type === "CallExpression"
+    && expression.arguments.length === 0)) return false;
+  const limits = sequence.expressions[3];
+  if (limits?.type !== "CallExpression") return false;
+  if (!literal(limits.arguments[0], projectsLimitsFeature)) return false;
+  if (!literal(limits.arguments[1], projectsLimitsField)) return false;
+  return sequence.expressions[4].type === "Identifier";
+}
+
+// The predicate's body rebuilt as claude.ai's disjunction. The four reads are
+// hoisted into declarators so every one of them runs on every call — they are
+// hooks, and leaving them behind `||` would call a prefix of them on some
+// renders and all of them on others — and the feature read is compared `> 0`
+// exactly as the bundle's own sibling limit helper compares it. Only the body is
+// replaced, so the declaration keeps its identity for its other callers.
+function projectsAllowedReplacement(source, node) {
+  const sequence = unwrap(node.body.body[0].argument);
+  const [pro, max, raven, limits] = sequence.expressions;
+  const part = (expression) => source.slice(expression.start, expression.end);
+  return `{const __claudeskPlanPro=${part(pro)},__claudeskPlanMax=${part(max)},`
+    + `__claudeskPlanRaven=${part(raven)},__claudeskFreeProjects=${part(limits)};`
+    + "return __claudeskFreeProjects>0||__claudeskPlanPro||__claudeskPlanMax"
+    + "||__claudeskPlanRaven}";
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1115,8 +1175,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // runner by the run refusal only it carries (its chunk is also reached by
   // `keyCode`, and the two scheduled-task hosts live in the Desktop-checks
   // chunk); the home-layout assignment by its own `stringsVouched` property,
-  // which appears nowhere else in the renderer graph.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched|voyage_composer_marlin|/.test(source)) {
+  // which appears nowhere else in the renderer graph; the projects-allowed
+  // predicate by its own limits-feature name, likewise unique.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched|voyage_composer_marlin|claude_ai_projects_limits|/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -1150,6 +1211,18 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       const [target] = targets;
       patches.push({ id, start: target.start, end: target.end,
         original: source.slice(target.start, target.end), replacement: forced });
+    }
+    // Projects: the predicate the build folded to a constant. Accepted only
+    // when exactly one function of that shape is in the chunk, so a second
+    // candidate refuses rather than splice the wrong body.
+    const projectsAllowed = [];
+    walk(ast, [], (node) => { if (projectsAllowedTarget(node)) projectsAllowed.push(node); });
+    if (projectsAllowed.length === 1) {
+      const target = projectsAllowed[0];
+      patches.push({ id: projectsAllowedPatchId, start: target.body.start,
+        end: target.body.end,
+        original: source.slice(target.body.start, target.body.end),
+        replacement: projectsAllowedReplacement(source, target) });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

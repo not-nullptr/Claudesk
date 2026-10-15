@@ -340,6 +340,21 @@ so moves the model and permission controls out of the card. Each is spliced only
 where its shape is unambiguous in the chunk, only in web-shell mode, and neither
 is required.
 
+`web-projects-allowed` restores the **Projects** predicate — the `/projects`
+routes and the composer's project slot — which the Desktop build also compiles
+out. The bundle's predicate calls three plan-capability readers and then reads
+`claude_ai_projects_limits`, but answers a module constant that is never
+assigned, so it is false however either would evaluate. The patch rebuilds the
+body as the disjunction claude.ai ships: the same four reads hoisted into
+declarators (they are hooks, so short-circuiting them behind `||` would change
+hook order between renders) and the feature compared `> 0`, as the bundle's own
+sibling limit helper already compares it. It is pinned by the feature name and
+field literals, which the bundle spells only there, and by the function's comma
+sequence, and the body is replaced only when exactly one such function is in the
+chunk. Spliced only in web-shell mode, and not required. The bridge supplies the
+feature the restored predicate reads (`grantProjectsLimits`), because a
+self-hosted org carries no plan capability.
+
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

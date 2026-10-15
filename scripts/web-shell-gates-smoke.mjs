@@ -37,13 +37,13 @@ function load({ webShell = false, env = {} } = {}) {
     `${flags}${grantSection}
      result = { granted: webShellGrantedGates, grant: grantWebShellGates,
        grantComposer: grantWebShellComposerDesign, hash: growthbookKey,
-       enabled: webShellEnabled };`,
+       grantProjects: grantProjectsLimits, enabled: webShellEnabled };`,
     sandbox,
   );
   return sandbox.result;
 }
 
-const { granted, grant, grantComposer, hash, enabled } = load();
+const { granted, grant, grantComposer, grantProjects, hash, enabled } = load();
 assert.deepEqual(plain(granted), ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks"],
   "the web shell's gates are the Code and Cowork entry points");
 assert.equal(enabled, false, "the rewrite is off unless the web shell is asked for");
@@ -85,6 +85,28 @@ assert.deepEqual(plain(composerTrue.growthbook.features[composerKey]), { value: 
 assert.match(serverSource,
   /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWebShellComposerDesign\(parsed\)\) \{\s*rewrote = true;\s*\}/,
   "the composer override is limited to web-shell bootstrap responses");
+
+// Projects: the free-plan allowance feature. It carries a value object rather
+// than a boolean, and, like the Code and Cowork gates, an upstream entry is
+// authoritative — Anthropic's own allowance must not be overridden by the
+// fallback the renderer patch needs when there is none.
+const projectsKey = hash("claude_ai_projects_limits");
+const projectsAbsent = { growthbook: { features: {} } };
+assert.equal(grantProjects(projectsAbsent), true, "an absent allowance must be added");
+assert.deepEqual(plain(projectsAbsent.growthbook.features[projectsKey]),
+  { defaultValue: { max_free_projects: 5 } },
+  "the allowance is granted as a field-value object the renderer reads `max_free_projects` off");
+assert.equal(grantProjects(projectsAbsent), false, "a granted allowance must not be rewritten");
+const projectsUpstream = {
+  growthbook: { features: { [projectsKey]: { defaultValue: { max_free_projects: 20 } } } },
+};
+assert.equal(grantProjects(projectsUpstream), false, "an upstream allowance must be left alone");
+assert.deepEqual(plain(projectsUpstream.growthbook.features[projectsKey]),
+  { defaultValue: { max_free_projects: 20 } }, "an upstream allowance survives");
+assert.equal(grantProjects({}), false, "a table-less document is left alone");
+assert.match(serverSource,
+  /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantProjectsLimits\(parsed\)\) \{\s*rewrote = true;\s*\}/,
+  "the allowance is limited to web-shell bootstrap responses");
 
 // For Code and Cowork, an upstream value is authoritative in either direction.
 const upstream = { growthbook: { features: { [hash("bad_moon_rising")]: { defaultValue: false } } } };

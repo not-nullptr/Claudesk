@@ -1926,6 +1926,31 @@ function grantWebShellComposerDesign(value) {
   return true;
 }
 
+// Projects. The renderer decides the whole surface — the `/projects` routes and
+// the composer's project slot — from `claude_ai_projects_limits` (a free-plan
+// project allowance) or from the org's plan capabilities (`claude_pro`,
+// `claude_max`, `raven`). A self-hosted account carries no plan capability, so
+// the feature alone decides, and without it a free account has no allowance and
+// projects stay shut. The renderer patch `web-projects-allowed` restores the
+// predicate the Desktop build compiles out (the constant it folds the
+// disjunction to is never assigned); this supplies the feature the restored
+// predicate reads. Only a feature the upstream did not already carry is added,
+// exactly as for the other gates, so a real allowance from Anthropic wins.
+const projectsLimitsGate = "claude_ai_projects_limits";
+// The free-plan allowance granted when the upstream supplies none. The client
+// only tests it for `> 0` to decide whether to consult the account's real
+// `create_limit`, which the API enforces; it is also the count a free account is
+// shown in the upgrade surfaces, so it is kept at the free tier's own figure.
+const projectsFreeAllowance = 5;
+function grantProjectsLimits(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey(projectsLimitsGate);
+  if (key in features) return false;
+  features[key] = { defaultValue: { max_free_projects: projectsFreeAllowance } };
+  return true;
+}
+
 // The connectors surface — the "Add connector" control and the plugin-connector
 // rows — decides whether this account may add connectors from the GrowthBook
 // feature `papi_mcp` (ion-dist's `canInstall`: `(manageFromPersonal ||
@@ -2106,6 +2131,13 @@ async function forwardOfficialProtocol(request, response, url) {
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
       && grantWebShellComposerDesign(parsed)) {
+      rewrote = true;
+    }
+    // Projects are gated on a free-plan allowance feature (see
+    // grantProjectsLimits); the renderer's own predicate is restored by the
+    // `web-projects-allowed` patch.
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
+      && grantProjectsLimits(parsed)) {
       rewrote = true;
     }
     // Connectors ("Add connector" / plugins) are gated on the `papi_mcp`

@@ -516,6 +516,34 @@ deployment that grants the arm has already made them:
 Each is spliced only where its own shape is unambiguous in the chunk, in
 web-shell mode only, and neither is required.
 
+**Projects** — the `/projects` and `/project/<id>` routes and the composer's
+project slot — are decided by one predicate: the GrowthBook feature
+`claude_ai_projects_limits` and its `max_free_projects` field, the plan
+capabilities `claude_pro` / `claude_max` / `raven`, or all three. claude.ai
+serves the predicate live, and a free account reaches projects through the
+feature's own field. The Desktop build compiles it out: the function still calls
+the three capability readers and the feature reader, but its answer is a module
+constant the bundle never assigns anywhere, so projects stay shut however either
+would evaluate and the route guard redirects every projects route.
+
+The `web-projects-allowed` renderer patch rebuilds that body as the disjunction
+claude.ai ships. The four reads are hoisted into declarators rather than left
+behind `||`: they are hooks, and short-circuiting them would call a prefix of
+them on some renders and all of them on others. The feature is compared `> 0`,
+exactly as the bundle's own sibling limit helper compares it. The function is
+pinned by the feature name and field literals the bundle spells only there, and
+its comma-sequence shape; the body is spliced only when exactly one such
+function is in the chunk. Spliced only in web-shell mode, and not required: a
+bundle that no longer matches leaves projects off rather than failing renderer
+preparation. It ships with a `patchRelease` bump (prepared-renderer bytes
+change), so it needs the `claude-desktop` service rebuilt, not just the bridge.
+
+The restored predicate still needs the feature or a plan capability to read. The
+bridge adds `claude_ai_projects_limits` to the bootstrap's growthbook table —
+`{max_free_projects: 5}`, only when the upstream did not already carry it, so a
+real allowance from Anthropic wins. Without it a free account, which is what a
+self-hosted org resolves to, has no allowance and projects stay shut.
+
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`
 on `<html>` and `data-composer-arm="marlin"` on the static composer skeleton.

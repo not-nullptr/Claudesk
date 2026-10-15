@@ -928,6 +928,58 @@ const compiledIds = inspectRenderer(decisionsCompiled.code, false, true).patches
 assert.ok(compiledIds.includes("web-new-page-home-variant")
   && compiledIds.includes("web-home-composer-arrangement"),
   "a mangled pair of decisions must still be spliced");
+// The projects-allowed predicate. The Desktop build reads the plan capabilities
+// and the limits feature, then answers a module constant it never assigns, so
+// projects are shut however either would evaluate. In web-shell mode the body is
+// rebuilt as the disjunction claude.ai ships: the same four reads hoisted into
+// declarators (they are hooks, so hoisting keeps their order fixed rather than
+// short-circuiting a prefix of them) and the feature compared `> 0`.
+const projectsConstant = "foldedProjectsAllowed";
+const projectsPredicate = (name = "projectsAllowed") => `function ${name}(){return readPro(),`
+  + `readMax(),readRaven(),limits("claude_ai_projects_limits","max_free_projects",0,schema),`
+  + `${projectsConstant}}`;
+const projectsChunk = `var ${projectsConstant}=!1;${projectsPredicate()}`
+  // The bundle's own sibling limit helper: the same four reads, but declared and
+  // guarded, so it must survive the splice untouched.
+  + 'function freeProjectLimit(){let p=readPro(),m=readMax(),r=readRaven(),'
+  + 'n=limits("claude_ai_projects_limits","max_free_projects",0,schema);'
+  + 'if(!(p||m||r))return n>0?n:0}'
+  // A five-expression sequence that never names the feature is not a target.
+  + 'function unrelatedSequence(){return a(),b(),c(),d(),constant}';
+assert.equal(inspectRenderer(projectsChunk, false, false).patches
+  .filter(patch => patch.id === "web-projects-allowed").length, 0,
+  "the projects predicate is left alone outside web-shell mode");
+const projectsPatches = inspectRenderer(projectsChunk, false, true).patches
+  .filter(patch => patch.id === "web-projects-allowed");
+assert.equal(projectsPatches.length, 1,
+  "exactly the predicate reading the limits feature must be rebuilt, and its sibling not");
+assert.ok(projectsPatches[0].original.includes('limits("claude_ai_projects_limits"')
+  && projectsPatches[0].original.endsWith(`,${projectsConstant}}`),
+  "only the predicate's body is spliced");
+assert.equal(inspectRenderer(`${projectsPredicate()}\n${projectsPredicate("projectsAllowedB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-allowed").length, 0,
+  "two candidates must refuse the splice rather than rebuild one of two");
+const projectsOut = patchRendererSources(
+  new Map([["projects.js", `${webShellFixtures}\n${accountMenuName}\n${projectsChunk}`]]), false, true)
+  .sources.get("projects.js");
+assert.ok(projectsOut.includes("const __claudeskPlanPro=readPro(),__claudeskPlanMax=readMax(),"
+  + "__claudeskPlanRaven=readRaven(),__claudeskFreeProjects="
+  + 'limits("claude_ai_projects_limits","max_free_projects",0,schema);'
+  + "return __claudeskFreeProjects>0||__claudeskPlanPro||__claudeskPlanMax"
+  + "||__claudeskPlanRaven}"),
+  "the body must be rebuilt as the hoisted four-read disjunction");
+assert.ok(!projectsOut.includes(`return readPro(),`),
+  "the folded comma sequence must not survive the splice");
+assert.ok(projectsOut.includes('if(!(p||m||r))return n>0?n:0}'),
+  "the bundle's own guarded limit helper must survive untouched");
+assert.ok(projectsOut.includes("function unrelatedSequence(){return a(),b(),c(),d(),constant}"),
+  "a five-expression sequence that never names the feature must survive untouched");
+const projectsCompiled = await minify(projectsChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(projectsCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-allowed").length, 1,
+  "a mangled predicate must still be rebuilt once");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
