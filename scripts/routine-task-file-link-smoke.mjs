@@ -33,6 +33,9 @@ import vm from "node:vm";
 // is touched.
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+// Values built inside a vm context carry that realm's prototypes, which
+// assert/strict's deepEqual rejects; compare a plain copy instead.
+const plain = (value) => JSON.parse(JSON.stringify(value));
 
 const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
 const start = wrapper.indexOf("// A routine's files belong to the Desktop");
@@ -270,6 +273,75 @@ assert.equal(
 assert.equal((await lstat(join(idleDir, "SKILL.md"))).nlink, 2,
   "a status change does not repair — it writes no task file");
 assert.ok(!(await readdir(idleDir)).some((name) => name.startsWith("SKILL.md.hardlinked-")));
+
+// --- the wrapper: the store's own repair is switched back on ----------------
+// Current Desktop builds refuse a hard-linked routine file only while a rollout
+// gate reads on, and repair the link themselves while it is off — upstream's own
+// answer, for every writer. The gate arrives in a feature payload fetched through
+// Electron's net, so the wrapper rewrites that one response on its way in.
+{
+  const gateSource = wrapper.slice(
+    wrapper.indexOf("const routineFileLinkGate = "),
+    wrapper.indexOf("const HOST = \"127.0.0.1\";"),
+  );
+  assert.ok(gateSource.length > 0, "the wrapper still carries the feature-payload rewrite");
+
+  let mode = "features";
+  const payload = {
+    features: {
+      "346871663": { defaultValue: true },
+      "1087396298": { defaultValue: { earlyMaxMinutes: 5 } },
+    },
+    user: { id: "acct" },
+  };
+  const lines = [];
+  const context = {
+    net: {
+      async fetch() {
+        if (mode === "broken") return new Response("not json", { status: 200 });
+        if (mode === "other") {
+          return new Response(JSON.stringify(payload), { status: 200 });
+        }
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "content-type": "application/json", "content-encoding": "gzip" },
+        });
+      },
+    },
+    Response,
+    Headers,
+    URL,
+    console: {
+      info: (...args) => lines.push(args.map(String).join(" ")),
+      warn: (...args) => lines.push(args.map(String).join(" ")),
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(gateSource, context);
+
+  const rewritten = await context.net.fetch("https://claude.ai/api/desktop/features", {});
+  const seen = await rewritten.json();
+  assert.equal("346871663" in seen.features, false, "the refusal's gate is dropped");
+  assert.deepEqual(plain(seen.features["1087396298"]), { defaultValue: { earlyMaxMinutes: 5 } },
+    "every other feature is left exactly as it arrived");
+  assert.deepEqual(plain(seen.user), { id: "acct" }, "and the rest of the payload with them");
+  assert.equal(rewritten.headers.get("content-encoding"), null,
+    "a re-serialized body declares no encoding it no longer has");
+  assert.equal(rewritten.headers.get("content-type"), "application/json",
+    "while the type it did have is kept");
+  assert.ok(lines.some((line) => line.includes("dropped feature 346871663")),
+    "the rewrite is reported");
+
+  mode = "other";
+  const unrelated = await context.net.fetch("https://claude.ai/api/bootstrap", {});
+  assert.equal((await unrelated.json()).features["346871663"].defaultValue, true,
+    "a response that is not this endpoint is passed through untouched");
+
+  mode = "broken";
+  const unreadable = await context.net.fetch("https://claude.ai/api/desktop/features", {});
+  assert.equal(await unreadable.text(), "not json",
+    "a payload that cannot be rewritten is handed on exactly as it arrived");
+}
 
 // --- the bridge: the repair uses Desktop's own answer for the file ----------
 // A browser's routine write goes through the bridge's IPC route, so the repair

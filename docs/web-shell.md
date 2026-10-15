@@ -458,29 +458,38 @@ with a plain copy.` when the path carries a second hard link — the redirect a
 sandboxed agent can set up through a shared folder, since the write would then
 land on the link's other name instead of on the task. The store checks on every
 write, so until that file is a plain copy on that machine every edit answers 500,
-from every client, and a browser cannot make it one. (Current Desktop builds gate
-the refusal behind a rollout flag and repair the link themselves while it is off;
-it reads on here.)
+from every client, and a browser cannot make it one.
 
-Both layers this deployment owns do what the refusal asks — move the linked file
-aside (`SKILL.md.hardlinked-<stamp>`), and let the store's own write create a
-plain one. The bridge, where a browser's calls already pass, asks Desktop for the
-task's own `filePath` first: its task list carries it, and that is the store's own
-answer for where its files live, where a store is free not to name the directory
-for the task id. It moves whatever is linked out of that file's directory, relays
-the call, and repairs and retries once if the refusal still arrives. The wrapper
-does the same at the main process boundary the writing IPCs cross, by task id
-under every root the Desktop's resolver can answer with — the configured
-`coworkUserFilesPath` and the fallbacks it resolves for itself — sweeping those
-roots when the id names no directory; that is the layer that covers the Desktop
-window's own routines list, and the agent's `update_scheduled_task` tool path,
-neither of which crosses the bridge. Neither writes through the link, so the
-other name keeps its bytes, and the moved file stays beside the task for
-inspection. When a refusal survives the repair, the error the client sees carries
-what the repair saw — the path Desktop answered or the reason it answered none,
-and how many links the file had — so a routine stuck on a machine nobody logs
-into is diagnosable from the browser that hit it. Neither repair runs as a sweep
-of its own: a routine nobody edits is left exactly as the store wrote it.
+Current builds put that refusal behind a rollout gate (`346871663`) and, while
+the gate is off, do the repairing themselves: they publish a fresh file into the
+task's directory rather than writing through the link — upstream's own answer,
+which is what the refusal asks of a person with shell access. The gate arrives in
+the feature payload the main process fetches through Electron's `net`, and it
+reads on for this deployment's accounts, so the wrapper rewrites that one
+response on its way in and drops the key. Only that key goes: every other feature,
+every other field, and every other response pass through untouched, and a payload
+that cannot be re-read is handed on exactly as it arrived. With the gate off, the
+store repairs a hard-linked routine file for every writer — the web shell, the
+Desktop window's own routines list, the agent's `update_scheduled_task` tool.
+
+The wrapper and the bridge also repair the file by hand, for the writers that
+never see that payload: builds that refuse unconditionally (no gate to drop), and
+a feature map that arrives from Desktop's disk cache instead of the network. Both
+move the linked file aside (`SKILL.md.hardlinked-<stamp>`) and let the store's own
+write create a plain one. The bridge, where a browser's calls already pass, asks
+Desktop for the task's own `filePath` first: its task list carries it, and that is
+the store's own answer for where its files live, where a store is free not to name
+the directory for the task id. The wrapper does the same at the main process
+boundary the writing IPCs cross, by task id under every root the Desktop's
+resolver can answer with — the configured `coworkUserFilesPath` and the fallbacks
+it resolves for itself — sweeping those roots when the id names no directory.
+Neither writes through the link, so the other name keeps its bytes, and the moved
+file stays beside the task for inspection. When a refusal survives the repair, the
+error the client sees carries what the repair saw — the path Desktop answered, or
+the reason it answered none, and how many links the file had — so a routine stuck
+on a machine nobody logs into is diagnosable from the browser that hit it. Neither
+repair runs as a sweep of its own: a routine nobody edits is left exactly as the
+store wrote it.
 
 ## Home greeting
 
