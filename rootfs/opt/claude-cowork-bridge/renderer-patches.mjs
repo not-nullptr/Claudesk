@@ -90,6 +90,28 @@ const sessionViewerReason = "not_desktop_app";
 // declarator directly following the one reading the shrimp gate. Spliced only
 // in web-shell mode, like the other chrome patches.
 const localSessionPlacementPatchId = "web-local-session-placement";
+// The web New page's "home" layout — the compact greeting, the composer's
+// controls docked below the card, the below-fold feed — is chosen by an
+// assignment the Desktop build compiles out. The chunk that reads the
+// `__gb__1085985672` gate returns its assignment object with `eligible`,
+// `settled` and `assignment` hardcoded false, so the renderer always settles on
+// the classic home layout however the gate evaluates; the layout components
+// themselves ship in this bundle. The browser chrome the web shell exists to
+// reproduce includes that layout, so the object is spliced to the all-assigned
+// shape the web bundle produces for a visitor in the experiment: eligible,
+// settled, assigned, strings delivered (the layout's default messages ship in
+// the bundle) and nothing left undelivered. The object is pinned by its own six
+// property names — not mangled — and the chunk by the gate literal it reads,
+// each exactly once, so any other count refuses rather than splice the wrong
+// object. Spliced only in web-shell mode, and deliberately not required: a
+// bundle that no longer matches leaves the classic home layout rather than
+// failing renderer preparation.
+const homeLayoutPatchId = "web-new-page-home-layout";
+const homeLayoutGate = "__gb__1085985672";
+const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
+  "stringsVouched", "stringsUndelivered"];
+const homeLayoutReplacement = "{eligible:!0,settled:!0,assignment:!0,"
+  + "stringsDelivered:!0,stringsVouched:!0,stringsUndelivered:!1}";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -538,6 +560,16 @@ function localSessionPlacementTarget(node) {
     }
   });
   return platformCall;
+}
+
+// The home-layout assignment object: an object literal carrying exactly the six
+// property names above, so a differently shaped object that merely shares one of
+// them is not a target.
+function homeLayoutAssignment(node) {
+  if (node.type !== "ObjectExpression"
+    || node.properties.length !== homeLayoutKeys.length) return false;
+  return node.properties.every(entry => entry.type === "Property" && entry.computed !== true
+    && homeLayoutKeys.includes(entry.key.name ?? entry.key.value));
 }
 
 // The account view a component reads from the profile hook:
@@ -990,8 +1022,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   // switcher by its own `data-compact-mode-switcher` label; the scheduled-task
   // runner by the run refusal only it carries (its chunk is also reached by
   // `keyCode`, and the two scheduled-task hosts live in the Desktop-checks
-  // chunk).
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run/.test(source)) {
+  // chunk); the home-layout assignment by its own `stringsVouched` property,
+  // which appears nowhere else in the renderer graph.
+  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched/.test(source)) {
     return { evidence, patches };
   }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -1002,6 +1035,21 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   let listenerHost;
   let toastBinding;
   let toastPublished = false;
+  if (webShellEnabled) {
+    // The home-layout assignment is accepted from its own chunk: exactly one
+    // object of that shape and one gate literal, both parsed, or nothing.
+    const assignments = [];
+    let gates = 0;
+    walk(ast, [], (node) => {
+      if (homeLayoutAssignment(node)) assignments.push(node);
+      if (literal(node, homeLayoutGate)) gates += 1;
+    });
+    if (assignments.length === 1 && gates === 1) {
+      const target = assignments[0];
+      patches.push({ id: homeLayoutPatchId, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end), replacement: homeLayoutReplacement });
+    }
+  }
   walk(ast, [], (node, ancestors) => {
     if (filePaneDownloadTarget(node, ancestors)) {
       button ??= ghostIconButton(ast);

@@ -459,6 +459,35 @@ detector accepts `(?:edge-)?api`), so the greeting renders in either chrome.
 Matching the entitlements document (`/api/bootstrap/<org>/current_user_access`)
 is deliberately excluded, so the greeting is never injected into that shape.
 
+## New page layout
+
+The composer card's **marlin** design and the page's **home** layout are two
+different things. Marlin (the unified card, the controls docked below it) is the
+GrowthBook gate `voyage_composer_marlin` (`2295073874`), which the bridge grants
+in web-shell bootstrap responses (`grantWebShellComposerDesign`) — the upstream
+table carries it false, and this one is forced even then.
+
+The layout is chosen elsewhere, and the Desktop build compiles the choice out:
+the chunk that reads the `__gb__1085985672` new-page gate returns its assignment
+object with `eligible`, `settled` and `assignment` hardcoded false, so the
+renderer settles on the classic home layout however the gate evaluates — even
+though the layout's own components (the compact greeting, the docked controls,
+the below-fold feed) ship in the same bundle. The web bundle returns the real
+assignment, which is why claude.ai's browser page looks different from a web
+shell running the Desktop bundle.
+
+The `web-new-page-home-layout` renderer patch splices that object to the
+all-assigned shape the web bundle produces for a visitor in the experiment
+(eligible, settled, assigned, strings delivered — the layout's default messages
+ship in the bundle — and nothing undelivered). The object is pinned by its own
+six property names and the chunk by the gate literal it reads, each exactly
+once; a bundle that no longer matches is left alone rather than mis-spliced, so
+the failure mode is the classic layout, not a broken page. Spliced only in
+web-shell mode, like the other chrome patches. Because the prepared renderer is
+served under an immutable `/renderer/<version>/<patchRelease>/…` path, the patch
+ships with a `patchRelease` bump and needs the `claude-desktop` service rebuilt
+(the preparer runs from its init).
+
 ## Account identity
 
 The account menu and sidebar footer would otherwise read as a gateway config: a

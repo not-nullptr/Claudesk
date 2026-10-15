@@ -302,6 +302,19 @@ web-shell mode. Both patches are **required**, like the rest of the web-shell
 set: without them the Routines list still offers creation and the failure is
 silent, which is exactly the shape a required patch exists to refuse.
 
+`web-new-page-home-layout` turns on the New page's **home** layout — the compact
+greeting, the composer's controls docked below the card, the below-fold feed —
+which the Desktop build compiles out: the chunk that reads the new-page gate
+(`__gb__1085985672`) returns its assignment object with `eligible`, `settled`
+and `assignment` hardcoded false, so the renderer settles on the classic layout
+however the gate evaluates, even though the layout's components ship in the same
+bundle. The patch splices that object to the all-assigned shape the web bundle
+produces for a visitor in the experiment. It is pinned by the object's own six
+property names and the chunk by the gate literal it reads, each exactly once.
+Unlike the rest of the web-shell set this one is deliberately **not required**:
+if a future bundle stops matching, the classic layout comes back rather than
+renderer preparation failing.
+
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

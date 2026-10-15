@@ -799,6 +799,46 @@ assert.equal(inspectRenderer(
   `${desktopChecks.replace("DesktopChecks", "OtherLabel")}\n${scheduledTaskHosts}`, false, true).patches
   .filter(patch => patch.id === "web-scheduled-task-hosts").length, 0,
   "a slot that is not the Desktop-checks slot is not a mount point for the scheduled-task hosts");
+// The home-layout assignment: the chunk that reads the new-page gate returns
+// the assignment object the Desktop build compiles out — eligible, settled and
+// assignment hardcoded false — so the renderer always settles on the classic
+// home layout. In web-shell mode the object is spliced to the all-assigned
+// shape the web bundle produces for a visitor in the experiment.
+const homeLayoutChunk = 'function homeAssignment(){useLocale().locale;readGate();'
+  + 'let eligible=!1;const gate="__gb__1085985672";observe(gate);'
+  + 'let settled=eligible,stringsDelivered=serverGates(gate),{data,fetchStatus}=useBootstrap();'
+  + 'useForced();let{activeOrganization,featureFlagsOrgUuid}=useAccount();'
+  + 'return{eligible,settled,assignment:settled,stringsDelivered,stringsVouched:eligible,'
+  + 'stringsUndelivered:eligible};}';
+// A lookalike object that shares one property name, and a second assignment
+// object in the same chunk, are both refused rather than spliced.
+const homeLayoutDecoy = 'function other(){return{eligible:!0,settled:!1};}';
+const homeLayoutTwin = homeLayoutChunk.replace("homeAssignment", "homeAssignmentB")
+  .replace('"__gb__1085985672"', '"__gb__0000000000"');
+assert.equal(inspectRenderer(homeLayoutChunk, false, false).patches.length, 0,
+  "the home-layout assignment is left alone outside web-shell mode");
+assert.equal(inspectRenderer(homeLayoutDecoy, false, true).patches.length, 0,
+  "an object sharing one property name is not the assignment");
+assert.equal(inspectRenderer(`${homeLayoutChunk}\n${homeLayoutDecoy}`, false, true).patches
+  .filter(patch => patch.id === "web-new-page-home-layout").length, 1,
+  "a lookalike in the same chunk must not stop the splice");
+assert.equal(inspectRenderer(`${homeLayoutChunk}\n${homeLayoutTwin}`, false, true).patches
+  .filter(patch => patch.id === "web-new-page-home-layout").length, 0,
+  "a second assignment object must refuse rather than splice one of two");
+const homeLayoutOut = patchRendererSources(
+  new Map([["home-layout.js", `${webShellFixtures}\n${accountMenuName}\n${homeLayoutChunk}`]]),
+  false, true).sources.get("home-layout.js");
+assert.ok(homeLayoutOut.includes('return{eligible:!0,settled:!0,assignment:!0,'
+  + 'stringsDelivered:!0,stringsVouched:!0,stringsUndelivered:!1}'),
+  "the assignment must be spliced to the all-assigned shape in web-shell mode");
+assert.ok(!homeLayoutOut.includes("stringsVouched:eligible"),
+  "the compiled-out shape must not survive the splice");
+const homeLayoutCompiled = await minify(homeLayoutChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(homeLayoutCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-new-page-home-layout").length, 1,
+  "a mangled assignment object must still be spliced once");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
