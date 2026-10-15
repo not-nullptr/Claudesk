@@ -127,6 +127,16 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // the flag is the same project list the `/projects` routes and the sidebar entry
 // were restored for.
 //
+// `amber_tributary_heron` is what makes a local Cowork session *writable* — the
+// last term of `cr("hub", orgAvailable, hubServed) || heron`, whose other two are
+// server verdicts this deployment does not serve. Without it session pages come
+// out read-only and every session-scoped control is handed the no-op the bundle
+// installs for that case, silently: the permission picker opens and does nothing,
+// and the model picker does not stick either. Like the atrium gate it is folded
+// to a constant in the Desktop build, so the renderer patch
+// `web-cowork-hub-writable` puts the read back in charge of the answer — the two
+// ship together.
+//
 // The feature name reaches the page nowhere else, so granting it moves only this
 // surface. It is not enough on its own: the Desktop build *folds* the capability
 // to a constant — `function remoteProjectsEnabled(){return read(thisFeature),FA}`
@@ -144,7 +154,8 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // one `growthbookKey` already accepts for a gate the bundle spells only as a
 // literal id.
 const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
-  "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553"];
+  "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553",
+  "amber_tributary_heron"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`

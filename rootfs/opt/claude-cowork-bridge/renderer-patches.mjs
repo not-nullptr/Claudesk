@@ -371,6 +371,38 @@ const projectsAtriumFeature = "yukon_silver_dramatic_shrimp_atrium";
 // a bundle that no longer matches leaves the requests to 404 as they do today.
 const projectsServerProjectsPatchId = "web-projects-remote-list";
 const projectsServerProjectsOff = "!1";
+// The flag that makes a local Cowork session *writable*. Every session-scoped
+// control — the permission picker, the model picker, stop, retry — is handed its
+// setter only when the session reports writable:
+//
+//   let writable = cr("hub", coworkMode.orgAvailable, hubVerdict.served)
+//                  || amberTributaryHeron.enabled;          // ← this one
+//   remoteGates = { isWritable: writable && !readOnly, readOnly, … };
+//
+// and the same two terms decide the session context's own
+// `canSetModel`/`setPermissionMode`. `cr` is `t || (surface === "hub" && n)`, so
+// the flag is the last term of a disjunction whose other two are server verdicts
+// this deployment does not serve: without it, session pages come out read-only,
+// the pickers draw (a binding exists) and every click lands in the no-op the
+// bundle installs for that case — `setPermissionMode: … ?? bb` with
+// `function bb(){}` — silently, which is exactly how a dead permission picker
+// looks next to a composer that still sends.
+//
+// The build folds the flag to a constant, as it does the atrium capability:
+//
+//   var heron = !1;
+//   function amberTributaryHeron(){ return read("amber_tributary_heron"),
+//                                         {enabled: heron} }
+//
+// so the read is discarded and `enabled` answers false however the deployment's
+// table reads. The patch rebuilds the returned object around the read itself —
+// one read, in the position it already occupied — which is what makes the
+// bridge's grant of that gate observable. Both ship together, as with the
+// atrium. Pinned by the feature-name literal, which the bundle spells only here,
+// and by the object's single `enabled` identifier. Spliced only in web-shell
+// mode, and not required.
+const coworkHubWritablePatchId = "web-cowork-hub-writable";
+const coworkHubWritableFeature = "amber_tributary_heron";
 // Turning the predicate off stops the requests, and react-query then answers
 // `isPending` for a query nobody enabled — a disabled query is pending in v5
 // until it has data. Both consumers that read that state would wait on it
@@ -1195,6 +1227,30 @@ function projectsServerProjectsTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The hub-writable flag's folded reads. The bundle spells the same fold twice —
+// `amberTributaryHeron()` and its `_`-prefixed twin, both `read(feature),
+// {enabled: heron}` off the same constant — so every function of that shape is
+// spliced, and a chunk carrying none is left alone.
+function coworkHubWritableTargets(ast) {
+  const found = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || node.params.length !== 0) return;
+    const statements = node.body?.body;
+    if (statements?.length !== 1 || statements[0].type !== "ReturnStatement") return;
+    const sequence = unwrap(statements[0].argument);
+    if (sequence?.type !== "SequenceExpression" || sequence.expressions.length !== 2) return;
+    const [read, answered] = sequence.expressions;
+    if (read?.type !== "CallExpression" || read.arguments.length !== 1) return;
+    if (!literal(read.arguments[0], coworkHubWritableFeature)) return;
+    const object = unwrap(answered);
+    if (object?.type !== "ObjectExpression" || object.properties.length !== 1) return;
+    if (!key(object.properties[0], "enabled")) return;
+    if (object.properties[0].value?.type !== "Identifier") return;
+    found.push({ sequence, read });
+  });
+  return found;
+}
+
 // The picker's server-projects report, and the keys of it the patch forces. The
 // module's own "no projects" constant carries the same five keys, so the report
 // is the one whose `allLoading` is computed — `!k && !E`, where the constant
@@ -1988,6 +2044,15 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsServerProjectsPatchId, start: serverProjects.start,
         end: serverProjects.end, original: source.slice(serverProjects.start, serverProjects.end),
         replacement: projectsServerProjectsOff });
+    }
+    // The hub-writable flag, in every function that folds it: the read is put
+    // back in charge of the answer, so the bridge's grant of the gate reaches it.
+    for (const hubWritable of coworkHubWritableTargets(ast)) {
+      const read = source.slice(hubWritable.read.start, hubWritable.read.end);
+      patches.push({ id: coworkHubWritablePatchId, start: hubWritable.sequence.start,
+        end: hubWritable.sequence.end,
+        original: source.slice(hubWritable.sequence.start, hubWritable.sequence.end),
+        replacement: `{enabled:${read}}` });
     }
     const report = projectsRemoteReportTarget(ast);
     if (report) {

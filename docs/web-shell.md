@@ -764,6 +764,24 @@ queries — the picker's report object and the page's list hook — to the settl
 empty answer. Requests stop, both surfaces draw what exists here, and the
 declarators stay, so the hooks in them still run.
 
+**Session pages are read-only without one flag.** Everything a session scoped
+control writes through — the permission picker's setter, the model picker's,
+stop, retry — is handed over only when the session reports writable:
+
+```js
+let writable = cr("hub", coworkMode.orgAvailable, hubVerdict.served)
+               || amberTributaryHeron.enabled;
+```
+
+`cr` is `t || (surface === "hub" && n)`, so the flag is the last term of a
+disjunction whose other two are server verdicts this deployment does not serve.
+Without it the session is read-only, and every control that would write is handed
+the no-op the bundle keeps for that case (`function bb(){}`), silently — which
+looks like a permission picker that opens and does nothing, and a model picker
+that does not stick. The Desktop build folds the flag to a constant, as it folds
+the atrium capability, so `web-cowork-hub-writable` rebuilds the folded object
+around the feature read and the bridge grants that gate. The two ship together.
+
 The permission control is the same missing store showing up once more. The
 composer chooses that slot's content from a hook:
 
@@ -822,7 +840,7 @@ which matters here, because a build that folded those two-liners into a
 conditional expression would stop matching, and the click would go quiet rather
 than loud.
 
-All fourteen change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All fifteen change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only
