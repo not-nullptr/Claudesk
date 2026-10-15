@@ -36,6 +36,53 @@ pub struct CreateUserRequest {
     pub upstream: Option<String>,
 }
 
+/// The setting that lays out the model picker: an ordered list of model ids kept
+/// at the root, with every other model moved under "More models". Each account's
+/// bridge reads it (see `/api/auth/deployment`) and rewrites the picker data it
+/// serves. Absent row means "unset" — the native layout, every model at the root.
+pub const MODEL_PICKER_MAIN_MODELS: &str = "model_picker_main_models";
+/// How many models an operator may pin, and how long one id may be. The bound is
+/// about a typo or a paste accident, not a real limit: the list is a shortlist.
+const MAX_MAIN_MODELS: usize = 50;
+const MAX_MODEL_ID_LEN: usize = 200;
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    /// Omitted leaves the stored list alone; an empty list clears it (back to the
+    /// native layout). Order is the picker's root order.
+    #[serde(default)]
+    pub model_picker_main_models: Option<Vec<String>>,
+}
+
+/// The main-model list as it is stored: trimmed, de-duplicated
+/// case-insensitively (the picker matches ids that way), bounded, and in the
+/// order the operator gave.
+pub fn normalize_main_models(raw: &[String]) -> AppResult<Vec<String>> {
+    if raw.len() > MAX_MAIN_MODELS {
+        return Err(AppError::BadRequest(format!(
+            "at most {MAX_MAIN_MODELS} main models are allowed"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    for value in raw {
+        let id = value.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if id.len() > MAX_MODEL_ID_LEN {
+            return Err(AppError::BadRequest(format!(
+                "a model id must be at most {MAX_MODEL_ID_LEN} characters"
+            )));
+        }
+        if !seen.insert(id.to_ascii_lowercase()) {
+            continue;
+        }
+        models.push(id.to_string());
+    }
+    Ok(models)
+}
+
 #[derive(Deserialize)]
 pub struct UpdateUserRequest {
     #[serde(default)]
@@ -137,6 +184,68 @@ pub async fn list_users(
 ) -> AppResult<Json<Value>> {
     require_admin(&state, &jar).await?;
     Ok(Json(json!({ "users": state.store.list_users().await? })))
+}
+
+/// The deployment settings the admin UI edits, as decoded values. Every known key
+/// is present even when it is unset (its empty default), so the form never has to
+/// tell "unset" from "not sent".
+pub async fn get_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    Ok(Json(json!({ "settings": deployment_settings(&state).await? })))
+}
+
+/// Write the settings the request carries. Keys it omits are left as they are,
+/// so a future setting cannot be cleared by a client that predates it.
+pub async fn update_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<UpdateSettingsRequest>,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    if let Some(raw) = body.model_picker_main_models.as_deref() {
+        let models = normalize_main_models(raw)?;
+        if models.is_empty() {
+            state.store.clear_setting(MODEL_PICKER_MAIN_MODELS).await?;
+        } else {
+            let encoded = serde_json::to_string(&models)
+                .map_err(|e| AppError::Internal(format!("setting encode: {e}")))?;
+            state
+                .store
+                .set_setting(MODEL_PICKER_MAIN_MODELS, &encoded)
+                .await?;
+        }
+    }
+    Ok(Json(json!({ "settings": deployment_settings(&state).await? })))
+}
+
+/// Every stored setting, decoded. A value that no longer parses is passed through
+/// as the raw string rather than dropped, so a hand-edited row stays visible.
+async fn deployment_settings(state: &AppState) -> AppResult<Value> {
+    let mut settings = serde_json::Map::new();
+    settings.insert(
+        MODEL_PICKER_MAIN_MODELS.into(),
+        json!(main_models(state).await?),
+    );
+    for (key, value) in state.store.settings().await? {
+        if key == MODEL_PICKER_MAIN_MODELS {
+            continue;
+        }
+        let decoded = serde_json::from_str(&value).unwrap_or(Value::String(value));
+        settings.insert(key, decoded);
+    }
+    Ok(Value::Object(settings))
+}
+
+/// The stored main-model list. Unset, or a stored value that is not a list of
+/// strings, answers an empty list — which every reader treats as "no layout".
+pub(crate) async fn main_models(state: &AppState) -> AppResult<Vec<String>> {
+    let Some(raw) = state.store.setting(MODEL_PICKER_MAIN_MODELS).await? else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
 /// Create an account and return a one-time invite token. This is the only time
@@ -335,5 +444,35 @@ mod tests {
         assert!(normalize_api_key(None).is_err());
         assert!(normalize_api_key(Some("   ")).is_err());
         assert!(normalize_api_key(Some(&"k".repeat(201))).is_err());
+    }
+
+    #[test]
+    fn main_models_keep_their_order_and_drop_duplicates() {
+        let raw = ["  claude-opus-5-5 ".to_string(), "claude-sonnet-5".to_string()];
+        assert_eq!(
+            normalize_main_models(&raw).unwrap(),
+            vec!["claude-opus-5-5", "claude-sonnet-5"]
+        );
+        // The picker matches ids case-insensitively, so two spellings are one
+        // model: the one named first is the one kept.
+        let raw = ["Opus".to_string(), "opus".to_string(), "Sonnet".to_string()];
+        assert_eq!(normalize_main_models(&raw).unwrap(), vec!["Opus", "Sonnet"]);
+    }
+
+    #[test]
+    fn main_models_drop_blanks_and_accept_an_empty_list() {
+        let raw = ["".to_string(), "   ".to_string(), "opus".to_string()];
+        assert_eq!(normalize_main_models(&raw).unwrap(), vec!["opus"]);
+        assert!(normalize_main_models(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn main_models_are_bounded() {
+        let long = vec!["opus".to_string(); MAX_MAIN_MODELS + 1];
+        assert!(normalize_main_models(&long).is_err());
+        let wide = ["a".repeat(MAX_MODEL_ID_LEN + 1)];
+        assert!(normalize_main_models(&wide).is_err());
+        let at_limit = ["a".repeat(MAX_MODEL_ID_LEN)];
+        assert!(normalize_main_models(&at_limit).is_ok());
     }
 }

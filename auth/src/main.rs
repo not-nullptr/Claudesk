@@ -308,6 +308,9 @@ async fn main() {
         .route("/api/auth/avatar/:id", get(api_auth::avatar))
         .route("/api/auth/me/avatar", put(api_auth::set_my_avatar))
         .route("/api/auth/verify", any(api_auth::verify))
+        // Read by an account's instance (no session), so it sits under /api/auth/
+        // where the proxy routes to authd; it answers one key. See api_auth.rs.
+        .route("/api/auth/deployment", get(api_auth::deployment))
         // Internal: the box gateway resolves an account's opaque gateway key to
         // that account's own upstream key. Deliberately outside `/api/*` so the
         // public reverse-proxy matcher never forwards it; secret-gated and inert
@@ -317,6 +320,10 @@ async fn main() {
             post(api_gateway::resolve_gateway_key),
         )
         .route("/api/admin/users", get(api_admin::list_users).post(api_admin::create_user))
+        .route(
+            "/api/admin/settings",
+            get(api_admin::get_settings).put(api_admin::update_settings),
+        )
         .route(
             "/api/admin/users/:id",
             patch(api_admin::update_user).delete(api_admin::delete_user),

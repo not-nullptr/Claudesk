@@ -17,6 +17,16 @@ export interface User {
   updated_at: number;
 }
 
+/** A deployment-wide setting the admin page owns. Only the model picker's layout
+ *  exists today: the ordered list of models kept at the root of the composer's
+ *  model menu, with every other configured model under "More models". Each
+ *  account's instance reads it from the auth service
+ *  (`GET /api/auth/deployment`) and lays the picker out from it. An empty list is
+ *  the native layout — every model at the root. */
+export interface DeploymentSettings {
+  model_picker_main_models: string[];
+}
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -95,6 +105,19 @@ export const api = {
       method: "POST",
     }),
   deleteUser: (id: number) => request<{ ok: true }>(`/api/admin/users/${id}`, { method: "DELETE" }),
+  getSettings: () => request<{ settings: DeploymentSettings }>("/api/admin/settings"),
+  /** Write the settings named in the patch; keys left out keep their value. */
+  updateSettings: (patch: Partial<DeploymentSettings>) =>
+    request<{ settings: DeploymentSettings }>("/api/admin/settings", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  /** The deployment's configured model ids, as the bridge itself serves them
+   *  (`GET /api/chat/models`). Not an admin route, and empty when the gateway
+   *  discovers its models instead of being handed a list, so the card must treat
+   *  an empty or failed answer as "no suggestions" rather than "no models". */
+  configuredModels: () =>
+    request<{ value: string[] }>("/api/chat/models").then((body) => body.value ?? []),
 };
 
 /** The invitee's own timezone, read from their browser at the moment they accept. */

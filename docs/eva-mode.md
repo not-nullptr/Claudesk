@@ -110,6 +110,28 @@ An admin can replace or clear a person's key from `/admin` (the `API key…` act
 the stored value is never sent back to the browser, so it is a blind write, and the
 table only shows whether a key is set.
 
+### The model picker's layout
+
+The deployment's model list (`CLAUDE_INFERENCE_MODELS_JSON`, or what the gateway's
+`/v1/models` reports) can be long, and every model in it otherwise lands at the root
+of the composer's model menu. The **Model picker** card on `/admin` names the models
+that should stay there and in what order; every other model is moved under a
+**More models** submenu, where it is still selectable — the layout claude.ai uses.
+
+The setting is deployment-wide and lives in `authd` (`settings` table, read back
+through `GET /api/auth/deployment`, which answers that one key and nothing else).
+Each account's bridge reads it and rewrites the model list in the bootstrap document
+it already proxies, so no renderer patch is involved: the split is data — a `section`
+of `main` or `overflow` on each entry, with the array order as the root order. A
+`[1m]` long-context spelling is an entry of its own, so naming the model alone keeps
+the root to one row per model and leaves the 1M spelling in the submenu; name the
+`[1m]` id too to pin that row as well.
+
+Clearing the list restores the native layout. `CLAUDE_MODEL_PICKER_MAIN_MODELS` is
+the same list in env form, for a deployment with no auth service; with
+`AUTH_IDENTITY_URL` set it is only the fallback for a failed read. A list whose ids
+are all absent from the picker is logged and ignored, so a typo cannot empty the menu.
+
 ### Each account gets its own instance
 
 Creating an account does not by itself give it a workspace. `authd` records the

@@ -135,6 +135,47 @@ const titleModel = (process.env.CLAUDE_TITLE_MODEL || "").trim();
 // "You're here!" placeholder. Setting this replaces the footer identity and is
 // folded into the time-based greeting below. Unset keeps Desktop's own value.
 const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().slice(0, 80);
+// The composer's model picker, laid out the way claude.ai lays it out: a short
+// list of main models at the root, everything else behind the "More models"
+// submenu. The renderer decides that split itself — each model entry's `section`
+// ("main" | "overflow") picks its group and the array order is the root order —
+// and the entries arrive in the bootstrap document this bridge already rewrites,
+// so no renderer patch is involved (see applyModelPickerLayout).
+//
+// The list is the deployment's, and an operator edits it on the admin page, where
+// it lives in the auth service; the bridge reads it per request
+// (resolveMainModels -> GET /api/auth/deployment). CLAUDE_MODEL_PICKER_MAIN_MODELS
+// is the env form, for a deployment without an auth service or as the fallback
+// when that read fails. Either way it is a list of exact model ids, most
+// convenient as the JSON array CLAUDE_INFERENCE_MODELS_JSON uses, and an empty
+// list means the native layout: every model at the root, nothing rewritten.
+const MODEL_PICKER_MAX_MODELS = 50;
+const envMainModels = parseModelList(process.env.CLAUDE_MODEL_PICKER_MAIN_MODELS);
+
+/** A model-id list from a JSON array, or from a comma/newline-separated string.
+ *  A value that opens like JSON but is not an array is a broken list, not a list
+ *  of one id, and answers empty — an id that matches nothing is worse than none,
+ *  since it silently leaves that model under "More models". */
+function parseModelList(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return [];
+  let items;
+  if (text.startsWith("[") || text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      items = [];
+    }
+  } else {
+    items = text.split(/[\s,]+/);
+  }
+  return items
+    .map((item) => typeof item === "string" ? item.trim() : "")
+    .filter(Boolean)
+    .slice(0, MODEL_PICKER_MAX_MODELS);
+}
+
 // Web-shell account identity. The browser chrome reads the signed-in account
 // from the bootstrap `account` document and from GET /api/account(_profile),
 // and reads the sidebar footer's provider label from ManagedConfig's
@@ -220,6 +261,44 @@ async function fetchAuthIdentity(request) {
   if (authIdentityCache.size >= AUTH_IDENTITY_CACHE_MAX) authIdentityCache.clear();
   authIdentityCache.set(cookie, { identity, expires: Date.now() + AUTH_IDENTITY_TTL_MS });
   return identity;
+}
+
+// The deployment's model-picker layout, as the admin page saved it. It lives in
+// the auth service (authd owns the setting and the admin page that edits it), so
+// this is a plain read of a narrow, cookie-free route — the bootstrap it feeds is
+// fetched on every page load, and the value changes only when an operator edits
+// it, so it is cached briefly. The env list stands in when no auth service is
+// wired up or the read fails, and an empty answer means the native layout.
+const deploymentSettingsCache = { models: null, expires: 0 };
+const DEPLOYMENT_SETTINGS_TTL_MS = 30 * 1000;
+
+async function resolveMainModels() {
+  if (!authIdentityUrl) return envMainModels;
+  if (deploymentSettingsCache.models && deploymentSettingsCache.expires > Date.now()) {
+    return deploymentSettingsCache.models;
+  }
+  let models = null;
+  try {
+    const response = await fetch(`${authIdentityUrl}/api/auth/deployment`, {
+      // A wedged auth service must not hold a page's first load open; the env
+      // list (or none at all) covers the wait.
+      signal: AbortSignal.timeout(2000),
+    });
+    if (response.ok) {
+      const body = await response.json();
+      const list = body?.model_picker_main_models;
+      if (Array.isArray(list)) {
+        models = list
+          .filter((id) => typeof id === "string" && id.trim())
+          .map((id) => id.trim())
+          .slice(0, MODEL_PICKER_MAX_MODELS);
+      }
+    }
+  } catch { /* fall back to the env list */ }
+  if (models === null) models = envMainModels;
+  deploymentSettingsCache.models = models;
+  deploymentSettingsCache.expires = Date.now() + DEPLOYMENT_SETTINGS_TTL_MS;
+  return models;
 }
 
 async function resolveRequestAccountIdentity(request) {
@@ -2051,6 +2130,76 @@ function grantCoworkPermissionGates(value) {
   return changed;
 }
 
+// How a model id in the operator's list is matched against the ids the picker
+// data carries: trimmed and case-folded. Literal otherwise — in particular a
+// long-context `[1m]` spelling is its own entry with its own id (the Desktop
+// lists one row per spelling, both named alike), so it is pinned only if it is
+// named. That keeps the root to one row per model the operator chose, while the
+// 1M spelling stays selectable under "More models" — or at the root, if that is
+// what they list.
+function modelPickerKey(id) {
+  return String(id ?? "").trim().toLowerCase();
+}
+
+// Lay out the composer's model picker the way claude.ai lays it out: the
+// deployment's main models at the root, in the order the operator gave, and every
+// other configured model under "More models". The renderer decides that split
+// from the data — each entry's `section` ("main" | "overflow") chooses its group
+// and the array order is the root order — and this data is the bootstrap
+// document's `model_selector_config`, one list per surface, which the bridge is
+// already rewriting on its way to the page. So this is a data rewrite, not a
+// renderer patch: it survives a Desktop update that moves or renames the code.
+//
+// Models are moved between groups, never hidden — one the operator left off the
+// list stays one click away in the submenu — and every entry the operator did not
+// name keeps its relative order. `section` is written on every entry rather than
+// only on the ones that move: the renderer reads a group off that field in two
+// places, one of which treats a missing value as "main" and one of which filters
+// on `=== "main"`, so stating it everywhere is the one answer they agree on.
+//
+// Returns whether the document changed. An empty list is the native layout and
+// rewrites nothing, and a list no entry matches (a typo, or ids from another
+// deployment) leaves the document alone rather than emptying the picker.
+function applyModelPickerLayout(value, mainModels) {
+  if (!Array.isArray(mainModels) || mainModels.length === 0) return false;
+  const surfaces = value?.model_selector_config;
+  if (!Array.isArray(surfaces)) return false;
+  const rank = new Map();
+  for (const id of mainModels) {
+    const key = modelPickerKey(id);
+    if (key && !rank.has(key)) rank.set(key, rank.size);
+  }
+  let changed = false;
+  let matched = false;
+  for (const surface of surfaces) {
+    if (!surface || !Array.isArray(surface.models)) continue;
+    const main = [];
+    const overflow = [];
+    for (const model of surface.models) {
+      const listed = rank.has(modelPickerKey(model?.id));
+      if (listed) matched = true;
+      const section = listed ? "main" : "overflow";
+      const next = model?.section === section ? model : { ...model, section };
+      if (next !== model) changed = true;
+      (listed ? main : overflow).push(next);
+    }
+    if (main.length === 0) continue;
+    // The operator's order. Array#sort is stable, so two entries that answer the
+    // same rank (an id listed twice) keep the order they arrived in.
+    main.sort((a, b) => rank.get(modelPickerKey(a.id)) - rank.get(modelPickerKey(b.id)));
+    const ordered = [...main, ...overflow];
+    if (ordered.some((model, index) => model !== surface.models[index])) {
+      surface.models = ordered;
+      changed = true;
+    }
+  }
+  if (!matched) {
+    console.log("[cowork-bridge] model picker: none of the configured main models are in the picker list");
+    return false;
+  }
+  return changed;
+}
+
 function containsSensitiveCredential(value) {
   if (!value || typeof value !== "object") return false;
   const sensitiveName = /^(?:api_?key|gateway_?api_?key|access_?token|refresh_?token|authorization|password|secret)$/i;
@@ -2207,6 +2356,14 @@ async function forwardOfficialProtocol(request, response, url) {
     }
     if (coworkSkipApprovals && bootstrapResponsePath.test(url.pathname)
       && grantCoworkPermissionGates(parsed)) {
+      rewrote = true;
+    }
+    // The composer's model picker, laid out from the deployment's main-model list
+    // (see applyModelPickerLayout). Every shell reads the same document, so the
+    // picker looks the same in the browser and in the Desktop window; with no
+    // operator list, the document is left exactly as upstream wrote it.
+    if (bootstrapResponsePath.test(url.pathname)
+      && applyModelPickerLayout(parsed, await resolveMainModels())) {
       rewrote = true;
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");
@@ -3454,6 +3611,12 @@ server.requestTimeout = 0;
 server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
   console.log(`[cowork-bridge] download roots: ${downloadRoots.join(", ")}`);
+  // Only the env-configured list is known this early; with an auth service the
+  // operator's list is read (and re-read) per request, so it is logged then.
+  if (envMainModels.length) {
+    console.log(`[cowork-bridge] model picker: ${envMainModels.length} main model(s) at the root: `
+      + envMainModels.join(", "));
+  }
   console.log(
     `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`
       + ` (requested ${sessionFileCapBytes}, memory limit ${sessionFileMemoryLimitBytes ?? "unknown"})`,

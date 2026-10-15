@@ -501,4 +501,45 @@ impl Store {
             .await?;
         Ok(())
     }
+
+    // --- deployment settings ------------------------------------------------
+
+    /// Every stored setting as JSON text, keyed. A key with no row is unset, so
+    /// an absent key is not an error here — the reader applies its own default.
+    pub async fn settings(&self) -> AppResult<Vec<(String, String)>> {
+        Ok(sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    pub async fn setting(&self, key: &str) -> AppResult<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(value,)| value))
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a setting. The row's absence *is* the unset state, so clearing is a
+    /// delete rather than a row holding `null`.
+    pub async fn clear_setting(&self, key: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM settings WHERE key = ?1")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }

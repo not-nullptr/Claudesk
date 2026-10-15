@@ -191,6 +191,13 @@ services:
       COWORK_REMOTE_ARTIFACTS_ROOT: "/config/Claude/Artifacts"
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "${COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD:-3}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:-}"
+      # The composer's model picker: an ordered list of model ids to keep at the
+      # root of the model menu, with every other configured model under "More
+      # models". A JSON array (as CLAUDE_INFERENCE_MODELS_JSON uses) or a
+      # comma-separated list. With AUTH_IDENTITY_URL set, the admin page's
+      # setting is what this reads and this is only the fallback; empty means the
+      # native layout, every model at the root.
+      CLAUDE_MODEL_PICKER_MAIN_MODELS: "${CLAUDE_MODEL_PICKER_MAIN_MODELS:-}"
       # Browser notifications: Web Push subscriptions, the VAPID key they are
       # bound to and the notification-preferences the settings panel writes, all
       # kept here so a restart does not drop every subscription. Contact address
