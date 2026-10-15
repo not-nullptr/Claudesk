@@ -133,88 +133,160 @@ function noteCoworkVmActivity() {
 // so a routine heals on the first edit any client attempts, and stays healed:
 // the agent's own `update_scheduled_task` tool path (which never crosses an IPC)
 // finds a plain file afterwards.
+//
+// The repair is deliberately forgiving about where the file is and which
+// argument carries the task id, and it says what it did when the write still
+// fails: a routine whose file lives under a root or a name this deployment does
+// not expect has to be diagnosable from the failure the client sees, because the
+// machine it is stuck on is one nobody logs into.
 const routineTaskFileWriteChannel =
   /\_\$_CoworkScheduledTasks_\$_(?:updateScheduledTask|updateScheduledTaskFileContent)$/;
 const routineFileLinkSuffix = ".hardlinked";
-const routineFileLinkRepairLimit = 8;
+const routineFileLinkRepairLimit = 64;
+const routineTaskIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-// The Cowork store keeps its routines in the "Scheduled" directory of the
-// Cowork user-files root; the Code store keeps them in the Claude config
-// directory. The root is the Desktop's own setting, persisted once it resolves
-// (`preferences.coworkUserFilesPath`), with `<home>/Claude` as the default.
-function coworkUserFilesRoot() {
+// The Cowork store keeps its routines in the "Scheduled" directory of the Cowork
+// user-files root; the Code store keeps them in the Claude config directory. The
+// Cowork root is the Desktop's own resolved setting (`coworkUserFilesPath`),
+// persisted once it decides — but a config that has not been written yet, or a
+// root the app fell back from, must not make the repair miss the file, so every
+// root the Desktop's own resolver can answer with is tried.
+function coworkUserFilesRoots() {
+  const roots = [];
   try {
     const config = JSON.parse(
       readFileSync(join(app.getPath("userData"), "claude_desktop_config.json"), "utf8"),
     );
     const configured = config?.preferences?.coworkUserFilesPath;
-    if (typeof configured === "string" && configured.startsWith("/")) return configured;
+    if (typeof configured === "string" && configured.startsWith("/")) roots.push(configured);
   } catch {}
-  return join(app.getPath("home"), "Claude");
+  // The resolver's own answers, in its order: the home folder, the legacy
+  // documents folder, and the userData fallback it uses when neither verifies.
+  roots.push(join(app.getPath("home"), "Claude"));
+  try {
+    roots.push(join(app.getPath("documents"), "Claude"));
+  } catch {}
+  try {
+    roots.push(join(app.getPath("userData"), "cowork-user-files"));
+  } catch {}
+  return roots;
 }
 
 function routineTaskRoots() {
   const configDir = process.env.CLAUDE_CONFIG_DIR;
-  return [
-    join(configDir || join(app.getPath("home"), ".claude"), "scheduled-tasks"),
-    join(coworkUserFilesRoot(), "Scheduled"),
-  ];
+  const roots = [join(configDir || join(app.getPath("home"), ".claude"), "scheduled-tasks")];
+  for (const root of coworkUserFilesRoots()) roots.push(join(root, "Scheduled"));
+  return [...new Set(roots)];
 }
 
-async function repairLinkedRoutineFiles(scheduledTaskId) {
-  if (typeof scheduledTaskId !== "string" ||
-      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(scheduledTaskId)) {
-    return 0;
+// Which task a write is about comes from the call's own arguments, whose shape
+// is the official API's, not ours: the id is a field of the task object on the
+// write channels, and every string argument is taken as a candidate too, so a
+// caller that passes the id on its own is not silently given no repair.
+function routineTaskIdsFromArgs(args) {
+  const ids = [];
+  for (const value of args) {
+    if (value && typeof value === "object" && typeof value.scheduledTaskId === "string") {
+      ids.push(value.scheduledTaskId);
+    }
   }
-  let repaired = 0;
-  for (const root of routineTaskRoots()) {
-    const taskDir = join(root, scheduledTaskId);
-    let entries;
-    try {
-      entries = await readdir(taskDir, { withFileTypes: true });
-    } catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+  for (const value of args) {
+    if (typeof value === "string") ids.push(value);
+  }
+  return [...new Set(ids)].filter((id) => routineTaskIdPattern.test(id));
+}
+
+// Moves every hard-linked file out of the way in one routine's directory, and
+// answers with what it moved. Returns the moved paths so the caller can report
+// them; a link that is not there is not an error, and is not logged.
+async function repairRoutineDirectory(taskDir) {
+  const moved = [];
+  let entries;
+  try {
+    entries = await readdir(taskDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
       console.warn(
-        `[cowork-wrapper] routine ${scheduledTaskId}: could not inspect ${taskDir}: ${error?.message || error}`,
+        `[cowork-wrapper] could not inspect routine directory ${taskDir}: ${error?.message || error}`,
+      );
+    }
+    return moved;
+  }
+  for (const entry of entries) {
+    if (moved.length >= routineFileLinkRepairLimit) return moved;
+    // `isFile()` is an lstat answer, so a symlink is neither followed nor moved:
+    // the store's own symlink refusal is a different failure, and one this
+    // repair must not paper over.
+    if (!entry.isFile()) continue;
+    // The repair's own leftovers are hard-linked by construction (they are the
+    // linked inode, renamed), so moving them again would only rename them again.
+    if (entry.name.includes(routineFileLinkSuffix)) continue;
+    const path = join(taskDir, entry.name);
+    let info;
+    try {
+      info = await lstat(path);
+    } catch {
+      continue;
+    }
+    if (!info.isFile() || info.nlink <= 1) continue;
+    const aside = `${path}${routineFileLinkSuffix}-${Date.now()}`;
+    try {
+      await rename(path, aside);
+    } catch (error) {
+      console.warn(
+        `[cowork-wrapper] ${path} is hard-linked (nlink ${info.nlink}) and could not be moved aside: ${error?.message || error}`,
       );
       continue;
     }
+    moved.push(path);
+    console.warn(
+      `[cowork-wrapper] ${path} was hard-linked to another name`
+      + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
+      + " so the Desktop writes a plain file",
+    );
+  }
+  return moved;
+}
+
+async function repairLinkedRoutineFiles({ ids = [], sweep = false } = {}) {
+  const moved = [];
+  const roots = routineTaskRoots();
+  for (const id of ids) {
+    for (const root of roots) moved.push(...await repairRoutineDirectory(join(root, id)));
+  }
+  // The id can be missing from the arguments, or name the task differently from
+  // the directory holding its file — the store's own refusal is then the only
+  // thing that says a linked file exists. Sweeping is for that case, so it runs
+  // on the retry alone, and only walks the routine directories themselves.
+  if (!sweep) return moved;
+  for (const root of roots) {
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
     for (const entry of entries) {
-      if (repaired >= routineFileLinkRepairLimit) return repaired;
-      // `isFile()` is an lstat answer, so a symlink is neither followed nor
-      // moved: the store's own symlink refusal is a different failure, and one
-      // this repair must not paper over.
-      if (!entry.isFile()) continue;
-      const path = join(taskDir, entry.name);
-      let info;
-      try {
-        info = await lstat(path);
-      } catch {
-        continue;
-      }
-      if (!info.isFile() || info.nlink <= 1) continue;
-      const aside = `${path}${routineFileLinkSuffix}-${Date.now()}`;
-      try {
-        await rename(path, aside);
-      } catch (error) {
-        console.warn(
-          `[cowork-wrapper] routine ${scheduledTaskId}: ${path} is hard-linked (nlink ${info.nlink}) and could not be moved aside: ${error?.message || error}`,
-        );
-        continue;
-      }
-      repaired += 1;
-      console.warn(
-        `[cowork-wrapper] routine ${scheduledTaskId}: ${path} was hard-linked to another name`
-        + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
-        + " so the Desktop writes a plain file",
-      );
+      if (moved.length >= routineFileLinkRepairLimit) return moved;
+      if (!entry.isDirectory() || !routineTaskIdPattern.test(entry.name)) continue;
+      moved.push(...await repairRoutineDirectory(join(root, entry.name)));
     }
   }
-  return repaired;
+  return moved;
 }
 
 function isLinkedRoutineFileRefusal(error) {
   return /hard-linked to another file/.test(String(error?.message ?? error));
+}
+
+// What the repair saw, appended to a refusal it could not clear. The client that
+// hits this shows the message, so the machine that is stuck can be diagnosed
+// from a browser: the id the call carried, the directories that were searched,
+// and whether any linked file was found anywhere under them.
+function routineRepairNote(ids, moved) {
+  return ` [cowork-wrapper: task id ${ids.length ? ids.map((id) => `"${id}"`).join(", ") : "not in the call"}; `
+    + `${moved.length ? `moved ${moved.length} hard-linked file(s): ${moved.join(", ")}` : "found no hard-linked routine file"}; `
+    + `searched ${routineTaskRoots().join(", ")}]`;
 }
 
 // The official Web renderer supplies its feature-flag default (currently
@@ -229,17 +301,24 @@ ipcMain.handle = (channel, listener) => {
   }
   if (routineTaskFileWriteChannel.test(channel)) {
     return originalIpcMainHandle(channel, async (event, ...args) => {
-      await repairLinkedRoutineFiles(args[0]?.scheduledTaskId);
+      const ids = routineTaskIdsFromArgs(args);
+      const repaired = await repairLinkedRoutineFiles({ ids });
       try {
         return await listener(event, ...args);
       } catch (error) {
         // The file can also turn up linked between the repair and the write, and
         // a link the repair did not see (a root we did not guess, a file the
         // store creates in place) fails here rather than above. One repair and
-        // one retry, then let the refusal stand.
+        // one retry, then let the refusal stand — with what the repair saw.
         if (!isLinkedRoutineFileRefusal(error)) throw error;
-        await repairLinkedRoutineFiles(args[0]?.scheduledTaskId);
-        return listener(event, ...args);
+        const swept = await repairLinkedRoutineFiles({ ids, sweep: true });
+        try {
+          return await listener(event, ...args);
+        } catch (retryError) {
+          if (!isLinkedRoutineFileRefusal(retryError)) throw retryError;
+          const seen = [...repaired, ...swept];
+          throw new Error(`${String(retryError?.message ?? retryError)}${routineRepairNote(ids, seen)}`);
+        }
       }
     });
   }

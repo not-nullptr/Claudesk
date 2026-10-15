@@ -461,13 +461,20 @@ and the store checks it on every write, so until the file becomes a plain copy o
 that machine every edit answers 500, from every client. The wrapper does what the
 refusal asks, at the main process boundary where the writing IPCs already pass:
 on `updateScheduledTask` and `updateScheduledTaskFileContent` it moves any linked
-file in the task's own directory aside (`SKILL.md.hardlinked-<stamp>`) before
-relaying the call, and if the refusal still arrives it repairs and retries once.
-Nothing is ever written through the link, so the other name keeps its bytes, and
-the store's own write lands on a plain file — including the agent's
-`update_scheduled_task` tool path, which writes in the main process without ever
-crossing an IPC. The repair runs at a write rather than as a sweep, so a routine
-nobody edits is left exactly as the store wrote it.
+file out of the task's own directory (`SKILL.md.hardlinked-<stamp>`) before
+relaying the call, and if the refusal still arrives it sweeps the routine
+directories under every root the Desktop's resolver can answer with, repairs, and
+retries once. Nothing is ever written through the link, so the other name keeps
+its bytes, and the store's own write lands on a plain file — including the
+agent's `update_scheduled_task` tool path, which writes in the main process
+without ever crossing an IPC. The id comes from the call's own arguments (the
+task object's `scheduledTaskId`, or a bare string argument), and when a refusal
+cannot be cleared the store's error comes back with what the repair saw appended
+to it — the id, the directories that were searched, and whether a linked file was
+found anywhere under them — so a stuck routine can be diagnosed from the browser
+that hit it rather than from a shell on that machine. The repair runs at a write
+rather than as a sweep of its own, so a routine nobody edits is left exactly as
+the store wrote it.
 
 ## Home greeting
 
