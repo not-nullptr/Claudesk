@@ -30,6 +30,13 @@ cd "$project_dir"
 
 [ -f .env ] || { printf 'refresh-users: no .env in %s\n' "$project_dir" >&2; exit 1; }
 
+# Each account's stack is recreated with no --build, so it inherits whatever the
+# image tags hold. Run standalone — after a pull, before a rebuild — this would
+# hand every account fresh containers around old code and look like success.
+# shellcheck source=scripts/lib/image-release.sh
+. "$project_dir/scripts/lib/image-release.sh"
+assert_images_current "$project_dir"
+
 if ! accounts="$(docker compose -f compose.yaml exec -T authd /app/authd --provisioned 2>/dev/null)"; then
     printf 'refresh-users: authd is not running; nothing to do\n' >&2
     exit 0

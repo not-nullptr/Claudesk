@@ -86,8 +86,23 @@ if sudo docker compose -f compose.yaml ps --status running --services 2>/dev/nul
     sudo docker compose -f compose.yaml stop -t 30 cowork-bridge
 fi
 
-sudo docker compose -f compose.yaml \
-    up -d --build --force-recreate \
+# Build as its own step, before anything is recreated. `up -d --force-recreate`
+# alone reuses the image, so a build that did not happen leaves every service —
+# and, worse, every account, whose stack is recreated with no --build at all —
+# running fresh containers around old code. Separating the build makes a failure
+# attributable instead of silent.
+sudo docker compose -f compose.yaml build \
+    claude-desktop cowork-bridge claude-mobile authd
+
+# Prove the images actually took before the accounts are recreated. This is the
+# check whose absence cost an afternoon: the browser was served a renderer
+# release from two deploys earlier, from an account stack recreated seconds
+# before, with nothing anywhere reporting a problem.
+# shellcheck source=scripts/lib/image-release.sh
+. "$project_dir/scripts/lib/image-release.sh"
+assert_images_current "$project_dir"
+
+sudo docker compose -f compose.yaml up -d --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \
     claude-mobile claude-mobile-gateway-loopback authd
 
