@@ -7,7 +7,17 @@
 }
 
 :root {
+  /* `anthropic-serif` first, deliberately. That is the app's own variable face
+   * (`font-weight: 300 800`, the same bytes as the web bundle's
+   * ant-serif-variable.woff2), and it is the only reason a weight like the
+   * compact greeting's `font-[360]` renders lighter than 400. The supplied CJK
+   * OTF is a single-weight static file and sits *after* it, so it still covers
+   * the Chinese glyphs the variable face lacks without flattening every weight
+   * onto its own 400. Ordering it first — as this file used to — made
+   * `font-[360]` a no-op and left the greeting looking heavier than the same
+   * markup on claude.ai. */
   --claude-remote-anthropic-serif-cjk:
+    anthropic-serif,
     "Anthropic Serif Text CJK",
     "Anthropic Serif Text",
     "Anthropic Serif",

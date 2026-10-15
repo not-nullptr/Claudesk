@@ -1848,6 +1848,45 @@
   globalThis.addEventListener("pageshow", () => connectEvents(true));
   globalThis.addEventListener("online", () => connectEvents(true));
 
+  // The entry document ships every static-composer element's class lists as
+  // data attributes — `data-page-classes`, `data-layout-home-classes`,
+  // `data-marlin-classes`, `data-classic-classes` — and whoever renders that
+  // document is meant to copy the chosen one into `class`. claude.ai's server
+  // does it before shipping the page; the Desktop package's copy carries the
+  // data attributes and no `class` at all, and nothing in either bundle ever
+  // reads them. So the skeleton that paints before hydration has no spacing
+  // whatsoever — every wrapper computes padding 0 — and the greeting it keeps is
+  // left where it lands, which is why the page does not sit where claude.ai's
+  // does. Apply the deployment's own choices here, from the document's own
+  // lists: the home layout first, then the marlin card, then the classic set,
+  // then the default. Nothing is invented; only which of the shipped lists wins.
+  const applyComposerClasses = () => {
+    let elements;
+    try {
+      elements = document.querySelectorAll(
+        "[data-page-classes],[data-layout-home-classes],"
+        + "[data-marlin-classes],[data-classic-classes]",
+      );
+    } catch {
+      return;
+    }
+    for (const element of elements) {
+      const classes = element.getAttribute("data-layout-home-classes")
+        || element.getAttribute("data-marlin-classes")
+        || element.getAttribute("data-classic-classes")
+        || element.getAttribute("data-page-classes");
+      if (classes && element.className !== classes) element.className = classes;
+    }
+  };
+  if (config.webShell) {
+    // Before the app mounts if possible, and again the moment the tree exists:
+    // this runs in <head> while the skeleton is still being parsed.
+    applyComposerClasses();
+    document.addEventListener("readystatechange", applyComposerClasses);
+    document.addEventListener("DOMContentLoaded", applyComposerClasses, { once: true });
+    globalThis.requestAnimationFrame?.(applyComposerClasses);
+  }
+
   // TEMPORARY. The New page's layout question — which greeting node is actually
   // on screen, what size it computed, and the two document attributes the first
   // paint reads — cannot be answered from the bundle alone, and the page is
