@@ -19,10 +19,23 @@
 # command, so neither the desktop's pivot_root entrypoint nor the bridge's
 # server runs.
 
+# Reach Docker the way the caller's privileges allow. deploy.sh runs as the
+# deploy user and touches Docker only through sudo, while the reconciler scripts
+# are run as root — a bare `docker` in the first case fails, and an unreadable
+# image is indistinguishable from a stale one, which is how this check first
+# reported every image as carrying nothing.
+docker_cli() {
+    if [ "$(id -u)" -eq 0 ]; then
+        docker "$@"
+    else
+        sudo docker "$@"
+    fi
+}
+
 image_release() {
     image="$1"
     path="$2"
-    docker run --rm --entrypoint cat "$image" "$path" 2>/dev/null \
+    docker_cli run --rm --entrypoint cat "$image" "$path" 2>/dev/null \
         | sed -n 's/.*"patchRelease"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1
 }
@@ -38,6 +51,7 @@ assert_images_current() {
     fi
 
     stale=0
+    unreadable=0
     for spec in \
         "local/claude-cowork-bridge:latest /app/release.json" \
         "local/claudesk-desktop:official-linux /opt/claude-cowork-bridge/release.json"
@@ -45,13 +59,23 @@ assert_images_current() {
         image="${spec%% *}"
         path="${spec##* }"
         actual="$(image_release "$image" "$path")"
-        if [ "$actual" != "$expected" ]; then
+        if [ -z "$actual" ]; then
+            printf 'release: cannot read %s out of %s\n' "$path" "$image" >&2
+            unreadable=1
+        elif [ "$actual" != "$expected" ]; then
             printf 'release: %s carries %s, this checkout is %s\n' \
-                "$image" "${actual:-nothing readable}" "$expected" >&2
+                "$image" "$actual" "$expected" >&2
             stale=1
         fi
     done
 
+    if [ "$unreadable" -ne 0 ]; then
+        printf '%s\n' \
+            'release: an unreadable image usually means Docker is not reachable as' \
+            'release: this user, or the image is not built yet. Rebuild, then retry:' \
+            'release:   sudo docker compose -f compose.yaml build claude-desktop cowork-bridge' >&2
+        return 1
+    fi
     if [ "$stale" -ne 0 ]; then
         printf '%s\n' \
             'release: the images do not carry this checkout; refusing to recreate accounts' \
