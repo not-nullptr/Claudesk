@@ -355,15 +355,26 @@ chunk. Spliced only in web-shell mode, and not required. The bridge supplies the
 feature the restored predicate reads (`grantProjectsLimits`), because a
 self-hosted org carries no plan capability.
 
-`web-projects-sidebar-entry` removes the second gate on the same feature, the one
-that keeps the sidebar's own entry hidden after the routes start working: the
-Desktop build appends `… && surface === "chat" && !isLocalChatSupported` to its
-nav filter's `||` chain, where the operand is a module constant read once from
-`globalThis.desktopBootFeatures` — the Desktop main process's table, absent in a
-browser — and the web bundle has no such clause. The `||` node that clause is the
-last operand of is spliced to its own left side. It is pinned by the two literals
-it compares against (`"projects"` and `"chat"`) and the negated binding it ends
-with. Spliced only in web-shell mode, and not required.
+`web-projects-sidebar-entry` and `web-projects-composer-slot` carry the same
+feature into the two surfaces that still hid it, each blocked by a value
+claude.ai computes and the Desktop build compiles to a constant.
+
+The first drops the two clauses about the Projects entry from the nav filter's
+negated `||` chain: one is Desktop-only (`… && surface === "chat" &&
+!isLocalChatSupported`, read once from `globalThis.desktopBootFeatures`, the
+Desktop main process's table that a browser page never has) and the other reads
+an atrium flag the web bundle evaluates `flag || !inNestedFrame` — true for any
+top-level page — while Desktop folds it to `false`. Only operands testing
+`id === "projects"` are removed, so the mode and eligibility filters still apply.
+
+The second forces the composer's project-slot answer to `"enabled"`. That chain's
+remaining operand is a store holding the pending first send, which is null until
+a send is being prepared, so on a New page it short-circuits to `"disabled"` and
+renders nothing; claude.ai renders the slot there. Only the returned expression
+is spliced, leaving the declarators — the feature reads and surface hook calls —
+in place so hook order is unchanged, and the function is pinned by the four mode
+literals it answers with. Both are spliced only in web-shell mode, and neither is
+required.
 
 
 The code generator splices only the selected node. It does not regenerate

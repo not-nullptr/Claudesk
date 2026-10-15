@@ -980,49 +980,101 @@ const projectsCompiled = await minify(projectsChunk, {
 assert.equal(inspectRenderer(projectsCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-allowed").length, 1,
   "a mangled predicate must still be rebuilt once");
-// The sidebar clause. Both builds filter their nav items through one `||`
-// chain; the Desktop build adds a trailing conjunction that hides the Projects
-// entry on the chat surface whenever `globalThis.desktopBootFeatures` — the
-// Desktop main process's table, absent in a browser — does not report local chat
-// as supported. The web bundle has no such clause, so on the chat surface the
-// entry always shows; the patch removes it by splicing the `||` node to its own
-// left side.
-const navChain = (clause = '||n.id==="projects"&&t==="chat"&&!supported') =>
+// The sidebar's Projects entry. Both builds filter their nav items through one
+// negated `||` chain, and both clauses about the entry itself are false on
+// claude.ai while being true here: one is Desktop-only (built on
+// `globalThis.desktopBootFeatures`, which a browser page never has) and the
+// other reads a value the Desktop build compiles to a constant. The patch drops
+// every operand that tests `id === "projects"` from that chain, keeping the mode
+// and eligibility filters.
+const navChain = (clauses = ['n.id==="projects"&&!a&&!o', 'n.id==="projects"&&t==="chat"&&!supported']) =>
   'function navItems(){return items.filter(n=>{let r=F&&n.id==="scheduled";'
   + 'return!(n.modes!==void 0&&!n.modes.includes(t)&&!r||!eligible(n,e)'
-  + '||n.id==="projects"&&!a&&!o' + clause + ')}).map(r=>r.href)}';
+  + `||${clauses.join("||")})}).map(r=>r.href)}`;
 assert.equal(inspectRenderer(navChain(), false, false).patches
   .filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
-  "the nav clause is left alone outside web-shell mode");
+  "the nav clauses are left alone outside web-shell mode");
 const navPatches = inspectRenderer(navChain(), false, true).patches
   .filter(patch => patch.id === "web-projects-sidebar-entry");
-assert.equal(navPatches.length, 1, "the clause must be removed exactly once");
-assert.equal(navPatches[0].original.slice(navPatches[0].replacement.length),
-  '||n.id==="projects"&&t==="chat"&&!supported',
-  "only the trailing projects/chat conjunction is spliced away");
-// A conjunction that names only one of the two, or names both but does not end
-// in a negated binding, is a different clause and must survive.
-assert.equal(inspectRenderer(navChain('||n.id==="projects"&&!a'), false, true).patches
+assert.equal(navPatches.length, 1, "the clauses must be removed exactly once");
+assert.equal(navPatches[0].replacement,
+  "!(n.modes!==void 0&&!n.modes.includes(t)&&!r||!eligible(n,e))",
+  "every projects operand must go, and the mode and eligibility filters must stay");
+assert.ok(!navPatches[0].replacement.includes("projects"),
+  "no clause naming the entry may survive the splice");
+// A chain carrying only one of the two project clauses is still the same filter,
+// and a chain that never mentions the surface is a different one.
+for (const [label, clauses] of [
+  ["only the shared clause", ['n.id==="projects"&&!a&&!o']],
+  ["only the surface clause", ['n.id==="projects"&&t==="chat"&&!supported']],
+]) {
+  const sole = inspectRenderer(navChain(clauses), false, true).patches
+    .filter(patch => patch.id === "web-projects-sidebar-entry");
+  assert.equal(sole.length, 1, `${label} alone must still be dropped`);
+  assert.ok(!sole[0].replacement.includes("projects"), `${label} must not survive`);
+}
+assert.equal(inspectRenderer(navChain(['n.modes.includes(t)&&t==="chat"']), false, true).patches
   .filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
-  "a projects clause without the surface test must survive");
-assert.equal(inspectRenderer(navChain('||n.id==="projects"&&t==="chat"&&enabled'), false, true)
-  .patches.filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
-  "a conjunction not ending in a negated binding must survive");
+  "a chain that never names the projects entry must survive untouched");
+assert.equal(inspectRenderer(`${navChain()}\n${navChain().replace("navItems", "navItemsB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
+  "two filters of the same shape must refuse rather than splice one of two");
 const navOut = patchRendererSources(
   new Map([["nav.js", `${webShellFixtures}\n${accountMenuName}\n${navChain()}`]]), false, true)
   .sources.get("nav.js");
-assert.ok(navOut.includes('||n.id==="projects"&&!a&&!o)}).map'),
-  "the chain must end at the project-scope clause the web bundle keeps");
-assert.ok(!navOut.includes('t==="chat"&&!supported'),
-  "the surface clause must not survive the splice");
-assert.ok(navOut.includes('!eligible(n,e)'),
-  "the rest of the chain must survive untouched");
+assert.ok(navOut.includes('if(n.gate!==void 0&&!l.has(n.gate))return!1;')
+  || navOut.includes("!eligible(n,e)"),
+  "the rest of the filter must survive untouched");
+assert.ok(!navOut.includes('n.id==="projects"'),
+  "no projects operand may survive the splice");
 const navCompiled = await minify(navChain(), {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
 assert.equal(inspectRenderer(navCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-sidebar-entry").length, 1,
-  "a mangled nav clause must still be removed once");
+  "a mangled nav filter must still have its projects operands dropped");
+// The composer's project slot. One function answers with the four mode literals,
+// and its inputs only short-circuit to "disabled" on this shell: the pending
+// first send it reads is null until a send is being prepared, so on a New page
+// nothing renders. The returned expression is forced to the deployed answer,
+// leaving the declarators above it — the flag reads and surface hook calls —
+// exactly where they are.
+const composerSlot = (inner = 'm?h?"disabled":t&&p?"pending":s&&!f?"projects":"enabled"'
+  + ':a&&t&&(!n.coworkSettled||p)?"pending":"disabled"') =>
+  'function composerMode(){let e=readStore(),t=isApp(),{surfaces:n,unifiedComposerDesign:r}=ctx(),'
+  + 'a=e!==null&&r,o=allowed(),s=t&&n.settled,f=hub(),p=!f&&e?.gatePending===!0,m=a&&(!t||f||s),'
+  + `h=gate(m);return ${inner}}`;
+assert.equal(inspectRenderer(composerSlot(), false, false).patches
+  .filter(patch => patch.id === "web-projects-composer-slot").length, 0,
+  "the composer's answer is left alone outside web-shell mode");
+const slotPatches = inspectRenderer(composerSlot(), false, true).patches
+  .filter(patch => patch.id === "web-projects-composer-slot");
+assert.equal(slotPatches.length, 1, "the answer must be forced exactly once");
+assert.equal(slotPatches[0].replacement, '"enabled"',
+  "the answer is forced to the arm that renders a slot");
+assert.ok(slotPatches[0].original.includes('"projects"') && slotPatches[0].original.includes('"disabled"'),
+  "only the returned conditional is spliced");
+// A three-literal conditional, or a function whose conditional is not what it
+// returns, is a different shape.
+assert.equal(inspectRenderer(composerSlot('m?"disabled":"enabled"'), false, true).patches
+  .filter(patch => patch.id === "web-projects-composer-slot").length, 0,
+  "a conditional missing a mode literal must survive");
+assert.equal(inspectRenderer(`${composerSlot()}\n${composerSlot().replace("composerMode", "composerModeB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-composer-slot").length, 0,
+  "two answers in one chunk must refuse rather than splice one of two");
+const slotOut = patchRendererSources(
+  new Map([["composer.js", `${webShellFixtures}\n${accountMenuName}\n${composerSlot()}`]]), false, true)
+  .sources.get("composer.js");
+assert.ok(slotOut.includes('h=gate(m);return "enabled"}'),
+  "the declarators must survive and only the answer change");
+assert.ok(!slotOut.includes('"projects"'),
+  "no mode literal may survive the splice");
+const slotCompiled = await minify(composerSlot(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(slotCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-composer-slot").length, 1,
+  "a mangled composer answer must still be forced once");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

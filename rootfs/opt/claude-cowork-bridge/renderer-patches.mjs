@@ -164,22 +164,46 @@ const homeArrangementReplacement = '"outside"';
 const projectsAllowedPatchId = "web-projects-allowed";
 const projectsLimitsFeature = "claude_ai_projects_limits";
 const projectsLimitsField = "max_free_projects";
-// The sidebar's own "Projects" entry is dropped by a clause the web bundle does
-// not have at all. Both builds filter their nav items through one `||` chain —
-// a mode mismatch, a per-item eligibility call, and "no project scope" — and the
-// Desktop build adds one more: `… && surface === "chat" && !isChatIn3pSupported`.
-// The operand is a module constant read once from `globalThis.desktopBootFeatures`
-// — the Desktop main process's app-feature table, which a browser page never has
-// — so it is false here, and on the chat surface (which is the surface this shell
-// renders) the entry is always filtered out. The clause is exactly the one that
-// separates the two builds, so it is removed: the `||` node it is the last
-// operand of is spliced to its own left side. It is pinned by the two literals
-// it compares against — "projects" and "chat", the only place in the renderer
-// graph they appear in one conjunction — plus the negated binding it ends with,
-// so no other nav clause can match. Spliced only in web-shell mode, and not
-// required: a bundle that no longer matches leaves the entry hidden rather than
-// failing renderer preparation.
+// The sidebar's own "Projects" entry. Both builds filter their nav items through
+// one negated `||` chain — a mode mismatch, a per-item eligibility call, and two
+// clauses about the entry itself — and every clause about the entry is false on
+// claude.ai while being true here. One is Desktop-only (`… && surface === "chat"
+// && !isChatIn3pSupported`, whose operand is a module constant read once from
+// `globalThis.desktopBootFeatures`, the Desktop main process's app-feature table
+// that a browser page never has), and the other is in both builds but reads a
+// value the Desktop build compiles to a constant (`… && !noProjectScope && !flag`,
+// whose second operand the web bundle evaluates `flag || !inNestedFrame` — true
+// for any top-level page, which is what this shell is). Rather than reconstruct
+// either value, the clauses that name the entry are dropped from the chain: the
+// `!` node is spliced to a negation of the same chain with every operand that
+// tests `id === "projects"` removed. The chain is pinned by the two literals its
+// project clauses compare against — "projects" and "chat", which appear together
+// in one conjunction nowhere else in the renderer graph — and only its project
+// operands are dropped, so the mode and eligibility filters still apply. Spliced
+// only in web-shell mode, and not required: a bundle that no longer matches
+// leaves the entry hidden rather than failing renderer preparation.
 const projectsNavPatchId = "web-projects-sidebar-entry";
+// The composer's project slot — the chip that takes the left seat of the row the
+// model and permission pickers share. One function answers it: the chain that
+// ends `… ? "disabled" : … ? "pending" : … ? "projects" : "enabled"`, where the
+// last two are the shapes that render a slot. Its operands are the projects
+// predicate the `web-projects-allowed` patch restores, the caller's own
+// `unifiedComposerDesign` — which is the unified-composer arm's predicate, and
+// so is already forced by the design-predicate patch — and a store holding the
+// pending first send. That store is null until a send is actually being
+// prepared, so on a New page, before the user has typed anything, the answer
+// short-circuits to "disabled" and no slot is rendered. claude.ai renders one
+// there, so the deployed answer is forced, exactly as the layout variant and the
+// route surface kind are: only the returned expression is spliced, leaving the
+// declarators above it in place, because they are where the feature reads and
+// the surface hook calls happen and removing them would change hook order. The
+// function is pinned by the four mode literals it answers with, which appear
+// together nowhere else in the renderer graph. Spliced only in web-shell mode,
+// and not required: a bundle that no longer matches leaves the slot unrendered
+// rather than failing renderer preparation.
+const projectsComposerPatchId = "web-projects-composer-slot";
+const projectsComposerMode = '"enabled"';
+const projectsComposerModes = ["disabled", "pending", "projects", "enabled"];
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -712,30 +736,52 @@ function projectsAllowedReplacement(source, node) {
     + "||__claudeskPlanRaven}";
 }
 
-// The nav clause that hides the sidebar's Projects entry on the chat surface:
-// the trailing `|| id === "projects" && surface === "chat" && !supported` of a
-// filter's `||` chain. Matched by its own two literals and the negated binding
-// it ends with, so no other navigation clause can match.
-function projectsNavClauseTarget(node) {
-  if (node.type !== "LogicalExpression" || node.operator !== "||") return false;
-  const right = unwrap(node.right);
-  if (right?.type !== "LogicalExpression" || right.operator !== "&&") return false;
-  const operands = [];
-  const flatten = (expression) => {
-    const inner = unwrap(expression);
-    if (inner?.type === "LogicalExpression" && inner.operator === "&&") {
-      flatten(inner.left);
-      flatten(inner.right);
-    } else operands.push(inner);
-  };
-  flatten(right);
-  const compares = (expression, value) => expression?.type === "BinaryExpression"
-    && ["===", "=="].includes(expression.operator)
+// Split a chain of same-operator logical expressions into its operands, after
+// unwrapping the parentheses the minifier leaves behind nested ones.
+function flattenLogical(expression, operator, into = []) {
+  const inner = unwrap(expression);
+  if (inner?.type === "LogicalExpression" && inner.operator === operator) {
+    flattenLogical(inner.left, operator, into);
+    flattenLogical(inner.right, operator, into);
+  } else if (inner) into.push(inner);
+  return into;
+}
+
+function comparesTo(expression, value) {
+  return expression?.type === "BinaryExpression" && ["===", "=="].includes(expression.operator)
     && (literal(expression.left, value) || literal(expression.right, value));
-  const negated = operands.some(expression => expression?.type === "UnaryExpression"
-    && expression.operator === "!" && expression.argument.type === "Identifier");
-  return negated && operands.some(expression => compares(expression, "projects"))
-    && operands.some(expression => compares(expression, "chat"));
+}
+
+// The nav filter's project clauses: a negated `||` chain holding a clause that
+// tests `id === "projects"`. Matching inside the negation, rather than on any one
+// clause, is what keeps a clause that merely mentions projects elsewhere in the
+// graph out of reach. The surface counterpart is deliberately *not* required —
+// it is the clause a future bundle is most likely to drop, and requiring it
+// would silently stop the patch from applying at all.
+function projectsNavClauseTarget(node) {
+  if (node.type !== "UnaryExpression" || node.operator !== "!") return false;
+  const chain = unwrap(node.argument);
+  if (chain?.type !== "LogicalExpression" || chain.operator !== "||") return false;
+  return flattenLogical(chain, "||").some(operand =>
+    flattenLogical(operand, "&&").some(term => comparesTo(term, "projects")));
+}
+
+// The composer's project-slot answer: a function whose *last* statement returns
+// one conditional carrying all four mode literals. Pinned by those literals, so
+// no other conditional in the graph can match; the declarators above the return
+// are left in place, so neither is the shape required beyond that last statement.
+function composerSlotTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return false;
+  const statements = node.body.body;
+  const last = statements.at(-1);
+  if (statements.length < 1 || last.type !== "ReturnStatement") return false;
+  const argument = unwrap(last.argument);
+  if (argument?.type !== "ConditionalExpression") return false;
+  const literals = new Set();
+  walk(argument, [], (child) => {
+    if (child.type === "Literal" && typeof child.value === "string") literals.add(child.value);
+  });
+  return projectsComposerModes.every(mode => literals.has(mode));
 }
 
 // The flag operand of every unified-composer design predicate: a declaration
@@ -1266,15 +1312,31 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         original: source.slice(target.body.start, target.body.end),
         replacement: projectsAllowedReplacement(source, target) });
     }
-    // The sidebar clause that hides the Projects entry: exactly one `||` chain
-    // in the chunk ends with that conjunction, or nothing is spliced.
+    // The sidebar's Projects entry: the nav filter's project clauses are dropped
+    // from the `||` chain it negates. Exactly one such negation is required, so a
+    // chunk with a second filter of the same shape refuses rather than splice.
     const navClauses = [];
     walk(ast, [], (node) => { if (projectsNavClauseTarget(node)) navClauses.push(node); });
     if (navClauses.length === 1) {
       const target = navClauses[0];
-      patches.push({ id: projectsNavPatchId, start: target.start, end: target.end,
-        original: source.slice(target.start, target.end),
-        replacement: source.slice(target.left.start, target.left.end) });
+      const chain = unwrap(target.argument);
+      const kept = flattenLogical(chain, "||")
+        .filter(operand => !flattenLogical(operand, "&&").some(term => comparesTo(term, "projects")))
+        .map(operand => source.slice(operand.start, operand.end));
+      if (kept.length) {
+        patches.push({ id: projectsNavPatchId, start: target.start, end: target.end,
+          original: source.slice(target.start, target.end),
+          replacement: `!(${kept.join("||")})` });
+      }
+    }
+    // The composer's project slot: the answer the deployed arm settles on.
+    const composerSlots = [];
+    walk(ast, [], (node) => { if (composerSlotTarget(node)) composerSlots.push(node); });
+    if (composerSlots.length === 1) {
+      const argument = unwrap(composerSlots[0].body.body.at(-1).argument);
+      patches.push({ id: projectsComposerPatchId, start: argument.start, end: argument.end,
+        original: source.slice(argument.start, argument.end),
+        replacement: projectsComposerMode });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

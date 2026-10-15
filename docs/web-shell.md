@@ -554,23 +554,45 @@ grant raises anything that is not already above zero and leaves a real allowance
 alone. Without it a free account — which is what a self-hosted org resolves to —
 has no allowance and projects stay shut.
 
-The **sidebar's own "Projects" entry** is a second, independent gate, and the one
-that is easiest to miss: with the predicate restored the routes work and created
-projects appear in the sidebar, but no entry leads to `/projects`. Both builds
-filter their nav items through one `||` chain — a mode mismatch, a per-item
-eligibility call, and "no project scope" — and the Desktop build appends one
-more: `… && surface === "chat" && !isLocalChatSupported`. That last operand is a
-module constant read once from `globalThis.desktopBootFeatures`, the Desktop main
-process's app-feature table, which a browser page never has; on the chat surface,
-which is the surface this shell renders, the entry is therefore always filtered
-out. The web bundle has no such clause at all, so the `web-projects-sidebar-entry`
-patch removes it — the `||` node it is the last operand of is spliced to its own
-left side. It is pinned by the two literals it compares against (`"projects"` and
-`"chat"`, the only place in the renderer graph they appear in one conjunction)
-and by the negated binding it ends with. Spliced only in web-shell mode, and not
-required: a bundle that no longer matches leaves the entry hidden rather than
-failing renderer preparation. It changes prepared-renderer bytes, so it ships
-with a `patchRelease` bump and needs the `claude-desktop` service rebuilt.
+The **sidebar's own "Projects" entry** and the **composer's project chip** are
+two more gates on top of that predicate, and both are the same shape of problem:
+a value claude.ai computes and the Desktop build compiles to a constant.
+
+The sidebar. Both builds filter their nav items through one negated `||` chain —
+a mode mismatch, a per-item eligibility call, and two clauses about the entry
+itself — and both of those clauses are false on claude.ai while being true here.
+One is Desktop-only: `… && surface === "chat" && !isChatIn3pSupported`, whose
+operand is a module constant read once from `globalThis.desktopBootFeatures`, the
+Desktop main process's app-feature table that a browser page never has. The other
+is in both builds but reads `… && !projectScope && !atrium`: the web bundle
+evaluates that second operand as `flag || !inNestedFrame`, which is true for any
+top-level page — this shell included — while the Desktop build folds it to
+`false` and leaves the clause standing. Rather than reconstruct either value, the
+`web-projects-sidebar-entry` patch drops every operand of that chain that tests
+`id === "projects"`, keeping the mode and eligibility filters. The chain is
+identified inside the negation it sits in, so a clause that merely mentions
+projects elsewhere is out of reach, and it refuses unless exactly one such
+negation is in the chunk. Spliced only in web-shell mode, and not required.
+
+The composer. The chip is answered by one function — the chain ending
+`… ? "disabled" : … ? "pending" : … ? "projects" : "enabled"`, where only the last
+two render a slot. Its operands are the restored projects predicate, the
+caller's `unifiedComposerDesign` (which is the unified-composer arm's own
+predicate, and so is already forced by the design-predicate patch), and a store
+holding the *pending first send* — null until a send is actually being prepared.
+On a New page, before anything has been typed, nothing prepares that send, so the
+answer short-circuits to `"disabled"` and no slot is rendered, where claude.ai
+renders one. The `web-projects-composer-slot` patch forces the answer to
+`"enabled"` — the same "deployed answer, spliced at the consumer" the layout
+variant and the route surface kind already get. Only the returned expression is
+spliced, so the declarators above it stay: they are where the feature reads and
+the surface hook calls happen, and removing them would change hook order. The
+function is pinned by the four mode literals it answers with, which appear
+together nowhere else in the renderer graph. Spliced only in web-shell mode, and
+not required.
+
+Both change prepared-renderer bytes, so they ship with a `patchRelease` bump and
+need the `claude-desktop` service rebuilt.
 
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`
