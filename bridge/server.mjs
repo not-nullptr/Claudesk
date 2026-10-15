@@ -1582,12 +1582,14 @@ const organizationResponsePath = /^\/api\/organizations\/[0-9a-f-]+$/i;
 // `until` hour is still ahead of the visitor's clock. The upstream gateway
 // never sends any of it, so the home page sits on the renderer's "You're here!"
 // placeholder instead of the time-based greeting the app shows (Desktop and the
-// web shell alike, since both bootstrap paths are matched above). Supply
-// the official payload for the chat and code surfaces and let the renderer's own
-// picker do the work; a greeting the upstream did send is kept. The official
-// backend expands the {{ NAME }} token server-side before it ships (its payload
-// carries final text like "Back at it, Maddie"); do the same here, addressing
-// the user by the same name the rest of the app shows (see resolveGreetingName).
+// web shell alike, since both bootstrap paths are matched above). Keep that
+// renderer payload shape; merge legacy Chat copy into the supplied schedule and
+// choose it deterministically by UTC ISO week so reloads are stable and the next
+// week rotates. The Code schedule remains unchanged. A non-empty upstream
+// greeting is kept. The official backend expands the {{ NAME }} token
+// server-side before it ships (its payload carries final text like
+// "Back at it, Maddie"); do the same here, addressing the user by the same name
+// the rest of the app shows (see resolveGreetingName).
 const GREETING_NAME_TOKEN = "{{ NAME }}";
 
 const greetingSurfaces = [
@@ -1706,6 +1708,95 @@ const greetingSurfaces = [
   },
 ];
 
+const GREETING_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+// An ISO week is identified by its Thursday. Since the Unix epoch was also a
+// Thursday, that date's timestamp divided by seven days is a monotonic week seed.
+function greetingWeekIndex(now) {
+  const thursday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const day = thursday.getUTCDay() || 7;
+  thursday.setUTCDate(thursday.getUTCDate() + 4 - day);
+  return Math.floor(thursday.getTime() / GREETING_WEEK_MS);
+}
+
+// The legacy picker offered "Golden hour thinking" in a late-afternoon window;
+// keep one fixed window so every slot's candidate pool — and therefore the
+// weekly rotation below — is identical from week to week.
+const GREETING_GOLDEN_HOUR = { start: 16, end: 18 };
+
+// Split only where a time-sensitive greeting can become eligible, retaining the
+// original text for the surrounding portions of each renderer slot.
+function splitGreetingSlots(slots, boundaries) {
+  const result = [];
+  let from = 0;
+  for (const { until, text } of slots) {
+    const ends = boundaries.filter((hour) => hour > from && hour < until).sort((a, b) => a - b);
+    for (const end of ends) {
+      result.push({ from, until: end, text });
+      from = end;
+    }
+    result.push({ from, until, text });
+    from = until;
+  }
+  return result;
+}
+
+function legacyChatGreetingCandidates(day, from, until, hasName, goldenHour) {
+  const candidates = [];
+  if (from >= 0 && until <= 5) {
+    candidates.push(hasName ? "It's late-night {{ NAME }}" : "It's late-night");
+    candidates.push("Moonlit chat?", "Hello, night owl", "What shall we think through?");
+  } else if (from >= 5 && until <= 12) {
+    if (hasName) {
+      candidates.push("Good morning, {{ NAME }}", "Welcome, {{ NAME }}", "Hey there, {{ NAME }}");
+    } else {
+      candidates.push("Good morning", "Welcome", "Hey there");
+    }
+    const weekdayCopy = {
+      mon: hasName ? ["Happy Monday, {{ NAME }}"] : ["Happy Monday"],
+      tue: hasName ? ["Happy Tuesday, {{ NAME }}"] : ["Happy Tuesday"],
+      wed: hasName ? ["Happy Wednesday, {{ NAME }}"] : ["Happy Wednesday"],
+      thu: hasName ? ["Happy Thursday, {{ NAME }}"] : ["Happy Thursday"],
+      fri: hasName ? ["Happy Friday, {{ NAME }}"] : ["Happy Friday"],
+      sat: hasName
+        ? ["Welcome to the weekend, {{ NAME }}", "Happy Saturday, {{ NAME }}"]
+        : ["Welcome to the weekend", "Happy Saturday!"],
+      sun: hasName
+        ? ["Sunday session, {{ NAME }}?", "Happy Sunday, {{ NAME }}"]
+        : ["Sunday session?", "Happy Sunday"],
+    };
+    candidates.push(...(weekdayCopy[day] ?? []), "Coffee and Claude time?");
+  } else if (from >= 12 && until <= 18) {
+    if (hasName) {
+      candidates.push("Good afternoon, {{ NAME }}", "Afternoon, {{ NAME }}", "Back at it, {{ NAME }}");
+    } else {
+      candidates.push("Good afternoon", "Afternoon", "Back at it!");
+    }
+  } else if (from >= 18 && until <= 24) {
+    if (hasName) {
+      candidates.push("{{ NAME }} returns!", "Good evening, {{ NAME }}", "Evening, {{ NAME }}");
+    } else {
+      candidates.push("Evening", "Good evening");
+    }
+  }
+  if (from < goldenHour.end && until > goldenHour.start) candidates.push("Golden hour thinking");
+  return candidates;
+}
+
+// One slot's weekly pick: a stable offset from the slot name, advanced by one
+// per ISO week. Week to week the selected index moves by exactly one, so a pool
+// of two or more choices never repeats the same greeting on consecutive weeks,
+// while every request within a week — and every reload — gets the same text.
+function selectWeeklyGreeting(candidates, slot, weekIndex) {
+  const unique = [...new Set(candidates)];
+  if (unique.length < 2) return unique[0];
+  let hash = 0;
+  for (let index = 0; index < slot.length; index += 1) {
+    hash = ((hash << 5) - hash + slot.charCodeAt(index)) | 0;
+  }
+  return unique[((hash + weekIndex) % unique.length + unique.length) % unique.length];
+}
+
 // Expand the {{ NAME }} token, or, with no name at all, drop it without leaving
 // stray punctuation: a trailing ", {{ NAME }}" disappears whole, and a leading
 // token is removed with the following word capitalized ("{{ NAME }} returns!"
@@ -1736,17 +1827,35 @@ function resolveGreetingName({ override, reported, account }) {
   return override || reported || display || full;
 }
 
-function injectPersonalizedGreeting(parsed, name) {
+function injectPersonalizedGreeting(parsed, name, now = new Date()) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const existing = parsed.personalized_greeting;
   if (Array.isArray(existing) && existing.length > 0) return parsed;
-  const renderSlots = (list) => list.map(({ until, text }) => ({ until, text: greetingText(text, name) }));
+  const weekIndex = greetingWeekIndex(now);
+  const renderSlots = (list, surface, day) => splitGreetingSlots(
+    list,
+    surface === "chat" ? [16, 18] : [],
+  ).map(({ from, until, text }) => {
+    const candidates = surface === "chat"
+      ? [text, ...legacyChatGreetingCandidates(day, from, until, Boolean(name), GREETING_GOLDEN_HOUR)]
+      : [text];
+    return {
+      until,
+      text: selectWeeklyGreeting(
+        candidates.map((candidate) => greetingText(candidate, name)),
+        `${surface}:${day}:${from}-${until}`,
+        weekIndex,
+      ),
+    };
+  });
   return {
     ...parsed,
     personalized_greeting: greetingSurfaces.map(({ surface, days, default_slots }) => ({
       surface,
-      ...(days ? { days: days.map(({ day, slots }) => ({ day, slots: renderSlots(slots) })) } : {}),
-      default_slots: renderSlots(default_slots),
+      ...(days ? {
+        days: days.map(({ day, slots }) => ({ day, slots: renderSlots(slots, surface, day) })),
+      } : {}),
+      default_slots: renderSlots(default_slots, surface, "default"),
     })),
   };
 }

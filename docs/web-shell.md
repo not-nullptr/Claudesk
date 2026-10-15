@@ -434,7 +434,23 @@ The home greeting is not local copy: ion-dist reads `personalized_greeting` out
 of its **bootstrap response** (an array of per-surface, per-weekday slots) and
 only falls back to the built-in "You're here!" when that field is absent. The
 bridge fills the official chat/code payload whenever the upstream sends none
-(`injectPersonalizedGreeting`).
+(`injectPersonalizedGreeting`). The Chat fallback merges the current server-shaped
+schedule with the non-incognito phrases from an older client-side greeting picker.
+It selects deterministically from the eligible weekday/time pool using the UTC
+ISO week and slot as a seed: reloads within the week retain the same greeting,
+and the choice rotates at the next week. “Golden hour thinking” is eligible in
+the late-afternoon window (16:00–18:00 local time). The Code fallback
+remains the supplied schedule. A non-empty upstream `personalized_greeting` still
+wins without modification.
+
+The old picker also carried incognito-only entries. They are intentionally not
+included in the normal fallback because the bridge cannot reliably tell whether
+incognito mode is enabled:
+
+- Morning: “Let’s chat incognito”
+- Afternoon: “Greetings, whoever you are”
+- Evening: “You’re incognito”
+- Late night: “You’re incognito”
 
 Which URL carries it depends on the shell. The Desktop frame bootstraps under
 `/edge-api/bootstrap*`; a plain browser — the web shell — uses the claude.ai

@@ -45,21 +45,30 @@ function load(userName) {
      ${greetingSection}
      ${storeSection}
      result = {
-       inject: (value, name) => injectPersonalizedGreeting(value, name),
+       inject: (value, name, now) => injectPersonalizedGreeting(value, name, now),
        resolve: resolveGreetingName,
+       weekIndex: greetingWeekIndex,
+       goldenHour: GREETING_GOLDEN_HOUR,
+       legacyCandidates: legacyChatGreetingCandidates,
+       renderText: greetingText,
        store: (value) => sanitizeStoreValue("LocalAgentModeSessions", "interactiveAuthStore", value),
        bootstrapPath: bootstrapResponsePath,
      };`,
     sandbox,
   );
-  const { inject, resolve, store, bootstrapPath } = sandbox.result;
+  const { inject, resolve, weekIndex, goldenHour, legacyCandidates, renderText, store, bootstrapPath }
+    = sandbox.result;
   // Round-trip through this realm's JSON so strict deepEqual (which also
   // compares prototypes) sees main-realm objects.
   const plain = (value) => JSON.parse(JSON.stringify(value));
   return {
-    inject: (value, name) => inject(value, name),
-    injectPlain: (value, name) => plain(inject(value, name)),
+    inject: (value, name, now) => inject(value, name, now),
+    injectPlain: (value, name, now) => plain(inject(value, name, now)),
     resolve,
+    weekIndex,
+    goldenHour,
+    legacyCandidates,
+    renderText,
     bootstrapPath,
     storePlain: (value) => plain(store(value)),
   };
@@ -86,10 +95,13 @@ function at(hour, day = 1) {
 
 const bare = load("");
 const named = load("Ada");
+const referenceDate = new Date("2026-01-05T12:00:00.000Z"); // Monday, ISO week 2
+const nextWeekDate = new Date(referenceDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+const sameWeekDate = new Date(referenceDate.getTime() + 6 * 24 * 60 * 60 * 1000);
 
 // 1. An empty upstream bootstrap gets both official surfaces, and every hour of
 //    every weekday resolves to some greeting text.
-const injected = bare.injectPlain({ account: { uuid: "u" } }, "");
+const injected = bare.injectPlain({ account: { uuid: "u" } }, "", referenceDate);
 assert.deepEqual(
   injected.personalized_greeting.map((entry) => entry.surface),
   ["chat", "code"],
@@ -107,29 +119,107 @@ for (const entry of injected.personalized_greeting) {
   }
 }
 
-// 2. The per-weekday slots match the supplied schedule, and the code surface
-//    falls back to default_slots on a day it does not define, like Thursday.
-assert.equal(pick(injected.personalized_greeting, "chat", 3, 0), "What shall we think through?"); // sun <5
-assert.equal(pick(injected.personalized_greeting, "chat", 6, 1), "New week"); // mon <9, name omitted
-assert.equal(pick(injected.personalized_greeting, "chat", 20, 2), "Evening"); // tue <22, name omitted
+// 2. The fixed per-day copy and legacy client strings both belong to the pool.
+//    The selector rotates through that pool weekly but is stable on reload.
+const sameWeek = bare.injectPlain({}, "", sameWeekDate);
+const nextWeek = bare.injectPlain({}, "", nextWeekDate);
+assert.deepEqual(sameWeek.personalized_greeting, injected.personalized_greeting,
+  "all slots stay stable within an ISO week");
+const chatWeek = (greeting) => greeting.find(({ surface }) => surface === "chat");
+const nextChatWeek = chatWeek(nextWeek.personalized_greeting);
+const currentChatWeek = chatWeek(injected.personalized_greeting);
+assert.deepEqual(
+  nextWeek.personalized_greeting.find(({ surface }) => surface === "code"),
+  injected.personalized_greeting.find(({ surface }) => surface === "code"),
+  "the pasted client snippet does not change the Code surface",
+);
+for (let day = 0; day < currentChatWeek.days.length; day += 1) {
+  const currentSlots = currentChatWeek.days[day].slots;
+  const nextSlots = nextChatWeek.days[day].slots;
+  assert.equal(currentSlots.length, nextSlots.length, "weekly slot boundaries stay stable");
+  for (let slot = 0; slot < currentSlots.length; slot += 1) {
+    assert.notEqual(currentSlots[slot].text, nextSlots[slot].text,
+      `${currentChatWeek.days[day].day} greeting changes at slot ending ${currentSlots[slot].until}`);
+  }
+}
+for (let slot = 0; slot < currentChatWeek.default_slots.length; slot += 1) {
+  assert.notEqual(currentChatWeek.default_slots[slot].text, nextChatWeek.default_slots[slot].text,
+    `default Chat greeting changes at slot ending ${currentChatWeek.default_slots[slot].until}`);
+}
+let previousWeek = injected.personalized_greeting;
+for (let week = 1; week <= 52; week += 1) {
+  const date = new Date(referenceDate.getTime() + week * 7 * 24 * 60 * 60 * 1000);
+  const currentWeek = bare.injectPlain({}, "", date).personalized_greeting;
+  const previousChat = chatWeek(previousWeek);
+  const currentChat = chatWeek(currentWeek);
+  for (let day = 0; day < previousChat.days.length; day += 1) {
+    for (let slot = 0; slot < previousChat.days[day].slots.length; slot += 1) {
+      assert.notEqual(previousChat.days[day].slots[slot].text, currentChat.days[day].slots[slot].text,
+        `Chat copy rotates every week (${previousChat.days[day].day}, ending ${previousChat.days[day].slots[slot].until})`);
+    }
+  }
+  for (let slot = 0; slot < previousChat.default_slots.length; slot += 1) {
+    assert.notEqual(previousChat.default_slots[slot].text, currentChat.default_slots[slot].text,
+      `default Chat copy rotates every week (ending ${previousChat.default_slots[slot].until})`);
+  }
+  previousWeek = currentWeek;
+}
 assert.equal(pick(injected.personalized_greeting, "code", 6, 0), "Ready when you are"); // sun <12
-assert.equal(pick(injected.personalized_greeting, "code", 6, 1), "Morning"); // mon <12, name omitted
+assert.equal(pick(injected.personalized_greeting, "code", 6, 1), "Morning"); // mon <12
 assert.equal(pick(injected.personalized_greeting, "code", 6, 4), "Clean slate"); // thu -> default_slots <12
 
+const legacyCopy = new Set();
+for (const day of dayNames) {
+  for (const [from, until] of [[0, 5], [5, 9], [9, 12], [12, 16], [16, 18], [18, 24]]) {
+    for (const hasName of [false, true]) {
+      for (const text of bare.legacyCandidates(day, from, until, hasName, bare.goldenHour)) {
+        legacyCopy.add(text);
+      }
+    }
+  }
+}
+for (const text of [
+  "Good morning", "Good morning, {{ NAME }}",
+  "Happy Monday", "Happy Monday, {{ NAME }}",
+  "Happy Thursday", "Happy Thursday, {{ NAME }}",
+  "Happy Friday", "Happy Friday, {{ NAME }}",
+  "Welcome to the weekend", "Welcome to the weekend, {{ NAME }}",
+  "Happy Saturday!", "Happy Saturday, {{ NAME }}",
+  "Sunday session?", "Sunday session, {{ NAME }}?",
+  "Happy Sunday", "Happy Sunday, {{ NAME }}",
+  "It's late-night", "It's late-night {{ NAME }}", "Golden hour thinking", "Back at it!",
+]) {
+  assert.ok(legacyCopy.has(text), `legacy pool includes ${text}`);
+}
+for (const excluded of ["Let’s chat incognito", "Greetings, whoever you are", "You’re incognito"]) {
+  assert.ok(!JSON.stringify(injected.personalized_greeting).includes(excluded),
+    `${excluded} remains excluded from non-incognito fallback`);
+}
+assert.ok(serverSource.includes("New week, {{ NAME }}"), "the supplied Chat greeting remains in the pool");
+assert.equal(bare.weekIndex(referenceDate), bare.weekIndex(sameWeekDate));
+assert.equal(bare.weekIndex(nextWeekDate), bare.weekIndex(referenceDate) + 1);
+assert.deepEqual(JSON.parse(JSON.stringify(bare.goldenHour)), { start: 16, end: 18 },
+  "the golden-hour window is the legacy late-afternoon one");
+assert.ok(bare.legacyCandidates("mon", 16, 18, true, bare.goldenHour)
+  .includes("Golden hour thinking"));
+assert.ok(!bare.legacyCandidates("mon", 12, 16, true, bare.goldenHour)
+  .includes("Golden hour thinking"));
+assert.ok(!bare.legacyCandidates("mon", 18, 22, true, bare.goldenHour)
+  .includes("Golden hour thinking"));
+
 // 3. A resolved name is expanded into slots that carry the token, and the token
-//    never leaks.
-const addressed = named.injectPlain({}, "Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 6, 1), "New week, Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 14, 1), "Back at it, Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 6, 0), "Welcome, Ada");
-assert.equal(pick(addressed.personalized_greeting, "code", 6, 1), "Morning, Ada");
+//    never leaks; fixed name-free copy remains available alongside it.
+const addressed = named.injectPlain({}, "Ada", referenceDate);
+const mondayNamed = pick(addressed.personalized_greeting, "chat", 6, 1);
+assert.ok(["New week, Ada", "Good morning, Ada", "Welcome, Ada", "Hey there, Ada",
+  "Happy Monday, Ada", "Coffee and Claude time?"].includes(mondayNamed));
+assert.equal(pick(addressed.personalized_greeting, "code", 6, 1), "Morning, Ada"); // code unchanged
 assert.equal(pick(addressed.personalized_greeting, "code", 14, 4), "Back at it, Ada"); // default_slots
 assert.ok(!JSON.stringify(addressed).includes("{{"));
 
 // 4. With no name at all, the token is dropped without stray punctuation.
-assert.equal(pick(injected.personalized_greeting, "chat", 1, 4), "Up late?"); // "Up late, {{ NAME }}?"
-assert.equal(pick(injected.personalized_greeting, "chat", 6, 0), "Welcome");
-assert.equal(pick(injected.personalized_greeting, "chat", 20, 0), "Returns!"); // leading token
+assert.equal(bare.renderText("Up late, {{ NAME }}?", ""), "Up late?");
+assert.equal(bare.renderText("{{ NAME }} returns!", ""), "Returns!");
 assert.ok(!JSON.stringify(injected).includes("Maddie"), "the fallback keeps names dynamic");
 assert.ok(!JSON.stringify(injected).includes("{{"));
 
@@ -142,8 +232,11 @@ assert.equal(bare.resolve({ override: "", reported: "", account: { display_name:
 assert.equal(bare.resolve({ override: "", reported: "", account: {} }), "");
 assert.equal(bare.resolve({}), "");
 // The reported app name is what the greeting actually renders.
-const asApp = bare.injectPlain({ account: { display_name: "Maddie" } }, "app");
-assert.equal(pick(asApp.personalized_greeting, "chat", 6, 1), "New week, app");
+const asApp = bare.injectPlain({ account: { display_name: "Maddie" } }, "app", referenceDate);
+assert.ok(["New week, app", "Good morning, app", "Welcome, app", "Hey there, app",
+  "Happy Monday, app", "Coffee and Claude time?"].includes(
+  pick(asApp.personalized_greeting, "chat", 6, 1),
+), "the app-reported name is rendered in the selected Chat greeting");
 
 // 6. A greeting the upstream did send is left untouched (same object back).
 const upstream = {
