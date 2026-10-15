@@ -1866,10 +1866,28 @@
         const describe = (element) => {
           const box = element.getBoundingClientRect();
           const style = getComputedStyle(element);
-          const box2 = element.parentElement ? getComputedStyle(element.parentElement) : style;
+          const holder = element.parentElement || element;
+          const box2 = getComputedStyle(holder);
           const painted = box.width > 0 && box.height > 0 && style.visibility !== "hidden";
+          // The lockup's own classes are where the weight lives: the compact
+          // lockup is `font-ui-serif font-[360]`, the inline one `font-display`.
+          // Which of them is on the element, and what the browser computed from
+          // it, is the whole question — so print both rather than infer them.
+          const column = (node) => {
+            for (let at = node; at; at = at.parentElement) {
+              if (typeof at.className === "string" && at.className.includes("md:px-14")) return at;
+            }
+            return null;
+          };
+          const columnNode = column(element);
+          const columnPad = columnNode
+            ? `${columnNode.style.paddingTop || "-"}/${getComputedStyle(columnNode).paddingTop}`
+            : "none";
           return `${painted ? "painted" : "hidden"} ${Math.round(box.width)}x${Math.round(box.height)}`
-            + ` font=${box2.fontSize} ${family(element.parentElement || element)}`;
+            + ` font=${box2.fontSize} weight=${box2.fontWeight}`
+            + ` vars=${box2.fontVariationSettings} ${family(holder)}`
+            + ` colPad=${columnPad}`
+            + ` cls="${String(holder.className).slice(0, 140)}"`;
         };
         const probe = (name) => {
           const value = globalThis[name];
