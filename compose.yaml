@@ -416,6 +416,15 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    # authd installs no SIGTERM handler and runs as PID 1, so the kernel does not
+    # apply the default terminate disposition and the signal is ignored outright.
+    # Docker would wait out its whole default grace — 10s — before killing it,
+    # and that wait is most of the outage every recreate costs: the reverse proxy
+    # calls this service's forward_auth on every request, so while it is gone
+    # every tab on every account gets a 502. Safe to cut short because the
+    # database is SQLite in WAL mode with a 5s busy timeout, so a kill mid-write
+    # recovers on the next open.
+    stop_grace_period: 3s
     restart: unless-stopped
 
 networks:

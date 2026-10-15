@@ -102,7 +102,15 @@ sudo docker compose -f compose.yaml build \
 . "$project_dir/scripts/lib/image-release.sh"
 assert_images_current "$project_dir"
 
-sudo docker compose -f compose.yaml up -d --force-recreate \
+# No --force-recreate. Compose recreates a service when its image or its config
+# hash changed, which covers everything this deploy touches: the build above
+# moves the image, and config/release.json is copied into the desktop image, so a
+# patchRelease bump changes it too. What it does NOT cover is recreating a
+# service that did not change — and for authd that is expensive rather than
+# merely wasteful: the reverse proxy calls its forward_auth on every request, so
+# a forced restart of an untouched authd is a 502 window in every tab on every
+# account, in exchange for nothing.
+sudo docker compose -f compose.yaml up -d \
     claude-desktop cowork-bridge claude-gateway-loopback \
     claude-mobile claude-mobile-gateway-loopback authd
 
