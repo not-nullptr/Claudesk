@@ -465,31 +465,36 @@ the gate is off, do the repairing themselves: they publish a fresh file into the
 task's directory rather than writing through the link — upstream's own answer,
 which is what the refusal asks of a person with shell access. The gate arrives in
 the feature payload the main process fetches through Electron's `net`, and it
-reads on for this deployment's accounts, so the wrapper rewrites that one
-response on its way in and drops the key. Only that key goes: every other feature,
-every other field, and every other response pass through untouched, and a payload
-that cannot be re-read is handed on exactly as it arrived. With the gate off, the
-store repairs a hard-linked routine file for every writer — the web shell, the
-Desktop window's own routines list, the agent's `update_scheduled_task` tool.
+reads on for this deployment's accounts, so the wrapper rewrites that one response
+on its way in and drops the key. Only that key goes: every other feature, every
+other field and every other response pass through untouched, and a payload that
+cannot be re-read is handed on exactly as it arrived. Desktop also keeps the last
+good payload on disk (`<userData>/fcache`, a gzip blob behind a magic header) and
+reads the gate from there whenever the network does not answer, so the same key is
+dropped from that cache at startup. With the gate off, the store repairs a
+hard-linked routine file for every writer — the web shell, the Desktop window's own
+routines list, the agent's `update_scheduled_task` tool.
 
-The wrapper and the bridge also repair the file by hand, for the writers that
-never see that payload: builds that refuse unconditionally (no gate to drop), and
-a feature map that arrives from Desktop's disk cache instead of the network. Both
-move the linked file aside (`SKILL.md.hardlinked-<stamp>`) and let the store's own
-write create a plain one. The bridge, where a browser's calls already pass, asks
-Desktop for the task's own `filePath` first: its task list carries it, and that is
-the store's own answer for where its files live, where a store is free not to name
-the directory for the task id. The wrapper does the same at the main process
-boundary the writing IPCs cross, by task id under every root the Desktop's
-resolver can answer with — the configured `coworkUserFilesPath` and the fallbacks
-it resolves for itself — sweeping those roots when the id names no directory.
-Neither writes through the link, so the other name keeps its bytes, and the moved
-file stays beside the task for inspection. When a refusal survives the repair, the
+The wrapper also repairs the file itself: at a write, off the task id in the call,
+under every root the Desktop's resolver can answer with (the configured
+`coworkUserFilesPath` and the fallbacks it resolves for itself), and once at
+startup by sweeping those roots — which is what heals a routine that was already
+stuck, and what covers builds whose refusal has no gate at all (the Desktop
+version pinned here refuses unconditionally). The bridge does the same where it
+can, off the path Desktop's own task list answers for the task, since a store is
+free not to name the task's directory for its id. In the topology that runs the
+web shell as its own container with `/config` mounted read-only (`compose.yaml`),
+that container can only ever *report* one of these files — the app container owns
+the writes — so its report names the path, the link count and the error the repair
+hit, and appends what the app process says about its own repairs (`/health`
+carries `routineFileLinkRepair`).
+
+Neither repair writes through the link, so the other name keeps its bytes, and the
+moved file stays beside the task for inspection. When a refusal survives them, the
 error the client sees carries what the repair saw — the path Desktop answered, or
-the reason it answered none, and how many links the file had — so a routine stuck
-on a machine nobody logs into is diagnosable from the browser that hit it. Neither
-repair runs as a sweep of its own: a routine nobody edits is left exactly as the
-store wrote it.
+the reason it answered none, how many links the file had, and what the app process
+reports about itself — so a routine stuck on a machine nobody logs into is
+diagnosable from the browser that hit it.
 
 ## Home greeting
 

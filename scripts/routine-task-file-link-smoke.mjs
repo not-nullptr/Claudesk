@@ -6,6 +6,7 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
+import { gunzip, gzip } from "node:zlib";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -64,6 +65,7 @@ const ipcMain = {
   },
 };
 const sandbox = {
+  Buffer,
   app: {
     getPath: (name) => ({
       home,
@@ -75,8 +77,14 @@ const sandbox = {
   join,
   lstat,
   readdir,
+  readFile,
   rename,
   readFileSync,
+  writeFile,
+  gunzip,
+  gzip,
+  promisify: (fn) => (...args) => new Promise((resolveImpl, reject) =>
+    fn(...args, (error, value) => (error ? reject(error) : resolveImpl(value)))),
   process: { env: {} },
   console: {
     warn: (...args) => warnings.push(args.map(String).join(" ")),
@@ -296,6 +304,15 @@ assert.ok(!(await readdir(idleDir)).some((name) => name.startsWith("SKILL.md.har
   };
   const lines = [];
   const context = {
+    Buffer,
+    join,
+    app: { getPath: () => userData },
+    readFile,
+    writeFile,
+    promisify: (fn) => (...args) => new Promise((resolveImpl, reject) =>
+    fn(...args, (error, value) => (error ? reject(error) : resolveImpl(value)))),
+    gunzip,
+    gzip,
     net: {
       async fetch() {
         if (mode === "broken") return new Response("not json", { status: 200 });
@@ -341,6 +358,51 @@ assert.ok(!(await readdir(idleDir)).some((name) => name.startsWith("SKILL.md.har
   const unreadable = await context.net.fetch("https://claude.ai/api/desktop/features", {});
   assert.equal(await unreadable.text(), "not json",
     "a payload that cannot be rewritten is handed on exactly as it arrived");
+
+  // The network is not the only source: Desktop caches the last good payload on
+  // disk and reads its gate from there when the fetch does not answer. Same
+  // rewrite, on that file, at startup.
+  const cacheSource = wrapper.slice(
+    wrapper.indexOf("const featureCacheMagic = "),
+    wrapper.indexOf("function routineFileLinkRepairState()"),
+  );
+  assert.ok(cacheSource.length > 0, "the wrapper still carries the feature-cache rewrite");
+  vm.runInContext(cacheSource, context);
+
+  const cacheFile = join(userData, "fcache");
+  const cached = {
+    timestamp: Date.now(),
+    mode: "3p",
+    orgUuid: "org",
+    features: { "346871663": { defaultValue: true }, keep: { defaultValue: false } },
+  };
+  const gzipAsync = (buffer) => new Promise((resolve, reject) =>
+    gzip(buffer, (error, value) => (error ? reject(error) : resolve(value))));
+  await writeFile(cacheFile, Buffer.concat([
+    Buffer.from([67, 76, 70, 2, 0, 154, 183, 226]),
+    await gzipAsync(Buffer.from(JSON.stringify(cached))),
+  ]));
+  assert.equal(await context.dropRoutineFileLinkGateFromCache(), "dropped");
+  const cacheBytes = await readFile(cacheFile);
+  assert.deepEqual([...cacheBytes.subarray(0, 8)], [67, 76, 70, 2, 0, 154, 183, 226],
+    "the cache keeps the header Desktop checks before reading it");
+  const cachePayload = JSON.parse(
+    (await new Promise((resolve, reject) =>
+      gunzip(cacheBytes.subarray(8), (error, value) => (error ? reject(error) : resolve(value)))))
+      .toString("utf-8"),
+  );
+  assert.equal("346871663" in cachePayload.features, false, "the gate is dropped from the cache too");
+  assert.deepEqual(cachePayload.features.keep, { defaultValue: false }, "every other feature stays");
+  assert.equal(cachePayload.mode, "3p", "and the cache's own fields with them");
+  assert.equal(await context.dropRoutineFileLinkGateFromCache(), "no gate",
+    "a cache already without the gate is left alone");
+
+  await writeFile(cacheFile, "not a cache");
+  assert.equal(await context.dropRoutineFileLinkGateFromCache(), "absent",
+    "a file that is not Desktop's cache is left alone");
+  await rm(cacheFile, { force: true });
+  assert.equal(await context.dropRoutineFileLinkGateFromCache(), "absent",
+    "and a missing cache is not an error");
 }
 
 // --- the bridge: the repair uses Desktop's own answer for the file ----------
@@ -396,7 +458,14 @@ async function handleStubRequest(request, response) {
   let raw = "";
   for await (const chunk of request) raw += chunk;
   const pathname = new URL(request.url, "http://127.0.0.1").pathname;
-  if (pathname === "/health") { desktop.send(response, { ok: true, surfaces: {} }); return; }
+  if (pathname === "/health") {
+    desktop.send(response, {
+      ok: true,
+      surfaces: {},
+      routineFileLinkRepair: { gate: "346871663", repair: true, sweep: "clean" },
+    });
+    return;
+  }
   if (pathname === "/events" || pathname === "/notifications") {
     desktop.send(response, { ok: true, value: [] });
     return;
@@ -519,8 +588,8 @@ try {
   const unknown = await call("schedule-unknown");
   assert.equal(unknown.status, 500);
   assert.match(String(unknown.body.error),
-    /\[cowork-bridge: routine file repair saw the Desktop's list has no task "schedule-unknown" \(2 listed\)/,
-    "the note says what Desktop answered");
+    /\[cowork-bridge: routine file repair saw .*the Desktop's list has no task "schedule-unknown" \(2 listed\).*the app reports \{"gate":"346871663","repair":true,"sweep":"clean"\}\]$/,
+    "the note says what Desktop answered, and what the app process reports about its own repairs");
 } finally {
   child.kill("SIGKILL");
   stub.close();

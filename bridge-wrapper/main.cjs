@@ -6,6 +6,8 @@ const { createReadStream, readFileSync, writeSync } = require("node:fs");
 const { createConnection } = require("node:net");
 const { lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
+const { promisify } = require("node:util");
+const { gunzip, gzip } = require("node:zlib");
 const { app, BrowserWindow, ipcMain, Menu, net, webContents } = require("electron");
 
 // The official Desktop computes each notification's final title and body inside
@@ -357,6 +359,78 @@ async function repairLinkedRoutineFiles({ ids = [], sweep = false } = {}) {
 
 function isLinkedRoutineFileRefusal(error) {
   return /hard-linked to another file/.test(String(error?.message ?? error));
+}
+
+// The repairs above run at a write, which is enough for a routine the write
+// names — but a file that a sandbox hard-linked before this deployment learned
+// to repair stays linked forever, because every write is what the store refuses.
+// Sweep once when the app comes up, so a stuck routine heals on a restart instead
+// of waiting for an edit that cannot land. Same repair, same limits: only files
+// carrying a second link, only inside a routine's own directory.
+let routineFileLinkSweep = "pending";
+
+async function sweepHardLinkedRoutineFiles() {
+  try {
+    const moved = await repairLinkedRoutineFiles({ sweep: true });
+    routineFileLinkSweep = moved.length > 0 ? `moved ${moved.length}` : "clean";
+    if (moved.length > 0) {
+      console.warn(
+        `[cowork-wrapper] routine file sweep at startup: moved ${moved.length} hard-linked file(s)`
+        + " aside so the store can write them",
+      );
+    }
+  } catch (error) {
+    routineFileLinkSweep = `failed: ${error?.message || error}`;
+    console.warn(`[cowork-wrapper] routine file sweep failed: ${error?.message || error}`);
+  }
+  return routineFileLinkSweep;
+}
+
+// Desktop keeps the last good feature payload on disk and reads its gate from
+// there whenever the network path does not answer (`kLt()` in the main bundle:
+// a gzip blob with a magic header, holding `{timestamp, mode, orgUuid, features}`).
+// The fetch rewrite above only covers the network; drop the gate here too, so the
+// store's own repair is what runs however the map got filled.
+const featureCacheMagic = Buffer.from([67, 76, 70, 2, 0, 154, 183, 226]);
+
+async function dropRoutineFileLinkGateFromCache() {
+  const path = join(app.getPath("userData"), "fcache");
+  try {
+    const raw = await readFile(path);
+    if (raw.length <= featureCacheMagic.length
+        || !raw.subarray(0, featureCacheMagic.length).equals(featureCacheMagic)) {
+      return "absent";
+    }
+    const payload = JSON.parse(
+      (await promisify(gunzip)(raw.subarray(featureCacheMagic.length))).toString("utf-8"),
+    );
+    if (!dropRoutineFileLinkGate(payload)) return "no gate";
+    await writeFile(
+      path,
+      Buffer.concat([featureCacheMagic, await promisify(gzip)(Buffer.from(JSON.stringify(payload)))]),
+    );
+    console.info(
+      `[cowork-wrapper] ${path}: dropped feature ${routineFileLinkGate}`
+      + " so the store repairs a hard-linked routine file itself",
+    );
+    return "dropped";
+  } catch (error) {
+    if (error?.code === "ENOENT") return "absent";
+    console.warn(`[cowork-wrapper] could not rewrite ${path}: ${error?.message || error}`);
+    return "unreadable";
+  }
+}
+
+// What the run in this process can say about the routine file repairs, for the
+// bridge's own report (`/health`): the app container owns these writes — the web
+// shell's container mounts /config read-only — so a refusal that survives there
+// needs to say whether this layer is even present.
+function routineFileLinkRepairState() {
+  return {
+    gate: routineFileLinkGate,
+    repair: true,
+    sweep: routineFileLinkSweep,
+  };
 }
 
 // What the repair saw, appended to a refusal it could not clear. The client that
@@ -2918,6 +2992,7 @@ const server = http.createServer(async (request, response) => {
         coworkReady: Boolean(surfaces.LocalAgentModeSessions?.includes("getAll")),
         rendererReady: true,
         renderer: rendererManifest,
+        routineFileLinkRepair: routineFileLinkRepairState(),
         surfaces,
       });
       return;
@@ -3091,6 +3166,13 @@ server.listen(PORT, HOST, () => {
 });
 
 app.whenReady().then(() => {
+  // Both of these are about the same refusal and neither needs IPC, the renderer
+  // or a session: a routine file an agent hard-linked heals on this start, and
+  // the feature map the store reads its gate from loses that gate whether it was
+  // filled from the network or from the payload cached on disk.
+  void sweepHardLinkedRoutineFiles();
+  void dropRoutineFileLinkGateFromCache();
+
   // The official main bundle has not been evaluated yet when this file loads;
   // find and wrap its notification service as soon as it exists. A bounded
   // poll also covers a slower first window creation on cold starts.

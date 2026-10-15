@@ -2918,6 +2918,24 @@ function isLinkedRoutineFileRefusal(error) {
   return /hard-linked to another file/.test(String(error?.message ?? error));
 }
 
+// What the app process reports about its own routine file repairs. This bridge is
+// a separate container whose /config is mounted read-only (compose.yaml), so its
+// repair can only ever *describe* one of these files — the app container owns the
+// write. When a refusal survives here, saying whether the app side even has a
+// repair is the difference between two very different problems.
+async function desktopRoutineFileRepairState() {
+  try {
+    const response = await fetch(`${coworkInternalUrl}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await response.json().catch(() => null);
+    if (!body?.routineFileLinkRepair) return "the app reports no routine file repair";
+    return `the app reports ${JSON.stringify(body.routineFileLinkRepair)}`;
+  } catch (error) {
+    return `the app could not be asked (${error?.message || error})`;
+  }
+}
+
 // Every routine write the browser makes goes through here: the repair asks
 // Desktop for the path itself, and a refusal that survives one repair and one
 // retry comes back with what the repair saw, so a routine stuck on a machine
@@ -2938,8 +2956,10 @@ async function invokeWithRoutineFileRepair(surface, method, args, argsEncoding) 
       return await desktop.invoke(surface, method, args, argsEncoding);
     } catch (retryError) {
       if (!isLinkedRoutineFileRefusal(retryError)) throw retryError;
+      const appState = await desktopRoutineFileRepairState();
       throw new Error(
-        `${String(retryError?.message ?? retryError)} [cowork-bridge: routine file repair saw ${seen.join(" | ")}]`,
+        `${String(retryError?.message ?? retryError)}`
+        + ` [cowork-bridge: routine file repair saw ${seen.join(" | ")}; ${appState}]`,
       );
     }
   }
