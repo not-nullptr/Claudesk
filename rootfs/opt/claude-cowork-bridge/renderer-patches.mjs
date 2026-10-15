@@ -299,6 +299,27 @@ const projectsSelectorOff = "!1";
 // separates it from the sibling component that draws one. Spliced only in
 // web-shell mode, and not required.
 const projectsBoundSlotPatchId = "web-projects-bound-slot";
+// The last gate, and the one that actually decides whether anything is drawn.
+// The picker's trigger component ends:
+//
+//   we = showProjects ?? (onCreateProject !== undefined)
+//   Te = !hideFolders && onBrowse !== undefined && !!browseConfig?.browseFolder
+//   Ee = chatProjects.length || !!defaultTarget || (we && pinned.length)
+//        || recents.length || more.length || we || locked || loading
+//   …
+//   return Ee ? <trigger/> : Te ? <browse/> : null;
+//
+// Every term but `we`, `locked` and `loading` is project/folder *data* — targets
+// the user has actually used, or the projects on the server — and a deployment
+// whose accounts have none is left with the two flags. `we` is `showProjects`,
+// which the picker is handed from above and which is false here; forcing it true
+// is what "show projects in the composer" means, and it is the deployment's
+// choice to make. `locked` and `loading` are states, not choices. The property
+// is pinned as `showProjects` inside an object literal — the destructuring of
+// the same name is a pattern, not an expression, so it cannot match. Spliced
+// only in web-shell mode, and not required.
+const projectsPickerSectionPatchId = "web-projects-picker-section";
+const projectsPickerSectionOn = "!0";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -963,6 +984,21 @@ function projectsBoundSlotTarget(ast) {
   return tests.length === 1 ? tests[0] : undefined;
 }
 
+// The `showProjects` property of the picker trigger's props object. Only an
+// object *literal* is considered, so the same name destructured as a pattern
+// cannot match, and its value must be a plain binding.
+function projectsPickerSectionTarget(ast) {
+  const found = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    for (const entry of node.properties) {
+      if (entry.type !== "Property" || (entry.key.name ?? entry.key.value) !== "showProjects") continue;
+      if (entry.value?.type === "Identifier") found.push(entry.value);
+    }
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1536,6 +1572,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
+    }
+    // The picker's `showProjects`, so the trigger has something to draw even on
+    // a deployment whose accounts have no project targets yet.
+    const pickerSection = projectsPickerSectionTarget(ast);
+    if (pickerSection) {
+      patches.push({ id: projectsPickerSectionPatchId, start: pickerSection.start,
+        end: pickerSection.end, original: source.slice(pickerSection.start, pickerSection.end),
+        replacement: projectsPickerSectionOn });
     }
     // The slot's bound-project branch, so the slot draws the selector instead of
     // the component that answers null without a resolved device binding.

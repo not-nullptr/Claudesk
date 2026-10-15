@@ -1234,6 +1234,39 @@ const boundCompiled = await minify(boundSlot(), {
 assert.equal(inspectRenderer(boundCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-bound-slot").length, 1,
   "a mangled slot component must still have its bound branch forced off");
+// The picker trigger's `showProjects`, the one term of its "is there anything to
+// draw" test that is a choice rather than data or state. Pinned as the property
+// inside an object literal, so the same name destructured as a pattern is out of
+// reach.
+const pickerSection = (value = "showProjects", pattern = "") =>
+  'var Trigger=memo(function(' + (pattern ? `{showProjects:${pattern},hideFolders:i=!1}` : "e")
+  + '){let d=showProjects,u=onCreate,we=d??u!==void 0;return S(Btn,{hideFolders:i})});'
+  + `var Host=memo(function(e){let we=flag(),Ee=we||data();`
+  + `return Ee?S(Trigger,{${value}:we,onCreateProject:u}):null});`;
+assert.equal(inspectRenderer(pickerSection(), false, false).patches
+  .filter(patch => patch.id === "web-projects-picker-section").length, 0,
+  "the picker section flag is left alone outside web-shell mode");
+const sectionPatches = inspectRenderer(pickerSection(), false, true).patches
+  .filter(patch => patch.id === "web-projects-picker-section");
+assert.equal(sectionPatches.length, 1, "the section flag must be forced once");
+assert.equal(sectionPatches[0].original, "we", "the property's value binding is what is spliced");
+assert.equal(sectionPatches[0].replacement, "!0", "only the property value is spliced");
+assert.equal(inspectRenderer(pickerSection("showProjects", "showProjects"), false, true).patches
+  .filter(patch => patch.id === "web-projects-picker-section").length, 1,
+  "a destructured pattern of the same name must not be mistaken for the property");
+const sectionOut = patchRendererSources(
+  new Map([["section.js", `${webShellFixtures}\n${accountMenuName}\n${pickerSection()}`]]), false, true)
+  .sources.get("section.js");
+assert.ok(sectionOut.includes("S(Trigger,{showProjects:!0,onCreateProject:u})"),
+  "the flag must be forced in place");
+assert.ok(sectionOut.includes("return S(Btn,{hideFolders:i})"),
+  "the rest of the component must survive untouched");
+const sectionCompiled = await minify(pickerSection(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(sectionCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-picker-section").length, 1,
+  "a mangled props object must still have its section flag forced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

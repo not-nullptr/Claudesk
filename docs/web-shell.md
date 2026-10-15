@@ -699,7 +699,7 @@ by the two prop names it destructures, `selectionChip` and `plainTrigger`, which
 the minifier leaves alone, and by returning `null` from a conditional. Spliced
 only in web-shell mode, and not required.
 
-All eight change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All nine change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

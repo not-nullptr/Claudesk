@@ -414,8 +414,16 @@ the same class and answers null until that project's device binding resolves. On
 a New page carrying a default project it produces the same empty div as every
 refusal above, one branch earlier. The patch routes the slot to the selector
 instead, and is pinned as the function whose returned conditional carries two
-slot elements. All eight are spliced only in web-shell mode, and none is
-required.
+slot elements.
+
+`web-projects-picker-section` forces the last of them, `showProjects`, which the
+picker is handed from above and which its trigger's "is there anything to draw"
+test reads as one of its terms. Every other term of that test is project/folder
+*data* — targets the account has actually used — or a transient state, so on a
+deployment with none, the flag is what decides. Forcing it is what showing
+projects in the composer means. It is pinned as the property inside an object
+literal, so the same name destructured as a pattern cannot match. All nine are
+spliced only in web-shell mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate
