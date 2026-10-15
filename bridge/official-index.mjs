@@ -33,7 +33,8 @@ export function shimOfficialIndex(html, { injection, overrideStyles, rendererBas
   // attributes are filled in here. Fixed markup or nothing: an entry that no
   // longer carries it is served as it is, since this only changes which of the
   // two designs paints first.
-  const annotated = !webShell ? shimmed : shimmed
+  const alreadyMarked = shimmed.includes("data-new-page-layout=");
+  const annotated = !webShell || alreadyMarked ? shimmed : shimmed
     .replace("<html ", () => '<html data-new-page-layout="home" ')
     .replace('<div id="static-composer"', () => '<div id="static-composer" data-composer-arm="marlin"');
   // Byte-check the injected config. A corrupted or reformatted injection must be

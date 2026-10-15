@@ -522,10 +522,14 @@ on `<html>` and `data-composer-arm="marlin"` on the static composer skeleton.
 They are what the first paint reads: the skeleton's own CSS keys the smaller home
 greeting off `html[data-new-page-layout=home]`, and every `data-composer-arm=marlin`
 rule in the shell keys the marlin card off the attribute, so without them the
-painted-before-hydration skeleton is always the classic one. The bridge rewrites
-the entry it already shims from the desktop container (`shimOfficialIndex`), so
-both are filled in there, in web-shell mode only; an entry that no longer carries
-that markup is served unchanged rather than refused.
+painted-before-hydration skeleton is always the classic one — including the
+greeting the skeleton keeps visible, whose size *is* that CSS variable. The app's
+own window loads its document from the desktop container (`serveIon` in the
+bridge wrapper), so that is where they are filled in; the bridge's own entry
+route shims the same document for a plain browser client and marks it too, and
+skips an entry that is already marked so the attribute is never written twice.
+An entry that no longer carries the markup is served unchanged rather than
+refused. Only in web-shell mode, and only `index.html`.
 
 ## Account identity
 

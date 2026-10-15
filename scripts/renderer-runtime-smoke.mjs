@@ -35,28 +35,50 @@ export function menuFlags(){return {hasAccount:!!a,inferenceConfig:e,internalToo
   assert.equal(manifest.patches.length, 6);
   const generation = join(state, release.desktopVersion, release.patchRelease);
   const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
-  const handler = wrapper.slice(wrapper.indexOf("async function serveIon("),
+  const handler = wrapper.slice(wrapper.indexOf("function annotateShellDocument("),
     wrapper.indexOf("async function serveDesktopIcon("));
   const overlayRoot = "/state";
   const patchedPath = posix.join(overlayRoot, release.desktopVersion, release.patchRelease, "bundle.js");
+  const shellDocument = '<!doctype html><html lang="en"><head></head>'
+    + '<body><div id="static-composer" hidden></div></body></html>';
   const files = new Map([[patchedPath, Buffer.from("patched")],
-    ["/ion/bundle.js", Buffer.from("original")], ["/ion/unchanged.js", Buffer.from("unchanged")]]);
-  const serve = vm.runInNewContext(`${handler}\nserveIon`, {
-    rendererManifest: manifest, RENDERER_STATE_ROOT: overlayRoot, ION_ROOT: "/ion",
-    normalize: posix.normalize, resolve: posix.resolve, extname: posix.extname,
-    ionMimeTypes: { ".js": "application/javascript" },
-    stat: async path => { if (!files.has(path)) throw new Error("unreadable overlay");
-      return { isFile: () => true }; },
-    readFile: async path => files.get(path),
-  });
-  let body;
-  const response = { writeHead() {}, end(value) { body = value.toString(); } };
-  await serve(response, `${manifest.basePath}/bundle.js`);
-  assert.equal(body, "patched", "HTTP must select the manifest's patched file");
-  await serve(response, `${manifest.basePath}/unchanged.js`);
-  assert.equal(body, "unchanged", "unchanged assets still come from ion-dist");
+    ["/ion/bundle.js", Buffer.from("original")], ["/ion/unchanged.js", Buffer.from("unchanged")],
+    ["/ion/index.html", Buffer.from(shellDocument)]]);
+  const serveWith = (webShell) => {
+    let body;
+    const serve = vm.runInNewContext(`${handler}\nserveIon`, {
+      rendererManifest: manifest, RENDERER_STATE_ROOT: overlayRoot, ION_ROOT: "/ion",
+      normalize: posix.normalize, resolve: posix.resolve, extname: posix.extname,
+      ionMimeTypes: { ".js": "application/javascript", ".html": "text/html" },
+      process: { env: webShell ? { CLAUDE_REMOTE_WEB_SHELL: "1" } : {} },
+      Buffer,
+      stat: async path => { if (!files.has(path)) throw new Error("unreadable overlay");
+        return { isFile: () => true }; },
+      readFile: async path => files.get(path),
+    });
+    const response = { writeHead() {}, end(value) { body = value.toString(); } };
+    return { serve, response, read: () => body };
+  };
+  const plain = serveWith(false);
+  await plain.serve(plain.response, `${manifest.basePath}/bundle.js`);
+  assert.equal(plain.read(), "patched", "HTTP must select the manifest's patched file");
+  await plain.serve(plain.response, `${manifest.basePath}/unchanged.js`);
+  assert.equal(plain.read(), "unchanged", "unchanged assets still come from ion-dist");
+  // The entry the app's own window loads is marked in web-shell mode only, and
+  // an asset that is not the entry is never touched.
+  await plain.serve(plain.response, "/ion/index.html");
+  assert.equal(plain.read(), shellDocument, "a non-web-shell entry must be served unchanged");
+  const shell = serveWith(true);
+  await shell.serve(shell.response, "/ion/index.html");
+  assert.ok(shell.read().includes('<html data-new-page-layout="home" lang="en">'),
+    "the web shell must mark the entry's home layout");
+  assert.ok(shell.read().includes('<div id="static-composer" data-composer-arm="marlin" hidden>'),
+    "the web shell must mark the entry's composer arm");
+  await shell.serve(shell.response, `${manifest.basePath}/bundle.js`);
+  assert.equal(shell.read(), "patched",
+    "a patched module the web shell serves must not be annotated");
   files.delete(patchedPath);
-  await assert.rejects(serve(response, `${manifest.basePath}/bundle.js`), /unreadable overlay/,
+  await assert.rejects(plain.serve(plain.response, `${manifest.basePath}/bundle.js`), /unreadable overlay/,
     "unreadable patches must never silently fall back to the original bundle");
   if (process.platform !== "win32") {
     assert.equal((await stat(generation)).mode & 0o777, 0o755,

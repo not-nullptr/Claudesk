@@ -136,5 +136,13 @@ assert.ok(shell.html.includes(`${base}/assets/`), "the asset roots must still be
 // only changes which design paints first, so it must never fail preparation.
 const bare = shim(configs[0], { webShell: true }).html;
 assert.ok(!bare.includes("data-composer-arm"), "an entry without the skeleton is left alone");
+// The desktop wrapper marks the document the app's own window loads, so the
+// entry reaches the bridge already annotated; marking it twice must be a no-op.
+const marked = shim(configs[0], {
+  entry: desktopEntry.replace('<html lang="en"', '<html data-new-page-layout="home" lang="en"'),
+  webShell: true,
+}).html;
+assert.equal(marked.split("data-new-page-layout=").length - 1, 1,
+  "an already-marked entry must not be marked twice");
 
 console.log("official-index-smoke: bootstrap splice survives $&/$'/$`/$$ and refuses drift");

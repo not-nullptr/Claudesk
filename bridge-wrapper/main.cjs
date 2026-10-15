@@ -2389,6 +2389,29 @@ async function fetchOfficialProtocol({ method, pathname, search, headers, bodyBa
   return result.value;
 }
 
+// The app's own entry document is the one asset no renderer patch can reach —
+// it is static HTML, not a module — and on claude.ai its *server* fills in the
+// two attributes the first paint reads: the composer arm on the static skeleton,
+// and the page-layout variant on <html>. The Desktop package ships that document
+// with neither, so the skeleton that paints before hydration is always the
+// classic one — including the greeting the skeleton keeps visible, whose size is
+// the `html[data-new-page-layout=home]` CSS variable. In web-shell mode this
+// deployment has already chosen both (the bridge grants the composer feature and
+// the renderer patches turn the layout on), so the same two attributes are
+// filled in here, for the document the app's own window loads. Only index.html,
+// only web-shell mode, and only when the markup is there to annotate: a document
+// that no longer carries it is served unchanged rather than refused.
+function annotateShellDocument(safePath, body) {
+  if (safePath !== "index.html" || process.env.CLAUDE_REMOTE_WEB_SHELL !== "1") return body;
+  const source = body.toString("utf8");
+  if (source.includes("data-new-page-layout=") || !source.includes("<html ")) return body;
+  if (!source.includes('<div id="static-composer"')) return body;
+  return Buffer.from(source
+    .replace("<html ", () => '<html data-new-page-layout="home" ')
+    .replace('<div id="static-composer"', () => '<div id="static-composer" data-composer-arm="marlin"'),
+  "utf8");
+}
+
 async function serveIon(response, pathname) {
   const prepared = pathname.startsWith(`${rendererManifest.basePath}/`);
   const requested = prepared
@@ -2414,7 +2437,7 @@ async function serveIon(response, pathname) {
   }
   const info = await stat(filePath);
   if (!info.isFile()) throw new Error("not found");
-  const body = await readFile(filePath);
+  const body = annotateShellDocument(safePath, await readFile(filePath));
   response.writeHead(200, {
     "Cache-Control": safePath === "index.html" && !prepared
       ? "no-store"
