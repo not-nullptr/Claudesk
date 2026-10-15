@@ -752,15 +752,17 @@ function serverProjectsAvailable() {
 ```
 
 The bridge forwards none of those routes and the platform refuses the family, so
-they never settle: the projects page waits on them and the composer picker is told
-its projects are still loading, which is what leaves it skeleton-drawing (its
-empty state is defined as "not loading, and no projects", and nothing reaches that
-while the loading term is true). The projects this deployment *does* have are the
-Desktop's **spaces**, and they reach this same picker by another route — as folder
-targets marked `isProject`, through the folders gate, drawn by the same rows. So
-`web-projects-remote-list` splices that predicate to false: the page stops asking,
-the picker reports the module's own no-projects constant, and both surfaces draw
-what exists here. The declarators stay, so the hooks in them still run.
+they never settle: the projects page waits on them and shows its skeleton cards,
+and the composer picker is told its projects are still loading, which is what
+leaves it skeleton-drawing (its empty state is defined as "not loading, and no
+projects", and nothing reaches that while the loading term is true). The projects
+this deployment *does* have are the Desktop's **spaces**, and they reach this
+same picker by another route — as folder targets marked `isProject`, through the
+folders gate, drawn by the same rows. So `web-projects-remote-list` splices that
+predicate to false, and forces the two consumers that read `isPending` off those
+queries — the picker's report object and the page's list hook — to the settled,
+empty answer. Requests stop, both surfaces draw what exists here, and the
+declarators stay, so the hooks in them still run.
 
 The permission control is the same missing store showing up once more. The
 composer chooses that slot's content from a hook:

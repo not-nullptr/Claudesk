@@ -1073,6 +1073,45 @@ const serverProjectsCompiled = await minify(serverProjectsChunk, {
 assert.equal(inspectRenderer(`${webShellFixtures}\n${serverProjectsCompiled.code}`, false, true)
   .patches.filter(patch => patch.id === "web-projects-remote-list").length, 1,
   "a mangled predicate must still be spliced once");
+
+// The two consumers that read those queries' pending state. A disabled query is
+// still pending in react-query, so both have to be told the list settled empty —
+// the picker's report object, and the projects page's list hook.
+const pageListHook = (name = "usePageProjects") => `function ${name}({enabled:e}={}){`
+  + "let f=query({enabled:e}),{data:p,isPending:m,error:h,dataUpdatedAt:g,refetch:_}=f,"
+  + "v=loadingOf(f),S=spacesLoading(),{projects:D,isLoading:ee}=spaces({enabled:!0});"
+  + "return{projects:[...p?.data??[],...D],isInitialLoading:m||S||ee,"
+  + "hasMore:p?.pagination.has_more??!1,isPending:m,chatProjectsEnabled:e,"
+  + "chatProjectsLoading:v,spacesLoading:S,chatProjectsError:h,"
+  + "chatProjectsUpdatedAt:g,refetch:_}}";
+const pageListDecoy = "function other(){return{projects:[],isPending:m,loading:v}}";
+const pageListChunk = `${pageListHook()}${pageListDecoy}`;
+assert.equal(inspectRenderer(`${webShellFixtures}\n${pageListChunk}`, false, false).patches
+  .filter(patch => patch.id === "web-projects-remote-list").length, 0,
+  "the page's list hook is left alone outside web-shell mode");
+const pageListPatches = inspectRenderer(`${webShellFixtures}\n${pageListChunk}`, false, true)
+  .patches.filter(patch => patch.id === "web-projects-remote-list");
+assert.deepEqual(pageListPatches.map(patch => patch.original), ["m||S||ee", "m", "v"],
+  "the page's loading terms must be forced, and its project list left alone");
+assert.ok(pageListPatches.every(patch => patch.replacement === "!1"));
+assert.equal(inspectRenderer(`${webShellFixtures}\n${pageListChunk}${pageListHook("two")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-remote-list").length, 0,
+  "two list hooks must refuse the splice rather than force one of two");
+const pageListOut = patchRendererSources(new Map([["page.js",
+  `${webShellFixtures}\n${accountMenuName}\n${pageListChunk}`]]), false, true)
+  .sources.get("page.js");
+assert.ok(pageListOut.includes("isInitialLoading:!1,hasMore:p?.pagination.has_more??!1,"
+  + "isPending:!1,chatProjectsEnabled:e,chatProjectsLoading:!1,spacesLoading:S,"
+  + "chatProjectsError:h"),
+  "the page must report a settled, empty list and keep everything else");
+assert.ok(pageListOut.includes("function other(){return{projects:[],isPending:m,loading:v}}"),
+  "an object with only some of the keys must not be mistaken for the hook's report");
+const pageListCompiled = await minify(pageListChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(`${webShellFixtures}\n${pageListCompiled.code}`, false, true)
+  .patches.filter(patch => patch.id === "web-projects-remote-list").length, 3,
+  "a mangled page hook must still be forced three times");
 // The sidebar's Projects entry. Both builds filter their nav items through one
 // negated `||` chain, and both clauses about the entry itself are false on
 // claude.ai while being true here: one is Desktop-only (built on

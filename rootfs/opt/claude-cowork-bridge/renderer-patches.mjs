@@ -371,6 +371,34 @@ const projectsAtriumFeature = "yukon_silver_dramatic_shrimp_atrium";
 // a bundle that no longer matches leaves the requests to 404 as they do today.
 const projectsServerProjectsPatchId = "web-projects-remote-list";
 const projectsServerProjectsOff = "!1";
+// Turning the predicate off stops the requests, and react-query then answers
+// `isPending` for a query nobody enabled — a disabled query is pending in v5
+// until it has data. Both consumers that read that state would wait on it
+// forever, so each reports the list as settled and empty instead.
+//
+// The composer picker's report component builds five keys from the queries:
+//
+//   te = memo(() => r
+//     ? { browse: ee, browseLoading: W, all: A, allLoading: !k && !E, failed: V || E }
+//     : NO_PROJECTS, […]);
+//
+// — the three computed terms are what it walks back up to the picker, and with
+// `k` (a settled gate over an answer that never settles) false, `allLoading`
+// comes out true however the predicate reads. The page's list hook reports the
+// same queries beside the spaces it draws:
+//
+//   return { projects: …, isInitialLoading: m || S || E && ee, hasMore: …,
+//            isPending: m, chatProjectsEnabled: d, chatProjectsLoading: v, … };
+//
+// — `m` is that same pending, and it is what leaves the page on its skeleton
+// cards. Both are forced to the settled answer, which is also the true one here:
+// this deployment has no server-side projects, and the projects it does have are
+// the Desktop's spaces, drawn from a different source entirely.
+const projectsRemoteReportKeys = ["browse", "browseLoading", "all", "allLoading", "failed"];
+const projectsRemoteReportForced = ["browseLoading", "allLoading", "failed"];
+const projectsPageListKeys = ["chatProjectsError", "isInitialLoading", "isPending"];
+const projectsPageListForced = ["isInitialLoading", "isPending", "chatProjectsLoading"];
+const projectsRemoteSettled = "!1";
 // The permission picker's own binding, which is the same missing store once
 // more. The composer picks that control's content from a hook:
 //
@@ -1167,6 +1195,40 @@ function projectsServerProjectsTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The picker's server-projects report, and the keys of it the patch forces. The
+// module's own "no projects" constant carries the same five keys, so the report
+// is the one whose `allLoading` is computed — `!k && !E`, where the constant
+// answers the minified `!1` the same key holds there.
+function projectsRemoteReportTarget(ast) {
+  const reports = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const keys = node.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value);
+    if (keys.length !== projectsRemoteReportKeys.length) return;
+    if (!projectsRemoteReportKeys.every(name => keys.includes(name))) return;
+    if (!node.properties.some(entry => key(entry, "allLoading")
+      && unwrap(entry.value)?.type === "LogicalExpression")) return;
+    reports.push(node);
+  });
+  return reports.length === 1 ? reports[0] : undefined;
+}
+
+// The projects page's list hook, pinned by the three `chatProjects*` keys only it
+// reports. Returns the returned object; its loading terms are what the patch
+// forces.
+function projectsPageListTarget(ast) {
+  const found = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const keys = node.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value);
+    if (!projectsPageListKeys.every(name => keys.includes(name))) return;
+    found.push(node);
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The permission binding hook's guard: the `if` whose body hands back the object
 // carrying `autoPickIsDraftOnly`, which appears nowhere else in the graph.
 function permissionBindingTarget(ast) {
@@ -1753,6 +1815,7 @@ export const prefilterNeedles = [
   "voyage_composer_marlin", // unified-composer design predicates
   "claude_ai_projects_limits", // projects-allowed predicate
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
+  "chatProjectsError", // the projects page's list hook, which the report patch forces
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -1918,12 +1981,31 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         replacement: source.slice(read.start, read.end) });
     }
     // The server-projects predicate: this deployment has no such backend, so the
-    // queries it gates are never asked and the picker reports none.
+    // queries it gates are never asked and every consumer is told the list is
+    // settled and empty rather than pending.
     const serverProjects = projectsServerProjectsTarget(ast);
     if (serverProjects) {
       patches.push({ id: projectsServerProjectsPatchId, start: serverProjects.start,
         end: serverProjects.end, original: source.slice(serverProjects.start, serverProjects.end),
         replacement: projectsServerProjectsOff });
+    }
+    const report = projectsRemoteReportTarget(ast);
+    if (report) {
+      for (const entry of report.properties) {
+        if (!projectsRemoteReportForced.includes(entry.key.name ?? entry.key.value)) continue;
+        patches.push({ id: projectsServerProjectsPatchId, start: entry.value.start,
+          end: entry.value.end, original: source.slice(entry.value.start, entry.value.end),
+          replacement: projectsRemoteSettled });
+      }
+    }
+    const pageList = projectsPageListTarget(ast);
+    if (pageList) {
+      for (const entry of pageList.properties) {
+        if (!projectsPageListForced.includes(entry.key.name ?? entry.key.value)) continue;
+        patches.push({ id: projectsServerProjectsPatchId, start: entry.value.start,
+          end: entry.value.end, original: source.slice(entry.value.start, entry.value.end),
+          replacement: projectsRemoteSettled });
+      }
     }
     // The slot's bound-project branch, so the slot draws the selector instead of
     // the component that answers null without a resolved device binding.

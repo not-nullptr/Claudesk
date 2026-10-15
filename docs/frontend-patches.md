@@ -512,22 +512,31 @@ function serverProjectsAvailable() {
 }
 ```
 
-It has exactly two callers and they are the whole of the surface. The projects
-page passes it as the list query's `enabled`, and prefetches behind it, so a false
-stops those requests outright. The composer picker's report component passes it to
-its own project queries, so a false makes that component report the module's
-`NO_PROJECTS` constant — empty, not loading, not failed — and the picker stops
-skeleton-drawing on a list that will never arrive. The projects this deployment
-does have are the Desktop's **spaces**, which reach the composer by a different
-route: as folder targets marked `isProject`, through the folders gate, drawn by
-the same rows. The patch splices the returned expression alone, so the
-declarators — where the feature reads and the account probe live, both hooks — stay
-put and hook order is unchanged. The function is pinned as the only predicate in
-the graph that reads `activeOrganization` beside its capability probe, because
-`let first = …, probe = read().isAvailable; return a && b && probe` is how the
-bundle spells *every* capability predicate, and three others match the shape
-alone. Spliced only in web-shell mode, and not required: a bundle that no longer
-matches leaves the requests to fail as they do today.
+Turning it off stops the requests, and that alone is not enough: react-query
+answers `isPending` for a query nobody enabled, so the two consumers that read
+that state would wait on a list that is never asked for. Each is therefore told
+the list has settled empty, which is also the true answer here:
+
+- the composer picker's report object builds its five keys from those queries and
+  walks three of them back up to the picker — `allLoading` comes out true for an
+  answer that never settles, and that is what leaves the popup skeleton-drawing;
+- the projects page's list hook reports the same queries beside the spaces it
+  draws, and its `isInitialLoading`/`isPending` is what leaves the page on its
+  skeleton cards.
+
+Everything the surfaces *should* show comes from elsewhere: the Desktop's
+**spaces**, which reach the composer as folder targets marked `isProject` through
+the folders gate, and the page's own spaces query. Each splice replaces one
+returned expression, so the declarators — where the feature reads, the account
+probe and the query calls live — stay put and hook order is unchanged. The
+predicate is pinned as the only one in the graph that reads `activeOrganization`
+beside its capability probe, because `let first = …, probe = read().isAvailable;
+return a && b && probe` is how the bundle spells *every* capability predicate and
+three others match the shape alone; the page's hook is pinned by the three
+`chatProjects*` keys only it reports, and its chunk is reached by the
+`chatProjectsError` needle, without which the prefilter never hands it to the
+parser. Spliced only in web-shell mode, and none of the three required: a bundle
+that no longer matches leaves the requests to fail as they do today.
 
 `web-permission-binding` fixes the composer's permission control, which is the
 same missing store again: the hook that feeds it answers only while the
