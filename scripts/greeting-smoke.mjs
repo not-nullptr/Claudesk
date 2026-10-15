@@ -107,28 +107,30 @@ for (const entry of injected.personalized_greeting) {
   }
 }
 
-// 2. The per-weekday slots are the ones the renderer picks (and the code surface
-//    falls back to default_slots on a day it does not define, like Thursday).
+// 2. The per-weekday slots match the supplied schedule, and the code surface
+//    falls back to default_slots on a day it does not define, like Thursday.
 assert.equal(pick(injected.personalized_greeting, "chat", 3, 0), "What shall we think through?"); // sun <5
-assert.equal(pick(injected.personalized_greeting, "chat", 6, 1), "Hey there"); // mon <9
-assert.equal(pick(injected.personalized_greeting, "chat", 20, 2), "Evening"); // tue <22
-assert.equal(pick(injected.personalized_greeting, "code", 6, 0), "Morning"); // sun <12
-assert.equal(pick(injected.personalized_greeting, "code", 6, 1), "Hello, world"); // mon <18, no name
-assert.equal(pick(injected.personalized_greeting, "code", 6, 4), "Back at it"); // thu -> default_slots <12
+assert.equal(pick(injected.personalized_greeting, "chat", 6, 1), "New week"); // mon <9, name omitted
+assert.equal(pick(injected.personalized_greeting, "chat", 20, 2), "Evening"); // tue <22, name omitted
+assert.equal(pick(injected.personalized_greeting, "code", 6, 0), "Ready when you are"); // sun <12
+assert.equal(pick(injected.personalized_greeting, "code", 6, 1), "Morning"); // mon <12, name omitted
+assert.equal(pick(injected.personalized_greeting, "code", 6, 4), "Clean slate"); // thu -> default_slots <12
 
-// 3. A resolved name is expanded into every slot that carries the token, and the
-//    token never leaks.
+// 3. A resolved name is expanded into slots that carry the token, and the token
+//    never leaks.
 const addressed = named.injectPlain({}, "Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 6, 1), "Hey there, Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 14, 1), "Afternoon, Ada");
-assert.equal(pick(addressed.personalized_greeting, "chat", 6, 0), "Sunday session, Ada?");
-assert.equal(pick(addressed.personalized_greeting, "code", 6, 4), "Back at it, Ada");
+assert.equal(pick(addressed.personalized_greeting, "chat", 6, 1), "New week, Ada");
+assert.equal(pick(addressed.personalized_greeting, "chat", 14, 1), "Back at it, Ada");
+assert.equal(pick(addressed.personalized_greeting, "chat", 6, 0), "Welcome, Ada");
+assert.equal(pick(addressed.personalized_greeting, "code", 6, 1), "Morning, Ada");
+assert.equal(pick(addressed.personalized_greeting, "code", 14, 4), "Back at it, Ada"); // default_slots
 assert.ok(!JSON.stringify(addressed).includes("{{"));
 
 // 4. With no name at all, the token is dropped without stray punctuation.
-assert.equal(pick(injected.personalized_greeting, "chat", 1, 1), "Up late?"); // "Up late, {{ NAME }}?"
-assert.equal(pick(injected.personalized_greeting, "chat", 6, 0), "Sunday session?");
+assert.equal(pick(injected.personalized_greeting, "chat", 1, 4), "Up late?"); // "Up late, {{ NAME }}?"
+assert.equal(pick(injected.personalized_greeting, "chat", 6, 0), "Welcome");
 assert.equal(pick(injected.personalized_greeting, "chat", 20, 0), "Returns!"); // leading token
+assert.ok(!JSON.stringify(injected).includes("Maddie"), "the fallback keeps names dynamic");
 assert.ok(!JSON.stringify(injected).includes("{{"));
 
 // 5. Name precedence: override > the app-wide reported name > account > none.
@@ -141,7 +143,7 @@ assert.equal(bare.resolve({ override: "", reported: "", account: {} }), "");
 assert.equal(bare.resolve({}), "");
 // The reported app name is what the greeting actually renders.
 const asApp = bare.injectPlain({ account: { display_name: "Maddie" } }, "app");
-assert.equal(pick(asApp.personalized_greeting, "chat", 6, 1), "Hey there, app");
+assert.equal(pick(asApp.personalized_greeting, "chat", 6, 1), "New week, app");
 
 // 6. A greeting the upstream did send is left untouched (same object back).
 const upstream = {

@@ -1596,111 +1596,112 @@ const greetingSurfaces = [
     days: [
       { day: "sun", slots: [
         { until: 5, text: "What shall we think through?" },
-        { until: 9, text: "Sunday session, {{ NAME }}?" },
-        { until: 12, text: "Welcome, {{ NAME }}" },
-        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 9, text: "Welcome, {{ NAME }}" },
+        { until: 12, text: "Coffee and Claude time?" },
+        { until: 18, text: "Good afternoon, {{ NAME }}" },
         { until: 22, text: "{{ NAME }} returns!" },
         { until: 24, text: "What shall we think through?" },
       ] },
       { day: "mon", slots: [
-        { until: 5, text: "Up late, {{ NAME }}?" },
-        { until: 9, text: "Hey there, {{ NAME }}" },
-        { until: 12, text: "Happy Monday, {{ NAME }}" },
-        { until: 18, text: "Afternoon, {{ NAME }}" },
-        { until: 22, text: "Good evening, {{ NAME }}" },
-        { until: 24, text: "Up late, {{ NAME }}?" },
+        { until: 5, text: "Moonlit chat?" },
+        { until: 9, text: "New week, {{ NAME }}" },
+        { until: 12, text: "Coffee and Claude time?" },
+        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 22, text: "Evening thoughts" },
+        { until: 24, text: "Moonlit chat?" },
       ] },
       { day: "tue", slots: [
         { until: 5, text: "It’s a late-night jam session." },
-        { until: 9, text: "Happy Tuesday, {{ NAME }}" },
-        { until: 12, text: "Hey there, {{ NAME }}" },
-        { until: 18, text: "Let’s noodle" },
+        { until: 9, text: "Hey there, {{ NAME }}" },
+        { until: 12, text: "Happy Tuesday, {{ NAME }}" },
+        { until: 18, text: "Afternoon, {{ NAME }}" },
         { until: 22, text: "Evening, {{ NAME }}" },
         { until: 24, text: "It’s a late-night jam session." },
       ] },
       { day: "wed", slots: [
         { until: 5, text: "Hello, night owl" },
-        { until: 9, text: "Good morning, {{ NAME }}" },
-        { until: 12, text: "Welcome, {{ NAME }}" },
-        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 9, text: "Happy Wednesday, {{ NAME }}" },
+        { until: 12, text: "What’s cooking, {{ NAME }}?" },
+        { until: 18, text: "Good afternoon, {{ NAME }}" },
         { until: 22, text: "Evening, how are things?" },
         { until: 24, text: "Hello, night owl" },
       ] },
       { day: "thu", slots: [
-        { until: 5, text: "What shall we think through?" },
-        { until: 9, text: "Good morning, {{ NAME }}" },
-        { until: 12, text: "Happy Thursday, {{ NAME }}" },
-        { until: 18, text: "Afternoon, {{ NAME }}" },
-        { until: 22, text: "{{ NAME }} returns!" },
-        { until: 24, text: "What shall we think through?" },
+        { until: 5, text: "Up late, {{ NAME }}?" },
+        { until: 9, text: "What’s cooking, {{ NAME }}?" },
+        { until: 12, text: "Hey there, {{ NAME }}" },
+        { until: 18, text: "Back at it, {{ NAME }}" },
+        { until: 22, text: "Good evening, {{ NAME }}" },
+        { until: 24, text: "Up late, {{ NAME }}?" },
       ] },
       { day: "fri", slots: [
         { until: 5, text: "Moonlit chat?" },
-        { until: 9, text: "What’s cooking, {{ NAME }}?" },
-        { until: 12, text: "Good morning, {{ NAME }}" },
-        { until: 18, text: "Let’s noodle" },
+        { until: 9, text: "Coffee and Claude time?" },
+        { until: 12, text: "Here we go!" },
+        { until: 18, text: "Afternoon, {{ NAME }}" },
         { until: 22, text: "Evening thoughts" },
         { until: 24, text: "Moonlit chat?" },
       ] },
       { day: "sat", slots: [
-        { until: 5, text: "It’s a late-night jam session." },
-        { until: 12, text: "Welcome to the weekend, {{ NAME }}" },
-        { until: 18, text: "Good afternoon, {{ NAME }}" },
-        { until: 22, text: "Evening, {{ NAME }}" },
-        { until: 24, text: "It’s a late-night jam session." },
+        { until: 5, text: "Hello, night owl" },
+        { until: 9, text: "What’s cooking, {{ NAME }}?" },
+        { until: 12, text: "Hey there, {{ NAME }}" },
+        { until: 18, text: "Let’s noodle" },
+        { until: 22, text: "Evening, how are things?" },
+        { until: 24, text: "Hello, night owl" },
       ] },
     ],
     default_slots: [
-      { until: 5, text: "What shall we think through?" },
-      { until: 9, text: "Hey, early bird" },
-      { until: 12, text: "What’s cooking, {{ NAME }}?" },
-      { until: 18, text: "Afternoon, {{ NAME }}" },
-      { until: 22, text: "{{ NAME }} returns!" },
-      { until: 24, text: "What shall we think through?" },
+      { until: 5, text: "Up late, {{ NAME }}?" },
+      { until: 9, text: "Hey there, {{ NAME }}" },
+      { until: 12, text: "Welcome, {{ NAME }}" },
+      { until: 18, text: "Back at it, {{ NAME }}" },
+      { until: 22, text: "Good evening, {{ NAME }}" },
+      { until: 24, text: "Up late, {{ NAME }}?" },
     ],
   },
   {
     surface: "code",
     days: [
       { day: "sun", slots: [
+        { until: 12, text: "Ready when you are" },
+        { until: 18, text: "What are we building?" },
+        { until: 24, text: "Ready when you are" },
+      ] },
+      { day: "mon", slots: [
         { until: 5, text: "Night build" },
         { until: 12, text: "Morning, {{ NAME }}" },
         { until: 18, text: "Ready when you are" },
         { until: 22, text: "Hello, world" },
         { until: 24, text: "Night build" },
       ] },
-      { day: "mon", slots: [
+      { day: "tue", slots: [
         { until: 18, text: "Hello, world" },
         { until: 22, text: "Hello, {{ NAME }}" },
         { until: 24, text: "Hello, world" },
       ] },
-      { day: "tue", slots: [
-        { until: 5, text: "Hello, night owl" },
-        { until: 18, text: "Hello, {{ NAME }}" },
-        { until: 22, text: "Evening, {{ NAME }}" },
-        { until: 24, text: "Hello, night owl" },
-      ] },
       { day: "wed", slots: [
-        { until: 12, text: "Clean slate" },
-        { until: 18, text: "Back at it, {{ NAME }}" },
-        { until: 22, text: "Beep boop time?" },
-        { until: 24, text: "Clean slate" },
+        { until: 5, text: "Hello, {{ NAME }}" },
+        { until: 12, text: "Fresh branch" },
+        { until: 22, text: "Clean slate" },
+        { until: 24, text: "Hello, {{ NAME }}" },
       ] },
       { day: "fri", slots: [
+        { until: 12, text: "Back at it, {{ NAME }}" },
+        { until: 18, text: "Afternoon, {{ NAME }}" },
+        { until: 24, text: "Back at it, {{ NAME }}" },
+      ] },
+      { day: "sat", slots: [
         { until: 12, text: "What are we building?" },
         { until: 18, text: "What needs fixing?" },
         { until: 24, text: "What are we building?" },
       ] },
-      { day: "sat", slots: [
-        { until: 12, text: "Ready when you are" },
-        { until: 18, text: "What are we building?" },
-        { until: 24, text: "Ready when you are" },
-      ] },
     ],
     default_slots: [
-      { until: 12, text: "Back at it, {{ NAME }}" },
-      { until: 18, text: "Afternoon, {{ NAME }}" },
-      { until: 24, text: "Back at it, {{ NAME }}" },
+      { until: 12, text: "Clean slate" },
+      { until: 18, text: "Back at it, {{ NAME }}" },
+      { until: 22, text: "Beep boop time?" },
+      { until: 24, text: "Clean slate" },
     ],
   },
 ];
@@ -1800,6 +1801,20 @@ function grantWebShellGates(value) {
     changed = true;
   }
   return changed;
+}
+
+// The browser New page's Marlin composer redesign is a separate GrowthBook gate
+// from shell selection. Enable it for this deployment even when the upstream's
+// hardcoded custom3p feature table carries an explicit false value.
+function grantWebShellComposerDesign(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey("voyage_composer_marlin");
+  const entry = features[key];
+  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+  if (on) return false;
+  features[key] = { defaultValue: true };
+  return true;
 }
 
 // The connectors surface — the "Add connector" control and the plugin-connector
@@ -1978,6 +1993,10 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
+      rewrote = true;
+    }
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
+      && grantWebShellComposerDesign(parsed)) {
       rewrote = true;
     }
     // Connectors ("Add connector" / plugins) are gated on the `papi_mcp`

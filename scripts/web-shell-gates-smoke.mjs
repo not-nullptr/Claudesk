@@ -2,13 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
-// The web shell reads the bootstrap's GrowthBook table for the few rollout gates
-// that decide whether a *browser* client is offered Code and Cowork. The bridge
-// grants them by name (ion-dist addresses a feature by a Java-style 32-bit hash
-// of it), because the self-hosted bootstrap carries Desktop's hardcoded table,
-// which has neither gate. These checks pin the hash the table is keyed by, that
-// only an absent gate is added — an upstream value, including a false one, is
-// never overwritten — and that the whole rewrite is the web shell's.
+// The web shell reads the bootstrap's GrowthBook table for rollout gates. Code
+// and Cowork are added only when absent, while the composer redesign is forced
+// on even if the upstream explicitly carries false. ion-dist keys each feature
+// by a Java-style 32-bit hash. These checks pin the keys and rewrite behavior.
 const serverSource = await readFile(new URL("../bridge/server.mjs", import.meta.url), "utf8");
 
 function section(source, start, end) {
@@ -39,13 +36,14 @@ function load({ webShell = false, env = {} } = {}) {
   vm.runInNewContext(
     `${flags}${grantSection}
      result = { granted: webShellGrantedGates, grant: grantWebShellGates,
-       hash: growthbookKey, enabled: webShellEnabled };`,
+       grantComposer: grantWebShellComposerDesign, hash: growthbookKey,
+       enabled: webShellEnabled };`,
     sandbox,
   );
   return sandbox.result;
 }
 
-const { granted, grant, hash, enabled } = load();
+const { granted, grant, grantComposer, hash, enabled } = load();
 assert.deepEqual(plain(granted), ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks"],
   "the web shell's gates are the Code and Cowork entry points");
 assert.equal(enabled, false, "the rewrite is off unless the web shell is asked for");
@@ -67,10 +65,28 @@ assert.equal(Object.keys(bootstrap.growthbook.features).length, granted.length +
 // pinned to the id the shipped bundle reads it by.
 assert.equal(hash("bad_moon_rising"), "2831057674",
   "a gate name must hash to the id ion-dist reads it by");
+assert.equal(hash("voyage_composer_marlin"), "2295073874",
+  "the Marlin composer gate must hash to the id ion-dist reads it by");
 assert.equal(hash("__gb__123456"), "123456", "a literal id passes through unchanged");
 
-// An upstream value is authoritative, in either direction: the gate the
-// deployment already carries keeps whatever it says.
+// The redesign is enabled even if the upstream table carries false, and its
+// entry is not rewritten again once the effective value is already true.
+const composerKey = hash("voyage_composer_marlin");
+const composerAbsent = { growthbook: { features: { existing: { defaultValue: true } } } };
+assert.equal(grantComposer(composerAbsent), true, "an absent composer gate must be enabled");
+assert.deepEqual(plain(composerAbsent.growthbook.features[composerKey]), { defaultValue: true });
+assert.equal(grantComposer(composerAbsent), false, "an enabled composer gate must be idempotent");
+const composerFalse = { growthbook: { features: { [composerKey]: { defaultValue: false } } } };
+assert.equal(grantComposer(composerFalse), true, "an explicit false composer gate must be overridden");
+assert.deepEqual(plain(composerFalse.growthbook.features[composerKey]), { defaultValue: true });
+const composerTrue = { growthbook: { features: { [composerKey]: { value: true } } } };
+assert.equal(grantComposer(composerTrue), false, "an already-true composer gate must be preserved");
+assert.deepEqual(plain(composerTrue.growthbook.features[composerKey]), { value: true });
+assert.match(serverSource,
+  /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWebShellComposerDesign\(parsed\)\) \{\s*rewrote = true;\s*\}/,
+  "the composer override is limited to web-shell bootstrap responses");
+
+// For Code and Cowork, an upstream value is authoritative in either direction.
 const upstream = { growthbook: { features: { [hash("bad_moon_rising")]: { defaultValue: false } } } };
 assert.equal(grant(upstream), true, "the one absent gate is still added");
 assert.deepEqual(plain(upstream.growthbook.features[hash("bad_moon_rising")]), { defaultValue: false },
