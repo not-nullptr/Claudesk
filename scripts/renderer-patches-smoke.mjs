@@ -1027,6 +1027,55 @@ const atriumCompiled = await minify(atriumChunk, {
 assert.equal(inspectRenderer(atriumCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-atrium").length, 1,
   "a mangled capability must still be unwrapped once");
+// The picker's server-side project list. The component that fetches claude.ai's
+// projects reports them up as a five-key object; a third-party instance never
+// answers the route, so the report has to stop claiming to be loading them. The
+// three computed terms are forced and the memo, the queries and the module's own
+// "no projects" object are left exactly where they were.
+const projectsRemoteReport = (name = "projectsReport") => `function ${name}(r){`
+  + "let k=settled(),E=failed(),W=working(),V=errored();return useMemo(()=>r?"
+  + "{browse:list(W),browseLoading:W,all:all(k),allLoading:!k&&!E,failed:V||E}"
+  + ":NO_PROJECTS,[r,E,k,W,V])}";
+const noProjectsConstant = "var NO_PROJECTS="
+  + "{browse:EMPTY,browseLoading:!1,all:EMPTY,allLoading:!1,failed:!1};";
+const projectsRemoteChunk = `${noProjectsConstant}${projectsRemoteReport()}`
+  // The same five keys answered entirely by constants, as the module's own object
+  // is: nothing in it is computed, so it is not a report.
+  + "var OTHER={browse:EMPTY,browseLoading:!1,all:EMPTY,allLoading:!1,failed:!1};";
+assert.equal(inspectRenderer(`${webShellFixtures}\n${projectsRemoteChunk}`, false, false).patches
+  .filter(patch => patch.id === "web-projects-remote-list").length, 0,
+  "the report is left alone outside web-shell mode");
+const projectsRemotePatches = inspectRenderer(`${webShellFixtures}\n${projectsRemoteChunk}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-remote-list");
+assert.equal(projectsRemotePatches.length, 3,
+  "exactly the report's three computed terms must be forced");
+assert.deepEqual(projectsRemotePatches.map(patch => patch.original), ["W", "!k&&!E", "V||E"],
+  "only the loading and failure terms are spliced, not the lists");
+assert.ok(projectsRemotePatches.every(patch => patch.replacement === "!1"),
+  "each forced term answers false");
+assert.equal(inspectRenderer(
+  `${webShellFixtures}\n${projectsRemoteReport()}\n${projectsRemoteReport("otherReport")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-remote-list").length, 0,
+  "two candidates must refuse the splice rather than force one of two");
+const projectsRemoteOut = patchRendererSources(new Map([["remote.js",
+  `${webShellFixtures}\n${accountMenuName}\n${projectsRemoteChunk}`]]), false, true)
+  .sources.get("remote.js");
+assert.ok(projectsRemoteOut.includes("{browse:list(W),browseLoading:!1,all:all(k),"
+  + "allLoading:!1,failed:!1}"),
+  "the report must answer empty, not loading and not failed");
+assert.ok(projectsRemoteOut.includes(noProjectsConstant),
+  "the module's own no-projects object must survive byte-for-byte");
+assert.ok(projectsRemoteOut.includes("var OTHER={browse:EMPTY,browseLoading:!1,all:EMPTY,"
+  + "allLoading:!1,failed:!1};"),
+  "a same-keys object of constants must not be mistaken for the report");
+assert.ok(projectsRemoteOut.includes("browse:list(W),browseLoading:!1"),
+  "the component's own list terms must stay in the object");
+const projectsRemoteCompiled = await minify(projectsRemoteChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(`${webShellFixtures}\n${projectsRemoteCompiled.code}`, false, true)
+  .patches.filter(patch => patch.id === "web-projects-remote-list").length, 3,
+  "a mangled report must still be forced three times");
 // The sidebar's Projects entry. Both builds filter their nav items through one
 // negated `||` chain, and both clauses about the entry itself are false on
 // claude.ai while being true here: one is Desktop-only (built on

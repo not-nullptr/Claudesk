@@ -738,6 +738,22 @@ unchanged. The function is pinned by the feature-name literal, which the bundle
 spells only there, and by the two-expression sequence's shape. Spliced only in
 web-shell mode, and not required.
 
+**The list inside that popup** is a different project surface again, and the one
+that leaves it spinning. Its rows come from claude.ai's *server-side* projects —
+`GET /api/organizations/<org>/projects`, in a creator list, a starred one, an
+overflow page and a `uuids=` batch — which one component fetches and reports up as
+a five-key object. On a third-party instance that route answers
+`custom_3p_not_available`, so the queries never settle, the picker is told they are
+still loading, and the skeleton is what is left: its empty state is defined as
+"not loading, and no projects", which nothing reaches while the flag says
+otherwise. The projects this deployment *does* have are the Desktop's **spaces**,
+and they reach this same picker by another route — as folder targets marked
+`isProject`, through the folders gate, drawn by the same rows. So
+`web-projects-remote-list` forces the computed terms of that report to false
+rather than serving a second project store: the picker draws its spaces and its
+folders, and an account with neither gets the "No projects yet." state claude.ai
+shows. The memo, the queries and the hooks stay where they were.
+
 The permission control is the same missing store showing up once more. The
 composer chooses that slot's content from a hook:
 
@@ -796,7 +812,7 @@ which matters here, because a build that folded those two-liners into a
 conditional expression would stop matching, and the click would go quiet rather
 than loud.
 
-All thirteen change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All fourteen change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

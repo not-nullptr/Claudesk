@@ -498,6 +498,32 @@ spells only there, and by the two-expression sequence's shape, so an unrelated
 sequence — or the same reader discarding a different feature's read — cannot
 match. Spliced only in web-shell mode, and not required.
 
+`web-projects-remote-list` reports the picker's **server-side** project list the
+way this deployment's answer actually is: none, and not in flight. Those rows come
+from claude.ai's own projects API — `GET /api/organizations/<org>/projects`, a
+creator list, a starred one, an overflow page and a `uuids=` batch — which one
+component fetches and reports up to the picker as a five-key object:
+
+```js
+let r = serverProjectsAvailable(), {own, starred} = projectQueries(r), …;
+te = memo(() => r ? { browse, browseLoading, all, allLoading: !k && !E, failed: V || E }
+                  : NO_PROJECTS, […]);
+```
+
+A third-party instance refuses that route (`custom_3p_not_available`), so the
+queries never settle, the picker is told they are still loading, and it draws its
+skeleton rows forever — its empty state is defined as "not loading and no
+projects", which nothing can reach. The projects this deployment does have are the
+Desktop's **spaces**, which arrive in the same picker by a different route
+entirely: as folder targets marked `isProject`, through the folders gate, drawn by
+the same rows. So the patch forces the report's three computed terms
+(`browseLoading`, `allLoading`, `failed`) to false, leaving its memo, its queries
+and every hook call untouched. The picker then draws its spaces and its folders,
+and on an account with neither, the "No projects yet." empty state claude.ai
+shows. Pinned by the report's five keys and by the computed `allLoading` that
+separates it from the module's own no-projects object, which carries the same keys
+as constants. Spliced only in web-shell mode, and not required.
+
 `web-permission-binding` fixes the composer's permission control, which is the
 same missing store again: the hook that feeds it answers only while the
 pending-first-send store exists, and with that null the slot draws a skeleton

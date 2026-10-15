@@ -342,6 +342,38 @@ const projectsPickerSectionOn = "!0";
 // Spliced only in web-shell mode, and not required.
 const projectsAtriumPatchId = "web-projects-atrium";
 const projectsAtriumFeature = "yukon_silver_dramatic_shrimp_atrium";
+// The picker's *server-side* project list — claude.ai's projects, which this
+// deployment does not have and cannot have. One component fetches them and
+// reports the result up to the picker:
+//
+//   let r = serverProjectsAvailable(), {own, starred} = projectQueries(r), …
+//   te = memo(() => r
+//     ? { browse: ee, browseLoading: W, all: A, allLoading: !k && !E, failed: V || E }
+//     : NO_PROJECTS, […]);
+//   useEffect(() => { report(te); }, [te, report]);
+//
+// Those queries are `GET /api/organizations/<org>/projects` (a creator list, a
+// starred one, an overflow page and a `uuids=` batch). A third-party instance
+// answers the route with `custom_3p_not_available`, so they never settle: the
+// picker is told its projects are still loading and draws its skeleton rows
+// forever, and its empty state — `!loading && no projects` — is unreachable.
+//
+// The projects this deployment *does* have are the Desktop's **spaces**, which
+// reach the same picker by an entirely different route: as folder targets marked
+// `isProject` through the folders gate, drawn by the same rows. So the fix is not
+// to serve a second project store — it is to report the server list the way this
+// deployment's answer actually is: none, and not in flight. The patch forces the
+// three computed terms of that report (`browseLoading`, `allLoading`, `failed`)
+// to `false`, leaving the memo, the queries and every hook call where they were;
+// the picker then draws its spaces, its folders, and — on an account with neither
+// — the "No projects yet." empty state claude.ai shows. Pinned by the report's
+// own five keys (the module's "no projects" constant carries the same keys, as
+// literals, which is what the `allLoading` test separates), and spliced only in
+// web-shell mode. Not required.
+const projectsRemoteListPatchId = "web-projects-remote-list";
+const projectsRemoteReportKeys = ["browse", "browseLoading", "all", "allLoading", "failed"];
+const projectsRemoteReportForced = ["browseLoading", "allLoading", "failed"];
+const projectsRemoteReportOff = "!1";
 // The permission picker's own binding, which is the same missing store once
 // more. The composer picks that control's content from a hook:
 //
@@ -1102,6 +1134,25 @@ function projectsAtriumTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The picker's server-projects report, and the entries of it the patch forces.
+// The module's own "no projects" constant carries the same five keys, so the
+// report is the one whose `allLoading` is computed — `!k && !E`, where the
+// constant answers the minified `!1` the same key holds there.
+function projectsRemoteReportTarget(ast) {
+  const reports = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const keys = node.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value);
+    if (keys.length !== projectsRemoteReportKeys.length) return;
+    if (!projectsRemoteReportKeys.every(name => keys.includes(name))) return;
+    if (!node.properties.some(entry => key(entry, "allLoading")
+      && unwrap(entry.value)?.type === "LogicalExpression")) return;
+    reports.push(node);
+  });
+  return reports.length === 1 ? reports[0] : undefined;
+}
+
 // The permission binding hook's guard: the `if` whose body hands back the object
 // carrying `autoPickIsDraftOnly`, which appears nowhere else in the graph.
 function permissionBindingTarget(ast) {
@@ -1851,6 +1902,17 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsAtriumPatchId, start: atrium.start, end: atrium.end,
         original: source.slice(atrium.start, atrium.end),
         replacement: source.slice(read.start, read.end) });
+    }
+    // The picker's server-side project list: this deployment has no such list, so
+    // the report stops claiming to be loading it or to have failed to.
+    const report = projectsRemoteReportTarget(ast);
+    if (report) {
+      for (const entry of report.properties) {
+        if (!projectsRemoteReportForced.includes(entry.key.name ?? entry.key.value)) continue;
+        patches.push({ id: projectsRemoteListPatchId, start: entry.value.start,
+          end: entry.value.end, original: source.slice(entry.value.start, entry.value.end),
+          replacement: projectsRemoteReportOff });
+      }
     }
     // The slot's bound-project branch, so the slot draws the selector instead of
     // the component that answers null without a resolved device binding.

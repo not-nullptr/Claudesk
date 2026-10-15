@@ -133,8 +133,18 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // with `var FA=!1` — so the read is discarded and the answer is false whatever
 // this table says. The renderer patch `web-projects-atrium` unwraps that comma
 // sequence, which is what makes this grant observable; the two ship together.
+//
+// `__gb__4205082553` — granted by its precomputed id, because the name is not in
+// any shipped file — is the picker's *create* flag, read once in the whole
+// renderer. It arms two things and nothing else: the second operand of the search
+// placeholder's ternary, which is what makes the box read "Search or create a
+// project" rather than "Search projects", and the `Create "<what you typed>"` row
+// in the picker's footer. claude.ai reads it true; a build that folds it false
+// leaves the create affordance to the "New project" row alone. The id form is the
+// one `growthbookKey` already accepts for a gate the bundle spells only as a
+// literal id.
 const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
-  "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium"];
+  "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`
