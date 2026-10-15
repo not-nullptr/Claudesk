@@ -1934,11 +1934,15 @@ function grantWebShellComposerDesign(value) {
 // projects stay shut. The renderer patch `web-projects-allowed` restores the
 // predicate the Desktop build compiles out (the constant it folds the
 // disjunction to is never assigned); this supplies the feature the restored
-// predicate reads. Only a feature the upstream did not already carry is added,
-// exactly as for the other gates, so a real allowance from Anthropic wins.
+// predicate reads. The feature carries a *value*, so the absence test the other
+// gates use is not enough: an entry the upstream carries can still answer an
+// allowance of zero, or carry no `max_free_projects` field at all, and the
+// renderer reads that as no allowance exactly as it reads a missing entry. Only
+// an allowance already above zero is left alone, so one Anthropic really granted
+// this account survives untouched.
 const projectsLimitsGate = "claude_ai_projects_limits";
-// The free-plan allowance granted when the upstream supplies none. The client
-// only tests it for `> 0` to decide whether to consult the account's real
+// The allowance granted when the upstream supplies none, or a zero one. The
+// client only tests it for `> 0` to decide whether to consult the account's real
 // `create_limit`, which the API enforces; it is also the count a free account is
 // shown in the upgrade surfaces, so it is kept at the free tier's own figure.
 const projectsFreeAllowance = 5;
@@ -1946,7 +1950,15 @@ function grantProjectsLimits(value) {
   const features = value?.growthbook?.features;
   if (!features || typeof features !== "object") return false;
   const key = growthbookKey(projectsLimitsGate);
-  if (key in features) return false;
+  const entry = features[key];
+  const configured = entry && typeof entry === "object"
+    ? (entry.value !== undefined ? entry.value : entry.defaultValue) : undefined;
+  // The renderer reads `max_free_projects` off the value when it is an object,
+  // and the value itself when it is a plain number; both spellings are honoured
+  // so an upstream entry in either shape is recognised as a real allowance.
+  const allowance = configured !== null && typeof configured === "object"
+    ? configured.max_free_projects : configured;
+  if (typeof allowance === "number" && allowance > 0) return false;
   features[key] = { defaultValue: { max_free_projects: projectsFreeAllowance } };
   return true;
 }

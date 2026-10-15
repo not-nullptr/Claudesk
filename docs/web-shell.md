@@ -539,10 +539,14 @@ preparation. It ships with a `patchRelease` bump (prepared-renderer bytes
 change), so it needs the `claude-desktop` service rebuilt, not just the bridge.
 
 The restored predicate still needs the feature or a plan capability to read. The
-bridge adds `claude_ai_projects_limits` to the bootstrap's growthbook table —
-`{max_free_projects: 5}`, only when the upstream did not already carry it, so a
-real allowance from Anthropic wins. Without it a free account, which is what a
-self-hosted org resolves to, has no allowance and projects stay shut.
+bridge adds `claude_ai_projects_limits` to the bootstrap's growthbook table as
+`{max_free_projects: 5}`. Unlike the other gates, presence is not the test here:
+the feature carries a *value*, and an entry the upstream already carries can
+still answer an allowance of zero or carry no `max_free_projects` field, which
+the renderer reads as no allowance exactly as it reads a missing entry. So the
+grant raises anything that is not already above zero and leaves a real allowance
+alone. Without it a free account — which is what a self-hosted org resolves to —
+has no allowance and projects stay shut.
 
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`

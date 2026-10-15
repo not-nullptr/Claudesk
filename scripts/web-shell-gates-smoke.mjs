@@ -86,23 +86,39 @@ assert.match(serverSource,
   /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWebShellComposerDesign\(parsed\)\) \{\s*rewrote = true;\s*\}/,
   "the composer override is limited to web-shell bootstrap responses");
 
-// Projects: the free-plan allowance feature. It carries a value object rather
-// than a boolean, and, like the Code and Cowork gates, an upstream entry is
-// authoritative — Anthropic's own allowance must not be overridden by the
-// fallback the renderer patch needs when there is none.
+// Projects: the free-plan allowance feature. It carries a *value*, not a
+// boolean, so the absence test the other gates use is not enough — an entry the
+// upstream already carries can still answer an allowance of zero, or carry no
+// `max_free_projects` field, and the renderer reads that as no allowance exactly
+// as it reads a missing entry. Only a positive allowance is left alone.
 const projectsKey = hash("claude_ai_projects_limits");
+const projectsFallback = { defaultValue: { max_free_projects: 5 } };
 const projectsAbsent = { growthbook: { features: {} } };
 assert.equal(grantProjects(projectsAbsent), true, "an absent allowance must be added");
-assert.deepEqual(plain(projectsAbsent.growthbook.features[projectsKey]),
-  { defaultValue: { max_free_projects: 5 } },
+assert.deepEqual(plain(projectsAbsent.growthbook.features[projectsKey]), projectsFallback,
   "the allowance is granted as a field-value object the renderer reads `max_free_projects` off");
 assert.equal(grantProjects(projectsAbsent), false, "a granted allowance must not be rewritten");
-const projectsUpstream = {
-  growthbook: { features: { [projectsKey]: { defaultValue: { max_free_projects: 20 } } } },
-};
-assert.equal(grantProjects(projectsUpstream), false, "an upstream allowance must be left alone");
-assert.deepEqual(plain(projectsUpstream.growthbook.features[projectsKey]),
-  { defaultValue: { max_free_projects: 20 } }, "an upstream allowance survives");
+for (const [label, entry] of [
+  ["an upstream allowance", { defaultValue: { max_free_projects: 20 } }],
+  ["an upstream allowance carried as a plain number", { defaultValue: 20 }],
+  ["an upstream allowance on the evaluated value", { value: { max_free_projects: 3 } }],
+]) {
+  const upstream = { growthbook: { features: { [projectsKey]: entry } } };
+  assert.equal(grantProjects(upstream), false, `${label} must be left alone`);
+  assert.deepEqual(plain(upstream.growthbook.features[projectsKey]), entry,
+    `${label} must survive untouched`);
+}
+for (const [label, entry] of [
+  ["a zero allowance", { defaultValue: { max_free_projects: 0 } }],
+  ["a zero allowance carried as a plain number", { defaultValue: 0 }],
+  ["an allowance object with no field", { defaultValue: {} }],
+  ["an explicit false", { defaultValue: false }],
+]) {
+  const upstream = { growthbook: { features: { [projectsKey]: entry } } };
+  assert.equal(grantProjects(upstream), true, `${label} must be raised to the fallback`);
+  assert.deepEqual(plain(upstream.growthbook.features[projectsKey]), projectsFallback,
+    `${label} must not leave the renderer reading no allowance`);
+}
 assert.equal(grantProjects({}), false, "a table-less document is left alone");
 assert.match(serverSource,
   /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantProjectsLimits\(parsed\)\) \{\s*rewrote = true;\s*\}/,
