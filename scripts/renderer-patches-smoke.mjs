@@ -1074,6 +1074,47 @@ assert.equal(inspectRenderer(`${webShellFixtures}\n${serverProjectsCompiled.code
   .patches.filter(patch => patch.id === "web-projects-remote-list").length, 1,
   "a mangled predicate must still be spliced once");
 
+// The hub-writable flag, folded to a constant the way the atrium capability is.
+// The bundle spells the fold twice off the same constant, so both are spliced and
+// the read — which the bridge grants — becomes the answer.
+const hubWritableFold = (name = "amberTributaryHeron") => `function ${name}(){`
+  + `return read("amber_tributary_heron"),{enabled:heronConstant}}`;
+const hubWritableChunk = `var heronConstant=!1;${hubWritableFold()}${hubWritableFold("_heron")}`
+  // The same discarded read answering a *different* feature is not this fold.
+  + 'function otherFold(){return read("amber_tributary_osprey"),{enabled:heronConstant}}'
+  // A read whose answer is not the constant object is not this fold either.
+  + 'function plainRead(){return read("amber_tributary_heron")}';
+assert.equal(inspectRenderer(`${webShellFixtures}\n${hubWritableChunk}`, false, false).patches
+  .filter(patch => patch.id === "web-cowork-hub-writable").length, 0,
+  "the fold is left alone outside web-shell mode");
+const hubWritablePatches = inspectRenderer(`${webShellFixtures}\n${hubWritableChunk}`, false, true)
+  .patches.filter(patch => patch.id === "web-cowork-hub-writable");
+assert.equal(hubWritablePatches.length, 2,
+  "every function carrying the fold must be spliced, and its neighbours not");
+assert.ok(hubWritablePatches.every(patch =>
+  patch.original === 'read("amber_tributary_heron"),{enabled:heronConstant}'
+  && patch.replacement === '{enabled:read("amber_tributary_heron")}'),
+  "the object must be rebuilt around the read itself");
+const hubWritableOut = patchRendererSources(new Map([["hub.js",
+  `${webShellFixtures}\n${accountMenuName}\n${hubWritableChunk}`]]), false, true)
+  .sources.get("hub.js");
+assert.ok(hubWritableOut.includes(
+  'function amberTributaryHeron(){return {enabled:read("amber_tributary_heron")}}'),
+  "the flag must answer the feature read instead of the folded constant");
+assert.ok(hubWritableOut.includes("var heronConstant=!1;"),
+  "the folded constant itself must survive");
+assert.ok(hubWritableOut.includes(
+  'function otherFold(){return read("amber_tributary_osprey"),{enabled:heronConstant}}'),
+  "a fold answering another feature must survive untouched");
+assert.ok(hubWritableOut.includes('function plainRead(){return read("amber_tributary_heron")}'),
+  "a bare read without the object must survive untouched");
+const hubWritableCompiled = await minify(hubWritableChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(`${webShellFixtures}\n${hubWritableCompiled.code}`, false, true)
+  .patches.filter(patch => patch.id === "web-cowork-hub-writable").length, 2,
+  "a mangled pair of folds must still be spliced");
+
 // The two consumers that read those queries' pending state. A disabled query is
 // still pending in react-query, so both have to be told the list settled empty —
 // the picker's report object, and the projects page's list hook.

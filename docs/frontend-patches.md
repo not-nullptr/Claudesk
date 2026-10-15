@@ -538,6 +538,38 @@ three others match the shape alone; the page's hook is pinned by the three
 parser. Spliced only in web-shell mode, and none of the three required: a bundle
 that no longer matches leaves the requests to fail as they do today.
 
+`web-cowork-hub-writable` puts a local Cowork session back in charge of its own
+settings. Everything session-scoped — the permission picker, the model picker,
+stop, retry — is handed a setter only when the session reports writable:
+
+```js
+let writable = cr("hub", coworkMode.orgAvailable, hubVerdict.served)
+               || amberTributaryHeron.enabled;
+remoteGates = { isWritable: writable && !readOnly, readOnly, … };
+```
+
+`cr` is `t || (surface === "hub" && n)`, so the flag is the last term of a
+disjunction whose other two are server verdicts this deployment does not serve.
+Without it a session page comes out read-only, and every control that would write
+is handed the no-op the bundle installs for that case — `setPermissionMode: … ??
+bb` with `function bb(){}` — which is silent, so the picker opens and does
+nothing while the composer, which has its own fallback, still sends. The build
+folds the flag to a constant the way it folds the atrium capability, and spells
+that fold twice:
+
+```js
+var heron = !1;
+function amberTributaryHeron(){ return read("amber_tributary_heron"), { enabled: heron } }
+```
+
+so the read is discarded and `enabled` answers false however the table reads. The
+patch rebuilds each folded object around the read itself — one read, in the
+position it already occupied — which is what makes the bridge's grant of that
+gate observable; the two ship together as they do for the atrium. Pinned by the
+feature-name literal, which the bundle spells only here, and by the single
+`enabled` identifier the object answers with. Spliced only in web-shell mode, and
+not required.
+
 `web-permission-binding` fixes the composer's permission control, which is the
 same missing store again: the hook that feeds it answers only while the
 pending-first-send store exists, and with that null the slot draws a skeleton
