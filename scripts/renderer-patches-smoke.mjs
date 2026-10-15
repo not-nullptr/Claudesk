@@ -875,6 +875,53 @@ const designCompiled = await minify(designPredicates, {
 assert.equal(inspectRenderer(designCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-composer-design-forced").length, 3,
   "a mangled set of design predicates must still be forced");
+// The settled layout variant and the route surface kind: one computed `{variant,
+// settled}` object, and the only place the three route names appear together.
+// Both are forced in web-shell mode; the composer's literal `variant: "none"`
+// objects and any other conditional are not targets.
+const variantFixture = (suffix = "") => 'function layoutVariant' + suffix + '(){'
+  + 'let{liveVariant:e,settled:t,confirmed:n}=decide();return{variant:e,settled:t}}'
+  + 'function composerDefault' + suffix + '(){return{variant:"none",settled:state.settled}}';
+const surfaceFixture = (suffix = "") => 'function surfaceKind' + suffix + '(){let e=hubHost(),t=lookActive();'
+  + 'return e?"hub":t?"outside":"none"}'
+  + 'function otherKind' + suffix + '(){return opts.mode?"hub":"none"}';
+assert.equal(inspectRenderer(`${variantFixture()}\n${surfaceFixture()}`, false, false).patches
+  .filter(patch => patch.id === "web-new-page-home-variant"
+    || patch.id === "web-home-composer-arrangement").length, 0,
+  "neither decision is forced outside web-shell mode");
+const forced = inspectRenderer(`${variantFixture()}\n${surfaceFixture()}`, false, true).patches
+  .filter(patch => patch.id === "web-new-page-home-variant"
+    || patch.id === "web-home-composer-arrangement");
+assert.deepEqual(forced.map(patch => patch.id).sort(),
+  ["web-home-composer-arrangement", "web-new-page-home-variant"]);
+assert.deepEqual(forced.map(patch => patch.original).sort(),
+  ['e?"hub":t?"outside":"none"', '{variant:e,settled:t}'],
+  "only the computed variant and the three-name conditional are spliced");
+// Two candidates in one chunk refuse rather than pick one.
+assert.equal(inspectRenderer(`${variantFixture()}\n${variantFixture("B")}`, false, true).patches
+  .filter(patch => patch.id === "web-new-page-home-variant").length, 0,
+  "a second computed variant object must refuse the splice");
+assert.equal(inspectRenderer(`${surfaceFixture()}\n${surfaceFixture("B")}`, false, true).patches
+  .filter(patch => patch.id === "web-home-composer-arrangement").length, 0,
+  "a second three-name conditional must refuse the splice");
+const decisionsOut = patchRendererSources(
+  new Map([["decisions.js", `${webShellFixtures}\n${accountMenuName}\n${variantFixture()}\n${surfaceFixture()}`]]),
+  false, true).sources.get("decisions.js");
+assert.ok(decisionsOut.includes('return{variant:"home",settled:!0}'),
+  "the layout variant must be spliced to the home arm");
+assert.ok(decisionsOut.includes('return "outside"'),
+  "the route surface kind must be spliced to the outside arm");
+assert.ok(decisionsOut.includes('return{variant:"none",settled:state.settled}'),
+  "the composer's own literal variant default must survive untouched");
+assert.ok(decisionsOut.includes('return opts.mode?"hub":"none"'),
+  "a two-name conditional must survive untouched");
+const decisionsCompiled = await minify(`${variantFixture()}\n${surfaceFixture()}`, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+const compiledIds = inspectRenderer(decisionsCompiled.code, false, true).patches.map(patch => patch.id);
+assert.ok(compiledIds.includes("web-new-page-home-variant")
+  && compiledIds.includes("web-home-composer-arrangement"),
+  "a mangled pair of decisions must still be spliced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

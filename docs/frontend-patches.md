@@ -328,6 +328,18 @@ among the declarations that end their answer with `… && !isSidePanel()`, and
 splices only the left operand of that guard, so the side-panel check still
 applies. Spliced only in web-shell mode, and not required.
 
+`web-new-page-home-variant` and `web-home-composer-arrangement` force the two
+decisions downstream of that arm, because a deployment that grants the arm has
+already made them. The first splices the layout hook's settled variant to the
+`home` arm — selected as the one `{variant, settled}` object whose variant is
+computed, since the composer's own `{variant: "none", …}` defaults are literals.
+The second splices the route surface kind to `"outside"` — selected as the only
+place the three route names appear together (`… ? "hub" : … ? "outside" :
+"none"`), whose `"outside"` arm is what selects the home composer arrangement and
+so moves the model and permission controls out of the card. Each is spliced only
+where its shape is unambiguous in the chunk, only in web-shell mode, and neither
+is required.
+
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

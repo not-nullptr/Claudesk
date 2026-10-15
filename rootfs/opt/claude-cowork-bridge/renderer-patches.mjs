@@ -127,6 +127,19 @@ const homeLayoutReplacement = "{eligible:!0,settled:!0,assignment:!0,"
 // required: a bundle that no longer matches leaves the arm to the flag.
 const composerDesignPatchId = "web-composer-design-forced";
 const composerDesignFeature = "voyage_composer_marlin";
+// Two decisions downstream of that arm, forced for the same reason. The layout
+// hook settles on a variant it derives from the gate eligibility, and the
+// composer host derives the route's surface kind from the same eligibility; both
+// are the deployed choice here, and both were observed settling on the classic
+// answer while the arm itself read on. Each is one expression, pinned by its own
+// shape rather than by names — the variant object is the one whose `variant` is
+// computed rather than a literal (`variant: "none"` is the composer's unrelated
+// default), and the surface kind is the only place the three route names appear
+// together. Spliced only in web-shell mode, neither required.
+const homeVariantPatchId = "web-new-page-home-variant";
+const homeVariantReplacement = '{variant:"home",settled:!0}';
+const homeArrangementPatchId = "web-home-composer-arrangement";
+const homeArrangementReplacement = '"outside"';
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -585,6 +598,29 @@ function homeLayoutAssignment(node) {
     || node.properties.length !== homeLayoutKeys.length) return false;
   return node.properties.every(entry => entry.type === "Property" && entry.computed !== true
     && homeLayoutKeys.includes(entry.key.name ?? entry.key.value));
+}
+
+// The layout hook's settled variant: the one `{variant, settled}` object whose
+// variant is a computed expression. The composer's own `{variant: "none",
+// settled: …}` objects are literals and therefore not targets.
+function homeVariantTarget(node) {
+  if (node.type !== "ObjectExpression" || node.properties.length !== 2) return false;
+  if (node.properties.some(entry => entry.type !== "Property" || entry.computed)) return false;
+  const keys = node.properties.map(entry => entry.key.name ?? entry.key.value);
+  if (!keys.includes("variant") || !keys.includes("settled")) return false;
+  const variant = node.properties.find(entry => (entry.key.name ?? entry.key.value) === "variant");
+  return unwrap(variant.value)?.type !== "Literal";
+}
+
+// The route surface kind the composer host derives: `… ? "hub" : … ? "outside" :
+// "none"`, the only place those three names appear together. Only its "outside"
+// arm selects the home composer arrangement, which is what moves the model and
+// permission controls out of the card.
+function homeSurfaceKindTarget(node) {
+  if (node.type !== "ConditionalExpression" || !literal(node.consequent, "hub")) return false;
+  const alternate = unwrap(node.alternate);
+  if (alternate?.type !== "ConditionalExpression") return false;
+  return literal(alternate.consequent, "outside") && literal(alternate.alternate, "none");
 }
 
 // The flag operand of every unified-composer design predicate: a declaration
@@ -1083,6 +1119,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
     for (const operand of composerDesignOperands(ast)) {
       patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
         original: source.slice(operand.start, operand.end), replacement: "!0" });
+    }
+    // The layout variant and the surface kind that selects the home composer
+    // arrangement are forced to the deployed answer, each from its own shape and
+    // only when that shape is unambiguous in the chunk.
+    const variants = [];
+    const surfaces = [];
+    walk(ast, [], (node) => {
+      if (homeVariantTarget(node)) variants.push(node);
+      if (homeSurfaceKindTarget(node)) surfaces.push(node);
+    });
+    for (const [targets, id, replacement] of [
+      [variants, homeVariantPatchId, homeVariantReplacement],
+      [surfaces, homeArrangementPatchId, homeArrangementReplacement],
+    ]) {
+      if (targets.length !== 1) continue;
+      const [target] = targets;
+      patches.push({ id, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end), replacement });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

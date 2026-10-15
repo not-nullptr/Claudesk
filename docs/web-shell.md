@@ -500,6 +500,22 @@ flag operand true, leaving the side-panel guard they all end with in place.
 Spliced only in web-shell mode, and not required: a bundle that no longer
 matches leaves the arm to the flag.
 
+Two decisions downstream of that arm are forced for the same reason, because a
+deployment that grants the arm has already made them:
+
+- `web-new-page-home-variant` splices the layout hook's settled variant to
+  `{variant:"home",settled:!0}`. It is the one `{variant, settled}` object whose
+  variant is computed — the composer's own `{variant:"none", …}` defaults are
+  literals and are left alone.
+- `web-home-composer-arrangement` splices the route surface kind to `"outside"`.
+  It is the only place the three route names appear together
+  (`… ? "hub" : … ? "outside" : "none"`), and only that arm selects the home
+  composer arrangement — the flag pair that moves the model and permission
+  controls out of the card.
+
+Each is spliced only where its own shape is unambiguous in the chunk, in
+web-shell mode only, and neither is required.
+
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`
 on `<html>` and `data-composer-arm="marlin"` on the static composer skeleton.
