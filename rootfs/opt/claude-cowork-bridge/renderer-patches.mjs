@@ -218,13 +218,19 @@ const projectsComposerModes = ["disabled", "pending", "projects", "enabled"];
 // which is exactly what the temporary probe reported (`chin=yes`, an empty
 // collapsing wrapper, `slot=no`).
 //
-// Only the store and the surface value are forced — the leading `kind === "chat"`
-// operand is kept, so a cowork chin is not turned into a chat one — which is the
-// same "deployed answer, spliced at the consumer" the rest of this family uses.
-// The block is pinned by the `"unified"` literal its own guard tests, so no other
-// conditional in the graph can match. Spliced only in web-shell mode, and not
-// required.
+// The whole test is forced rather than just its store operand. Keeping the
+// branch's own `kind === "chat"` operand is the narrower splice, and it is the
+// one that was tried first — the page did not change, and from the DOM alone the
+// two readings of that cannot be separated: the branch is never reached, or this
+// shell reports a surface kind that is not `"chat"`. Forcing the test open
+// settles the first reading outright and is correct under the second; the only
+// cost of being wrong about it is a cowork chin drawn as a chat one. It is the
+// same "deployed answer, spliced at the consumer" the rest of this family uses,
+// and the block is pinned by the `"unified"` literal its own guard tests, so no
+// other conditional in the graph can match. Spliced only in web-shell mode, and
+// not required.
 const projectsChinPatchId = "web-projects-composer-chin";
+const projectsChinForced = "!0";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -813,24 +819,20 @@ function composerChinBranchTarget(node) {
   if (test?.type !== "BinaryExpression" || !["===", "=="].includes(test.operator)) return false;
   if (!literal(test.left, "unified") && !literal(test.right, "unified")) return false;
   if (node.consequent?.type !== "BlockStatement") return false;
-  return node.consequent.body.filter(entry => entry.type === "IfStatement")
-    .some(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
-      && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
+  return composerChinBranch(node) !== undefined;
 }
 
-// The test that branch should keep: the leading surface comparison, so a cowork
-// chin is not turned into a chat one. A block without one is left alone rather
-// than forced open.
-function composerChinTest(node) {
-  const branch = node.consequent.body.filter(entry => entry.type === "IfStatement")
+// The branch that draws the project chip: the one in that block that both asks
+// for the pending-first-send store and returns an element on its own — a bare
+// `return`, not a block, which is how the chooser is written and what separates
+// it from the other `"unified"` guard in the renderer graph.
+function composerChinBranch(node) {
+  if (node.type !== "IfStatement" || node.consequent?.type !== "BlockStatement") return undefined;
+  return node.consequent.body.filter(entry => entry.type === "IfStatement"
+    && entry.consequent?.type === "ReturnStatement")
     .find(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
-      && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
-  if (!branch) return undefined;
-  return flattenLogical(branch.test, "&&").find((term) => {
-    if (term.type !== "BinaryExpression" || !["===", "=="].includes(term.operator)) return false;
-    const subject = literal(term.left, "chat") ? term.right : term.left;
-    return property(subject, "kind");
-  });
+      && ["!==", "=="].includes(term.operator)
+      && (literal(term.left, null) || literal(term.right, null))));
 }
 
 // The flag operand of every unified-composer design predicate: a declaration
@@ -1393,15 +1395,11 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
     const chinBlocks = [];
     walk(ast, [], (node) => { if (composerChinBranchTarget(node)) chinBlocks.push(node); });
     if (chinBlocks.length === 1) {
-      const block = chinBlocks[0];
-      const branch = block.consequent.body.filter(entry => entry.type === "IfStatement")
-        .find(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
-          && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
-      const kept = composerChinTest(block);
-      if (branch && kept) {
+      const branch = composerChinBranch(chinBlocks[0]);
+      if (branch) {
         patches.push({ id: projectsChinPatchId, start: branch.test.start, end: branch.test.end,
           original: source.slice(branch.test.start, branch.test.end),
-          replacement: source.slice(kept.start, kept.end) });
+          replacement: projectsChinForced });
       }
     }
     // The home-layout assignment is accepted from its own chunk: exactly one

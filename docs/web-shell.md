@@ -605,11 +605,16 @@ if (kind === "chat" && shaped)     return <SP/>;                   // another ch
 — so with that store null the composer builds an **empty collapsing wrapper** and
 never calls the predicate at all. A DOM probe confirms the shape: the chin
 exists, its only contents are the collapsing wrapper, and no
-`[data-home-project-slot]` element is anywhere in the page. The
-`web-projects-composer-chin` patch forces that branch's test, keeping its own
-`kind === "chat"` operand — so a cowork chin is not turned into a chat one — and
-the block is pinned by the `"unified"` literal its own guard tests. Spliced only
-in web-shell mode, and not required.
+`[data-home-project-slot]` element is anywhere in the page.
+
+The `web-projects-composer-chin` patch forces that branch's test outright. It
+first kept the branch's own `kind === "chat"` operand, on the reasoning that a
+cowork chin should not become a chat one, and the page did not change — which
+leaves two possibilities that the DOM cannot separate: the branch is not reached
+at all, or the surface this shell reports is not `"chat"`. The test is therefore
+forced whole. The block is pinned by the `"unified"` literal its own guard tests,
+so no other conditional in the graph can match. Spliced only in web-shell mode,
+and not required.
 
 All three change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the

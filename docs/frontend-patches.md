@@ -379,10 +379,12 @@ literals it answers with.
 composer selects its chin in one `if (position === "unified")` block whose second
 branch — the one that draws the project chip — requires the pending-first-send
 store too, so with that null the composer builds an empty collapsing wrapper and
-never reaches the slot predicate above. The patch forces that branch's test,
-keeping its own `kind === "chat"` operand so a cowork chin is not turned into a
-chat one; the block is pinned by the `"unified"` literal its guard tests. All
-three are spliced only in web-shell mode, and none is required.
+never reaches the slot predicate above. The patch forces that branch's test
+outright; keeping only the store operand off it left the page unchanged, and the
+two readings of that — the branch is unreachable, or this shell's surface is not
+`"chat"` — cannot be told apart from the DOM. The block is pinned by the
+`"unified"` literal its guard tests. All three are spliced only in web-shell
+mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate

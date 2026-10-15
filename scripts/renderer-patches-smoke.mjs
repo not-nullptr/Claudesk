@@ -1095,24 +1095,20 @@ const chinPatches = inspectRenderer(chinChooser(), false, true).patches
 assert.equal(chinPatches.length, 1, "the chip branch must be forced exactly once");
 assert.equal(chinPatches[0].original, 'n.kind==="chat"&&m!==null&&h',
   "only the branch that reads the first-send store is spliced");
-assert.equal(chinPatches[0].replacement, 'n.kind==="chat"',
-  "the surface comparison must survive and the rest must go");
-// The fallback branch keeps its own surface test but does not read the store, so
-// it is not a target; a block whose branch has no surface comparison is left
-// alone rather than forced open.
+assert.equal(chinPatches[0].replacement, "!0",
+  "the branch must be forced open, surface kind included");
+// The fallback branch does not read the store, so it is not a target, and a
+// block that is not the unified chooser is out of reach entirely.
 assert.equal(inspectRenderer(chinChooser('n.kind==="chat"&&g'), false, true).patches
   .filter(patch => patch.id === "web-projects-composer-chin").length, 0,
   "a branch that does not read the store must survive untouched");
-assert.equal(inspectRenderer(chinChooser('m!==null&&h'), false, true).patches
-  .filter(patch => patch.id === "web-projects-composer-chin").length, 0,
-  "a branch with no surface comparison must survive untouched");
 assert.equal(inspectRenderer(chinChooser(undefined, 'if(e==="below")'), false, true).patches
   .filter(patch => patch.id === "web-projects-composer-chin").length, 0,
   "a block that is not the unified chooser must survive untouched");
 const chinOut = patchRendererSources(
   new Map([["chin.js", `${webShellFixtures}\n${accountMenuName}\n${chinChooser()}`]]), false, true)
   .sources.get("chin.js");
-assert.ok(chinOut.includes('if(n.kind==="chat")return S(xP,'),
+assert.ok(chinOut.includes("if(!0)return S(xP,"),
   "the chip branch must be forced open");
 assert.ok(chinOut.includes('if(n.kind==="chat"&&g)return S(SP,'),
   "the fallback branch must survive untouched");
