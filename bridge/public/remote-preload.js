@@ -1847,4 +1847,62 @@
   });
   globalThis.addEventListener("pageshow", () => connectEvents(true));
   globalThis.addEventListener("online", () => connectEvents(true));
+
+  // TEMPORARY. The New page's layout question — which greeting node is actually
+  // on screen, what size it computed, and the two document attributes the first
+  // paint reads — cannot be answered from the bundle alone, and the page is
+  // reached from phones with no console. This paints a short report of what the
+  // DOM settled on, so the answer can be read off a screenshot. Web-shell mode
+  // only, and it touches nothing but its own element. Remove it once the layout
+  // question is settled.
+  if (config.webShell) {
+    const paintLayoutReport = () => {
+      try {
+        const root = document.documentElement;
+        const skeleton = document.getElementById("static-composer");
+        const reserve = document.getElementById("static-composer-greeting-reserve");
+        const greetings = [...document.querySelectorAll("[data-new-page-greeting-text]")];
+        const family = (element) => (getComputedStyle(element).fontFamily || "").split(",")[0];
+        const describe = (element) => {
+          const box = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          const box2 = element.parentElement ? getComputedStyle(element.parentElement) : style;
+          const painted = box.width > 0 && box.height > 0 && style.visibility !== "hidden";
+          return `${painted ? "painted" : "hidden"} ${Math.round(box.width)}x${Math.round(box.height)}`
+            + ` font=${box2.fontSize} ${family(element.parentElement || element)}`;
+        };
+        const lines = [
+          `doc layout=${root.getAttribute("data-new-page-layout") ?? "-"}`
+            + ` chrome=${root.getAttribute("data-sidebar-chrome-preference") ?? "-"}`,
+          `skel ${skeleton ? (skeleton.hidden ? "present(hidden)" : "present(shown)") : "absent"}`
+            + ` arm=${skeleton?.getAttribute("data-composer-arm") ?? "-"}`,
+          `skelGreeting ${reserve ? `${getComputedStyle(reserve).fontSize} class="${reserve.className}"` : "absent"}`,
+          `reactGreeting n=${greetings.length} ${greetings.map(describe).join(" | ")}`,
+          `latch ${localStorage.getItem("composer-card-latch") ?? "-"}`
+            + `/${localStorage.getItem("new-page-layout-latch") ?? "-"}`,
+        ];
+        let box = document.getElementById("claudesk-layout-report");
+        if (!box) {
+          box = document.createElement("pre");
+          box.id = "claudesk-layout-report";
+          box.style.cssText = "position:fixed;left:0;bottom:0;z-index:2147483647;margin:0;"
+            + "padding:6px 8px;background:#111;color:#7CFC00;font:11px/1.35 monospace;"
+            + "white-space:pre-wrap;max-width:100vw";
+          (document.body || document.documentElement).appendChild(box);
+        }
+        box.textContent = lines.join("\n");
+      } catch (error) {
+        // A diagnostic must never break the page it is diagnosing.
+        void error;
+      }
+    };
+    const schedule = () => {
+      for (const delay of [1500, 4000, 9000, 20000]) setTimeout(paintLayoutReport, delay);
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", schedule, { once: true });
+    } else {
+      schedule();
+    }
+  }
 })();
