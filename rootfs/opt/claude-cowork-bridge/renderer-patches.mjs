@@ -258,7 +258,18 @@ const projectsChinForced = "!0";
 // `isClaudeApp` and `webPickerEnabled`, which together appear there only.
 // Spliced only in web-shell mode, and not required.
 const projectsPickerPatchId = "web-projects-folder-picker";
-const projectsPickerTrue = "!0";
+// The two properties of that object, and the value each takes in the web bundle.
+// `isClaudeApp` is forced so the picker's own gate cannot answer null whatever
+// the scope does — on claude.ai the same gate is satisfied by `webPickerEnabled`
+// instead, which this shell cannot reach because it needs a remote-projects
+// capability the bridge does not report. `noBackend` is a constant the Desktop
+// build folds to `!0` and the web bundle ships as `!1`; it switches the
+// component's whole return between the trigger it draws the chip with and a
+// wrapper that draws nothing here.
+const projectsPickerForced = new Map([
+  ["isClaudeApp", "!0"],
+  ["noBackend", "!1"],
+]);
 // The composer's project selector — the component the slot wrapper above wraps —
 // bails on its own scope guard before it ever reaches the picker:
 //
@@ -880,8 +891,10 @@ function composerChinBranch(node) {
 }
 
 // The folder/project picker's capability object: the one carrying both
-// `isClaudeApp` and `webPickerEnabled`. Returns the `isClaudeApp` property, whose
-// value is the only thing spliced.
+// `isClaudeApp` and `webPickerEnabled`. Returns the properties of it this module
+// forces. Only the property *value* is ever replaced, never its binding, so the
+// other fields that still read that binding are unaffected — and a value that is
+// already the forced literal is simply spliced to itself.
 function projectsPickerTarget(ast) {
   const objects = [];
   walk(ast, [], (node) => {
@@ -891,9 +904,8 @@ function projectsPickerTarget(ast) {
     if (names.has("isClaudeApp") && names.has("webPickerEnabled")) objects.push(node);
   });
   if (objects.length !== 1) return undefined;
-  return objects[0].properties.filter(entry => entry.type === "Property")
-    .find(entry => (entry.key.name ?? entry.key.value) === "isClaudeApp"
-      && entry.value?.type === "Identifier");
+  return objects[0].properties.filter(entry => entry.type === "Property"
+    && projectsPickerForced.has(entry.key.name ?? entry.key.value));
 }
 
 // The composer's project selector: the component that destructures both
@@ -1483,13 +1495,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
           replacement: projectsChinForced });
       }
     }
-    // The folder picker's `isClaudeApp` flag, so the chip it draws is not the
-    // empty one the platform check would leave behind.
-    const picker = projectsPickerTarget(ast);
-    if (picker) {
+    // The folder picker's capability flags, so the chip it draws is not the empty
+    // one the platform check and the folded backend flag would leave behind.
+    for (const picker of projectsPickerTarget(ast) ?? []) {
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
-        replacement: projectsPickerTrue });
+        replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
     }
     // The project selector's scope guard, so it draws rather than answering null.
     const selector = projectsSelectorTarget(ast);

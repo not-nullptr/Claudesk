@@ -400,8 +400,14 @@ reads the binding. The object is pinned by carrying both `isClaudeApp` and
 wraps that picker — `projectScopeLocked && !isClaudeApp ? null : <ProjectSelector/>`
 — which answers null here and leaves the slot wrapper empty one level earlier.
 It is pinned by the two prop names the component destructures, `selectionChip`
-and `plainTrigger`, and by the null it returns from a conditional. All six are
-spliced only in web-shell mode, and none is required.
+and `plainTrigger`, and by the null it returns from a conditional.
+
+That patch also forces `noBackend` — a constant the Desktop build ships as `!0`
+and the web bundle as `!1` — because the picker's whole return is switched on it:
+`noBackend` selects a wrapper that draws nothing here, where the web bundle draws
+the trigger the chip is made of. Restoring it is the web bundle's own value, not
+a choice made here. All seven are spliced only in web-shell mode, and none is
+required.
 
 
 The code generator splices only the selected node. It does not regenerate

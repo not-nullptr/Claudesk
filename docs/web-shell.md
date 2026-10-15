@@ -638,8 +638,26 @@ this deployment actually supports, because the wrapper intercepts the native
 dialog and answers it with the in-page picker. Only the value is spliced: the
 binding stays, since `webPickerPending` in the same object still reads it, and
 the declarator is where the platform read happens. The object is pinned by
-carrying both `isClaudeApp` and `webPickerEnabled`. Spliced only in web-shell
-mode, and not required.
+carrying both `isClaudeApp` and `webPickerEnabled`, and both of the flags it
+forces are spliced from its own property values.
+
+The second flag is the one that actually decides the chip. The same object
+carries `noBackend`, which the Desktop build ships as `!0` and the web bundle as
+`!1`, and the component's whole return is switched on it:
+
+```js
+return H.noBackend
+  ? <>{<DraftRegion>{e => trigger(e && …)}</DraftRegion>}{trust}</>
+  : trigger(…);
+```
+
+so the branch that draws the trigger is the one this build never takes. Restoring
+`noBackend` to `!1` is the web bundle's own value, not a choice made here; the
+`isClaudeApp` force is the same local platform override the session patches make,
+and it keeps the picker's gate from answering null whatever the scope does — on
+claude.ai that gate is satisfied by `webPickerEnabled` instead, which this shell
+cannot reach because it needs a remote-projects capability the bridge does not
+report. Spliced only in web-shell mode, and not required.
 
 The selector's own guard. One step earlier in the same path, the component that
 wraps the picker decides whether to draw at all:
@@ -659,7 +677,7 @@ by the two prop names it destructures, `selectionChip` and `plainTrigger`, which
 the minifier leaves alone, and by returning `null` from a conditional. Spliced
 only in web-shell mode, and not required.
 
-All six change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All seven change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

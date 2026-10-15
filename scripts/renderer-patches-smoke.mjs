@@ -1123,21 +1123,22 @@ assert.equal(inspectRenderer(chinCompiled.code, false, true).patches
 // patches force — and the picker refuses to draw at all when it is false and no
 // web picker is available. Only that one property's value is spliced; the
 // binding stays, because `webPickerPending` in the same object reads it.
-const pickerObject = (value = "isApp") =>
+const pickerObject = (value = "isApp", backend = "!0") =>
   'function pickerCaps(keepMounted,traffic){let n=isApp(),r=userData(),i=remoteMode(),a=remoteEnabled(),'
   + 'o=allowed(),s=spaces(),c=a&&o,l=c&&policy(traffic,i.orgAvailable,s)&&!i.isLoading;'
   + `return{isClaudeApp:${value},userDataPending:r,coworkRemoteMode:i,remoteProjectsEnabled:a,`
-  + 'atriumCreate:c,webPickerEnabled:l,webPickerPending:keepMounted&&!n&&!l&&PENDING,noBackend:!0}}';
+  + `atriumCreate:c,webPickerEnabled:l,webPickerPending:keepMounted&&!n&&!l&&PENDING,noBackend:${backend}}}`;
 assert.equal(inspectRenderer(pickerObject(), false, false).patches
   .filter(patch => patch.id === "web-projects-folder-picker").length, 0,
   "the picker caps are left alone outside web-shell mode");
 const projectsPickerPatches = inspectRenderer(pickerObject(), false, true).patches
   .filter(patch => patch.id === "web-projects-folder-picker");
-assert.equal(projectsPickerPatches.length, 1, "the app flag must be forced exactly once");
-assert.equal(projectsPickerPatches[0].original, "isApp");
-assert.equal(projectsPickerPatches[0].replacement, "!0",
-  "only the isClaudeApp value is spliced");
-// An object carrying the flag but not the picker's other capability is a
+assert.equal(projectsPickerPatches.length, 2, "both capability flags must be forced");
+assert.deepEqual(projectsPickerPatches.map(patch => patch.original).sort(), ["!0", "isApp"],
+  "only the two property values are spliced");
+assert.deepEqual(projectsPickerPatches.map(patch => patch.replacement).sort(), ["!0", "!1"],
+  "the app flag goes true and the folded backend flag goes false");
+// An object carrying one flag but not the picker's other capability is a
 // different object, and two candidates refuse rather than splice one of two.
 assert.equal(inspectRenderer('function other(){let n=isApp();return{isClaudeApp:n,noBackend:!0}}',
   false, true).patches.filter(patch => patch.id === "web-projects-folder-picker").length, 0,
@@ -1149,15 +1150,17 @@ const projectsPickerOut = patchRendererSources(
   new Map([["picker.js", `${webShellFixtures}\n${accountMenuName}\n${pickerObject()}`]]), false, true)
   .sources.get("picker.js");
 assert.ok(projectsPickerOut.includes("isClaudeApp:!0,userDataPending:r"),
-  "the flag must be forced in place");
+  "the app flag must be forced in place");
+assert.ok(projectsPickerOut.includes("noBackend:!1}}"),
+  "the folded backend flag must be restored to the web bundle's value");
 assert.ok(projectsPickerOut.includes("webPickerPending:keepMounted&&!n&&!l&&PENDING"),
   "the binding must survive for the other field that reads it");
 const projectsPickerCompiled = await minify(pickerObject(), {
   mangle: true, compress: { unused: false }, format: { quote_style: 1 },
 });
 assert.equal(inspectRenderer(projectsPickerCompiled.code, false, true).patches
-  .filter(patch => patch.id === "web-projects-folder-picker").length, 1,
-  "a mangled capability object must still have its app flag forced");
+  .filter(patch => patch.id === "web-projects-folder-picker").length, 2,
+  "a mangled capability object must still have both flags forced");
 // The project selector's own scope guard, which answers null before the picker
 // above is reached. Pinned by the two prop names it destructures, which the
 // minifier leaves alone, and by the null it returns.
