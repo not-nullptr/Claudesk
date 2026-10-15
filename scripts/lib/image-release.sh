@@ -83,6 +83,9 @@ assert_images_current() {
             'release:   sudo docker compose -f compose.yaml build claude-desktop cowork-bridge' >&2
         return 1
     fi
+    # Read by callers that want to check what is serving, not just what was built.
+    # shellcheck disable=SC2034
+    RELEASE_EXPECTED="$expected"
     printf 'release: images carry %s\n' "$expected"
     return 0
 }

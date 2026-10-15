@@ -112,3 +112,39 @@ sudo docker compose -f compose.yaml up -d --force-recreate \
 # yet is pending, not provisioned, so refresh alone would skip it.
 sudo "$project_dir/scripts/refresh-users.sh"
 sudo "$project_dir/scripts/converge-users.sh"
+
+# What was built is not the same question as what is serving. The check above
+# proves the images carry this release; it says nothing about the containers, and
+# an instance nobody recreated goes on serving the old renderer while every
+# command in this script reports success. That is not hypothetical: a browser was
+# chased through three rounds of rebuilds that were all landing correctly, while
+# the tab under test was served by an instance that had never been touched.
+# Sweep what is actually listening and name anything left behind.
+verify_instances() {
+    expected="$1"
+    stale=0
+    for port in $(sudo docker ps --format '{{.Ports}}' \
+        | grep -o '127\.0\.0\.1:[0-9]*' | cut -d: -f2 | sort -un); do
+        release="$(curl -s --max-time 3 "http://127.0.0.1:$port/api/health" 2>/dev/null \
+            | tr ',' '\n' | sed -n 's/.*"patchRelease":"\([^"]*\)".*/\1/p' | head -n 1)"
+        # Anything that does not answer with a Claudesk release is not an
+        # instance of ours — authd, the gateway, a plain HTTP port.
+        [ -n "$release" ] || continue
+        if [ "$release" != "$expected" ]; then
+            printf 'deploy: instance on port %s still serves %s, not %s\n' \
+                "$port" "$release" "$expected" >&2
+            stale=1
+        fi
+    done
+    if [ "$stale" -ne 0 ]; then
+        printf '%s\n' \
+            'deploy: an instance above was not recreated, and a browser is served' \
+            'deploy: from whichever one its session maps to — whatever the images' \
+            'deploy: say. Re-run this script, or recreate that account directly:' \
+            'deploy:   sudo scripts/refresh-users.sh' >&2
+    fi
+    # A warning, not a failure: another Claudesk deployment on this host is
+    # legitimately allowed to be on its own release.
+    return 0
+}
+verify_instances "$RELEASE_EXPECTED"
