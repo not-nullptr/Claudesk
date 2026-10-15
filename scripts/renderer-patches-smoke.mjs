@@ -1118,6 +1118,46 @@ const chinCompiled = await minify(chinChooser(), {
 assert.equal(inspectRenderer(chinCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-composer-chin").length, 1,
   "a mangled chin chooser must still have its chip branch forced");
+// The folder/project picker's capability object. Its `isClaudeApp` asks whether
+// this is the Claude app — the same zero-argument platform check the session
+// patches force — and the picker refuses to draw at all when it is false and no
+// web picker is available. Only that one property's value is spliced; the
+// binding stays, because `webPickerPending` in the same object reads it.
+const pickerObject = (value = "isApp") =>
+  'function pickerCaps(keepMounted,traffic){let n=isApp(),r=userData(),i=remoteMode(),a=remoteEnabled(),'
+  + 'o=allowed(),s=spaces(),c=a&&o,l=c&&policy(traffic,i.orgAvailable,s)&&!i.isLoading;'
+  + `return{isClaudeApp:${value},userDataPending:r,coworkRemoteMode:i,remoteProjectsEnabled:a,`
+  + 'atriumCreate:c,webPickerEnabled:l,webPickerPending:keepMounted&&!n&&!l&&PENDING,noBackend:!0}}';
+assert.equal(inspectRenderer(pickerObject(), false, false).patches
+  .filter(patch => patch.id === "web-projects-folder-picker").length, 0,
+  "the picker caps are left alone outside web-shell mode");
+const projectsPickerPatches = inspectRenderer(pickerObject(), false, true).patches
+  .filter(patch => patch.id === "web-projects-folder-picker");
+assert.equal(projectsPickerPatches.length, 1, "the app flag must be forced exactly once");
+assert.equal(projectsPickerPatches[0].original, "isApp");
+assert.equal(projectsPickerPatches[0].replacement, "!0",
+  "only the isClaudeApp value is spliced");
+// An object carrying the flag but not the picker's other capability is a
+// different object, and two candidates refuse rather than splice one of two.
+assert.equal(inspectRenderer('function other(){let n=isApp();return{isClaudeApp:n,noBackend:!0}}',
+  false, true).patches.filter(patch => patch.id === "web-projects-folder-picker").length, 0,
+  "an object without the picker's own fields must survive untouched");
+assert.equal(inspectRenderer(`${pickerObject()}\n${pickerObject().replace("pickerCaps", "pickerCapsB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-folder-picker").length, 0,
+  "two capability objects must refuse rather than splice one of two");
+const projectsPickerOut = patchRendererSources(
+  new Map([["picker.js", `${webShellFixtures}\n${accountMenuName}\n${pickerObject()}`]]), false, true)
+  .sources.get("picker.js");
+assert.ok(projectsPickerOut.includes("isClaudeApp:!0,userDataPending:r"),
+  "the flag must be forced in place");
+assert.ok(projectsPickerOut.includes("webPickerPending:keepMounted&&!n&&!l&&PENDING"),
+  "the binding must survive for the other field that reads it");
+const projectsPickerCompiled = await minify(pickerObject(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(projectsPickerCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-folder-picker").length, 1,
+  "a mangled capability object must still have its app flag forced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

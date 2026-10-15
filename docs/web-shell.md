@@ -616,7 +616,32 @@ forced whole. The block is pinned by the `"unified"` literal its own guard tests
 so no other conditional in the graph can match. Spliced only in web-shell mode,
 and not required.
 
-All three change prepared-renderer bytes, so they ship with a `patchRelease` bump
+The picker. With the branch open the slot wrapper renders — and comes out empty,
+`data-home-project-slot class="… empty:hidden"` with nothing inside — because the
+picker itself refuses to draw:
+
+```js
+{ isClaudeApp: n, … webPickerEnabled: l, webPickerPending: keepMounted && !n && !l && RN }
+function BN(e, t) { return e.isClaudeApp ? !1 : (!e.webPickerEnabled && !e.webPickerPending) || t }
+…
+if (BN(caps, projectLocked)) return null;
+```
+
+`isClaudeApp` is the same zero-argument platform check two other patches already
+force: it asks whether this is the Claude app, and the web shell answers no
+because it drops the Desktop user-agent token to get the browser chrome. On the
+real app the picker draws and opens the *native* folder dialog; here it draws
+nothing, and the web-picker alternative it would otherwise fall back to is not
+available either. `web-projects-folder-picker` forces that one property's value
+true — the same local override the session patches make — which selects the path
+this deployment actually supports, because the wrapper intercepts the native
+dialog and answers it with the in-page picker. Only the value is spliced: the
+binding stays, since `webPickerPending` in the same object still reads it, and
+the declarator is where the platform read happens. The object is pinned by
+carrying both `isClaudeApp` and `webPickerEnabled`. Spliced only in web-shell
+mode, and not required.
+
+All five change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

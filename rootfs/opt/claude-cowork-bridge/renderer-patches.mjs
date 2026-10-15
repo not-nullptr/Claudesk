@@ -231,6 +231,34 @@ const projectsComposerModes = ["disabled", "pending", "projects", "enabled"];
 // not required.
 const projectsChinPatchId = "web-projects-composer-chin";
 const projectsChinForced = "!0";
+// The folder/project picker the chip is made of. Once the chin and the slot
+// wrapper render, the wrapper still comes out empty, because the picker itself
+// refuses to draw:
+//
+//   { isClaudeApp: n, userDataPending: r, … webPickerEnabled: l,
+//     webPickerPending: e && !n && !l && RN, … }
+//   function BN(e, t) { return e.isClaudeApp ? !1 : (!e.webPickerEnabled
+//     && !e.webPickerPending) || t }
+//   …
+//   if (BN(H, projectLocked)) return null;
+//
+// `isClaudeApp` is the same zero-argument platform check the session-viewer and
+// session-placement patches force: it asks whether this is the Claude app, and
+// the web shell answers no because it drops the Desktop user-agent token to get
+// the browser chrome. On the real app the picker renders and opens the *native*
+// folder dialog; here it renders nothing, and the alternative it falls back to
+// needs a web picker this deployment does not have.
+//
+// Forcing the flag true in this one object is the same local override the other
+// two patches make, and it selects the path this deployment actually supports:
+// the native dialog is intercepted by the wrapper and answered by the in-page
+// picker. Only that one property's value is spliced — its binding stays, because
+// `webPickerPending` in the same object still reads it, and the declarator is
+// where the platform read happens. The object is pinned by carrying both
+// `isClaudeApp` and `webPickerEnabled`, which together appear there only.
+// Spliced only in web-shell mode, and not required.
+const projectsPickerPatchId = "web-projects-folder-picker";
+const projectsPickerTrue = "!0";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -835,6 +863,23 @@ function composerChinBranch(node) {
       && (literal(term.left, null) || literal(term.right, null))));
 }
 
+// The folder/project picker's capability object: the one carrying both
+// `isClaudeApp` and `webPickerEnabled`. Returns the `isClaudeApp` property, whose
+// value is the only thing spliced.
+function projectsPickerTarget(ast) {
+  const objects = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "ObjectExpression") return;
+    const names = new Set(node.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value));
+    if (names.has("isClaudeApp") && names.has("webPickerEnabled")) objects.push(node);
+  });
+  if (objects.length !== 1) return undefined;
+  return objects[0].properties.filter(entry => entry.type === "Property")
+    .find(entry => (entry.key.name ?? entry.key.value) === "isClaudeApp"
+      && entry.value?.type === "Identifier");
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1401,6 +1446,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
           original: source.slice(branch.test.start, branch.test.end),
           replacement: projectsChinForced });
       }
+    }
+    // The folder picker's `isClaudeApp` flag, so the chip it draws is not the
+    // empty one the platform check would leave behind.
+    const picker = projectsPickerTarget(ast);
+    if (picker) {
+      patches.push({ id: projectsPickerPatchId, start: picker.value.start,
+        end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
+        replacement: projectsPickerTrue });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

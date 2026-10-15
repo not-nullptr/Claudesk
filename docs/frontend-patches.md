@@ -383,8 +383,19 @@ never reaches the slot predicate above. The patch forces that branch's test
 outright; keeping only the store operand off it left the page unchanged, and the
 two readings of that — the branch is unreachable, or this shell's surface is not
 `"chat"` — cannot be told apart from the DOM. The block is pinned by the
-`"unified"` literal its guard tests. All three are spliced only in web-shell
-mode, and none is required.
+`"unified"` literal its guard tests.
+
+`web-projects-folder-picker` supplies the chip itself. With the branch open the
+slot wrapper renders and comes out empty, because the picker refuses to draw when
+its capability object reports `isClaudeApp` false and no web picker is available
+— and `isClaudeApp` is the same zero-argument platform check two session patches
+already force, false here because the shell drops the Desktop user-agent token.
+Forcing that one property's value selects the path this deployment supports, the
+native folder dialog the wrapper intercepts and answers with the in-page picker;
+only the value is spliced, since `webPickerPending` in the same object still
+reads the binding. The object is pinned by carrying both `isClaudeApp` and
+`webPickerEnabled`. All five are spliced only in web-shell mode, and none is
+required.
 
 
 The code generator splices only the selected node. It does not regenerate
