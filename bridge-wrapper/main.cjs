@@ -4,7 +4,7 @@ const http = require("node:http");
 const { randomBytes, createHash } = require("node:crypto");
 const { createReadStream, readFileSync, writeSync } = require("node:fs");
 const { createConnection } = require("node:net");
-const { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
+const { lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
 const { app, BrowserWindow, ipcMain, Menu, webContents } = require("electron");
 
@@ -116,6 +116,107 @@ function noteCoworkVmActivity() {
   coworkVmLastActivityAt = Date.now();
 }
 
+// A routine's files belong to the Desktop, and it refuses to publish one that is
+// hard-linked to another name: writing "through" the link would land on the
+// link's other name rather than on the task, which is exactly how a sandboxed
+// agent could redirect a privileged write. So the store stops with "Not written:
+// this task's file is hard-linked to another file. Replace it with a plain
+// copy." The refusal is right, but it strands the routine — every later edit
+// fails, from every client, until somebody with shell access on that machine
+// replaces the file by hand.
+//
+// Do what the refusal asks, from here, at the main process boundary: move the
+// linked file aside and let the store's own write create a plain one. Nothing is
+// ever written through the link, so the other name keeps its bytes, and moving
+// the file away is the whole repair — the store writes a fresh SKILL.md on the
+// attempt that follows. The channels below are the ones that write task files,
+// so a routine heals on the first edit any client attempts, and stays healed:
+// the agent's own `update_scheduled_task` tool path (which never crosses an IPC)
+// finds a plain file afterwards.
+const routineTaskFileWriteChannel =
+  /\_\$_CoworkScheduledTasks_\$_(?:updateScheduledTask|updateScheduledTaskFileContent)$/;
+const routineFileLinkSuffix = ".hardlinked";
+const routineFileLinkRepairLimit = 8;
+
+// The Cowork store keeps its routines in the "Scheduled" directory of the
+// Cowork user-files root; the Code store keeps them in the Claude config
+// directory. The root is the Desktop's own setting, persisted once it resolves
+// (`preferences.coworkUserFilesPath`), with `<home>/Claude` as the default.
+function coworkUserFilesRoot() {
+  try {
+    const config = JSON.parse(
+      readFileSync(join(app.getPath("userData"), "claude_desktop_config.json"), "utf8"),
+    );
+    const configured = config?.preferences?.coworkUserFilesPath;
+    if (typeof configured === "string" && configured.startsWith("/")) return configured;
+  } catch {}
+  return join(app.getPath("home"), "Claude");
+}
+
+function routineTaskRoots() {
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  return [
+    join(configDir || join(app.getPath("home"), ".claude"), "scheduled-tasks"),
+    join(coworkUserFilesRoot(), "Scheduled"),
+  ];
+}
+
+async function repairLinkedRoutineFiles(scheduledTaskId) {
+  if (typeof scheduledTaskId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(scheduledTaskId)) {
+    return 0;
+  }
+  let repaired = 0;
+  for (const root of routineTaskRoots()) {
+    const taskDir = join(root, scheduledTaskId);
+    let entries;
+    try {
+      entries = await readdir(taskDir, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+      console.warn(
+        `[cowork-wrapper] routine ${scheduledTaskId}: could not inspect ${taskDir}: ${error?.message || error}`,
+      );
+      continue;
+    }
+    for (const entry of entries) {
+      if (repaired >= routineFileLinkRepairLimit) return repaired;
+      // `isFile()` is an lstat answer, so a symlink is neither followed nor
+      // moved: the store's own symlink refusal is a different failure, and one
+      // this repair must not paper over.
+      if (!entry.isFile()) continue;
+      const path = join(taskDir, entry.name);
+      let info;
+      try {
+        info = await lstat(path);
+      } catch {
+        continue;
+      }
+      if (!info.isFile() || info.nlink <= 1) continue;
+      const aside = `${path}${routineFileLinkSuffix}-${Date.now()}`;
+      try {
+        await rename(path, aside);
+      } catch (error) {
+        console.warn(
+          `[cowork-wrapper] routine ${scheduledTaskId}: ${path} is hard-linked (nlink ${info.nlink}) and could not be moved aside: ${error?.message || error}`,
+        );
+        continue;
+      }
+      repaired += 1;
+      console.warn(
+        `[cowork-wrapper] routine ${scheduledTaskId}: ${path} was hard-linked to another name`
+        + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
+        + " so the Desktop writes a plain file",
+      );
+    }
+  }
+  return repaired;
+}
+
+function isLinkedRoutineFileRefusal(error) {
+  return /hard-linked to another file/.test(String(error?.message ?? error));
+}
+
 // The official Web renderer supplies its feature-flag default (currently
 // memoryGB=4) to startVM, and that explicit argument takes precedence over the
 // persisted Desktop preference. Clamp both configuration IPCs at the main
@@ -125,6 +226,22 @@ const originalIpcMainHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) => {
   if (typeof channel !== "string" || typeof listener !== "function") {
     return originalIpcMainHandle(channel, listener);
+  }
+  if (routineTaskFileWriteChannel.test(channel)) {
+    return originalIpcMainHandle(channel, async (event, ...args) => {
+      await repairLinkedRoutineFiles(args[0]?.scheduledTaskId);
+      try {
+        return await listener(event, ...args);
+      } catch (error) {
+        // The file can also turn up linked between the repair and the write, and
+        // a link the repair did not see (a root we did not guess, a file the
+        // store creates in place) fails here rather than above. One repair and
+        // one retry, then let the refusal stand.
+        if (!isLinkedRoutineFileRefusal(error)) throw error;
+        await repairLinkedRoutineFiles(args[0]?.scheduledTaskId);
+        return listener(event, ...args);
+      }
+    });
   }
   if (channel.endsWith("_$_ClaudeVM_$_startVM")) {
     if (coworkHostBashEnabled) {

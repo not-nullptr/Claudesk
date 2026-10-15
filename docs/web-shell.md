@@ -450,6 +450,25 @@ capability (the account can still create and delete routines by asking its
 agent) — it only takes the controls out of the UI. The client that can be
 scheduled must be able to ack, or every re-delivery starts the run again.
 
+Editing a task's file is the one write the Desktop refuses *by design*, and that
+refusal is what a routine can get stuck behind. The store publishes a task's
+files (`SKILL.md`, and the watcher script beside it) through a writer that stops
+with `Not written: this task's file is hard-linked to another file. Replace it
+with a plain copy.` when the path carries a second hard link — the redirect a
+sandboxed agent can set up through a shared folder, since the write would then
+land on the link's other name instead of on the task. No browser can clear that,
+and the store checks it on every write, so until the file becomes a plain copy on
+that machine every edit answers 500, from every client. The wrapper does what the
+refusal asks, at the main process boundary where the writing IPCs already pass:
+on `updateScheduledTask` and `updateScheduledTaskFileContent` it moves any linked
+file in the task's own directory aside (`SKILL.md.hardlinked-<stamp>`) before
+relaying the call, and if the refusal still arrives it repairs and retries once.
+Nothing is ever written through the link, so the other name keeps its bytes, and
+the store's own write lands on a plain file — including the agent's
+`update_scheduled_task` tool path, which writes in the main process without ever
+crossing an IPC. The repair runs at a write rather than as a sweep, so a routine
+nobody edits is left exactly as the store wrote it.
+
 ## Home greeting
 
 The home greeting is not local copy: ion-dist reads `personalized_greeting` out
