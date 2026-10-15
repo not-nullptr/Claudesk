@@ -1584,28 +1584,97 @@ function scheduledTaskListenerHost(ast) {
   return hosts.size === 1 ? [...hosts][0] : undefined;
 }
 
+// Which chunks of ion-dist are worth parsing at all.
+//
+// This is an optimization, and a pure one: every acceptance below is decided on
+// parsed nodes, so the only thing a needle can do is decide whether a chunk is
+// looked at. It is the difference between parsing the handful of chunks that
+// carry a target and parsing all 3372 chunks of ion-dist (113 MB, tens of
+// seconds of acorn on every container start). Each needle is therefore anchored
+// on a literal its own detector *requires*, so a chunk that would produce the
+// patch necessarily contains it.
+//
+// It is deliberately NOT applied inside `inspectRenderer`, which stays a pure
+// function of one chunk. The preparer is the only caller that has a real file
+// list to narrow, and the smoke suites drive the patcher with small synthetic
+// fixtures that no needle could describe — a filter in here would silently skip
+// them and turn every one of those assertions into a no-op.
+//
+// Two ways this goes wrong, and both are silent:
+//
+//   * A trailing `|` is an empty alternative, which matches every string and
+//     disables the filter entirely — putting the whole ion-dist back through
+//     acorn while every test still passes. It has happened: a commit appended
+//     `voyage_composer_marlin|` to a line that already ended in `|`.
+//     scripts/renderer-prefilter-smoke.mjs fails on a degenerate regex.
+//   * A generic word pulls in every vendor chunk that merely mentions it.
+//     `protocol` alone matched 206 files and 37 MB, `onEdit` 85 and 25 MB,
+//     `sessionRef` 59 and 9.5 MB, bare `rewind` 54 and 18 MB — and those chunks
+//     parse to nothing. All four are now anchored on their detector's own
+//     literal (`must use https (or http on loopback)`, `"onEdit"`, `"app:"`,
+//     `rewindV2`/`rewindSession unavailable`).
+//
+// `keyCode` is the one deliberately broad needle, and it is the floor: the IME
+// capability marker is a `keyCode === 229` comparison, which input-handling
+// chunks legitimately contain all over the renderer, so every one of the 47
+// must be parsed for the marker's evidence to be recorded. It costs ~19 MB of
+// the ~25 MB this filter lets through; the other 19 needles together account
+// for the rest.
+export const prefilterNeedles = [
+  // Capability markers.
+  "rewindSession unavailable", // cowork-native-rewind
+  "rewindV2", // code-native-rewind-v2
+  "keyCode", // ime-keycode-229 (broad by nature; see above)
+  '"onEdit"', // native-message-edit
+  // Required patches.
+  "fileView", // file-pane download: the pane's own file-kind selector
+  "native-file-preview-error", // file-pane preview: the DeclineReason test id
+  'when==="desktop"', // route alias
+  "not_desktop_app", // session viewer gate
+  "avatar_image_url", // account chip avatar
+  'must use https (or http on loopback)', // gateway URL host rule
+  '"app:"', // the two gateway-setup guards
+  // Web-shell patches.
+  "principalDisplayName", // account menu name
+  "signOut", // account sign-out row
+  "DesktopChecks", // scheduled task hosts
+  "dramatic_shrimp_force_local", // local session placement
+  "claudeai.notification.permission.result", // notification enable
+  "data-compact-mode-switcher", // titlebar mode picker
+  "Local scheduled tasks can only run", // scheduled task runner
+  "stringsVouched", // home layout assignment
+  "voyage_composer_marlin", // unified-composer design predicates
+  "claude_ai_projects_limits", // projects-allowed predicate
+];
+
+// Every needle is a literal substring, so it is escaped before it reaches the
+// alternation. Joining them raw makes a needle's own punctuation regex syntax:
+// `must use https (or http on loopback)` then matches `must use https or http
+// on loopback`, its parentheses read as a group, and the chunk it was added for
+// is filtered out — losing the patch with nothing to show for it.
+const escapeLiteral = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// A needle that spells a quoted string is also matched with the other quote
+// character. Which one a chunk uses is the minifier's choice, not ours, so a
+// needle carrying only `"` filters out the chunk it exists for the day the
+// compiler switches to `'` — silently, since the patch simply stops being
+// applied. On the official build every quoted needle happens to be
+// double-quoted, so the twin matches nothing today and costs nothing; the
+// minified fixtures in renderer-patches-smoke.mjs exercise both styles.
+const quoteVariants = (needle) => (needle.includes('"') ? [needle, needle.replaceAll('"', "'")] : [needle]);
+
+const prefilter = new RegExp(
+  prefilterNeedles.flatMap(quoteVariants).map(escapeLiteral).join("|"),
+);
+
+// Exported so the preparer can pick the chunks a worker pool has to look at
+// without re-deriving the predicate — one definition, so a worker can never be
+// handed a different candidate set than the preparer itself would choose.
+export const rendererPrefilter = prefilter;
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
-  // String prefilter is only an optimization; all acceptance uses parsed nodes.
-  // `native-file-preview-error` is the DeclineReason UI's test id; the preview
-  // component's own chunk matches none of the other tokens, so without it the
-  // patch below would never be attempted on the file it targets. The route-alias
-  // chunk likewise carries none of them, so its own `when==="desktop"` rule is
-  // listed too. The session layout carries its own `not_desktop_app` reason. The
-  // account chip's chunk is reached by the API field it reads (`avatar_image_url`),
-  // and the user-menu identity reader in the same chunk by `principalDisplayName`;
-  // the Desktop-checks slot by its own component label; the session-placement
-  // helper by the force-local shrimp literal only it carries; the compact mode
-  // switcher by its own `data-compact-mode-switcher` label; the scheduled-task
-  // runner by the run refusal only it carries (its chunk is also reached by
-  // `keyCode`, and the two scheduled-task hosts live in the Desktop-checks
-  // chunk); the home-layout assignment by its own `stringsVouched` property,
-  // which appears nowhere else in the renderer graph; the projects-allowed
-  // predicate by its own limits-feature name, likewise unique.
-  if (!/rewind|keyCode|onEdit|protocol|sessionRef|native-file-preview-error|when==="desktop"|not_desktop_app|avatar_image_url|principalDisplayName|signOut|DesktopChecks|dramatic_shrimp_force_local|claudeai\.notification\.permission\.result|data-compact-mode-switcher|Local scheduled tasks can only run|stringsVouched|voyage_composer_marlin|claude_ai_projects_limits|/.test(source)) {
-    return { evidence, patches };
-  }
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const redirectScopes = new Map();
   let button;
@@ -1961,11 +2030,27 @@ export function patchEmbeddedSources(sources) {
   return { sources: output, patches };
 }
 
-export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false) {
+// The per-file half of the analysis, split out from the assembly so it can run
+// across worker threads: every chunk is inspected independently and the results
+// are only combined afterwards. What the prefilter lets through (see
+// prefilterNeedles) is ~25 MB of the official chunks — a minute of acorn on one
+// core, a few seconds spread over the box's cores.
+export function inspectAll(sources, gatewayEnabled, webShellEnabled = false) {
+  const analyses = new Map();
+  for (const [path, source] of sources) {
+    analyses.set(path, inspectRenderer(source, gatewayEnabled, webShellEnabled));
+  }
+  return analyses;
+}
+
+// The assembly half: union whatever `inspectAll` (or a pool of workers running
+// it) produced, hold it to the required-patch and marker invariants, and splice.
+// `analyses` is a Map of path -> { patches, evidence }, keyed the same way as
+// `sources`.
+export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnabled = false) {
   const matches = new Map();
   const markers = new Map(markerIds.map(id => [id, []]));
-  for (const [path, source] of sources) {
-    const result = inspectRenderer(source, gatewayEnabled, webShellEnabled);
+  for (const [path, result] of analyses) {
     for (const patch of result.patches) {
       if (!matches.has(patch.id)) matches.set(patch.id, []);
       matches.get(patch.id).push({ path, ...patch });
@@ -2004,4 +2089,9 @@ export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = 
   }
   return { sources: output, patches,
     markers: [...markers].map(([id, found]) => ({ id, matches: found })) };
+}
+
+export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false) {
+  return assembleRenderer(sources, inspectAll(sources, gatewayEnabled, webShellEnabled),
+    gatewayEnabled, webShellEnabled);
 }

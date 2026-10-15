@@ -108,8 +108,29 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // it. It is a rollout gate for folders everywhere, not just projects (the same
 // reader feeds the folder chip and the selected-folder map), which is what a
 // deployment that already exposes the workspace as a folder wants.
+//
+// `yukon_silver_dramatic_shrimp_atrium` is the second half of that surface, and
+// the reason the chip it draws opens onto a bare search box. The gate is read
+// exactly once, as the capability object's `remoteProjectsEnabled`, and that one
+// name is what the composer's folder picker reads to decide whether it is the
+// claude.ai project picker or only a folder picker:
+//
+//     atriumCreate   = remoteProjectsEnabled && projectsAllowance;
+//     showProjects   = !locked && atriumCreate && (!controlled || chatProjectsEnabled);
+//     showFilterSort = remoteProjectsEnabled && !locked && !foldersOnly;
+//
+// With it off, `showProjects` is false (the renderer patch that forces the last
+// gate open is what draws the chip at all), `showFilterSort` is false so the
+// search box never grows its "Filter and sort" button, `onCreateProject` is never
+// handed down so there is no "New project" row, and the placeholder falls to its
+// last arm — "Search projects" instead of "Search or create a project". The
+// allowance is already granted (`grantProjectsLimits`), and the surface behind
+// the flag is the same project list the `/projects` routes and the sidebar entry
+// were restored for, so the gate is the whole of what was missing between this
+// deployment's picker and claude.ai's. It is the atrium rollout, read nowhere
+// else, so granting it moves only this surface.
 const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
-  "yukon_silver_folders"];
+  "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`

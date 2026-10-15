@@ -7,6 +7,55 @@ the intended behavior with stable anchors and keep the replacement small.
 Claudesk uses Acorn AST selectors instead of regular expressions for the current
 Gateway guards.
 
+## Preparing the renderer
+
+`rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs` runs from container init
+on every start. It parses ion-dist with Acorn, splices the patches, and publishes
+a generation under `/renderer/<desktopVersion>/<patchRelease>/`, which the
+Desktop process then serves to the bridge. Three things keep that from costing
+tens of seconds per container:
+
+**The chunk prefilter.** ion-dist is ~3400 chunks and 113 MB, and only a few
+dozen can carry a target. `prefilterNeedles` in `renderer-patches.mjs` lists a
+literal for each detector — `fileView` for the file pane, `"app:"` for the two
+Gateway-setup guards, `must use https (or http on loopback)` for the URL host
+rule, and so on. A chunk that produces a patch necessarily contains its needle,
+so the preparer only parses what matches: 91 chunks and 25 MB rather than 3372
+and 113 MB, which is ~13 s instead of ~116 s. Two traps, both silent:
+
+- Every needle is a *literal*, escaped before it is joined into the alternation.
+  Joined raw, a needle's own punctuation is regex syntax —
+  `must use https (or http on loopback)` becomes a group and stops matching the
+  chunk it was added for.
+- A quoted needle is matched with both quote characters, because which one a
+  chunk uses is the minifier's choice.
+
+The filter is applied by the preparer, not inside `inspectRenderer`, which stays
+a pure function of one chunk: the smoke suites drive the patcher with small
+synthetic fixtures that no needle could describe.
+
+**One generation per box, not per container.** The generation is a pure function
+of the ion-dist, the two flags and the patcher, so it is byte-identical in every
+container. `scripts/seed-renderer.sh` builds it once during `deploy.sh` — for
+each flag combination the accounts actually use — into
+`CLAUDESK_RENDERER_SEED_DIR`, which the desktop service mounts read-only. A
+container whose inputs match a seed adopts it (~1 s instead of ~13 s); one that
+finds no seed, a stale one, or one built for other flags prepares its own. The
+fallback is what makes this safe to get wrong: a missing seed is a slower
+deploy, never a wrong renderer.
+
+**Parallelism.** The per-chunk analysis has no cross-chunk dependency, so the
+preparer deals the chunks to worker threads by size
+(`renderer-inspect-worker.mjs`, `CLAUDESK_RENDERER_JOBS`, default 8) and
+`assembleRenderer` unions the results and holds the required-patch and marker
+invariants, single-threaded and unchanged.
+
+The generation's cache key covers the ion-dist sources, the two flags, the
+release **and the patcher's own source**. The last one matters: without it,
+editing `renderer-patches.mjs` while leaving `patchRelease` alone leaves the key
+unchanged, the fast path returns the previous generation, and the edit silently
+never runs.
+
 ## Current selectors
 
 `rootfs/opt/claude-cowork-bridge/renderer-patches.mjs` owns discovery, validation,
@@ -469,7 +518,16 @@ The HTTP smoke test verifies those snippets against the served modules.
 npm ci --prefix rootfs/opt/claude-cowork-bridge --ignore-scripts
 ./scripts/validate.sh
 node scripts/desktop-compatibility-smoke.mjs /path/to/extracted/resources/ion-dist
+node scripts/renderer-prefilter-smoke.mjs /path/to/extracted/resources/ion-dist
 ```
+
+That last one is the prefilter's own guard, and the directory argument is what
+makes it worth running: without it the check is only that the regex is not
+degenerate (which `./scripts/validate.sh` runs), and with it the smoke parses
+every chunk unfiltered and asserts that each chunk carrying a patch or marker is
+also a chunk the filter selects. A needle that misses its own chunk loses that
+patch silently for every patch outside the required set, so run it against a real
+ion-dist whenever a needle changes.
 
 The source tests run syntax variations and evaluate the patched guards with all
 combinations of native/HTTPS protocol, Gateway toggle and upstream feature flag.

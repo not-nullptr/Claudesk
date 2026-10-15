@@ -28,6 +28,7 @@ node scripts/slug-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/package-sync-smoke.mjs
 node scripts/renderer-patches-smoke.mjs
+node scripts/renderer-prefilter-smoke.mjs
 node scripts/renderer-runtime-smoke.mjs
 node scripts/login-shell-smoke.mjs
 node scripts/updater-smoke.mjs

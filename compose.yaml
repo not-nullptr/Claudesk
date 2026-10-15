@@ -51,6 +51,14 @@ services:
       # web shell on it also splices the desktop Code route alias. See
       # docs/web-shell.md.
       CLAUDE_REMOTE_WEB_SHELL: "${CLAUDE_REMOTE_WEB_SHELL:-0}"
+      # Read by the renderer preparer (cont-init). The prepared renderer is a pure
+      # function of ion-dist plus the two flags above, so it is the same
+      # generation in every container on the box: the deploy builds it once
+      # (scripts/seed-renderer.sh) and mounts it read-only at the path below. A
+      # container that finds its inputs unchanged adopts the seed instead of
+      # parsing 113 MB of ion-dist, and one that finds it missing, stale or built
+      # for other flags simply prepares its own — slower, never wrong.
+      CLAUDESK_RENDERER_SEED: "/opt/claudesk-renderer-seed"
       # Route the Desktop main process's folder dialogs (Cowork's "Choose
       # folder" grant, which the native dialog cannot show on the headless
       # display) to the browser's in-page picker. Defaults on with the web shell.
@@ -82,6 +90,11 @@ services:
       # persistent-root-entrypoint.sh.
       - ${CLAUDESK_ROOT_STATE:-/var/lib/claudesk-root}:/persistent-root
       - ./persistent-root-entrypoint.sh:/persistent-root-entrypoint.sh:ro
+      # The generation scripts/seed-renderer.sh built for this release, shared by
+      # every container on the box (see CLAUDESK_RENDERER_SEED above). Read-only:
+      # a container only ever reads a seed, and a writable mount would let one
+      # account's container hand another a generation.
+      - ${CLAUDESK_RENDERER_SEED_DIR:-/opt/claudesk/data/renderer-seed}:/opt/claudesk-renderer-seed:ro
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/vhost-vsock:/dev/vhost-vsock
