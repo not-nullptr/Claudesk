@@ -259,6 +259,22 @@ const projectsChinForced = "!0";
 // Spliced only in web-shell mode, and not required.
 const projectsPickerPatchId = "web-projects-folder-picker";
 const projectsPickerTrue = "!0";
+// The composer's project selector — the component the slot wrapper above wraps —
+// bails on its own scope guard before it ever reaches the picker:
+//
+//   let {projectScopeLocked: c, …} = composerContext(), m = isClaudeApp();
+//   …
+//   return c && !m ? null : <ProjectSelector …/>;
+//
+// On claude.ai that guard is false because nothing scopes the composer, and the
+// selector draws. Forcing it off is correct whenever the composer is being used
+// to *choose* a project rather than to show one it is locked to, which is what
+// this shell's New page is. The component is pinned by its own destructured prop
+// names — `selectionChip` and `plainTrigger`, which the minifier does not touch —
+// and by returning `null` from a conditional, so no other component can match.
+// Spliced only in web-shell mode, and not required.
+const projectsSelectorPatchId = "web-projects-selector-scope";
+const projectsSelectorOff = "!1";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -880,6 +896,26 @@ function projectsPickerTarget(ast) {
       && entry.value?.type === "Identifier");
 }
 
+// The composer's project selector: the component that destructures both
+// `selectionChip` and `plainTrigger` and answers `null` from a conditional —
+// its scope guard. Returns that conditional's test, the only thing spliced.
+function projectsSelectorTarget(ast) {
+  const candidates = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionExpression") return;
+    const pattern = node.params?.[0];
+    if (pattern?.type !== "ObjectPattern") return;
+    const names = new Set(pattern.properties.filter(entry => entry.type === "Property")
+      .map(entry => entry.key.name ?? entry.key.value));
+    if (!names.has("selectionChip") || !names.has("plainTrigger")) return;
+    walk(node.body, [], (child) => {
+      if (child.type !== "ConditionalExpression" || !literal(child.consequent, null)) return;
+      candidates.push(child.test);
+    });
+  });
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1454,6 +1490,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerTrue });
+    }
+    // The project selector's scope guard, so it draws rather than answering null.
+    const selector = projectsSelectorTarget(ast);
+    if (selector) {
+      patches.push({ id: projectsSelectorPatchId, start: selector.start, end: selector.end,
+        original: source.slice(selector.start, selector.end),
+        replacement: projectsSelectorOff });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

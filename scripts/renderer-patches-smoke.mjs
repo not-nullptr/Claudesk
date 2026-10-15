@@ -1158,6 +1158,43 @@ const projectsPickerCompiled = await minify(pickerObject(), {
 assert.equal(inspectRenderer(projectsPickerCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-folder-picker").length, 1,
   "a mangled capability object must still have its app flag forced");
+// The project selector's own scope guard, which answers null before the picker
+// above is reached. Pinned by the two prop names it destructures, which the
+// minifier leaves alone, and by the null it returns.
+const selectorComponent = (test = "locked&&!isApp", props = "selectionChip:r=!1,plainTrigger:i=!1") =>
+  `var selector=memo(function({isCollapsed:e=!1,${props},projectsOnly:a=!1}){`
+  + 'let c=scopeLocked(),m=isApp();return ' + test + '?null:S(Picker,{projectLocked:c,plainTrigger:i})})';
+assert.equal(inspectRenderer(selectorComponent(), false, false).patches
+  .filter(patch => patch.id === "web-projects-selector-scope").length, 0,
+  "the selector guard is left alone outside web-shell mode");
+const selectorPatches = inspectRenderer(selectorComponent(), false, true).patches
+  .filter(patch => patch.id === "web-projects-selector-scope");
+assert.equal(selectorPatches.length, 1, "the scope guard must be forced exactly once");
+assert.equal(selectorPatches[0].original, "locked&&!isApp");
+assert.equal(selectorPatches[0].replacement, "!1", "only the guard's test is spliced");
+// A component with one of the two prop names, or with no null conditional, is a
+// different component and must survive.
+assert.equal(inspectRenderer(selectorComponent("locked&&!isApp", "selectionChip:r=!1"), false, true)
+  .patches.filter(patch => patch.id === "web-projects-selector-scope").length, 0,
+  "a component with one prop name only must survive untouched");
+assert.equal(inspectRenderer(selectorComponent("locked?null:S(Picker,{})", "selectionChip:r=!1,plainTrigger:i=!1"),
+  false, true).patches.filter(patch => patch.id === "web-projects-selector-scope").length, 0,
+  "a component whose conditional returns no null must survive untouched");
+assert.equal(inspectRenderer(
+  `${selectorComponent()}\n${selectorComponent().replace("var selector", "var selectorB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-selector-scope").length, 0,
+  "two selectors must refuse rather than splice one of two");
+const selectorOut = patchRendererSources(
+  new Map([["selector.js", `${webShellFixtures}\n${accountMenuName}\n${selectorComponent()}`]]), false, true)
+  .sources.get("selector.js");
+assert.ok(selectorOut.includes("return !1?null:S(Picker,"),
+  "the guard must be forced off in place");
+const selectorCompiled = await minify(selectorComponent(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(selectorCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-selector-scope").length, 1,
+  "a mangled selector must still have its guard forced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

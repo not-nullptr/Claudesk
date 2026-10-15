@@ -394,8 +394,14 @@ Forcing that one property's value selects the path this deployment supports, the
 native folder dialog the wrapper intercepts and answers with the in-page picker;
 only the value is spliced, since `webPickerPending` in the same object still
 reads the binding. The object is pinned by carrying both `isClaudeApp` and
-`webPickerEnabled`. All five are spliced only in web-shell mode, and none is
-required.
+`webPickerEnabled`.
+
+`web-projects-selector-scope` forces off the scope guard of the component that
+wraps that picker — `projectScopeLocked && !isClaudeApp ? null : <ProjectSelector/>`
+— which answers null here and leaves the slot wrapper empty one level earlier.
+It is pinned by the two prop names the component destructures, `selectionChip`
+and `plainTrigger`, and by the null it returns from a conditional. All six are
+spliced only in web-shell mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate
