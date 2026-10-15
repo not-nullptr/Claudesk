@@ -97,7 +97,19 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // from the product. `coworkWebEnabled` itself already reads true there — it is
 // `!isDesktopApp && dramatic_shrimp && the web-Cowork gate` — so this only
 // supplies the rollout flag the same way `bad_moon_rising` supplies Code's.
-const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks"];
+//
+// `yukon_silver_folders` is what gives the composer's project selector anything
+// to show. The picker builds its pinned, recent and more targets inside
+// `if (foldersEnabled)` — with the flag off every list is empty, the trigger's
+// "is there anything to draw" test is false, and the component returns null, so
+// the slot in the composer renders as an empty element however many of the
+// renderer's own gates are opened. That is the whole of the "Projects" surface
+// in the composer: the entry points, the routes and the chip all follow from
+// it. It is a rollout gate for folders everywhere, not just projects (the same
+// reader feeds the folder chip and the selected-folder map), which is what a
+// deployment that already exposes the workspace as a folder wants.
+const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
+  "yukon_silver_folders"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`
