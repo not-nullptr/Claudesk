@@ -33,6 +33,24 @@ export function menuFlags(){return {hasAccount:!!a,inferenceConfig:e,internalToo
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
   assert.equal(manifest.patches.length, 6);
+  // Every container start runs the preparer, and the work is a pure function of
+  // the sources and the two flags, so the same inputs must not be prepared
+  // twice: this is the difference between a minute and a moment on every start,
+  // for this deployment's instance and every account's.
+  const rerun = (env) => spawnSync(process.execPath, [preparePath, ion, state, releasePath], {
+    encoding: "utf8", env: { ...process.env, CLAUDE_DESKTOP_VERSION: release.desktopVersion, ...env },
+  });
+  const again = rerun({ CLAUDE_REMOTE_GATEWAY_SETTINGS: "1", CLAUDE_REMOTE_WEB_SHELL: "0" });
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /inputs unchanged/, "unchanged inputs must reuse the generation");
+  const otherFlags = rerun({ CLAUDE_REMOTE_GATEWAY_SETTINGS: "0", CLAUDE_REMOTE_WEB_SHELL: "0" });
+  assert.equal(otherFlags.status, 0, otherFlags.stderr);
+  assert.match(otherFlags.stdout, /patches=\d+/, "changed flags must be prepared again");
+  // The claim is only as good as the marker: without it the generation is redone.
+  await rm(join(state, release.desktopVersion, release.patchRelease, ".inputs"), { force: true });
+  const unmarked = rerun({ CLAUDE_REMOTE_GATEWAY_SETTINGS: "1", CLAUDE_REMOTE_WEB_SHELL: "0" });
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.match(unmarked.stdout, /patches=\d+/, "an unmarked generation must be prepared again");
   const generation = join(state, release.desktopVersion, release.patchRelease);
   const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
   const handler = wrapper.slice(wrapper.indexOf("function annotateShellDocument("),

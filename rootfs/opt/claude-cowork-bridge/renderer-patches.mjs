@@ -137,9 +137,17 @@ const composerDesignFeature = "voyage_composer_marlin";
 // default), and the surface kind is the only place the three route names appear
 // together. Spliced only in web-shell mode, neither required.
 const homeVariantPatchId = "web-new-page-home-variant";
-const homeVariantReplacement = '{variant:"home",settled:!0}';
+const homeVariantReplacement = '"home"';
 const homeArrangementPatchId = "web-home-composer-arrangement";
 const homeArrangementReplacement = '"outside"';
+// What each forced decision published on the way: the value it was about to
+// replace, and the surface kind's single one. Read by the preload's on-page
+// report, and the only way to tell a force that worked from one that was never
+// reached. The layout variable is the ternary's own value; the arm is an array
+// because several predicates answer the same question from different readings.
+const layoutProbe = "globalThis.__CLAUDESK_LAYOUT__";
+const armProbe = "globalThis.__CLAUDESK_ARM__";
+const surfaceProbe = "globalThis.__CLAUDESK_SURFACE__";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -600,16 +608,29 @@ function homeLayoutAssignment(node) {
     && homeLayoutKeys.includes(entry.key.name ?? entry.key.value));
 }
 
-// The layout hook's settled variant: the one `{variant, settled}` object whose
-// variant is a computed expression. The composer's own `{variant: "none",
-// settled: …}` objects are literals and therefore not targets.
-function homeVariantTarget(node) {
-  if (node.type !== "ObjectExpression" || node.properties.length !== 2) return false;
-  if (node.properties.some(entry => entry.type !== "Property" || entry.computed)) return false;
-  const keys = node.properties.map(entry => entry.key.name ?? entry.key.value);
-  if (!keys.includes("variant") || !keys.includes("settled")) return false;
-  const variant = node.properties.find(entry => (entry.key.name ?? entry.key.value) === "variant");
-  return unwrap(variant.value)?.type !== "Literal";
+// The layout variant where the composer host consumes it: the ternary that
+// picks between the component's own `layoutVariant` prop and that prop's default
+// — `test ? default : prop` — and every greeting, composer-offset and
+// control-seat class is read off its result. Either arm may be either side, so
+// nothing depends on which the compiler wrote first, and the targeting is
+// structural (a `layoutVariant` prop whose default this ternary names, in the
+// same component), so a renamed or inlined minifier output still matches.
+function homeLayoutVariantTarget(node, ancestors) {
+  if (node.type !== "ConditionalExpression") return false;
+  const { consequent, alternate } = node;
+  if (consequent?.type !== "Identifier" || alternate?.type !== "Identifier") return false;
+  const owner = [...ancestors].reverse().find(parent => functionTypes.has(parent.type));
+  if (!owner) return false;
+  let found = false;
+  walk(owner, [], (child) => {
+    if (child.type !== "Property" || (child.key.name ?? child.key.value) !== "layoutVariant") return;
+    if (child.value?.type === "AssignmentPattern"
+      && child.value.right?.type === "Identifier"
+      && (child.value.right.name === consequent.name || child.value.right.name === alternate.name)) {
+      found = true;
+    }
+  });
+  return found;
 }
 
 // The route surface kind the composer host derives: `… ? "hub" : … ? "outside" :
@@ -1116,27 +1137,33 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   let toastPublished = false;
   if (webShellEnabled) {
     // The unified-composer design predicates are forced to their flag operand.
-    for (const operand of composerDesignOperands(ast)) {
+    // Each one also publishes the value it replaced, so the on-page report can
+    // tell a force that took from one whose input now shares the site.
+    composerDesignOperands(ast).forEach((operand, index) => {
+      const original = source.slice(operand.start, operand.end);
       patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
-        original: source.slice(operand.start, operand.end), replacement: "!0" });
-    }
+        original,
+        replacement: `(${armProbe}=${armProbe}||[],${armProbe}[${index}]=${original},!0)` });
+    });
     // The layout variant and the surface kind that selects the home composer
     // arrangement are forced to the deployed answer, each from its own shape and
-    // only when that shape is unambiguous in the chunk.
+    // only when that shape is unambiguous in the chunk. Each publishes the value
+    // it replaced for the same reason.
     const variants = [];
     const surfaces = [];
-    walk(ast, [], (node) => {
-      if (homeVariantTarget(node)) variants.push(node);
+    walk(ast, [], (node, ancestors) => {
+      if (homeLayoutVariantTarget(node, ancestors)) variants.push(node);
       if (homeSurfaceKindTarget(node)) surfaces.push(node);
     });
-    for (const [targets, id, replacement] of [
-      [variants, homeVariantPatchId, homeVariantReplacement],
-      [surfaces, homeArrangementPatchId, homeArrangementReplacement],
+    for (const [targets, id, probe, forced] of [
+      [variants, homeVariantPatchId, layoutProbe, homeVariantReplacement],
+      [surfaces, homeArrangementPatchId, surfaceProbe, homeArrangementReplacement],
     ]) {
       if (targets.length !== 1) continue;
       const [target] = targets;
-      patches.push({ id, start: target.start, end: target.end,
-        original: source.slice(target.start, target.end), replacement });
+      const original = source.slice(target.start, target.end);
+      patches.push({ id, start: target.start, end: target.end, original,
+        replacement: `(${probe}=${original},${forced})` });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

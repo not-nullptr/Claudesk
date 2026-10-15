@@ -1871,6 +1871,10 @@
           return `${painted ? "painted" : "hidden"} ${Math.round(box.width)}x${Math.round(box.height)}`
             + ` font=${box2.fontSize} ${family(element.parentElement || element)}`;
         };
+        const probe = (name) => {
+          const value = globalThis[name];
+          return value === undefined ? "-" : JSON.stringify(value);
+        };
         const lines = [
           `doc layout=${root.getAttribute("data-new-page-layout") ?? "-"}`
             + ` chrome=${root.getAttribute("data-sidebar-chrome-preference") ?? "-"}`,
@@ -1880,6 +1884,8 @@
           `reactGreeting n=${greetings.length} ${greetings.map(describe).join(" | ")}`,
           `latch ${localStorage.getItem("composer-card-latch") ?? "-"}`
             + `/${localStorage.getItem("new-page-layout-latch") ?? "-"}`,
+          `probe layout=${probe("__CLAUDESK_LAYOUT__")} arm=${probe("__CLAUDESK_ARM__")}`
+            + ` surface=${probe("__CLAUDESK_SURFACE__")}`,
         ];
         let box = document.getElementById("claudesk-layout-report");
         if (!box) {

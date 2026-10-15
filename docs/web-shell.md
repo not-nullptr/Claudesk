@@ -623,6 +623,26 @@ name is set at invite-accept — or renamed later — reads correctly without th
 deployment-wide `CLAUDE_REMOTE_ACCOUNT_NAME` being re-applied by a re-provision.
 See [Eva Mode](eva-mode.md).
 
+## Rollout cost
+
+Every container start runs the renderer preparer (`prepare-renderer.mjs`), and the
+work — acorn over ~195 MB of JavaScript — costs about a minute. Container
+initialization runs it on *every* start, including the "already patched" fast
+path, and `/var/lib/claude-cowork-bridge` is not a volume, so a `--force-recreate`
+throws the result away and the next start pays it again. A full `deploy.sh`
+recreates this deployment's desktop plus every account's, so that minute is paid
+once per instance for byte-identical output.
+
+The preparer now stamps each generation with a key over its actual inputs — the
+renderer sources, the two flags and the release — and keeps the existing
+generation when that key matches, which turns an unchanged start from a minute
+into about a second. `scripts/deploy-bridge-only.sh` closes the other half: a
+change that lives in the bridge needs the bridge containers recycled and nothing
+else, so it rebuilds only that image and recreates only the bridges, leaving
+every desktop (and every renderer) alone. It refuses when `config/release.json`
+has moved, because then the desktop image needs rebuilding too and the honest
+path is `deploy.sh`.
+
 ## Why it is fenced
 
 The chrome and the surface set are the same switch in ion-dist (`isClaudeApp`),

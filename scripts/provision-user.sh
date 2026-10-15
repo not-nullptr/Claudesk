@@ -180,6 +180,16 @@ vm_vsock_port=""
 # every account: this image
 # requires Cowork VM mode and refuses the host-bash mode at build time, so the pin
 # only keeps an account from naming a mode the deployment set for itself.
+#
+# The services recreated at the end are CLAUDESK_RECREATE_SERVICES, defaulting to
+# the full set. That set is right after an image change — the desktop container
+# is what re-prepares the renderer, so it has to come back for a renderer fix to
+# reach anyone. A change that lives only in the bridge does not need it, and
+# skipping it is the difference between seconds and the minute of parsing every
+# desktop container pays at startup (see prepare-renderer.mjs);
+# scripts/deploy-bridge-only.sh sets the narrow set. The value is a deliberate
+# list of names, so it must split.
+# shellcheck disable=SC2086
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
 CLAUDESK_NAME_PREFIX="$slug-" \
@@ -201,7 +211,7 @@ CLAUDESK_VM_VSOCK_PORT="$vm_vsock_port" \
 CLAUDESK_VM_VSOCK_GUEST_SITES="${CLAUDESK_VM_VSOCK_GUEST_SITES:-0}" \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
 compose_shared --project-name "claudesk-$slug" \
-    up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback
+    up -d --force-recreate ${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}
 
 # Route the account to it; authd re-reads this on every request.
 if [ -z "$upstream" ]; then

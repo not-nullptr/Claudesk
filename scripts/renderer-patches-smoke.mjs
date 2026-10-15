@@ -863,9 +863,9 @@ assert.deepEqual(designIds.map(patch => patch.original).sort(),
 const designOut = patchRendererSources(
   new Map([["design.js", `${webShellFixtures}\n${accountMenuName}\n${designPredicates}`]]), false, true)
   .sources.get("design.js");
-assert.ok(designOut.includes("return(!0)&&!inSidePanel()")
-  && designOut.includes("return(!0)&&!inSidePanel()"),
-  "the forced operand must leave the side-panel guard in place");
+assert.match(designOut,
+  /return\(+globalThis\.__CLAUDESK_ARM__=globalThis\.__CLAUDESK_ARM__\|\|\[\],globalThis\.__CLAUDESK_ARM__\[0\]=e\|\|t,!0\)+&&!inSidePanel\(\)/,
+  "the forced operand must publish its input and leave the side-panel guard in place");
 assert.ok(!designOut.includes("pick(n)&&"), "the latch-aware predicate's operand must be replaced");
 assert.ok(designOut.includes("return e&&!inSidePanel()"),
   "a guard that does not read the feature must survive untouched");
@@ -875,13 +875,14 @@ const designCompiled = await minify(designPredicates, {
 assert.equal(inspectRenderer(designCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-composer-design-forced").length, 3,
   "a mangled set of design predicates must still be forced");
-// The settled layout variant and the route surface kind: one computed `{variant,
-// settled}` object, and the only place the three route names appear together.
-// Both are forced in web-shell mode; the composer's literal `variant: "none"`
-// objects and any other conditional are not targets.
-const variantFixture = (suffix = "") => 'function layoutVariant' + suffix + '(){'
-  + 'let{liveVariant:e,settled:t,confirmed:n}=decide();return{variant:e,settled:t}}'
-  + 'function composerDefault' + suffix + '(){return{variant:"none",settled:state.settled}}';
+// The layout variant where the composer host consumes it — a `layoutVariant`
+// prop default the component's own ternary also names — and the route surface
+// kind, the only place the three route names appear together. Both are forced in
+// web-shell mode, each publishing the value it replaced.
+const variantFixture = (suffix = "") => 'function page' + suffix + '({topContent:e,'
+  + 'layoutVariant:t=defaultVariant}={}){let h=isStart()?defaultVariant:t;return h}'
+  + 'function otherPage' + suffix + '({layoutVariant:t=otherDefault}={}){'
+  + 'let h=isStart()?firstDefault:t;return h}';
 const surfaceFixture = (suffix = "") => 'function surfaceKind' + suffix + '(){let e=hubHost(),t=lookActive();'
   + 'return e?"hub":t?"outside":"none"}'
   + 'function otherKind' + suffix + '(){return opts.mode?"hub":"none"}';
@@ -895,24 +896,30 @@ const forced = inspectRenderer(`${variantFixture()}\n${surfaceFixture()}`, false
 assert.deepEqual(forced.map(patch => patch.id).sort(),
   ["web-home-composer-arrangement", "web-new-page-home-variant"]);
 assert.deepEqual(forced.map(patch => patch.original).sort(),
-  ['e?"hub":t?"outside":"none"', '{variant:e,settled:t}'],
-  "only the computed variant and the three-name conditional are spliced");
-// Two candidates in one chunk refuse rather than pick one.
+  ['e?"hub":t?"outside":"none"', 'isStart()?defaultVariant:t'],
+  "only the consuming ternary and the three-name conditional are spliced");
+assert.ok(forced.every(patch => /__CLAUDESK_/.test(patch.replacement)),
+  "each forced decision must publish the value it replaced");
+// A ternary whose consequent is not the component's own prop default is not a
+// target, and two candidates in one chunk refuse rather than pick one.
+assert.ok(!inspectRenderer(`${variantFixture()}\n${surfaceFixture()}`, false, true).patches
+  .some(patch => patch.original === "isStart()?firstDefault:t"),
+  "a ternary naming another default must not be spliced");
 assert.equal(inspectRenderer(`${variantFixture()}\n${variantFixture("B")}`, false, true).patches
   .filter(patch => patch.id === "web-new-page-home-variant").length, 0,
-  "a second computed variant object must refuse the splice");
+  "two candidates must refuse the splice");
 assert.equal(inspectRenderer(`${surfaceFixture()}\n${surfaceFixture("B")}`, false, true).patches
   .filter(patch => patch.id === "web-home-composer-arrangement").length, 0,
   "a second three-name conditional must refuse the splice");
 const decisionsOut = patchRendererSources(
   new Map([["decisions.js", `${webShellFixtures}\n${accountMenuName}\n${variantFixture()}\n${surfaceFixture()}`]]),
   false, true).sources.get("decisions.js");
-assert.ok(decisionsOut.includes('return{variant:"home",settled:!0}'),
-  "the layout variant must be spliced to the home arm");
-assert.ok(decisionsOut.includes('return "outside"'),
+assert.ok(decisionsOut.includes('(globalThis.__CLAUDESK_LAYOUT__=isStart()?defaultVariant:t,"home")'),
+  "the consuming ternary must be spliced to the home arm");
+assert.ok(decisionsOut.includes('return (globalThis.__CLAUDESK_SURFACE__=e?"hub":t?"outside":"none","outside")'),
   "the route surface kind must be spliced to the outside arm");
-assert.ok(decisionsOut.includes('return{variant:"none",settled:state.settled}'),
-  "the composer's own literal variant default must survive untouched");
+assert.ok(decisionsOut.includes('let h=isStart()?firstDefault:t'),
+  "a ternary naming another component's default must survive untouched");
 assert.ok(decisionsOut.includes('return opts.mode?"hub":"none"'),
   "a two-name conditional must survive untouched");
 const decisionsCompiled = await minify(`${variantFixture()}\n${surfaceFixture()}`, {
