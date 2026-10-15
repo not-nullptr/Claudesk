@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { linkSync, readFileSync, symlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import {
   lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile,
 } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 // The Desktop refuses to publish a routine's own file when it is hard-linked to
@@ -13,17 +16,23 @@ import vm from "node:vm";
 // but on its own it strands the routine: every later edit, from every client,
 // answers "Not written: this task's file is hard-linked to another file. Replace
 // it with a plain copy." and only somebody with shell access on that machine can
-// clear it.
+// clear it. The store checks on every write, so it stays stuck.
 //
-// The wrapper does what the refusal asks, at the main process boundary where the
-// writing IPCs already cross: move the linked file aside, so the store's own
-// write creates a plain one. These checks drive it through a store that refuses
-// exactly like the Desktop's does, and hold the repair to its reach — both
-// routine trees, every root the Desktop's own resolver can answer with, the two
-// argument shapes a task id arrives in, and the sweep when the id names no
-// directory — and to its limits: a plain file and a symlink are left alone, a
-// read or a status change repairs nothing, and a refusal the repair cannot clear
-// comes back to the client with what the repair saw.
+// Two layers do what the refusal asks, and these checks drive each through a
+// store that refuses exactly like the Desktop's does:
+//
+//   * the wrapper, at the main process boundary where the writing IPCs already
+//     cross, repairing by task id under the roots the Desktop resolves and
+//     sweeping them when the id names no directory;
+//   * the bridge, where the browser's calls already pass, repairing the path
+//     Desktop itself answers for the task — the store's own word for where its
+//     files are — and reporting what it saw when a refusal survives it.
+//
+// Each is also held to its limits: a plain file and a symlink are left alone, a
+// read or a status change repairs nothing, and no routine the write never named
+// is touched.
+
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
 const start = wrapper.indexOf("// A routine's files belong to the Desktop");
@@ -261,6 +270,191 @@ assert.equal(
 assert.equal((await lstat(join(idleDir, "SKILL.md"))).nlink, 2,
   "a status change does not repair — it writes no task file");
 assert.ok(!(await readdir(idleDir)).some((name) => name.startsWith("SKILL.md.hardlinked-")));
+
+// --- the bridge: the repair uses Desktop's own answer for the file ----------
+// A browser's routine write goes through the bridge's IPC route, so the repair
+// belongs there too — and there it can ask Desktop where the task keeps its
+// files instead of guessing a directory. This fixture keeps the task files
+// somewhere no wrapper root covers, on purpose: the repair has to be reading
+// Desktop's answer, not looking under the usual trees.
+const bridgeHome = await mkdtemp(join(tmpdir(), "routine-link-bridge-"));
+const storeRoot = join(bridgeHome, "store-elsewhere");
+const desktopRefusal =
+  "Error invoking remote method '$eipc_message$probe_$_claude.web_$_CoworkScheduledTasks_$_updateScheduledTask':"
+  + " Error: Not written: this task's file is hard-linked to another file. Replace it with a plain copy.";
+
+const bridgeTask = "schedule-test";
+const bridgeFile = join(storeRoot, "imported-9f3c", "SKILL.md");
+const bridgeTwin = join(bridgeHome, "authorized_keys");
+const stubbornTask = "schedule-stubborn";
+const stubbornFile = join(storeRoot, "stubborn", "SKILL.md");
+const stubbornTwin = join(bridgeHome, "stubborn-twin");
+await mkdir(join(storeRoot, "imported-9f3c"), { recursive: true });
+await mkdir(join(storeRoot, "stubborn"), { recursive: true });
+await writeFile(bridgeFile, "ssh-rsa AAAA the other name's bytes\n");
+await writeFile(stubbornFile, "stubborn\n");
+linkSync(bridgeFile, bridgeTwin);
+linkSync(stubbornFile, stubbornTwin);
+
+// Desktop, as far as this route is concerned: it answers its task list with the
+// path each task's files live at, and its store refuses a linked path before it
+// writes — the two facts the repair runs on.
+const desktop = {
+  listed: [
+    { id: bridgeTask, filePath: bridgeFile, enabled: false, createdAt: 0 },
+    { id: stubbornTask, filePath: stubbornFile, enabled: false, createdAt: 0 },
+  ],
+  calls: [],
+  writes: [],
+  send(response, payload) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(payload));
+  },
+};
+const stub = http.createServer((request, response) => {
+  handleStubRequest(request, response).catch((error) => {
+    // A fixture that throws must not take the process (and the bridge's
+    // transport, which is this very server) down with it: answer, and let the
+    // check that made the request see the failure.
+    console.error(`[stub] ${request.method} ${request.url} failed:`, error);
+    desktop.send(response, { ok: false, error: String(error?.message ?? error) });
+  });
+});
+async function handleStubRequest(request, response) {
+  let raw = "";
+  for await (const chunk of request) raw += chunk;
+  const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+  if (pathname === "/health") { desktop.send(response, { ok: true, surfaces: {} }); return; }
+  if (pathname === "/events" || pathname === "/notifications") {
+    desktop.send(response, { ok: true, value: [] });
+    return;
+  }
+  let body = {};
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch {
+    desktop.send(response, { ok: true, value: null });
+    return;
+  }
+  desktop.calls.push({ surface: body.surface, method: body.method, args: body.args });
+  if (body.method === "getAllScheduledTasks") {
+    desktop.send(response, { ok: true, value: desktop.listed });
+    return;
+  }
+  if (body.method !== "updateScheduledTask") {
+    desktop.send(response, { ok: true, value: null });
+    return;
+  }
+  const scheduledTaskId = body.args?.[0]?.scheduledTaskId;
+  const file = desktop.listed.find((task) => task.id === scheduledTaskId)?.filePath;
+  desktop.writes.push({ scheduledTaskId, path: file ?? null });
+  if (!file) { desktop.send(response, { ok: false, error: desktopRefusal }); return; }
+  if (scheduledTaskId === stubbornTask) {
+    // A link that comes back after every repair: the refusal cannot be cleared,
+    // and what the repair saw is the only thing left to report.
+    await rm(stubbornTwin, { force: true });
+    await writeFile(file, "stubborn\n");
+    linkSync(file, stubbornTwin);
+    desktop.send(response, { ok: false, error: desktopRefusal });
+    return;
+  }
+  // The store's own writer: a path that carries a second link is refused, and
+  // anything else is written — created, when the repair left nothing there.
+  const info = await lstat(file).catch(() => null);
+  if (info?.isFile() && info.nlink > 1) {
+    desktop.send(response, { ok: false, error: desktopRefusal });
+    return;
+  }
+  await writeFile(file, "written by the store\n");
+  desktop.send(response, { ok: true, value: { scheduledTaskId } });
+}
+
+const bridgePort = 8191;
+const stubPort = 8192;
+// The bridge reads the release manifest the image writes at build time; this
+// checkout only carries the source it is built from.
+const releaseFile = `${root}bridge/release.json`;
+const createdRelease = !existsSync(releaseFile);
+if (createdRelease) writeFileSync(releaseFile, readFileSync(`${root}config/release.json`));
+await new Promise((resolve) => stub.listen(stubPort, "127.0.0.1", resolve));
+const child = spawn(process.execPath, [`${root}bridge/server.mjs`], {
+  env: {
+    ...process.env,
+    BRIDGE_PORT: String(bridgePort),
+    BRIDGE_HOST: "127.0.0.1",
+    COWORK_INTERNAL_URL: `http://127.0.0.1:${stubPort}`,
+    AUTH_IDENTITY_URL: "",
+  },
+  stdio: ["ignore", "pipe", "inherit"],
+});
+try {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("the bridge did not start")), 10000);
+    child.stdout.on("data", (chunk) => {
+      if (String(chunk).includes("listening on")) { clearTimeout(timer); resolve(); }
+    });
+    child.on("exit", (code) => reject(new Error(`the bridge exited with ${code}`)));
+  });
+  const call = async (scheduledTaskId) => {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/api/remote/ipc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        surface: "CoworkScheduledTasks",
+        method: "updateScheduledTask",
+        args: [{ scheduledTaskId, prompt: "new" }],
+      }),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+
+  // The repair runs before the write, off Desktop's own path for the task — and
+  // the store's write lands on a plain file.
+  const updated = await call(bridgeTask);
+  assert.equal(updated.status, 200, `the write should succeed, got ${JSON.stringify(updated.body)}`);
+  assert.equal(updated.body.ok, true);
+  assert.equal(await readFile(bridgeFile, "utf8"), "written by the store\n",
+    "the store's write landed after the repair");
+  assert.equal((await lstat(bridgeFile)).nlink, 1, "on a plain file");
+  const aside = (await readdir(join(storeRoot, "imported-9f3c")))
+    .find((name) => name.startsWith("SKILL.md.hardlinked-"));
+  assert.ok(aside, "the linked file was moved aside, beside the task");
+  assert.equal(await readFile(join(storeRoot, "imported-9f3c", aside), "utf8"),
+    "ssh-rsa AAAA the other name's bytes\n", "and it is the linked file itself, not a copy of a write");
+  assert.equal(await readFile(bridgeTwin, "utf8"), "ssh-rsa AAAA the other name's bytes\n",
+    "the other name keeps its bytes");
+  const listIndex = desktop.calls.findIndex((entry) => entry.method === "getAllScheduledTasks");
+  const firstWrite = desktop.calls.findIndex((entry) => entry.method === "updateScheduledTask");
+  assert.ok(listIndex !== -1 && listIndex < firstWrite,
+    "the path came from Desktop's own task list, before the store was asked to write");
+
+  // A refusal that survives the repair and one retry comes back with what the
+  // repair saw — the machine it happens on is one nobody logs into.
+  const stubborn = await call(stubbornTask);
+  assert.equal(stubborn.status, 500);
+  assert.match(String(stubborn.body.error), /hard-linked to another file/,
+    "the store's own refusal is preserved");
+  assert.match(String(stubborn.body.error),
+    /\[cowork-bridge: routine file repair saw .*moved aside \(was nlink 2\)/,
+    "and it names the repair it performed");
+  assert.equal(
+    desktop.writes.filter((entry) => entry.scheduledTaskId === stubbornTask).length, 2,
+    "one refusal, one retry",
+  );
+
+  // A task Desktop does not list is reported as such rather than guessed at:
+  // the repair says where it looked for the answer.
+  const unknown = await call("schedule-unknown");
+  assert.equal(unknown.status, 500);
+  assert.match(String(unknown.body.error),
+    /\[cowork-bridge: routine file repair saw the Desktop's list has no task "schedule-unknown" \(2 listed\)/,
+    "the note says what Desktop answered");
+} finally {
+  child.kill("SIGKILL");
+  stub.close();
+  await rm(bridgeHome, { recursive: true, force: true });
+  if (createdRelease) rmSync(releaseFile, { force: true });
+}
 
 await rm(home, { recursive: true, force: true });
 console.log("routine-task-file-link-smoke: ok");

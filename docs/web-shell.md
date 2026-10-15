@@ -456,25 +456,31 @@ files (`SKILL.md`, and the watcher script beside it) through a writer that stops
 with `Not written: this task's file is hard-linked to another file. Replace it
 with a plain copy.` when the path carries a second hard link — the redirect a
 sandboxed agent can set up through a shared folder, since the write would then
-land on the link's other name instead of on the task. No browser can clear that,
-and the store checks it on every write, so until the file becomes a plain copy on
-that machine every edit answers 500, from every client. The wrapper does what the
-refusal asks, at the main process boundary where the writing IPCs already pass:
-on `updateScheduledTask` and `updateScheduledTaskFileContent` it moves any linked
-file out of the task's own directory (`SKILL.md.hardlinked-<stamp>`) before
-relaying the call, and if the refusal still arrives it sweeps the routine
-directories under every root the Desktop's resolver can answer with, repairs, and
-retries once. Nothing is ever written through the link, so the other name keeps
-its bytes, and the store's own write lands on a plain file — including the
-agent's `update_scheduled_task` tool path, which writes in the main process
-without ever crossing an IPC. The id comes from the call's own arguments (the
-task object's `scheduledTaskId`, or a bare string argument), and when a refusal
-cannot be cleared the store's error comes back with what the repair saw appended
-to it — the id, the directories that were searched, and whether a linked file was
-found anywhere under them — so a stuck routine can be diagnosed from the browser
-that hit it rather than from a shell on that machine. The repair runs at a write
-rather than as a sweep of its own, so a routine nobody edits is left exactly as
-the store wrote it.
+land on the link's other name instead of on the task. The store checks on every
+write, so until that file is a plain copy on that machine every edit answers 500,
+from every client, and a browser cannot make it one. (Current Desktop builds gate
+the refusal behind a rollout flag and repair the link themselves while it is off;
+it reads on here.)
+
+Both layers this deployment owns do what the refusal asks — move the linked file
+aside (`SKILL.md.hardlinked-<stamp>`), and let the store's own write create a
+plain one. The bridge, where a browser's calls already pass, asks Desktop for the
+task's own `filePath` first: its task list carries it, and that is the store's own
+answer for where its files live, where a store is free not to name the directory
+for the task id. It moves whatever is linked out of that file's directory, relays
+the call, and repairs and retries once if the refusal still arrives. The wrapper
+does the same at the main process boundary the writing IPCs cross, by task id
+under every root the Desktop's resolver can answer with — the configured
+`coworkUserFilesPath` and the fallbacks it resolves for itself — sweeping those
+roots when the id names no directory; that is the layer that covers the Desktop
+window's own routines list, and the agent's `update_scheduled_task` tool path,
+neither of which crosses the bridge. Neither writes through the link, so the
+other name keeps its bytes, and the moved file stays beside the task for
+inspection. When a refusal survives the repair, the error the client sees carries
+what the repair saw — the path Desktop answered or the reason it answered none,
+and how many links the file had — so a routine stuck on a machine nobody logs
+into is diagnosable from the browser that hit it. Neither repair runs as a sweep
+of its own: a routine nobody edits is left exactly as the store wrote it.
 
 ## Home greeting
 

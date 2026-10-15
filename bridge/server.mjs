@@ -1,8 +1,8 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
-import { extname, normalize, resolve } from "node:path";
+import { lstat, readFile, readdir, rename, stat } from "node:fs/promises";
+import { dirname, extname, join, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
 import {
   createDownloadHandler,
@@ -2809,6 +2809,142 @@ async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = fals
   console.log(`[cowork-bridge] start ${cwd}: filled permissionMode=${mode} from the stored folder pick`);
 }
 
+// A routine's own file is the one write the Desktop refuses *by design*. Its
+// store will not publish a SKILL.md that carries a second hard link, because
+// writing "through" the link would land on the link's other name rather than on
+// the task — the redirect a sandboxed agent can set up through a shared folder —
+// so the update stops with "Not written: this task's file is hard-linked to
+// another file. Replace it with a plain copy." The refusal is right, and on its
+// own it strands the routine: the store checks on every write, so every later
+// edit, from every client, fails the same way until that file on that machine is
+// a plain copy, which is exactly what a browser cannot make it. (Recent Desktop
+// builds gate the refusal behind a rollout flag and repair the link themselves
+// while it is off; it reads on here.)
+//
+// Do what the refusal asks, in the bridge, where the call already passes: ask
+// Desktop for the task's own `filePath` — its task list carries it, and that is
+// the store's own answer, so the repair does not have to guess a directory that
+// a store is free not to name for the task id — move the linked file aside, and
+// let the store's write create a plain one. Nothing is ever written through the
+// link, so the other name keeps its bytes; the moved file stays beside the task
+// for inspection, and a refusal that survives says what the repair saw.
+const routineTaskFileWriteMethods = new Set([
+  "updateScheduledTask",
+  "updateScheduledTaskFileContent",
+]);
+const routineFileLinkSuffix = ".hardlinked";
+
+function routineTaskIdFromInvocation(method, args) {
+  if (!routineTaskFileWriteMethods.has(method)) return null;
+  const params = (args ?? []).find(
+    (value) => value && typeof value === "object" && !Array.isArray(value),
+  );
+  const id = params?.scheduledTaskId ?? params?.id;
+  return typeof id === "string" && id !== "" ? id : null;
+}
+
+// Desktop's own answer for where a task keeps its files. A task whose files live
+// on another machine answers a path that is not here, which the repair reports
+// rather than guesses at.
+async function routineTaskFilePath(scheduledTaskId) {
+  const tasks = await desktop.invoke("CoworkScheduledTasks", "getAllScheduledTasks", []);
+  if (!Array.isArray(tasks)) return { state: "the Desktop listed no tasks" };
+  const task = tasks.find((entry) => (entry?.id ?? entry?.scheduledTaskId) === scheduledTaskId);
+  if (!task) {
+    return { state: `the Desktop's list has no task "${scheduledTaskId}" (${tasks.length} listed)` };
+  }
+  const filePath = task.filePath;
+  if (typeof filePath !== "string" || filePath === "") {
+    return { state: `the Desktop listed "${scheduledTaskId}" without a file path` };
+  }
+  return { state: "path", filePath };
+}
+
+// Moves one linked file out of the way, and answers with what it saw — the note
+// travels back to the client when the write is refused anyway.
+async function repairLinkedRoutineFile(filePath) {
+  let info;
+  try {
+    info = await lstat(filePath);
+  } catch (error) {
+    return `${filePath}: ${error?.code ?? "unreadable"}`;
+  }
+  if (!info.isFile()) return `${filePath}: not a file`;
+  if (info.nlink <= 1) return `${filePath}: plain (nlink ${info.nlink})`;
+  const aside = `${filePath}${routineFileLinkSuffix}-${Date.now()}`;
+  try {
+    await rename(filePath, aside);
+  } catch (error) {
+    return `${filePath}: hard-linked (nlink ${info.nlink}), could not be moved aside (${error?.message || error})`;
+  }
+  console.log(
+    `[cowork-bridge] routine file repair: ${filePath} was hard-linked to another name`
+      + ` (nlink ${info.nlink}, inode ${info.ino}); moved it to ${aside}`
+      + " so the Desktop writes a plain file",
+  );
+  return `${filePath}: moved aside (was nlink ${info.nlink})`;
+}
+
+async function repairRoutineTaskFileForWrite(method, args) {
+  const scheduledTaskId = routineTaskIdFromInvocation(method, args);
+  if (scheduledTaskId === null) return `the call names no task`;
+  let located;
+  try {
+    located = await routineTaskFilePath(scheduledTaskId);
+  } catch (error) {
+    return `could not ask the Desktop where "${scheduledTaskId}" keeps its file: ${error?.message || error}`;
+  }
+  if (located.state !== "path") return located.state;
+  const seen = [await repairLinkedRoutineFile(located.filePath)];
+  // The watcher script sits in the same directory and is published by the same
+  // writer, so a link on it blocks the update exactly as SKILL.md's does. Only
+  // linked files are touched, and only inside the task's own directory.
+  const directory = dirname(located.filePath);
+  let entries = [];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {}
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.includes(routineFileLinkSuffix)) continue;
+    const sibling = join(directory, entry.name);
+    if (sibling === located.filePath) continue;
+    const note = await repairLinkedRoutineFile(sibling);
+    if (!note.endsWith("plain (nlink 1)")) seen.push(note);
+  }
+  return seen.join("; ");
+}
+
+function isLinkedRoutineFileRefusal(error) {
+  return /hard-linked to another file/.test(String(error?.message ?? error));
+}
+
+// Every routine write the browser makes goes through here: the repair asks
+// Desktop for the path itself, and a refusal that survives one repair and one
+// retry comes back with what the repair saw, so a routine stuck on a machine
+// nobody logs into is diagnosable from the browser that hit it.
+async function invokeWithRoutineFileRepair(surface, method, args, argsEncoding) {
+  if (surface !== "CoworkScheduledTasks" || !routineTaskFileWriteMethods.has(method)) {
+    return desktop.invoke(surface, method, args, argsEncoding);
+  }
+  const seen = [await repairRoutineTaskFileForWrite(method, args)];
+  try {
+    return await desktop.invoke(surface, method, args, argsEncoding);
+  } catch (error) {
+    if (!isLinkedRoutineFileRefusal(error)) throw error;
+    // The path can also turn up linked between the repair and the write, and the
+    // list is read again so a task whose file moved is still found.
+    seen.push(await repairRoutineTaskFileForWrite(method, args));
+    try {
+      return await desktop.invoke(surface, method, args, argsEncoding);
+    } catch (retryError) {
+      if (!isLinkedRoutineFileRefusal(retryError)) throw retryError;
+      throw new Error(
+        `${String(retryError?.message ?? retryError)} [cowork-bridge: routine file repair saw ${seen.join(" | ")}]`,
+      );
+    }
+  }
+}
+
 async function handleApi(request, response, url) {
   // The login shell refuses the entire API surface, with or without a session.
   // It exists to serve the sign-in page and nothing else, so there is no route
@@ -3122,7 +3258,7 @@ async function handleApi(request, response, url) {
           body.argsEncoding,
         );
       } else {
-        value = await desktop.invoke(
+        value = await invokeWithRoutineFileRepair(
           body.surface,
           body.method,
           body.args ?? [],
