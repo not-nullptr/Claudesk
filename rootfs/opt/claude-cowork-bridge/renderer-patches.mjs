@@ -346,13 +346,20 @@ const projectsPickerSectionOn = "!0";
 // web-shell mode, and not required.
 const permissionBindingPatchId = "web-permission-binding";
 const permissionBindingOn = "!0";
-// The composer's permission picker asks for the mode list with
+// The session-scoped permission pickers ask for their mode list with
 // `excludeBypass: true`, which drops "Skip all approvals" — the row the
-// deployment's own settings and rollout gate exist to offer. It used to be in
-// the control this replaced, so the flag is cleared: the picker is scoped to a
-// session, and a session can hold that mode. Pinned as the `excludeBypass`
-// property of the object that also carries `sessionBinding`, which is the
-// composer's own picker and not the other callers of the same component.
+// deployment's own settings and its two rollout gates exist to offer. It used to
+// be in the control the composer's picker replaced, so the flag is cleared: these
+// pickers are scoped to a session, and a session can hold that mode.
+//
+// Pinned as the `excludeBypass` property of an object that also carries
+// `sessionBinding` — that pair is what marks a session picker, as opposed to the
+// callers of the same component that pass `excludeBypass` without a binding. Two
+// sites match, deliberately: the composer's picker and the one the session
+// surface draws. Both are session-scoped, so both get the row back; scoping the
+// splice to the composer alone would mean keying it on a prop (`placement`,
+// `triggerSize`) that says nothing about the reason and would silently stop
+// matching the day it moved.
 const permissionBypassPatchId = "web-permission-bypass-row";
 const permissionBypassOff = "!1";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this

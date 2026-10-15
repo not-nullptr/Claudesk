@@ -744,10 +744,12 @@ else in the renderer graph. Spliced only in web-shell mode, and not required.
 The picker also asks for its mode list with `excludeBypass: true`, which drops the
 "Skip all approvals" row — the row the deployment's own settings and rollout gate
 exist to offer, and which the control this replaced used to show.
-`web-permission-bypass-row` clears that flag: the picker is scoped to a session
-and a session can hold that mode. It is pinned as the `excludeBypass` property of
-the object that also carries `sessionBinding`, so the other callers of the same
-component are untouched. Spliced only in web-shell mode, and not required.
+`web-permission-bypass-row` clears that flag: these pickers are scoped to a
+session, and a session can hold that mode. It is pinned as the `excludeBypass`
+property of an object that also carries `sessionBinding`, which is what marks a
+session picker; two sites match — the composer's and the one the session surface
+draws — and both get the row back. Callers that pass `excludeBypass` without a
+binding are untouched. Spliced only in web-shell mode, and not required.
 
 All eleven change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
