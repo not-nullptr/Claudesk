@@ -164,6 +164,22 @@ const homeArrangementReplacement = '"outside"';
 const projectsAllowedPatchId = "web-projects-allowed";
 const projectsLimitsFeature = "claude_ai_projects_limits";
 const projectsLimitsField = "max_free_projects";
+// The sidebar's own "Projects" entry is dropped by a clause the web bundle does
+// not have at all. Both builds filter their nav items through one `||` chain —
+// a mode mismatch, a per-item eligibility call, and "no project scope" — and the
+// Desktop build adds one more: `… && surface === "chat" && !isChatIn3pSupported`.
+// The operand is a module constant read once from `globalThis.desktopBootFeatures`
+// — the Desktop main process's app-feature table, which a browser page never has
+// — so it is false here, and on the chat surface (which is the surface this shell
+// renders) the entry is always filtered out. The clause is exactly the one that
+// separates the two builds, so it is removed: the `||` node it is the last
+// operand of is spliced to its own left side. It is pinned by the two literals
+// it compares against — "projects" and "chat", the only place in the renderer
+// graph they appear in one conjunction — plus the negated binding it ends with,
+// so no other nav clause can match. Spliced only in web-shell mode, and not
+// required: a bundle that no longer matches leaves the entry hidden rather than
+// failing renderer preparation.
+const projectsNavPatchId = "web-projects-sidebar-entry";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -696,6 +712,32 @@ function projectsAllowedReplacement(source, node) {
     + "||__claudeskPlanRaven}";
 }
 
+// The nav clause that hides the sidebar's Projects entry on the chat surface:
+// the trailing `|| id === "projects" && surface === "chat" && !supported` of a
+// filter's `||` chain. Matched by its own two literals and the negated binding
+// it ends with, so no other navigation clause can match.
+function projectsNavClauseTarget(node) {
+  if (node.type !== "LogicalExpression" || node.operator !== "||") return false;
+  const right = unwrap(node.right);
+  if (right?.type !== "LogicalExpression" || right.operator !== "&&") return false;
+  const operands = [];
+  const flatten = (expression) => {
+    const inner = unwrap(expression);
+    if (inner?.type === "LogicalExpression" && inner.operator === "&&") {
+      flatten(inner.left);
+      flatten(inner.right);
+    } else operands.push(inner);
+  };
+  flatten(right);
+  const compares = (expression, value) => expression?.type === "BinaryExpression"
+    && ["===", "=="].includes(expression.operator)
+    && (literal(expression.left, value) || literal(expression.right, value));
+  const negated = operands.some(expression => expression?.type === "UnaryExpression"
+    && expression.operator === "!" && expression.argument.type === "Identifier");
+  return negated && operands.some(expression => compares(expression, "projects"))
+    && operands.some(expression => compares(expression, "chat"));
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1223,6 +1265,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         end: target.body.end,
         original: source.slice(target.body.start, target.body.end),
         replacement: projectsAllowedReplacement(source, target) });
+    }
+    // The sidebar clause that hides the Projects entry: exactly one `||` chain
+    // in the chunk ends with that conjunction, or nothing is spliced.
+    const navClauses = [];
+    walk(ast, [], (node) => { if (projectsNavClauseTarget(node)) navClauses.push(node); });
+    if (navClauses.length === 1) {
+      const target = navClauses[0];
+      patches.push({ id: projectsNavPatchId, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end),
+        replacement: source.slice(target.left.start, target.left.end) });
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

@@ -42,6 +42,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     enqueueRelayedEvent: (value) => enqueued.push(value),
     remoteFolderPickTimeoutMs: 60,
     remoteFolderPickerEnabled: true,
+    process: { platform: "linux" },
     Date, clearTimeout, console,
     // The wrapper unrefs its timers (Electron keeps the loop alive); the test
     // must not, or the timeout case would settle the process instead.
@@ -81,6 +82,11 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   });
   const request = enqueued.at(-1);
   assert.equal(request.payload.multiple, true);
+  // Electron's `createDirectory` is the macOS open panel's canCreateDirectories;
+  // the GTK/Win32 choosers this replaces always offer making a folder, so a
+  // flow that asks only for `openDirectory` still gets the affordance there.
+  assert.equal(request.payload.allowCreate, true,
+    "a directory dialog without createDirectory must still offer creating one on this host");
   sandbox.resolveRemoteFolderPick({ id: request.payload.id, canceled: true });
   assert.deepEqual(plain(await windowForm), { canceled: true, filePaths: [] });
 
@@ -92,6 +98,43 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
   assert.deepEqual(plain(await fakeDialog.showOpenDialog({ properties: ["openDirectory"] })),
     { canceled: true, filePaths: [] }, "an unanswered dialog answers as a cancel");
+}
+
+// --- wrapper: on macOS the property is what decides it ----------------------
+// There the native open panel really does withhold the control unless the
+// caller asked for `createDirectory`, so the picker must not invent it.
+{
+  const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
+  const relaySource = wrapper.slice(
+    wrapper.indexOf("const folderPickRelay = {"),
+    wrapper.indexOf("const server = http.createServer("),
+  );
+  const enqueued = [];
+  const fakeDialog = {
+    async showOpenDialog() { return { canceled: true, filePaths: [] }; },
+  };
+  const sandbox = {
+    require: () => ({ dialog: fakeDialog }),
+    randomBytes: () => ({ toString: () => "0011223344556677" }),
+    enqueueRelayedEvent: (value) => enqueued.push(value),
+    remoteFolderPickTimeoutMs: 60,
+    remoteFolderPickerEnabled: true,
+    process: { platform: "darwin" },
+    Date, clearTimeout, console,
+    setTimeout: (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref = () => timer;
+      return timer;
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(relaySource, sandbox);
+  void fakeDialog.showOpenDialog({ properties: ["openDirectory"] });
+  assert.equal(enqueued.at(-1).payload.allowCreate, false,
+    "without createDirectory, macOS keeps the native panel's refusal");
+  void fakeDialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  assert.equal(enqueued.at(-1).payload.allowCreate, true,
+    "createDirectory still asks for the control on macOS");
 }
 
 // --- realtime: the request reaches the browser as a relayed event -----------

@@ -355,6 +355,16 @@ chunk. Spliced only in web-shell mode, and not required. The bridge supplies the
 feature the restored predicate reads (`grantProjectsLimits`), because a
 self-hosted org carries no plan capability.
 
+`web-projects-sidebar-entry` removes the second gate on the same feature, the one
+that keeps the sidebar's own entry hidden after the routes start working: the
+Desktop build appends `… && surface === "chat" && !isLocalChatSupported` to its
+nav filter's `||` chain, where the operand is a module constant read once from
+`globalThis.desktopBootFeatures` — the Desktop main process's table, absent in a
+browser — and the web bundle has no such clause. The `||` node that clause is the
+last operand of is spliced to its own left side. It is pinned by the two literals
+it compares against (`"projects"` and `"chat"`) and the negated binding it ends
+with. Spliced only in web-shell mode, and not required.
+
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

@@ -980,6 +980,49 @@ const projectsCompiled = await minify(projectsChunk, {
 assert.equal(inspectRenderer(projectsCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-allowed").length, 1,
   "a mangled predicate must still be rebuilt once");
+// The sidebar clause. Both builds filter their nav items through one `||`
+// chain; the Desktop build adds a trailing conjunction that hides the Projects
+// entry on the chat surface whenever `globalThis.desktopBootFeatures` — the
+// Desktop main process's table, absent in a browser — does not report local chat
+// as supported. The web bundle has no such clause, so on the chat surface the
+// entry always shows; the patch removes it by splicing the `||` node to its own
+// left side.
+const navChain = (clause = '||n.id==="projects"&&t==="chat"&&!supported') =>
+  'function navItems(){return items.filter(n=>{let r=F&&n.id==="scheduled";'
+  + 'return!(n.modes!==void 0&&!n.modes.includes(t)&&!r||!eligible(n,e)'
+  + '||n.id==="projects"&&!a&&!o' + clause + ')}).map(r=>r.href)}';
+assert.equal(inspectRenderer(navChain(), false, false).patches
+  .filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
+  "the nav clause is left alone outside web-shell mode");
+const navPatches = inspectRenderer(navChain(), false, true).patches
+  .filter(patch => patch.id === "web-projects-sidebar-entry");
+assert.equal(navPatches.length, 1, "the clause must be removed exactly once");
+assert.equal(navPatches[0].original.slice(navPatches[0].replacement.length),
+  '||n.id==="projects"&&t==="chat"&&!supported',
+  "only the trailing projects/chat conjunction is spliced away");
+// A conjunction that names only one of the two, or names both but does not end
+// in a negated binding, is a different clause and must survive.
+assert.equal(inspectRenderer(navChain('||n.id==="projects"&&!a'), false, true).patches
+  .filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
+  "a projects clause without the surface test must survive");
+assert.equal(inspectRenderer(navChain('||n.id==="projects"&&t==="chat"&&enabled'), false, true)
+  .patches.filter(patch => patch.id === "web-projects-sidebar-entry").length, 0,
+  "a conjunction not ending in a negated binding must survive");
+const navOut = patchRendererSources(
+  new Map([["nav.js", `${webShellFixtures}\n${accountMenuName}\n${navChain()}`]]), false, true)
+  .sources.get("nav.js");
+assert.ok(navOut.includes('||n.id==="projects"&&!a&&!o)}).map'),
+  "the chain must end at the project-scope clause the web bundle keeps");
+assert.ok(!navOut.includes('t==="chat"&&!supported'),
+  "the surface clause must not survive the splice");
+assert.ok(navOut.includes('!eligible(n,e)'),
+  "the rest of the chain must survive untouched");
+const navCompiled = await minify(navChain(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(navCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-sidebar-entry").length, 1,
+  "a mangled nav clause must still be removed once");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

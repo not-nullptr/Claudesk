@@ -167,10 +167,16 @@ mount runs. A dialog nobody answers times out as a cancel
 (`CLAUDE_REMOTE_FOLDER_PICK_TIMEOUT_MS`, default 5 minutes), so an agent turn
 cannot hang forever.
 
-The picker also gains a **New folder** action (the native dialog's
-`createDirectory`): `POST /api/remote/folders` creates a single, validated folder
-segment under the same workspace confinement as the listing, and the picker then
-opens it.
+The picker also gains a **New folder** action: `POST /api/remote/folders` creates
+a single, validated folder segment under the same workspace confinement as the
+listing, and the picker then opens it. Which dialogs offer it is not the native
+dialog's `createDirectory` property, though — that property is Electron's macOS
+open panel (`canCreateDirectories`, default true there), while the GTK and Win32
+choosers this picker replaces always offer making a folder whatever the caller
+asked for. So on every host but macOS the action is offered for any directory
+dialog, including the folder-grant flows that only ask for `openDirectory`; on
+macOS the property still decides, because there the native panel really does
+withhold the control.
 
 Note this is the *grant* path; the Cowork-on-web *device model* for browsing a
 paired computer's folders (above) is still unwired, and a deployment that
@@ -547,6 +553,24 @@ the renderer reads as no allowance exactly as it reads a missing entry. So the
 grant raises anything that is not already above zero and leaves a real allowance
 alone. Without it a free account — which is what a self-hosted org resolves to —
 has no allowance and projects stay shut.
+
+The **sidebar's own "Projects" entry** is a second, independent gate, and the one
+that is easiest to miss: with the predicate restored the routes work and created
+projects appear in the sidebar, but no entry leads to `/projects`. Both builds
+filter their nav items through one `||` chain — a mode mismatch, a per-item
+eligibility call, and "no project scope" — and the Desktop build appends one
+more: `… && surface === "chat" && !isLocalChatSupported`. That last operand is a
+module constant read once from `globalThis.desktopBootFeatures`, the Desktop main
+process's app-feature table, which a browser page never has; on the chat surface,
+which is the surface this shell renders, the entry is therefore always filtered
+out. The web bundle has no such clause at all, so the `web-projects-sidebar-entry`
+patch removes it — the `||` node it is the last operand of is spliced to its own
+left side. It is pinned by the two literals it compares against (`"projects"` and
+`"chat"`, the only place in the renderer graph they appear in one conjunction)
+and by the negated binding it ends with. Spliced only in web-shell mode, and not
+required: a bundle that no longer matches leaves the entry hidden rather than
+failing renderer preparation. It changes prepared-renderer bytes, so it ships
+with a `patchRelease` bump and needs the `claude-desktop` service rebuilt.
 
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`

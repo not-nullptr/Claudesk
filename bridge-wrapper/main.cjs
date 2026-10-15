@@ -2568,7 +2568,13 @@ function requestRemoteFolderPick(options) {
           ? options.defaultPath
           : null,
         multiple: properties.includes("multiSelections"),
-        allowCreate: properties.includes("createDirectory"),
+        // Electron's `createDirectory` describes the macOS open panel
+        // (`canCreateDirectories`) and default-true there; the GTK and Win32
+        // choosers this picker replaces always offer making a folder, whatever
+        // the caller asked for. So the property is not what decides it on those
+        // hosts — a flow that only asks for `openDirectory` still gets the
+        // native "create folder" affordance, and the picker has to match it.
+        allowCreate: properties.includes("createDirectory") || process.platform !== "darwin",
         at: Date.now(),
       },
     });
