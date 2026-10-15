@@ -1886,4 +1886,51 @@
     document.addEventListener("DOMContentLoaded", applyComposerClasses, { once: true });
     globalThis.requestAnimationFrame?.(applyComposerClasses);
   }
+
+  // TEMPORARY: report what the composer actually renders, so the project chip can
+  // be chased to the component that draws it. Remove once it is found.
+  if (config.webShell) {
+    const describe = (element) => {
+      if (element === null) return "none";
+      let attrs = "";
+      try {
+        attrs = [...element.attributes]
+          .filter((attribute) => attribute.name.startsWith("data-"))
+          .map((attribute) => attribute.name).join(",");
+      } catch {}
+      const classes = typeof element.className === "string" ? element.className : "";
+      return `${element.tagName.toLowerCase()}${attrs ? `[${attrs}]` : ""}`
+        + `{${classes.slice(0, 70)}}`;
+    };
+    const outline = (element, depth) => {
+      if (element === null || depth <= 0) return "";
+      return [...element.children].map((child) => {
+        const inner = outline(child, depth - 1);
+        return describe(child) + (inner ? `(${inner})` : "");
+      }).join(" ");
+    };
+    const paint = () => {
+      if (!document.body) return;
+      const parts = [];
+      const chin = document.querySelector("[data-chorus-chin-open]");
+      parts.push(`chin=${chin === null ? "no" : "yes"}`);
+      parts.push(`  kids=${outline(chin, 2).slice(0, 900) || "none"}`);
+      const slot = document.querySelector("[data-home-project-slot]");
+      parts.push(`slot=${slot === null ? "no" : `yes text=${JSON.stringify((slot.textContent || "").slice(0, 60))}`}`);
+      const editor = document.querySelector('[contenteditable="true"], textarea');
+      const chain = [];
+      for (let node = editor; node && node !== document.body && chain.length < 7;
+        node = node.parentElement) chain.push(describe(node));
+      parts.push(`editor=${chain.join(" < ") || "none"}`);
+      const overlay = document.createElement("pre");
+      overlay.id = "claudesk-composer-probe";
+      overlay.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;"
+        + "max-height:50vh;overflow:auto;margin:0;padding:6px;background:#111;color:#0f0;"
+        + "font:11px/1.35 monospace;white-space:pre-wrap";
+      overlay.textContent = parts.join("\n");
+      document.getElementById("claudesk-composer-probe")?.remove();
+      document.body.append(overlay);
+    };
+    for (const delay of [4000, 8000, 15000]) globalThis.setTimeout?.(paint, delay);
+  }
 })();
