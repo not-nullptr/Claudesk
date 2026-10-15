@@ -110,10 +110,9 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // deployment that already exposes the workspace as a folder wants.
 //
 // `yukon_silver_dramatic_shrimp_atrium` is the second half of that surface, and
-// the reason the chip it draws opens onto a bare search box. The gate is read
-// exactly once, as the capability object's `remoteProjectsEnabled`, and that one
-// name is what the composer's folder picker reads to decide whether it is the
-// claude.ai project picker or only a folder picker:
+// the value the picker's own capability reads. That capability is the feature
+// read the composer's folder picker consults to decide whether it is the claude.ai
+// project picker or only a folder picker:
 //
 //     atriumCreate   = remoteProjectsEnabled && projectsAllowance;
 //     showProjects   = !locked && atriumCreate && (!controlled || chatProjectsEnabled);
@@ -126,9 +125,14 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // last arm — "Search projects" instead of "Search or create a project". The
 // allowance is already granted (`grantProjectsLimits`), and the surface behind
 // the flag is the same project list the `/projects` routes and the sidebar entry
-// were restored for, so the gate is the whole of what was missing between this
-// deployment's picker and claude.ai's. It is the atrium rollout, read nowhere
-// else, so granting it moves only this surface.
+// were restored for.
+//
+// The feature name reaches the page nowhere else, so granting it moves only this
+// surface. It is not enough on its own: the Desktop build *folds* the capability
+// to a constant — `function remoteProjectsEnabled(){return read(thisFeature),FA}`
+// with `var FA=!1` — so the read is discarded and the answer is false whatever
+// this table says. The renderer patch `web-projects-atrium` unwraps that comma
+// sequence, which is what makes this grant observable; the two ship together.
 const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
   "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's

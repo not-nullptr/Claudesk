@@ -715,6 +715,29 @@ by the two prop names it destructures, `selectionChip` and `plainTrigger`, which
 the minifier leaves alone, and by returning `null` from a conditional. Spliced
 only in web-shell mode, and not required.
 
+**The picker's shape** is the last of these, and it is the one the page shows most
+plainly: with the chip drawing and the popup open, the popup is a bare search box
+— the placeholder reads "Search projects", there is no "Filter and sort" button
+on the search, no "New project" row and no "No projects yet." empty state. All
+four are switched on one capability:
+
+```js
+atriumCreate   = remoteProjectsEnabled && projectsAllowance;
+showProjects   = !locked && atriumCreate && (!controlled || chatProjectsEnabled);
+showFilterSort = remoteProjectsEnabled && !locked && !foldersOnly;
+```
+
+and `remoteProjectsEnabled` is the same fold as the projects predicate: the reads
+the atrium feature and then answers a module constant it never assigns,
+`function remoteProjectsEnabled(){return read("yukon_silver_dramatic_shrimp_atrium"),FA}`
+with `var FA=!1`. `web-projects-atrium` splices that comma sequence down to the
+read, so the capability answers what the deployment's growthbook table says —
+which is why the bridge also grants the gate, the way it grants
+`yukon_silver_folders`. The read keeps its expression position, so hook order is
+unchanged. The function is pinned by the feature-name literal, which the bundle
+spells only there, and by the two-expression sequence's shape. Spliced only in
+web-shell mode, and not required.
+
 The permission control is the same missing store showing up once more. The
 composer chooses that slot's content from a hook:
 
@@ -773,7 +796,7 @@ which matters here, because a build that folded those two-liners into a
 conditional expression would stop matching, and the click would go quiet rather
 than loud.
 
-All twelve change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All thirteen change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

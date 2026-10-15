@@ -320,6 +320,28 @@ const projectsBoundSlotPatchId = "web-projects-bound-slot";
 // only in web-shell mode, and not required.
 const projectsPickerSectionPatchId = "web-projects-picker-section";
 const projectsPickerSectionOn = "!0";
+// `remoteProjectsEnabled` — the capability that makes the picker the claude.ai
+// project picker rather than a folder picker. The Desktop build reads the atrium
+// feature and then answers a module constant it never assigns, exactly as the
+// projects predicate above does:
+//
+//   function remoteProjectsEnabled(){ return read("yukon_silver_dramatic_shrimp_atrium"), FA }
+//   var FA = !1;
+//
+// The comma sequence is the fold: the read happens and is thrown away, so the
+// capability answers false however the deployment's feature table reads. Three
+// things in the picker are switched on it — `showProjects` (which the patch above
+// has to force instead), `showFilterSort` (the search box's "Filter and sort"
+// button), and, through `atriumCreate`, whether `onCreateProject` is handed down
+// at all — which is both the "New project" row and the arm of the placeholder
+// ternary that reads "Search or create a project". Splicing the sequence down to
+// the read itself restores claude.ai's answer without moving the read: it stays
+// in the same expression position, so hook order is unchanged. The function is
+// pinned by the feature-name literal, which the bundle spells only here, and by
+// the two-expression sequence's shape, so an unrelated sequence cannot match.
+// Spliced only in web-shell mode, and not required.
+const projectsAtriumPatchId = "web-projects-atrium";
+const projectsAtriumFeature = "yukon_silver_dramatic_shrimp_atrium";
 // The permission picker's own binding, which is the same missing store once
 // more. The composer picks that control's content from a hook:
 //
@@ -1060,6 +1082,26 @@ function projectsPickerSectionTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The atrium capability's folded read: a function whose whole body returns the
+// two-expression comma sequence — the feature read, then the identifier the build
+// folds the answer to. Returns that sequence, the only part the patch rewrites.
+function projectsAtriumTarget(ast) {
+  const found = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return;
+    const statements = node.body.body;
+    if (statements.length !== 1 || statements[0].type !== "ReturnStatement") return;
+    const sequence = unwrap(statements[0].argument);
+    if (sequence?.type !== "SequenceExpression" || sequence.expressions.length !== 2) return;
+    const [read, folded] = sequence.expressions;
+    if (read?.type !== "CallExpression" || read.arguments.length !== 1) return;
+    if (!literal(read.arguments[0], projectsAtriumFeature)) return;
+    if (folded.type !== "Identifier") return;
+    found.push(sequence);
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The permission binding hook's guard: the `if` whose body hands back the object
 // carrying `autoPickIsDraftOnly`, which appears nowhere else in the graph.
 function permissionBindingTarget(ast) {
@@ -1645,6 +1687,7 @@ export const prefilterNeedles = [
   "stringsVouched", // home layout assignment
   "voyage_composer_marlin", // unified-composer design predicates
   "claude_ai_projects_limits", // projects-allowed predicate
+  "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -1798,6 +1841,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerSectionPatchId, start: pickerSection.start,
         end: pickerSection.end, original: source.slice(pickerSection.start, pickerSection.end),
         replacement: projectsPickerSectionOn });
+    }
+    // The atrium capability's folded read. The sequence is spliced down to the
+    // feature read itself, so the capability answers what the deployment's table
+    // says instead of the constant the Desktop build folded it to.
+    const atrium = projectsAtriumTarget(ast);
+    if (atrium) {
+      const read = atrium.expressions[0];
+      patches.push({ id: projectsAtriumPatchId, start: atrium.start, end: atrium.end,
+        original: source.slice(atrium.start, atrium.end),
+        replacement: source.slice(read.start, read.end) });
     }
     // The slot's bound-project branch, so the slot draws the selector instead of
     // the component that answers null without a resolved device binding.

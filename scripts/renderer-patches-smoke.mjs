@@ -980,6 +980,53 @@ const projectsCompiled = await minify(projectsChunk, {
 assert.equal(inspectRenderer(projectsCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-allowed").length, 1,
   "a mangled predicate must still be rebuilt once");
+// The atrium capability. The picker's `remoteProjectsEnabled` is the same fold
+// once more: the Desktop build reads the atrium feature and then answers a
+// module constant it never assigns, so the composer's picker is a folder picker.
+// The patch splices the comma sequence down to the read, keeping the read where
+// it was so hook order is unchanged.
+const atriumConstant = "foldedAtrium";
+const atriumReader = (name = "remoteProjectsEnabled") => `function ${name}(){return `
+  + `read("yukon_silver_dramatic_shrimp_atrium"),${atriumConstant}}`;
+const atriumChunk = `var ${atriumConstant}=!1;${atriumReader()}`
+  // The same reader in the same discarded position, naming a different feature:
+  // only the atrium literal pins the target, so this must survive untouched.
+  + `function otherFlags(){return read("ccr_auto_permission_mode"),${atriumConstant}}`
+  // A two-expression sequence whose read names no feature is not a target.
+  + `function unrelatedPair(){return read(),${atriumConstant}}`;
+assert.equal(inspectRenderer(atriumChunk, false, false).patches
+  .filter(patch => patch.id === "web-projects-atrium").length, 0,
+  "the atrium capability is left alone outside web-shell mode");
+const atriumPatches = inspectRenderer(atriumChunk, false, true).patches
+  .filter(patch => patch.id === "web-projects-atrium");
+assert.equal(atriumPatches.length, 1,
+  "exactly the reader naming the atrium feature must be unwrapped, and its sibling not");
+assert.equal(atriumPatches[0].original,
+  `read("yukon_silver_dramatic_shrimp_atrium"),${atriumConstant}`,
+  "only the comma sequence is spliced");
+assert.equal(atriumPatches[0].replacement, `read("yukon_silver_dramatic_shrimp_atrium")`,
+  "the sequence must be spliced down to the feature read itself");
+assert.equal(inspectRenderer(`${atriumReader()}\n${atriumReader("remoteProjectsEnabledB")}`,
+  false, true).patches.filter(patch => patch.id === "web-projects-atrium").length, 0,
+  "two candidates must refuse the splice rather than unwrap one of two");
+const atriumOut = patchRendererSources(
+  new Map([["atrium.js", `${webShellFixtures}\n${accountMenuName}\n${atriumChunk}`]]),
+  false, true).sources.get("atrium.js");
+assert.ok(atriumOut.includes(
+  'function remoteProjectsEnabled(){return read("yukon_silver_dramatic_shrimp_atrium")}'),
+  "the capability must answer the feature read instead of the folded constant");
+assert.ok(!atriumOut.includes(`read("yukon_silver_dramatic_shrimp_atrium"),${atriumConstant}`),
+  "the folded comma sequence must not survive the splice");
+assert.ok(atriumOut.includes(`read("ccr_auto_permission_mode"),${atriumConstant}`),
+  "a discarded read of another feature must survive untouched");
+assert.ok(atriumOut.includes(`function unrelatedPair(){return read(),${atriumConstant}}`),
+  "a sequence that names no feature must survive untouched");
+const atriumCompiled = await minify(atriumChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(atriumCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-atrium").length, 1,
+  "a mangled capability must still be unwrapped once");
 // The sidebar's Projects entry. Both builds filter their nav items through one
 // negated `||` chain, and both clauses about the entry itself are false on
 // claude.ai while being true here: one is Desktop-only (built on

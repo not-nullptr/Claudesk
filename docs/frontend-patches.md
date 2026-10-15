@@ -473,6 +473,31 @@ deployment with none, the flag is what decides. Forcing it is what showing
 projects in the composer means. It is pinned as the property inside an object
 literal, so the same name destructured as a pattern cannot match.
 
+`web-projects-atrium` restores the picker's *capability*, which is the last thing
+between this deployment's picker and claude.ai's. The composer's folder picker
+answers as the claude.ai project picker — the "Filter and sort" button on the
+search, the "New project" row, the "No projects yet." empty state, and the
+placeholder that reads "Search or create a project" rather than "Search
+projects" — only when `remoteProjectsEnabled` holds:
+
+```
+atriumCreate   = remoteProjectsEnabled && projectsAllowance;
+showProjects   = !locked && atriumCreate && (!controlled || chatProjectsEnabled);
+showFilterSort = remoteProjectsEnabled && !locked && !foldersOnly;
+```
+
+and that capability is the same fold as the predicate above: a function that
+reads `yukon_silver_dramatic_shrimp_atrium` and then answers a module constant it
+never assigns, `function remoteProjectsEnabled(){return read(thisFeature),FA}`
+with `var FA=!1`. The patch splices the comma sequence down to the read itself,
+so the capability answers what the deployment's GrowthBook table says — which is
+also why the two ship together with the bridge's grant of that gate. The read
+stays in the same expression position it was folded into, so hook order is
+unchanged. The function is pinned by the feature-name literal, which the bundle
+spells only there, and by the two-expression sequence's shape, so an unrelated
+sequence — or the same reader discarding a different feature's read — cannot
+match. Spliced only in web-shell mode, and not required.
+
 `web-permission-binding` fixes the composer's permission control, which is the
 same missing store again: the hook that feeds it answers only while the
 pending-first-send store exists, and with that null the slot draws a skeleton
