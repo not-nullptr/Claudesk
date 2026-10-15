@@ -102,6 +102,16 @@ sudo docker compose -f compose.yaml build \
 . "$project_dir/scripts/lib/image-release.sh"
 assert_images_current "$project_dir"
 
+# Prepare the renderer once, before anything is recreated. The generation is the
+# same in every container on the box — it depends only on the ion-dist, the
+# release and two flags — but until now each container computed it for itself,
+# so a deploy paid tens of seconds of acorn per account, competing for cores.
+# This leaves it in the directory the desktop service mounts read-only, and each
+# container adopts it instead. Accounts whose flags match no seed fall back to
+# preparing their own, so this is an optimization that cannot make a deploy
+# wrong, only slower. It needs the image the build above produced.
+sudo "$project_dir/scripts/seed-renderer.sh"
+
 # No --force-recreate. Compose recreates a service when its image or its config
 # hash changed, which covers everything this deploy touches: the build above
 # moves the image, and config/release.json is copied into the desktop image, so a
