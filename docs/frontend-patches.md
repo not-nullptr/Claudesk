@@ -373,8 +373,16 @@ a send is being prepared, so on a New page it short-circuits to `"disabled"` and
 renders nothing; claude.ai renders the slot there. Only the returned expression
 is spliced, leaving the declarators — the feature reads and surface hook calls —
 in place so hook order is unchanged, and the function is pinned by the four mode
-literals it answers with. Both are spliced only in web-shell mode, and neither is
-required.
+literals it answers with.
+
+`web-projects-composer-chin` carries the same feature the last mile. The unified
+composer selects its chin in one `if (position === "unified")` block whose second
+branch — the one that draws the project chip — requires the pending-first-send
+store too, so with that null the composer builds an empty collapsing wrapper and
+never reaches the slot predicate above. The patch forces that branch's test,
+keeping its own `kind === "chat"` operand so a cowork chin is not turned into a
+chat one; the block is pinned by the `"unified"` literal its guard tests. All
+three are spliced only in web-shell mode, and none is required.
 
 
 The code generator splices only the selected node. It does not regenerate

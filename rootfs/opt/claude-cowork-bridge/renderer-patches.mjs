@@ -204,6 +204,27 @@ const projectsNavPatchId = "web-projects-sidebar-entry";
 const projectsComposerPatchId = "web-projects-composer-slot";
 const projectsComposerMode = '"enabled"';
 const projectsComposerModes = ["disabled", "pending", "projects", "enabled"];
+// The unified composer picks its chin in one `if (position === "unified")` block,
+// and the branch that draws the project chip is the second one:
+//
+//   if (collapsed) return <Chin open={false}/>;            // empty, no chip
+//   if (kind === "chat" && firstSend !== null && h) return <xP/>;   // the chip
+//   if (kind === "chat" && shaped) return <SP/>;           // a different chin
+//
+// That branch never runs here. It needs the same pending-first-send store the
+// slot predicate above reads, plus a second surface value, and both are states a
+// browser page does not reach on a New page. The predicate patch cannot help,
+// because nothing calls it at all: the chin is drawn with an empty leading seat,
+// which is exactly what the temporary probe reported (`chin=yes`, an empty
+// collapsing wrapper, `slot=no`).
+//
+// Only the store and the surface value are forced — the leading `kind === "chat"`
+// operand is kept, so a cowork chin is not turned into a chat one — which is the
+// same "deployed answer, spliced at the consumer" the rest of this family uses.
+// The block is pinned by the `"unified"` literal its own guard tests, so no other
+// conditional in the graph can match. Spliced only in web-shell mode, and not
+// required.
+const projectsChinPatchId = "web-projects-composer-chin";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -784,6 +805,34 @@ function composerSlotTarget(node) {
   return projectsComposerModes.every(mode => literals.has(mode));
 }
 
+// The unified composer's chin chooser: the `if (position === "unified")` block,
+// and within it the branch whose test also asks for the pending-first-send store.
+function composerChinBranchTarget(node) {
+  if (node.type !== "IfStatement") return false;
+  const test = unwrap(node.test);
+  if (test?.type !== "BinaryExpression" || !["===", "=="].includes(test.operator)) return false;
+  if (!literal(test.left, "unified") && !literal(test.right, "unified")) return false;
+  if (node.consequent?.type !== "BlockStatement") return false;
+  return node.consequent.body.filter(entry => entry.type === "IfStatement")
+    .some(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
+      && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
+}
+
+// The test that branch should keep: the leading surface comparison, so a cowork
+// chin is not turned into a chat one. A block without one is left alone rather
+// than forced open.
+function composerChinTest(node) {
+  const branch = node.consequent.body.filter(entry => entry.type === "IfStatement")
+    .find(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
+      && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
+  if (!branch) return undefined;
+  return flattenLogical(branch.test, "&&").find((term) => {
+    if (term.type !== "BinaryExpression" || !["===", "=="].includes(term.operator)) return false;
+    const subject = literal(term.left, "chat") ? term.right : term.left;
+    return property(subject, "kind");
+  });
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1337,6 +1386,23 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsComposerPatchId, start: argument.start, end: argument.end,
         original: source.slice(argument.start, argument.end),
         replacement: projectsComposerMode });
+    }
+    // The unified composer's chin: the branch that draws the project chip is
+    // forced on, keeping that branch's own surface comparison. Accepted only when
+    // exactly one `"unified"` block is in the chunk.
+    const chinBlocks = [];
+    walk(ast, [], (node) => { if (composerChinBranchTarget(node)) chinBlocks.push(node); });
+    if (chinBlocks.length === 1) {
+      const block = chinBlocks[0];
+      const branch = block.consequent.body.filter(entry => entry.type === "IfStatement")
+        .find(entry => flattenLogical(entry.test, "&&").some(term => term.type === "BinaryExpression"
+          && ["!==", "=="].includes(term.operator) && (literal(term.left, null) || literal(term.right, null))));
+      const kept = composerChinTest(block);
+      if (branch && kept) {
+        patches.push({ id: projectsChinPatchId, start: branch.test.start, end: branch.test.end,
+          original: source.slice(branch.test.start, branch.test.end),
+          replacement: source.slice(kept.start, kept.end) });
+      }
     }
     // The home-layout assignment is accepted from its own chunk: exactly one
     // object of that shape and one gate literal, both parsed, or nothing.

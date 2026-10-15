@@ -591,8 +591,31 @@ function is pinned by the four mode literals it answers with, which appear
 together nowhere else in the renderer graph. Spliced only in web-shell mode, and
 not required.
 
-Both change prepared-renderer bytes, so they ship with a `patchRelease` bump and
-need the `claude-desktop` service rebuilt.
+The chin. Forcing that predicate was not enough on its own, and the reason is
+worth recording: the unified composer picks its chin in one
+`if (position === "unified")` block, and the branch that *draws* the project chip
+is the second one —
+
+```js
+if (collapsed)                     return <Chin open={false}/>;   // empty
+if (kind === "chat" && firstSend !== null && h) return <xP/>;      // the chip
+if (kind === "chat" && shaped)     return <SP/>;                   // another chin
+```
+
+— so with that store null the composer builds an **empty collapsing wrapper** and
+never calls the predicate at all. A DOM probe confirms the shape: the chin
+exists, its only contents are the collapsing wrapper, and no
+`[data-home-project-slot]` element is anywhere in the page. The
+`web-projects-composer-chin` patch forces that branch's test, keeping its own
+`kind === "chat"` operand — so a cowork chin is not turned into a chat one — and
+the block is pinned by the `"unified"` literal its own guard tests. Spliced only
+in web-shell mode, and not required.
+
+All three change prepared-renderer bytes, so they ship with a `patchRelease` bump
+and need the `claude-desktop` service rebuilt. Finding the chin also settled the
+order they have to be reasoned about in: a slot predicate that is never called is
+indistinguishable, from the page, from one that answers "disabled", and only
+looking at the DOM tells the two apart.
 
 Finally, the entry **document** carries two attributes claude.ai's *server*
 fills in and the Desktop package ships with neither — `data-new-page-layout="home"`
