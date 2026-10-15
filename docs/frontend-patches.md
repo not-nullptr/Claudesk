@@ -406,7 +406,15 @@ That patch also forces `noBackend` — a constant the Desktop build ships as `!0
 and the web bundle as `!1` — because the picker's whole return is switched on it:
 `noBackend` selects a wrapper that draws nothing here, where the web bundle draws
 the trigger the chip is made of. Restoring it is the web bundle's own value, not
-a choice made here. All seven are spliced only in web-shell mode, and none is
+a choice made here.
+
+`web-projects-bound-slot` forces off the slot component's *first* branch — the one
+for a project the composer is already bound to, which draws the same element with
+the same class and answers null until that project's device binding resolves. On
+a New page carrying a default project it produces the same empty div as every
+refusal above, one branch earlier. The patch routes the slot to the selector
+instead, and is pinned as the function whose returned conditional carries two
+slot elements. All eight are spliced only in web-shell mode, and none is
 required.
 
 

@@ -641,6 +641,28 @@ the declarator is where the platform read happens. The object is pinned by
 carrying both `isClaudeApp` and `webPickerEnabled`, and both of the flags it
 forces are spliced from its own property values.
 
+The seventh is one branch earlier than all of it, and it is the one that was
+actually in the way. The component that owns the slot element has two branches
+that draw it, with the same tag and the same class:
+
+```js
+!isClaudeApp() && hostProjectUuid !== undefined
+  ? <div data-home-project-slot …><BoundProject projectUuid={hostProjectUuid}/></div>
+  : mode === "enabled" || mode === "projects"
+    ? <div data-home-project-slot …><ProjectSelector …/></div>
+    : …
+```
+
+The first is for a project the composer is *already bound to*; it reads that
+project's device binding and answers null until it resolves, so on a New page that
+carries a default project it produces the same empty div the selector's refusals
+produce — indistinguishable in the DOM, and one branch earlier than every fix
+above. `web-projects-bound-slot` forces that test off, which routes the slot to
+the selector — the thing a composer that is *choosing* a project should draw. It
+is identified as the function whose returned conditional carries two
+`data-home-project-slot` elements, which is what separates it from its sibling.
+Spliced only in web-shell mode, and not required.
+
 The second flag is the one that actually decides the chip. The same object
 carries `noBackend`, which the Desktop build ships as `!0` and the web bundle as
 `!1`, and the component's whole return is switched on it:
@@ -677,7 +699,7 @@ by the two prop names it destructures, `selectionChip` and `plainTrigger`, which
 the minifier leaves alone, and by returning `null` from a conditional. Spliced
 only in web-shell mode, and not required.
 
-All seven change prepared-renderer bytes, so they ship with a `patchRelease` bump
+All eight change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

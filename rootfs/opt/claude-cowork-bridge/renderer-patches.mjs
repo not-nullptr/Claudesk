@@ -286,6 +286,19 @@ const projectsPickerForced = new Map([
 // Spliced only in web-shell mode, and not required.
 const projectsSelectorPatchId = "web-projects-selector-scope";
 const projectsSelectorOff = "!1";
+// The slot component's *first* branch. It draws the same element with the same
+// class as the branch that draws the selector, but its content is a different
+// component: the one for a project the composer is already bound to, which reads
+// that project's device binding and answers null until it resolves. When the New
+// page carries a default project, this branch is taken and the slot comes out as
+// the same empty div the selector's own refusals produce — indistinguishable in
+// the DOM from either of them, and one branch earlier than both. Forcing the
+// test off routes the slot to the selector, which is what a composer that is
+// *choosing* a project should draw. Identified as the function whose returned
+// conditional contains two `data-home-project-slot` elements, which is what
+// separates it from the sibling component that draws one. Spliced only in
+// web-shell mode, and not required.
+const projectsBoundSlotPatchId = "web-projects-bound-slot";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -928,6 +941,28 @@ function projectsSelectorTarget(ast) {
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
+// The bound-project branch of the slot component: the test of the conditional
+// that returns two `data-home-project-slot` elements. Returns that test, the only
+// thing spliced.
+function projectsBoundSlotTarget(ast) {
+  const tests = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") return;
+    const last = node.body.body.at(-1);
+    if (last?.type !== "ReturnStatement") return;
+    const argument = unwrap(last.argument);
+    if (argument?.type !== "ConditionalExpression") return;
+    let slots = 0;
+    walk(argument, [], (child) => {
+      if (child.type === "Property" && (child.key.name ?? child.key.value) === "data-home-project-slot") {
+        slots += 1;
+      }
+    });
+    if (slots === 2) tests.push(argument.test);
+  });
+  return tests.length === 1 ? tests[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1501,6 +1536,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
+    }
+    // The slot's bound-project branch, so the slot draws the selector instead of
+    // the component that answers null without a resolved device binding.
+    const boundSlot = projectsBoundSlotTarget(ast);
+    if (boundSlot) {
+      patches.push({ id: projectsBoundSlotPatchId, start: boundSlot.start, end: boundSlot.end,
+        original: source.slice(boundSlot.start, boundSlot.end),
+        replacement: projectsSelectorOff });
     }
     // The project selector's scope guard, so it draws rather than answering null.
     const selector = projectsSelectorTarget(ast);

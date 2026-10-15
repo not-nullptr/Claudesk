@@ -1198,6 +1198,42 @@ const selectorCompiled = await minify(selectorComponent(), {
 assert.equal(inspectRenderer(selectorCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-selector-scope").length, 1,
   "a mangled selector must still have its guard forced");
+// The slot component's first branch, which draws the same element for a project
+// the composer is already bound to. Pinned as the returned conditional carrying
+// two slot elements, which is what separates it from the sibling that draws one.
+const boundSlot = (test = "!isApp()&&hostProjectUuid!==void 0", second = true) =>
+  'function slot({pickersCollapsed:e}){let mode=readMode(),isApp=isAppFn(),hostProjectUuid=host();'
+  + `return ${test}?S("div",{"data-home-project-slot":!0,className:"min-w-0 shrink-[999] empty:hidden",`
+  + 'children:S(Bound,{projectUuid:hostProjectUuid})})'
+  + (second
+    ? ':mode==="enabled"||mode==="projects"?S("div",{"data-home-project-slot":!0,'
+      + 'className:"min-w-0 shrink-[999] empty:hidden",children:S(Selector,{})}):null'
+    : ":null")
+  + '}';
+assert.equal(inspectRenderer(boundSlot(), false, false).patches
+  .filter(patch => patch.id === "web-projects-bound-slot").length, 0,
+  "the bound-project branch is left alone outside web-shell mode");
+const boundPatches = inspectRenderer(boundSlot(), false, true).patches
+  .filter(patch => patch.id === "web-projects-bound-slot");
+assert.equal(boundPatches.length, 1, "the bound-project branch must be forced off once");
+assert.equal(boundPatches[0].original, "!isApp()&&hostProjectUuid!==void 0");
+assert.equal(boundPatches[0].replacement, "!1", "only that branch's test is spliced");
+assert.equal(inspectRenderer(boundSlot(undefined, false), false, true).patches
+  .filter(patch => patch.id === "web-projects-bound-slot").length, 0,
+  "a component drawing one slot element must survive untouched");
+const boundOut = patchRendererSources(
+  new Map([["bound.js", `${webShellFixtures}\n${accountMenuName}\n${boundSlot()}`]]), false, true)
+  .sources.get("bound.js");
+assert.ok(boundOut.includes('return !1?S("div",{"data-home-project-slot":!0'),
+  "the branch must be forced off in place");
+assert.ok(boundOut.includes('mode==="enabled"||mode==="projects"?S("div",'),
+  "the selector branch must survive untouched");
+const boundCompiled = await minify(boundSlot(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(boundCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-projects-bound-slot").length, 1,
+  "a mangled slot component must still have its bound branch forced off");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
