@@ -422,8 +422,17 @@ test reads as one of its terms. Every other term of that test is project/folder
 *data* — targets the account has actually used — or a transient state, so on a
 deployment with none, the flag is what decides. Forcing it is what showing
 projects in the composer means. It is pinned as the property inside an object
-literal, so the same name destructured as a pattern cannot match. All nine are
-spliced only in web-shell mode, and none is required.
+literal, so the same name destructured as a pattern cannot match.
+
+`web-permission-binding` fixes the composer's permission control, which is the
+same missing store again: the hook that feeds it answers only while the
+pending-first-send store exists, and with that null the slot draws a skeleton
+forever. Forcing its guard open hands the picker the binding it would have had
+one render later, since everything the returned object reads comes from the
+pending draft's own settings and the default-mode helper. The guard is pinned by
+the object it returns, which carries `autoPickIsDraftOnly`, a name that appears
+nowhere else in the graph. All ten are spliced only in web-shell mode, and none
+is required.
 
 
 The code generator splices only the selected node. It does not regenerate

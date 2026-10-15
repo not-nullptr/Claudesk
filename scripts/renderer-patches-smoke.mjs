@@ -1267,6 +1267,41 @@ const sectionCompiled = await minify(pickerSection(), {
 assert.equal(inspectRenderer(sectionCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-projects-picker-section").length, 1,
   "a mangled props object must still have its section flag forced");
+// The permission binding hook, which answers only while the pending-first-send
+// store exists and otherwise leaves the composer's permission control drawing a
+// skeleton. Pinned by the object it returns, whose `autoPickIsDraftOnly` name
+// appears nowhere else in the graph.
+const permissionBinding = (test = "store()!==null&&flags?.arms===!0", marker = true) =>
+  'function permissionBinding(){let e=pendingFirstSend(),t=e?.newChatAutoArms;'
+  + 'return useMemo(()=>{' + `if(${test})return arms(model)?{permissionMode:"auto",`
+  + 'setPermissionMode:set,autoPickIsDraftOnly:!0,modelRequiresAuto:!0}'
+  + (marker ? ':{permissionMode:mode(),setPermissionMode:set,autoPickIsDraftOnly:!0,modelRequiresAuto:!1}'
+    : ':void 0')
+  + '},[e,t])}';
+assert.equal(inspectRenderer(permissionBinding(), false, false).patches
+  .filter(patch => patch.id === "web-permission-binding").length, 0,
+  "the permission binding is left alone outside web-shell mode");
+const bindingPatches = inspectRenderer(permissionBinding(), false, true).patches
+  .filter(patch => patch.id === "web-permission-binding");
+assert.equal(bindingPatches.length, 1, "the binding guard must be forced once");
+assert.equal(bindingPatches[0].original, "store()!==null&&flags?.arms===!0");
+assert.equal(bindingPatches[0].replacement, "!0", "only the guard's test is spliced");
+assert.equal(inspectRenderer(permissionBinding().replaceAll("autoPickIsDraftOnly:!0", "draftOnly:!0"),
+  false, true).patches.filter(patch => patch.id === "web-permission-binding").length, 0,
+  "a guard whose body carries no draft-only marker must survive untouched");
+const bindingOut = patchRendererSources(
+  new Map([["binding.js", `${webShellFixtures}\n${accountMenuName}\n${permissionBinding()}`]]), false, true)
+  .sources.get("binding.js");
+assert.ok(bindingOut.includes('useMemo(()=>{if(!0)return arms(model)?'),
+  "the guard must be forced open in place");
+assert.ok(bindingOut.includes("},[e,t])"),
+  "the hook's dependencies must survive untouched");
+const bindingCompiled = await minify(permissionBinding(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(bindingCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-permission-binding").length, 1,
+  "a mangled binding hook must still have its guard forced");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

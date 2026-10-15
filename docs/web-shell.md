@@ -699,7 +699,33 @@ by the two prop names it destructures, `selectionChip` and `plainTrigger`, which
 the minifier leaves alone, and by returning `null` from a conditional. Spliced
 only in web-shell mode, and not required.
 
-All nine change prepared-renderer bytes, so they ship with a `patchRelease` bump
+The permission control is the same missing store showing up once more. The
+composer chooses that slot's content from a hook:
+
+```js
+let s = permissionBinding();
+s === undefined
+  ? (arms ? <iconOnly/> : <PermissionSkeleton/>)   // the skeleton
+  : <PermissionPicker binding={s}/>;
+```
+
+and the hook answers only while the pending-first-send store exists:
+
+```js
+let e = pendingFirstSend(), t = e?.newChatAutoArms, …;
+return memo(() => { if (e !== null && t === true) return {permissionMode: …, …}; }, […]);
+```
+
+With that store null — a New page before anything has been typed — the hook
+returns nothing and the slot draws its skeleton indefinitely.
+`web-permission-binding` forces that guard open rather than faking the store:
+everything the returned object reads is the pending draft's own settings and the
+default-mode helper, none of which touch the store, so the picker is handed the
+binding it would have had one render later. The guard is identified by the object
+it returns, which carries `autoPickIsDraftOnly` — a name that appears nowhere
+else in the renderer graph. Spliced only in web-shell mode, and not required.
+
+All ten change prepared-renderer bytes, so they ship with a `patchRelease` bump
 and need the `claude-desktop` service rebuilt. Finding the chin also settled the
 order they have to be reasoned about in: a slot predicate that is never called is
 indistinguishable, from the page, from one that answers "disabled", and only

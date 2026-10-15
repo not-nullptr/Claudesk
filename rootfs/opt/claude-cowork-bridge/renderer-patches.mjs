@@ -320,6 +320,32 @@ const projectsBoundSlotPatchId = "web-projects-bound-slot";
 // only in web-shell mode, and not required.
 const projectsPickerSectionPatchId = "web-projects-picker-section";
 const projectsPickerSectionOn = "!0";
+// The permission picker's own binding, which is the same missing store once
+// more. The composer picks that control's content from a hook:
+//
+//   let s = permissionBinding();
+//   s === undefined
+//     ? (arms ? <iconOnly/> : <PermissionSkeleton/>)
+//     : <PermissionPicker binding={s}/>;
+//
+// and the hook answers only while the pending-first-send store exists:
+//
+//   let e = pendingFirstSend(), t = e?.newChatAutoArms, …;
+//   return memo(() => {
+//     if (e !== null && t === true) return { permissionMode: …, … };
+//   }, […]);
+//
+// With that store null — a New page before anything has been typed, in this
+// shell as in any other — the hook returns nothing and the slot draws its
+// skeleton forever. The guard is forced open rather than the store faked: the
+// value it returns is computed from the pending draft's own settings and the
+// default mode helper, and none of those branches read the store, so the picker
+// is handed the same binding it would have had one render later. The guard is
+// identified by the object it returns, which carries `autoPickIsDraftOnly` —
+// a name that appears nowhere else in the renderer graph. Spliced only in
+// web-shell mode, and not required.
+const permissionBindingPatchId = "web-permission-binding";
+const permissionBindingOn = "!0";
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -999,6 +1025,19 @@ function projectsPickerSectionTarget(ast) {
   return found.length === 1 ? found[0] : undefined;
 }
 
+// The permission binding hook's guard: the `if` whose body hands back the object
+// carrying `autoPickIsDraftOnly`, which appears nowhere else in the graph.
+function permissionBindingTarget(ast) {
+  const tests = [];
+  walk(ast, [], (node) => {
+    if (node.type !== "IfStatement" || !node.consequent) return;
+    if (!contains(node.consequent, child => child.type === "Property"
+      && (child.key.name ?? child.key.value) === "autoPickIsDraftOnly")) return;
+    tests.push(node.test);
+  });
+  return tests.length === 1 ? tests[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -1572,6 +1611,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
       patches.push({ id: projectsPickerPatchId, start: picker.value.start,
         end: picker.value.end, original: source.slice(picker.value.start, picker.value.end),
         replacement: projectsPickerForced.get(picker.key.name ?? picker.key.value) });
+    }
+    // The permission binding's guard, so the composer's permission control is
+    // handed a binding instead of drawing its skeleton indefinitely.
+    const permissionBinding = permissionBindingTarget(ast);
+    if (permissionBinding) {
+      patches.push({ id: permissionBindingPatchId, start: permissionBinding.start,
+        end: permissionBinding.end, original: source.slice(permissionBinding.start, permissionBinding.end),
+        replacement: permissionBindingOn });
     }
     // The picker's `showProjects`, so the trigger has something to draw even on
     // a deployment whose accounts have no project targets yet.
