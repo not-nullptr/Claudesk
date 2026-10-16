@@ -29,7 +29,27 @@ const gatewaySettingsEnabled = process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1
 const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === "1";
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
-const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// A tenant instance: one account's own Desktop, provisioned by
+// scripts/provision-user.sh, as opposed to the deployment's own instance.
+//
+// A tenant's Code must never execute in this container. The container is
+// privileged (CAP_SYS_ADMIN, userns_mode: host, apparmor=unconfined) and its
+// `app` user has passwordless sudo, so an agent shell here sits a short step
+// from host root. The Claude Code agent therefore belongs on a self-hosted
+// runner inside the account's Cowork guest, not in the container
+// (docs/code-in-cowork-vm.md), and the *local* executor is never offered: a
+// tenant cannot turn it on, and a deployment that sets both is a
+// misconfiguration this reports rather than serves.
+const tenantInstance = process.env.CLAUDESK_TENANT === "1";
+const codeActionsEnabled =
+  process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1" && !tenantInstance;
+if (tenantInstance && process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1") {
+  console.warn(
+    "[bridge] CLAUDESK_TENANT=1 with CLAUDE_REMOTE_CODE_ACTIONS=1: a tenant "
+    + "instance never runs Code in its own container, so the local Code "
+    + "surface stays withheld (docs/code-in-cowork-vm.md)",
+  );
+}
 // Which instance this bridge belongs to (CLAUDESK_NAME_PREFIX from the .env that
 // names the containers). Reported on /api/health so a peer that reaches *a*
 // Desktop can tell whether it reached its own: gateway_net is shared, and every
@@ -3700,6 +3720,11 @@ async function handleApi(request, response, url) {
         ),
         configuredModels,
         codeActionsEnabled,
+        // Whether this is one account's own instance. A tenant reports
+        // `codeReady: false` by construction (see `tenantInstance`), so a peer
+        // reading this can tell "Code is off here" from "this instance is a
+        // tenant, whose Code belongs on its self-hosted runner".
+        tenant: tenantInstance,
         infrastructureActionsEnabled,
         // The actual methods the renderer exposes on each surface, filtered by
         // what this bridge allows. `codeReady` only checks request/response

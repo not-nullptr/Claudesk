@@ -117,8 +117,12 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 # Eva semantics, set here rather than inherited from the shared .env:
 #   - inference goes through this account's relay into the box-level chain
 #     (relay → caddy `gateway` → shitproxy), not straight at the router;
-#   - no Code surface.
-# Both are overridable for a deployment that wants something else.
+#   - no Code in this container (Eva semantics, set here rather than inherited
+#     from the shared .env): `CLAUDESK_TENANT=1` marks one account's own
+#     instance, which never exposes the container-local Code executor — its Code
+#     belongs on a self-hosted runner inside its Cowork guest
+#     (docs/code-in-cowork-vm.md). Both are overridable for a deployment that
+#     wants something else.
 
 # The gateway a provisioned account talks to, and how it authenticates. The
 # endpoint must be reachable from inside the Cowork VM, which makes the model
@@ -161,9 +165,11 @@ esac
 #   - the extra download roots (COWORK_REMOTE_READ_ROOTS), so an account reads
 #     its own workspace and nothing else.
 #
-# (Code is separately off for accounts, and stays off until the deployment turns
-# it on.) Override any of them for every account with the matching
-# CLAUDESK_ACCOUNT_* variable.
+# (Code is not scoped here: it is off for accounts because an account is a
+# tenant, and a tenant never runs Code in its container — see CLAUDESK_TENANT
+# above. CLAUDESK_ACCOUNT_CODE_ACTIONS cannot lift that; the account's Code
+# belongs on a self-hosted runner in its Cowork guest.) Override any of the
+# four above for every account with the matching CLAUDESK_ACCOUNT_* variable.
 account_scope "${role:-User}"
 
 # This account's Cowork vsock port (empty leaves the app's default). Computed
@@ -202,6 +208,7 @@ CLAUDE_GATEWAY_AUTH_SCHEME="$account_gateway_scheme" \
 CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
+CLAUDESK_TENANT=1 \
 CLAUDE_REMOTE_LOGIN_SHELL=0 \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \

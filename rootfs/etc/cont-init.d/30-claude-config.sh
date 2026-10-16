@@ -8,6 +8,28 @@ auth_scheme="${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
 models_json="${CLAUDE_INFERENCE_MODELS_JSON:-}"
 remote_gateway_settings="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
+# A tenant instance (one account's own, scripts/provision-user.sh) never runs
+# Code in this container: the agent belongs on a self-hosted runner inside the
+# account's Cowork guest, and this container is privileged enough that an agent
+# shell here is close to host root. So the local Code surface is written off
+# whatever the flag says — the app config and the bridge agree, and neither is
+# the enforcement point on its own (the bridge withholds the IPC surface too).
+# See docs/code-in-cowork-vm.md.
+tenant="${CLAUDESK_TENANT:-0}"
+case "$tenant" in
+    0|1)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDESK_TENANT must be 0 or 1\n' >&2
+        exit 1
+        ;;
+esac
+if [ "$tenant" = "1" ]; then
+    if [ "$remote_code_actions" = "1" ]; then
+        printf '[claude-config] CLAUDESK_TENANT=1: keeping the local Code surface off (CLAUDE_REMOTE_CODE_ACTIONS ignored)\n'
+    fi
+    remote_code_actions=0
+fi
 gateway_env_authoritative="${CLAUDE_GATEWAY_ENV_AUTHORITATIVE:-0}"
 remote_desktop_home="${CLAUDE_REMOTE_DESKTOP_HOME:-}"
 allowed_egress_hosts_json="${CLAUDE_EGRESS_ALLOWED_HOSTS_JSON:-}"

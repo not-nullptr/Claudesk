@@ -47,6 +47,11 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
+      # One account's own instance (scripts/provision-user.sh). Read by the
+      # container init as well as the bridge: a tenant's Code never runs in this
+      # container, so the local Code surface is not written on either — see
+      # docs/code-in-cowork-vm.md.
+      CLAUDESK_TENANT: "${CLAUDESK_TENANT:-0}"
       # Read by the renderer preparer (cont-init) as well as the bridge: with the
       # web shell on it also splices the desktop Code route alias. See
       # docs/web-shell.md.
@@ -171,6 +176,12 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
+      # One account's own instance, provisioned by scripts/provision-user.sh (as
+      # opposed to the deployment's own). A tenant never exposes the
+      # container-local Code executor — its Code belongs on a self-hosted runner
+      # inside its Cowork guest — so this withholds that surface whatever
+      # CLAUDE_REMOTE_CODE_ACTIONS says. See docs/code-in-cowork-vm.md.
+      CLAUDESK_TENANT: "${CLAUDESK_TENANT:-0}"
       # Experimental: render ion-dist's browser (claude.ai) chrome with the local
       # IPC data layer, and grant the org entitlements its Cowork surface checks.
       # See docs/web-shell.md. Off by default.
