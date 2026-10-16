@@ -3191,6 +3191,63 @@ function emptyProjectResource(sub, accountUuid) {
 // untouched by it. Wire shapes: bridge/code-runners.mjs.
 const selfHostedPoolsBase = "/v1/code/runners/self-hosted/pools/";
 
+// The model calls of the runner inside the VM, forwarded through the one
+// address the guest provably reaches: the guest dials the bridge on slirp's
+// host address for its own polling, and its egress is filtered by an allowlist
+// of its own, so the account's gateway is not something it can be assumed to
+// reach directly (the call hangs rather than failing when it cannot). The
+// runner authenticates with its pool secret — the same one it polls with — and
+// the bridge attaches the account's own gateway credentials, the pair the
+// Desktop itself uses, then streams the answer back untouched: Claude Code
+// speaks the Anthropic wire and so does the account's gateway chain.
+async function handleInferencePassthrough(request, response, url) {
+  if (!(await codeRunners.verifyPoolSecret({ headers: request.headers }))) {
+    throw new ApiError(401, "unknown pool secret");
+  }
+  const gatewayBase = process.env.CLAUDE_GATEWAY_BASE_URL || "";
+  const gatewayKey = process.env.CLAUDE_GATEWAY_API_KEY || "";
+  const gatewayScheme = process.env.CLAUDE_GATEWAY_AUTH_SCHEME || "bearer";
+  if (!gatewayBase || !gatewayKey) {
+    throw new ApiError(502, "this instance has no inference gateway configured");
+  }
+  const body = await readRequestBuffer(request, 32 * 1024 * 1024);
+  const headers = {
+    "content-type": request.headers["content-type"] || "application/json",
+  };
+  for (const name of ["anthropic-version", "anthropic-beta", "accept"]) {
+    if (typeof request.headers[name] === "string") headers[name] = request.headers[name];
+  }
+  if (gatewayScheme === "x-api-key") headers["x-api-key"] = gatewayKey;
+  else headers.authorization = `Bearer ${gatewayKey}`;
+  const controller = new AbortController();
+  // The client going away is the *response's* early close — a request's own
+  // `close` fires as soon as its body has been read, which would abort this
+  // forward the moment it starts.
+  response.on("close", () => {
+    if (!response.writableEnded) controller.abort();
+  });
+  const upstream = await fetch(`${String(gatewayBase).replace(/\/+$/, "")}${url.pathname}`, {
+    method: "POST",
+    headers,
+    body,
+    signal: controller.signal,
+  });
+  response.writeHead(upstream.status, {
+    "content-type": upstream.headers.get("content-type") || "application/json",
+    ...(upstream.headers.get("cache-control")
+      ? { "cache-control": upstream.headers.get("cache-control") } : {}),
+  });
+  if (upstream.body) {
+    try {
+      for await (const chunk of upstream.body) response.write(Buffer.from(chunk));
+    } catch {
+      // The client went away, or the gateway's stream broke mid-answer: end
+      // what is still open rather than compounding the error.
+    }
+  }
+  if (!response.writableEnded) response.end();
+}
+
 // A placed session waits for the runner inside the account's Cowork VM, and
 // that runner lives only while the VM does — the VM idle-stops on its own, and
 // a Code session is not otherwise a thing that wakes it (the Cowork surfaces
@@ -4619,6 +4676,16 @@ const server = http.createServer(async (request, response) => {
     // exactly as before. Anything under the session base this handler does not
     // answer is logged and 404s there, rather than being forwarded to an
     // upstream that has never heard of this session.
+    else if (
+      codeRunners
+      && request.method === "POST"
+      && (url.pathname === "/v1/messages" || url.pathname === "/v1/messages/count_tokens")
+    ) {
+      // The runner's model calls — see handleInferencePassthrough. Ahead of the
+      // session handler because the body must be forwarded verbatim, before
+      // anything tries to parse it as JSON.
+      await handleInferencePassthrough(request, response, url);
+    }
     else if (
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")

@@ -466,12 +466,14 @@ What is left is the **deployment** half, and it needs the box:
    container when one is there, else fetched once from the pinned npm artifact
    into the account's data root), carries the account's model endpoint and key
    into the guest's root-only `runner.env` (loopback rewritten to `10.0.2.2`),
-   and the runner invokes `claude -p "<prompt>"`. Remaining: whether the
-   staged agent's endpoint is reachable from inside the guest (the gateway URL
-   must be one the guest can resolve — the provisioning docs already say so),
-   and whether the host can write the `claudeshared` share — if it can, the
-   payload should move out of the image and only the unit need re-deriving per
-   release.
+   and the runner invokes `claude -p "<prompt>"`. The agent answers through the
+   **bridge** — its model calls ride `/v1/messages`, forwarded by the bridge to
+   the account's gateway with the account's credentials — because the guest's
+   egress allowlist makes dialing the gateway directly from inside the VM
+   unreliable (a blocked call hangs rather than failing). Remaining: a real
+   end-to-end run through that chain, and whether the host can write the
+   `claudeshared` share — if it can, the payload should move out of the image
+   and only the unit need re-deriving per release.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it
@@ -536,6 +538,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 | `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. |
 | `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. Answered under **both generations of the path**: `ccr_v2_send_events_web` decides whether the client posts to `/v1/code/sessions/{id}/events` or the original `/v1/sessions/{id}/events`, and the Desktop build's hardcoded feature table carries the gate false — so the original leg is the one the browser actually sends its first message over. |
 | `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
+| `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the request and the streamed answer pass through untouched. |
 | `GET /v1/code/sessions/watch` | The list's SSE stream. Its reader treats 400/404 as **fatal for the whole surface**, so it is held open and quiet (a comment frame, keepalives) rather than 404ed. |
 | `POST /api/organizations/{org}/dust/generate_title_and_branch` | `{first_session_message, title_style, model?}` → `{title, branch_name?}`. The Desktop main answers this in-process with an on-device model; a browser fetches its own origin, so the bridge derives the title (first meaningful line, cleaned, capped) and the branch (its slug). `generate_session_title` (`{title}`) and `command_display_names` (`{results: []}`) are served the same way. |
 

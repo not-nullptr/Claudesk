@@ -361,6 +361,18 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
   }
 
   return {
+    /**
+     * Does this Authorization header name one of this instance's pool
+     * secrets? The runner's model calls come through the bridge carrying the
+     * same secret it polls with, so this is the pass for them.
+     */
+    async verifyPoolSecret({ headers } = {}) {
+      const token = bearerToken(headers);
+      if (!token) return false;
+      const state = await load();
+      return state.pools.some((pool) => pool.secret === token);
+    },
+
     /** GET /v1/code/runners/self-hosted/pools */
     async listPools() {
       const state = await load();

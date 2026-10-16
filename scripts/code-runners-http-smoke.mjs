@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ if (createdRelease) writeFileSync(releaseFile, readFileSync(`${root}config/relea
 
 const stateDir = mkdtempSync(join(tmpdir(), "code-runners-http-"));
 const children = [];
+let gateway = null;
 
 // Read an SSE stream until it has carried `frames` client events (or it goes
 // quiet), then drop the connection — the stream tails forever by design.
@@ -80,10 +82,39 @@ async function boot({ port, env }) {
 
 try {
   // --- a tenant with self-hosted runners on --------------------------------
+  // The account's gateway, stood in for: the bridge forwards the runner's model
+  // calls to it, so the smoke records what arrived and answers in wire shapes.
+  const gatewayHits = [];
+  gateway = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      gatewayHits.push({
+        url: request.url,
+        authorization: request.headers.authorization || "",
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      if (request.url === "/v1/messages") {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write("event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
+        response.end("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+      } else {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ input_tokens: 3 }));
+      }
+    });
+  });
+  await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+  const gatewayPort = gateway.address().port;
+
   const tenantPort = 8156;
   const tenantRequest = await boot({
     port: tenantPort,
-    env: { CLAUDESK_TENANT: "1", CLAUDESK_CODE_RUNNERS: "1", CLAUDESK_CODE_RUNNER_POOL: "smoke-pool" },
+    env: {
+      CLAUDESK_TENANT: "1", CLAUDESK_CODE_RUNNERS: "1", CLAUDESK_CODE_RUNNER_POOL: "smoke-pool",
+      CLAUDE_GATEWAY_BASE_URL: `http://127.0.0.1:${gatewayPort}`,
+      CLAUDE_GATEWAY_API_KEY: "smoke-gateway-key",
+    },
   });
 
   // `/api/health` deliberately answers 503 while nothing answers at the Desktop
@@ -262,6 +293,34 @@ try {
   assert.equal(unknownV1.body.includes("<!doctype"), false,
     "an API path never gets the app HTML");
 
+  // The runner's model calls, over the one address the guest is certain to
+  // reach: refused without the pool secret, forwarded verbatim with it, with
+  // the account's own gateway credential attached by the bridge.
+  const anonymousModel = await tenantRequest("/v1/messages", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(anonymousModel.status, 401, "a model call without the pool secret is refused");
+
+  const modelCall = await tenantRequest("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}`,
+      "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: "smoke", messages: [] }),
+  });
+  assert.equal(modelCall.status, 200, modelCall.body);
+  assert.ok(modelCall.type.includes("text/event-stream"), modelCall.type);
+  assert.ok(modelCall.body.includes("message_stop"), "the stream passes through untouched");
+  assert.equal(gatewayHits.at(-1).authorization, "Bearer smoke-gateway-key",
+    "the account's own gateway credential is attached by the bridge");
+
+  const tokenCount = await tenantRequest("/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ model: "smoke", messages: [] }),
+  });
+  assert.equal(JSON.parse(tokenCount.body).input_tokens, 3, "count_tokens is forwarded too");
+  assert.equal(gatewayHits.at(-1).url, "/v1/messages/count_tokens", "the path is preserved");
+
   // The org's environment capabilities — asked for wherever a session can be
   // placed, and parsed strictly: `version` and `repositories` are required and
   // `absent`/`unreadable` are read unconditionally.
@@ -383,10 +442,24 @@ try {
   const ownerPools = await ownerRequest("/v1/code/runners/self-hosted/pools");
   assert.equal(ownerPools.body.includes("\"pools\""), false,
     "the operator's instance must not serve the self-hosted pool API");
+  const ownerModel = await ownerRequest("/v1/messages", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(ownerModel.status, 404,
+    "and the model passthrough belongs to a tenant with runners, not to it");
 } finally {
   for (const child of children) child.kill("SIGTERM");
+  if (gateway !== null) {
+    // The bridges keep their upstream connection to the stub alive; close
+    // those too or `close()` waits on them and the smoke never finishes.
+    gateway.closeAllConnections?.();
+    gateway.close();
+  }
+  // A bridge shutting down writes one last notice into the state dir; give it
+  // a beat before the dir goes, or the rm runs against a racing write.
+  await new Promise((resolve) => setTimeout(resolve, 500));
   if (createdRelease) rmSync(releaseFile, { force: true });
-  rmSync(stateDir, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 process.stdout.write("code-runners-http-smoke: the pool API is routed for a tenant and nobody else\n");

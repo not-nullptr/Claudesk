@@ -162,21 +162,12 @@ if [ -z "$agent_source" ]; then
     agent_source="$agent_cache"
 fi
 
-# The account's model endpoint and key, as the instance itself holds them. The
-# guest cannot reach the container's loopback, so a loopback base URL is
-# rewritten to slirp's host address on the way in; the key lands only in the
-# guest's own root-only runner.env.
-gateway_url=""
-gateway_key=""
-gateway_scheme=""
-if [ "$container_running" = true ]; then
-    container_env="$(docker exec "$desktop_container" printenv 2>/dev/null || true)"
-    gateway_url="$(printf '%s\n' "$container_env" | sed -n 's/^CLAUDE_GATEWAY_BASE_URL=//p' | head -n 1)"
-    gateway_key="$(printf '%s\n' "$container_env" | sed -n 's/^CLAUDE_GATEWAY_API_KEY=//p' | head -n 1)"
-    gateway_scheme="$(printf '%s\n' "$container_env" | sed -n 's/^CLAUDE_GATEWAY_AUTH_SCHEME=//p' | head -n 1)"
-fi
-guest_gateway_url="$(printf '%s' "$gateway_url" |
-    sed -e 's#//127\.0\.0\.1#//10.0.2.2#' -e 's#//localhost#//10.0.2.2#')"
+# Where the agent's model calls go. The guest's egress is its own allowlist —
+# dialing the account's gateway directly from inside the VM is not something to
+# rely on (a blocked call hangs rather than fails) — so they go through the
+# bridge on the one address the guest provably reaches (it polls over it), and
+# the bridge forwards them to the gateway with the account's own credentials.
+# The pass is the pool secret, which this file already carries.
 
 if [ -n "$agent_source" ]; then
     claude_bin="${CLAUDESK_GUEST_CLAUDE_BIN:-/opt/claudesk/claude}"
@@ -194,24 +185,17 @@ fi
 # so the one flag it names is the default and the prompt follows it. The
 # Desktop's own behaviour is untouched; this only shapes how the runner asks.
 agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:--p}"
-model_env=""
-if [ -n "$guest_gateway_url" ] && [ -n "$gateway_key" ]; then
-    case "${gateway_scheme:-bearer}" in
-        x-api-key) credential_line="ANTHROPIC_API_KEY=\"$gateway_key\"" ;;
-        *) credential_line="ANTHROPIC_AUTH_TOKEN=\"$gateway_key\"" ;;
-    esac
-    model_env="ANTHROPIC_BASE_URL=\"$guest_gateway_url\"
-$credential_line"
-fi
+model_env="ANTHROPIC_BASE_URL=\"$runner_base\"
+ANTHROPIC_AUTH_TOKEN=\"$secret\""
 
 # A stamp over everything that lands in the image, so a re-run with an unchanged
 # payload and the same pool is a no-op while an edited runner, a new agent or a
-# rotated key is applied. The key itself never lands in the stamp — only enough
-# of its hash to make a rotation re-run the install.
+# rotated secret is applied. The secret itself never lands in the stamp — only
+# enough of its hash to make a rotation re-run the install.
 stamp="$(cat "$project_dir/guest/runner.py" "$project_dir/scripts/install-guest-runner.sh" \
     | sha256sum | cut -d' ' -f1)"
-stamp="$stamp:$pool_id:$runner_base:$claude_bin:$checkout:$agent_source:$guest_gateway_url"
-stamp="$stamp:$(printf '%s:%s' "$gateway_key" "$gateway_scheme" | sha256sum | cut -c1-16)"
+stamp="$stamp:$pool_id:$runner_base:$claude_bin:$checkout:$agent_source"
+stamp="$stamp:$(printf '%s' "$secret" | sha256sum | cut -c1-16)"
 
 mount_dir="$(mktemp -d)"
 loop_device=""
