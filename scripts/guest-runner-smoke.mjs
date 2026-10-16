@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,12 @@ const work = mkdtempSync(join(tmpdir(), "guest-runner-"));
 const stateDir = join(work, "state");
 writeFileSync(stateDir, "", { flag: "w+" });
 rmSync(stateDir);
-const stub = join(work, "claude");
+// The agent lives where the guest keeps its own: a `claude-bin` directory with
+// the runnable inside it — the runner is pointed at the directory and must
+// resolve the binary (the product's path is exactly this shape).
+const stub_dir = join(work, "claude-bin");
+mkdirSync(stub_dir, { recursive: true });
+const stub = join(stub_dir, "claude");
 writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s' \"$2\"\n");
 chmodSync(stub, 0o755);
 let child;
@@ -39,7 +44,7 @@ function runRunner({ secret, once = true }) {
       ...process.env,
       CLAUDESK_RUNNER_BASE: `http://127.0.0.1:${port}`,
       CLAUDESK_RUNNER_SECRET: secret,
-      CLAUDESK_RUNNER_CLAUDE_BIN: stub,
+      CLAUDESK_RUNNER_CLAUDE_BIN: stub_dir,
       CLAUDESK_RUNNER_CHECKOUT: work,
     },
   });

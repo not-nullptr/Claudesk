@@ -84,6 +84,9 @@ fi
 # deployment that gives its VMs a different network (a tap, a proxy) needs
 # another address.
 runner_base="${CLAUDESK_GUEST_RUNNER_BASE:-http://10.0.2.2:8080}"
+# The product's own spelling of the agent path: a directory, with the runnable
+# (`claude`) inside it. guest/runner.py resolves either the directory or the
+# executable, so this default needs no `claude` suffix.
 claude_bin="${CLAUDESK_GUEST_CLAUDE_BIN:-/opt/cowork/claude-bin}"
 checkout="${CLAUDESK_GUEST_CHECKOUT:-/sessions}"
 

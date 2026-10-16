@@ -449,13 +449,18 @@ restricts guest egress must allow that address
 
 What is left is the **deployment** half, and it needs the box:
 
-1. **Install it on a real account and watch it run.** `install-guest-runner.sh`
-   does the image half; what the box still has to answer is the environment:
-   whether the guest's `/opt/cowork/claude-bin` answers `--print` (or
-   `CLAUDESK_RUNNER_AGENT_ARGS` should name something else), whether guest egress
-   reaches `10.0.2.2`, and whether the host can write the `claudeshared` share —
-   if it can, the payload should move out of the image and only the unit need
-   re-deriving per release.
+1. **Install it on a real account and watch it run** *(partly answered on the
+   box)*. `/opt/cowork/claude-bin` is a **directory** — the agent the product
+   runs is `claude` inside it, staged by the guest's own `coworkd` (the daemon
+   copies the SDK binary the host puts on the `claudeshared` share; the share
+   itself is noexec). A runner pointed at the bare directory gets
+   `[Errno 13] Permission denied` on execve — execve on a directory is EACCES —
+   so `guest/runner.py` now resolves either form (directory → `claude` inside,
+   with `/usr/local/bin/claude` as a fallback). What the box still answers:
+   whether that binary accepts `CLAUDESK_RUNNER_AGENT_ARGS` (`--print` by
+   default) in the shape the runner passes it, and whether the host can write
+   the `claudeshared` share — if it can, the payload should move out of the
+   image and only the unit need re-deriving per release.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it

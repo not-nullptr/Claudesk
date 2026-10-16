@@ -34,7 +34,29 @@ def env(name, default=""):
 
 BASE = env("CLAUDESK_RUNNER_BASE", "http://10.0.2.2:8080").rstrip("/")
 SECRET = env("CLAUDESK_RUNNER_SECRET")
-CLAUDE_BIN = env("CLAUDESK_RUNNER_CLAUDE_BIN", "/opt/cowork/claude-bin")
+
+
+def resolve_claude_bin(configured):
+    """The agent binary, from whatever the deployment configured.
+
+    The Cowork guest keeps its Claude Code under `/opt/cowork/claude-bin`, and
+    that path is a *directory* — the runnable is `claude` inside it, staged
+    there by the guest's own daemon. Accept either the directory or the
+    executable itself, and keep the guest's well-known locations as fallbacks,
+    so a deployment that names the directory (the product's own spelling)
+    still runs.
+    """
+    candidates = [configured]
+    if configured:
+        candidates.append(os.path.join(configured, "claude"))
+    candidates += ["/opt/cowork/claude-bin/claude", "/usr/local/bin/claude"]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return configured
+
+
+CLAUDE_BIN = resolve_claude_bin(env("CLAUDESK_RUNNER_CLAUDE_BIN", "/opt/cowork/claude-bin"))
 CHECKOUT = env("CLAUDESK_RUNNER_CHECKOUT", "/sessions")
 POLL_SECONDS = float(env("CLAUDESK_RUNNER_POLL_SECONDS", "5") or 5)
 # How the binary is asked to answer one prompt. `--print` is Claude Code's
@@ -123,10 +145,13 @@ def run_session(hint):
     status, history = request("/v1/code/sessions/%s/events" % quoted, token=token)
     prompt = prompt_of((history or {}).get("data") if isinstance(history, dict) else [])
 
-    if not os.path.exists(CLAUDE_BIN):
-        finish("report-failure", {"reason": "%s is not present in the guest" % CLAUDE_BIN,
-                                  "setup_failure_kind": "missing_binary"})
-        log("session %s: no agent at %s" % (session, CLAUDE_BIN))
+    if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
+        # A directory here is the classic miss (the product's own path is one);
+        # resolution above should have taken it, so what lands here is genuinely
+        # absent or not executable — say which.
+        reason = "%s is not an executable file in the guest" % CLAUDE_BIN
+        finish("report-failure", {"reason": reason, "setup_failure_kind": "missing_binary"})
+        log("session %s: %s" % (session, reason))
         return session, 127
 
     argv = [CLAUDE_BIN] + AGENT_ARGS + [prompt]
