@@ -118,13 +118,24 @@ const sessionConfigKeys = ["sources", "outcomes", "model", "cwd", "effort_level"
 function sessionDocument(session) {
   const archived = session.archived === true;
   const state = session.state;
+  // What the runner last reported of the child's own lifecycle wins over the
+  // state derived from the store's vocabulary.
+  const reportedWorker = typeof session.reported_worker_status === "string"
+    ? session.reported_worker_status : null;
+  const reportedConnection = typeof session.reported_connection_status === "string"
+    ? session.reported_connection_status : null;
   return {
     id: session.session_uuid,
     title: typeof session.title === "string" ? session.title : "",
     status: archived ? "archived" : "active",
-    ...(!archived && state === "active"
-      ? { worker_status: "running", connection_status: "connected" } : {}),
-    ...(!archived && (state === "released" || state === "failed")
+    ...(!archived && reportedWorker
+      ? {
+        worker_status: reportedWorker,
+        ...(reportedConnection ? { connection_status: reportedConnection } : {}),
+      }
+      : !archived && state === "active"
+        ? { worker_status: "running", connection_status: reportedConnection ?? "connected" } : {}),
+    ...(!archived && !reportedWorker && (state === "released" || state === "failed")
       ? { worker_status: "idle" } : {}),
     environment_id: session.pool_id,
     self_hosted_runner_pool_id: session.pool_id,
@@ -171,21 +182,61 @@ function sessionConfigOf(session) {
   return config;
 }
 
-/** The canonical bare form of a session id: no generation prefix, no dashes. */
-function bareSessionId(id) {
-  return String(id ?? "").replace(/^(?:cse_|session_)/, "").replaceAll("-", "").toLowerCase();
+// The product's session ids encode their UUID in a trailing `_01<base58>`
+// segment: the runner decodes it (`ZI` in its own code — last `_`, a `01`
+// marker, then exactly 22 characters of the Bitcoin base58 alphabet whose
+// number is the UUID's hex) and hands the child that UUID as its remote session
+// id. An id it cannot decode yields undefined, and the setup that builds URLs
+// and state paths out of it dies — so the bridge mints ids in the same
+// encoding rather than inventing its own.
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58OfHex(hex) {
+  let value = BigInt(`0x${hex}`);
+  let out = "";
+  while (value > 0n) {
+    out = base58Alphabet[Number(value % 58n)] + out;
+    value /= 58n;
+  }
+  return (out || "1").padStart(22, "1");
+}
+
+function hexOfBase58(text) {
+  let value = 0n;
+  for (const character of text) {
+    const digit = base58Alphabet.indexOf(character);
+    if (digit < 0) return null;
+    value = value * 58n + BigInt(digit);
+  }
+  const hex = value.toString(16);
+  return hex.length <= 32 ? hex.padStart(32, "0") : null;
 }
 
 /**
- * The id a new session gets on the wire. The app classifies an id by its
- * prefix — `session_`/`cse_` is a code session, anything else (a bare uuid
- * very much included) reads as a *local* one — and every code-session reader,
- * the meta fetch first among them, answers "not found" for an id it does not
- * classify. So session ids carry the wire generation's `cse_` prefix and an
- * alphabet the app's own id shape accepts (`[A-Za-z0-9_]`, no dashes).
+ * The canonical bare form of a session id: the UUID the id carries, as 32 hex
+ * characters and nothing else. Both spellings of an id canonicalize to it — an
+ * encoded `cse_…_01<base58>` decodes, a plain uuid or `session_…` strips — so
+ * a session answers under old links and new alike.
+ */
+function bareSessionId(id) {
+  const raw = String(id ?? "");
+  const encoded = /_01([1-9A-HJ-NP-Za-km-z]{22})$/.exec(raw);
+  if (encoded) {
+    const hex = hexOfBase58(encoded[1]);
+    if (hex !== null) return hex;
+  }
+  return raw.replace(/^(?:cse_|session_)/, "").replaceAll("-", "").toLowerCase();
+}
+
+/**
+ * The id a new session gets on the wire: the wire generation's `cse_` prefix
+ * (the app classifies an id by it — anything else, a bare uuid very much
+ * included, reads as a *local* session), an alphabet the app's id shape accepts
+ * (`[A-Za-z0-9_]`, no dashes), and the UUID the runner decodes back out.
  */
 function newSessionId() {
-  return `cse_${randomUUID().replaceAll("-", "")}`;
+  const hex = randomUUID().replaceAll("-", "");
+  return `cse_${hex.slice(0, 12)}_01${base58OfHex(hex)}`;
 }
 
 /**
@@ -252,17 +303,20 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     } catch {
       cache = { pools: [], runners: [], sessions: [] };
     }
-    // Sessions the store held before ids spoke the wire's generation get their
-    // prefix here, once — a bare uuid is classified "local" by every reader in
-    // the app, so an un-migrated session reads as not a code session at all
-    // (its meta fetch answers null before it ever asks the bridge, and the page
-    // says "This session couldn't be found"). Lookups keep answering the old
-    // spelling (see sessionById), so a page already open on one heals on its
-    // next request.
+    // Sessions the store held before ids spoke the wire's encoding get re-minted
+    // here, once, from the uuid they already carry: a bare uuid is classified
+    // "local" by every reader in the app (its meta fetch answers null before it
+    // ever asks the bridge, and the page says "This session couldn't be
+    // found"), and an id the runner cannot decode breaks the child's setup.
+    // Lookups keep answering every old spelling (see sessionById), so a page
+    // already open on one heals on its next request.
     let migrated = false;
     for (const session of cache.sessions) {
       if (typeof session.session_uuid !== "string") continue;
-      const canonical = `cse_${bareSessionId(session.session_uuid)}`;
+      const bare = bareSessionId(session.session_uuid);
+      const canonical = /^[0-9a-f]{32}$/.test(bare)
+        ? `cse_${bare.slice(0, 12)}_01${base58OfHex(bare)}`
+        : session.session_uuid;
       if (session.session_uuid !== canonical) {
         session.session_uuid = canonical;
         migrated = true;
@@ -322,25 +376,34 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       .filter((environment) => environment.state === "active");
   }
 
-  // Which pool a runner call belongs to, from its secret. A wrong secret and an
-  // unknown pool are the same answer: no pool.
+  // Which pool a runner call belongs to, from its credential: the pool secret
+  // itself, or a `runner_token` the register leg handed out — the product's own
+  // runner switches to that token right after registering. A wrong credential
+  // and an unknown pool are the same answer: no pool.
   function poolForSecret(state, headers) {
     const token = bearerToken(headers);
     if (!token) return null;
-    return state.pools.find((pool) => pool.secret === token) ?? null;
+    const bySecret = state.pools.find((pool) => pool.secret === token);
+    if (bySecret) return bySecret;
+    const byToken = state.runners.find((runner) => runner.runner_token === token);
+    if (byToken) {
+      return state.pools.find((pool) => pool.pool_id === byToken.pool_id) ?? null;
+    }
+    return null;
   }
 
-  // Session-scoped calls carry the session token the runner was issued (or the
-  // pool secret, for a runner acting on behalf of a pool it owns). Anything
-  // else is refused — the runner's own retry loop backs off on that, which is
-  // the correct outcome for a secret that names nothing here.
+  // Session-scoped calls carry the session token the runner was issued, or a
+  // pool credential (the pool secret, or a runner_token of a runner serving
+  // that pool). Anything else is refused — the runner's own retry loop backs
+  // off on that, which is the correct outcome for a credential that names
+  // nothing here.
   function sessionFor(state, headers, sessionId) {
     const session = sessionById(state, sessionId);
     if (!session) return null;
     const token = bearerToken(headers);
     if (!token) return { unauthorized: true };
     if (session.session_token === token) return session;
-    const pool = state.pools.find((entry) => entry.secret === token);
+    const pool = poolForSecret(state, headers);
     if (pool && pool.pool_id === session.pool_id) return session;
     return { unauthorized: true };
   }
@@ -454,6 +517,9 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       if (!pool) return { unauthorized: true };
       const runner = {
         runner_id: `ccrunner_${randomBytes(12).toString("hex")}`,
+        // The product's own runner switches to this token for every later call
+        // (the 4-token chain's second hop); the register answer carries it.
+        runner_token: `ccrun_${randomBytes(24).toString("base64url")}`,
         pool_id: pool.pool_id,
         runner_version: body?.runner_version ?? "",
         client_label: body?.client_label ?? "",
@@ -463,7 +529,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       state.runners.push(runner);
       await save();
       log.log(`[code-runners] runner ${runner.runner_id} registered on pool ${pool.pool_id}`);
-      return { runner_id: runner.runner_id };
+      return { runner_id: runner.runner_id, runner_token: runner.runner_token };
     },
 
     /** POST /v1/code/runners/self-hosted/deregister */
@@ -505,6 +571,57 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
         pool_active_session_count: state.sessions.filter(
           (session) => session.pool_id === pool.pool_id && session.state === "active",
         ).length,
+      };
+    },
+
+    /**
+     * POST /v1/code/runners/self-hosted/runners/{id}/poll — `PollWork`, the
+     * poll the shipped runner actually uses (the spawn-hints leg above is the
+     * older protocol, kept for the runners that still speak it). The answer's
+     * reader validates strictly: a JSON object, optionally `assignment_ids`
+     * (an array of well-formed session ids — these are what the runner then
+     * takes through /remote, token, worker registration and the child), plus
+     * `session_assignments` (array) and `suggested_poll_interval` (a duration
+     * string like "5s").
+     */
+    async pollWork({ headers, body } = {}) {
+      const state = await load();
+      const pool = poolForSecret(state, headers);
+      if (!pool) return { unauthorized: true };
+      const token = bearerToken(headers);
+      const runner = state.runners.find(
+        (entry) => entry.runner_token === token && entry.pool_id === pool.pool_id,
+      ) ?? null;
+      const now = new Date().toISOString();
+      if (runner) runner.last_poll_at = now;
+      // A session's assignment persists for the runner that holds it until it
+      // is released, failed or requeued: the reader treats a held session's
+      // disappearance from `assignment_ids` as a server-side deassignment and
+      // aborts the child on the spot. Fresh pending sessions are claimed for
+      // whichever runner is asking.
+      const mine = state.sessions.filter(
+        (session) => session.pool_id === pool.pool_id
+          && session.state !== "released" && session.state !== "failed",
+      );
+      const held = [];
+      for (const session of mine) {
+        if (runner && session.assigned_runner_id === runner.runner_id) {
+          if (session.state === "pending") session.state = "offered";
+          held.push(session.session_uuid);
+          continue;
+        }
+        if (session.assigned_runner_id === undefined && session.state === "pending") {
+          session.state = "offered";
+          if (runner) session.assigned_runner_id = runner.runner_id;
+          held.push(session.session_uuid);
+        }
+      }
+      await save();
+      return {
+        assignment_ids: held,
+        session_assignments: [],
+        suggested_poll_interval: "5s",
+        lease_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       };
     },
 
@@ -556,6 +673,161 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     },
 
     /**
+     * GET /v1/code/sessions/{id}/remote — the session's start configuration,
+     * read by the product's own runner before it spawns the session's claude:
+     * the sources to check out, the arguments that carry the session's own
+     * settings (the model among them — this is where the composer's choice
+     * reaches the agent), and the inference token the child authenticates its
+     * model calls with. The bridge mints that token here and accepts it on its
+     * own model passthrough, so the child's calls come home.
+     */
+    async sessionRemote({ headers, sessionId, baseUrl } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      if (!session.inference_token) {
+        session.inference_token = `ccinfer_${randomBytes(24).toString("base64url")}`;
+        await save();
+      }
+      const config = sessionConfigOf(session);
+      const claudeCodeArgs = {};
+      if (typeof config.model === "string" && config.model) claudeCodeArgs.model = config.model;
+      if (typeof config.permission_mode === "string" && config.permission_mode) {
+        claudeCodeArgs.permission_mode = config.permission_mode;
+      }
+      return {
+        // The runner derives the child's API origin from this (`new URL(...)`
+        // on it in its setup — absent, the whole session fails with "Invalid
+        // URL"). It is our own address as the runner reached it.
+        ...(typeof baseUrl === "string" && baseUrl ? { api_base_url: baseUrl } : {}),
+        sources: config.sources,
+        push_targets: [],
+        claude_code_args: claudeCodeArgs,
+        environment_variables: {},
+        agent_files: [],
+        inference_auth: {
+          access_token: session.inference_token,
+          expires_in_seconds: 3600,
+        },
+      };
+    },
+
+    /**
+     * POST /v1/code/sessions/{id}/worker/register — the runner announces
+     * itself as this session's worker; the epoch that comes back is the
+     * handle that distinguishes a takeover from the previous worker.
+     */
+    async registerWorker({ headers, sessionId } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      session.worker_epoch = (Number(session.worker_epoch) || 0) + 1;
+      await save();
+      return { worker_epoch: session.worker_epoch };
+    },
+
+    /**
+     * POST /v1/code/sessions/{id}/worker/events — the runner relaying the
+     * child's events into the session's log. Same store as every other events
+     * leg; the runner credential is the pass.
+     */
+    async appendWorkerEvents({ headers, sessionId, body } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      const incoming = Array.isArray(body?.events) ? body.events
+        : body && typeof body === "object" ? [body] : [];
+      const appended = appendToSession(session, incoming);
+      if (appended.length) await save();
+      return { data: appended };
+    },
+
+    /**
+     * PUT /v1/code/sessions/{id}/worker — the runner reporting the child's
+     * lifecycle (`worker_status`, or `{connection_status}`). This is the
+     * truest state the session has — the runner learns it from the child
+     * itself — so the session document prefers it over the derived default.
+     */
+    async updateSessionWorker({ headers, sessionId, body } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      if (typeof body?.worker_status === "string") {
+        session.reported_worker_status = body.worker_status;
+      }
+      if (typeof body?.connection_status === "string") {
+        session.reported_connection_status = body.connection_status;
+      }
+      session.worker_updated_at = new Date().toISOString();
+      await save();
+      return {};
+    },
+
+    /** POST /v1/code/sessions/{id}/worker/heartbeat — liveness while the child runs. */
+    async workerHeartbeat({ headers, sessionId } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      session.worker_heartbeat_at = new Date().toISOString();
+      await save();
+      return {};
+    },
+
+    /**
+     * POST /v1/code/sessions/{id}/worker/diagnostics — the runner forwarding
+     * lines of the child's diagnostics; the bridge keeps them where a log
+     * reader can see them rather than in the transcript.
+     */
+    async forwardWorkerDiagnostics({ headers, sessionId, body } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      const lines = Array.isArray(body?.lines) ? body.lines : [];
+      for (const line of lines.slice(0, 200)) {
+        log.log(`[code-runners] ${session.session_uuid} diagnostics: ${String(line).slice(0, 500)}`);
+      }
+      return {};
+    },
+
+    /**
+     * POST /v1/code/auth/refresh — the runner's token rotation. The bridge's
+     * tokens do not expire, so the same one is handed back; a credential that
+     * names nothing here is refused like every other leg.
+     */
+    async refreshRunnerToken({ headers } = {}) {
+      const token = bearerToken(headers);
+      if (!token) return { unauthorized: true };
+      const state = await load();
+      const runner = state.runners.find((entry) => entry.runner_token === token);
+      if (runner) return { token: runner.runner_token };
+      const pool = state.pools.find((entry) => entry.secret === token);
+      if (pool) return { token: pool.secret };
+      return { unauthorized: true };
+    },
+
+    /**
+     * Is this a credential the bridge accepts for model calls? The pool
+     * secret, a runner_token, or the inference token minted for a session —
+     * the last is what the spawned claude actually carries.
+     */
+    async verifyInferenceAuth({ headers } = {}) {
+      const token = bearerToken(headers);
+      if (!token) return false;
+      const state = await load();
+      if (state.pools.some((pool) => pool.secret === token)) return true;
+      if (state.runners.some((runner) => runner.runner_token === token)) return true;
+      return state.sessions.some(
+        (session) => Boolean(session.inference_token) && session.inference_token === token,
+      );
+    },
+
+    /**
      * POST /v1/code/runners/self-hosted/sessions/{id}/report-failure. The runner
      * says why it could not run the session; `excluded_count`/`stuck` are the
      * pool-health numbers it reads back, and this deployment has no exclusion
@@ -586,7 +858,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       if (session.unauthorized) return session;
       session.state = "released";
       await save();
-      return {};
+      return { released: true };
     },
 
     /** POST …/sessions/{id}/retry-spawn — the operator's Activity → Retry. */
@@ -598,6 +870,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       session.state = "pending";
       session.attempt += 1;
       session.session_token = undefined;
+      session.assigned_runner_id = undefined;
       await save();
       return {};
     },

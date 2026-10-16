@@ -148,6 +148,11 @@ def run_session(hint):
     status, history = request("/v1/code/sessions/%s/events" % quoted, token=token)
     prompt = prompt_of((history or {}).get("data") if isinstance(history, dict) else [])
 
+    # The session's own settings — the composer's model choice among them —
+    # ride the session document; the agent must be asked with them or it
+    # answers as whatever its default is.
+    model, permission_mode = session_settings(session)
+
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
         # resolution above should have taken it, so what lands here is genuinely
@@ -157,7 +162,12 @@ def run_session(hint):
         log("session %s: %s" % (session, reason))
         return session, 127
 
-    argv = [CLAUDE_BIN] + AGENT_ARGS + [prompt]
+    settings_args = []
+    if model is not None:
+        settings_args += ["--model", model]
+    if permission_mode is not None:
+        settings_args += ["--permission-mode", permission_mode]
+    argv = [CLAUDE_BIN] + AGENT_ARGS + settings_args + [prompt]
     # The checkout is where the session's work happens; a guest without it (a
     # fresh image, a stopped VM) still runs, from /, rather than failing the
     # session on a directory.
@@ -181,6 +191,28 @@ def run_session(hint):
                                   "failure_kind": "agent_failed"})
     log("session %s: agent exited %s" % (session, code))
     return session, code
+
+
+def session_settings(session_id):
+    """The model and permission mode the session was placed with.
+
+    They live on the session document's `config` (the create body's own
+    shape); absent, the agent's defaults stand.
+    """
+    status, document = request("/v1/code/sessions/%s" % quoted_id(session_id))
+    if status != 200 or not isinstance(document, dict):
+        return None, None
+    config = (document.get("session") or {}).get("config") or {}
+    model = config.get("model")
+    permission_mode = config.get("permission_mode")
+    return (
+        model if isinstance(model, str) and model else None,
+        permission_mode if isinstance(permission_mode, str) and permission_mode else None,
+    )
+
+
+def quoted_id(session_id):
+    return urllib.parse.quote(str(session_id), safe="")
 
 
 def main():

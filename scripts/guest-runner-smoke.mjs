@@ -28,7 +28,7 @@ rmSync(stateDir);
 const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
-writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s %s' \"$1\" \"$2\"\n");
+writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s' \"$*\"\n");
 chmodSync(stub, 0o755);
 let child;
 
@@ -95,7 +95,7 @@ try {
   const placed = await request("/v1/code/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "guest smoke", environment_id: poolId }),
+    body: JSON.stringify({ title: "guest smoke", environment_id: poolId, config: { model: "claude-opus-5-5" } }),
   });
   const sessionId = JSON.parse(placed.body).session.id;
   await request(`/v1/code/sessions/${sessionId}/events`, {
@@ -114,7 +114,8 @@ try {
   const history = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
   const decoded = decodeClientEventsResponse(history);
   assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
-  assert.equal(decoded[1].message.message.content[0].text, "agent saw: -p summarise the repo",
+  assert.equal(decoded[1].message.message.content[0].text,
+    "agent saw: -p --model claude-opus-5-5 summarise the repo",
     "the agent ran on the prompt the session carried");
   const releasedDoc = JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session;
   assert.equal(releasedDoc.status, "active", "a session the app reads stays active");

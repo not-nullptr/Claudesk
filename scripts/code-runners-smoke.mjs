@@ -213,8 +213,9 @@ try {
     1,
     "the runner's hint carries the create body's sources — they live in `config` now",
   );
-  assert.match(placed.session.id, /^cse_[0-9a-z]{32}$/,
-    "a session id speaks the wire's generation — a bare uuid reads as a local session to the app");
+  assert.match(placed.session.id, /^cse_[0-9a-f]{12}_01[1-9A-HJ-NP-Za-km-z]{22}$/,
+    "a session id speaks the wire's encoding — a bare uuid reads as a local session to the app, "
+    + "and the runner decodes the trailing base58 segment back into the session's uuid");
   const sessionSuffix = placed.session.id.replace(/^cse_/, "");
   assert.equal((await backend.session(`session_${sessionSuffix}`)).session.id, placed.session.id,
     "and answers under the display generation's `session_` spelling too");

@@ -3231,8 +3231,8 @@ function stripGatewayUnsupported(payload) {
 // Desktop itself uses, then streams the answer back untouched: Claude Code
 // speaks the Anthropic wire and so does the account's gateway chain.
 async function handleInferencePassthrough(request, response, url) {
-  if (!(await codeRunners.verifyPoolSecret({ headers: request.headers }))) {
-    throw new ApiError(401, "unknown pool secret");
+  if (!(await codeRunners.verifyInferenceAuth({ headers: request.headers }))) {
+    throw new ApiError(401, "unknown inference credential");
   }
   const gatewayBase = process.env.CLAUDE_GATEWAY_BASE_URL || "";
   const gatewayKey = process.env.CLAUDE_GATEWAY_API_KEY || "";
@@ -3460,6 +3460,45 @@ async function handleCodeRunnerApi(request, response, url) {
     throw new ApiError(405, "method not allowed");
   }
 
+  // The legs the product's own runner uses to start and work a session — see
+  // sessionRemote / registerWorker in code-runners.mjs. They authenticate with
+  // the runner_token the register leg handed out, or the pool secret.
+  const runnerSessionLeg = pathname.match(
+    /^\/v1\/code\/sessions\/([^/]+)\/(remote|worker|worker\/register|worker\/events|worker\/heartbeat|worker\/diagnostics)$/,
+  );
+  if (runnerSessionLeg) {
+    const sessionId = decodeURIComponent(runnerSessionLeg[1]);
+    const leg = runnerSessionLeg[2];
+    if (leg === "worker" && method === "PUT") {
+      return answer(await codeRunners.updateSessionWorker({ headers, sessionId, body }));
+    }
+    if (leg === "worker/heartbeat" && method === "POST") {
+      return answer(await codeRunners.workerHeartbeat({ headers, sessionId }));
+    }
+    if (leg === "worker/diagnostics" && method === "POST") {
+      return answer(await codeRunners.forwardWorkerDiagnostics({ headers, sessionId, body }));
+    }
+    if (leg === "remote" && method === "GET") {
+      // The child's API origin, as the runner itself reached us — the runner's
+      // setup parses this, not the host it configured.
+      const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${
+        request.headers.host || "localhost"}`;
+      return answer(await codeRunners.sessionRemote({ headers, sessionId, baseUrl }));
+    }
+    if (leg === "worker/register" && method === "POST") {
+      return answer(await codeRunners.registerWorker({ headers, sessionId }));
+    }
+    if (leg === "worker/events" && method === "POST") {
+      return answer(await codeRunners.appendWorkerEvents({ headers, sessionId, body }));
+    }
+    throw new ApiError(405, "method not allowed");
+  }
+
+  // The runner's token rotation — its own path family, outside the sessions.
+  if (pathname === "/v1/code/auth/refresh" && method === "POST") {
+    return answer(await codeRunners.refreshRunnerToken({ headers }));
+  }
+
   const sessionDetail = pathname.match(/^\/v1\/code\/sessions\/([^/]+)$/);
   if (sessionDetail) {
     const sessionId = decodeURIComponent(sessionDetail[1]);
@@ -3480,6 +3519,15 @@ async function handleCodeRunnerApi(request, response, url) {
   // The runner's session-scoped calls: exchange an assignment for the session
   // token, then report on the run. Every one is authenticated by that token (or
   // by the pool secret of the pool the session belongs to).
+  // The runner's own poll (PollWork) — the shipped CLI's poll, scoped to the
+  // runner rather than the pool. See pollWork in code-runners.mjs.
+  const runnerPollMatch = pathname.match(
+    /^\/v1\/code\/runners\/self-hosted\/runners\/([^/]+)\/poll$/,
+  );
+  if (runnerPollMatch && method === "POST") {
+    return answer(await codeRunners.pollWork({ headers, body }));
+  }
+
   const runnerSessionsBase = "/v1/code/runners/self-hosted/sessions/";
   if (method === "POST" && pathname.startsWith(runnerSessionsBase)) {
     const rest = pathname.slice(runnerSessionsBase.length);
@@ -4733,6 +4781,7 @@ const server = http.createServer(async (request, response) => {
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
         || url.pathname.startsWith("/v1/code/sessions")
+        || url.pathname.startsWith("/v1/code/auth/")
         || url.pathname.startsWith("/v1/sessions/")
         || url.pathname.startsWith("/v1/environment_providers/")
         || url.pathname === "/v1/environments"
