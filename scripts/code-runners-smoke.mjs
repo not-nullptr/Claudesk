@@ -253,35 +253,30 @@ assert.ok(
   serverSource.includes('url.pathname.startsWith("/v1/environment_providers/")'),
   "the environment list a tenant's Code surface reads is served here too",
 );
-// The web Code surface reads `claude_code_web` out of the access document, so a
-// tenant with the runner backend has to declare it — the same entry the mobile
-// facade declares for the phone — while the operator's own instance is left
-// alone. Exercised, not grepped: the grant is evaluated against a document.
-// Two slices, not one: the granted list and the function that applies it sit
-// far apart in the bridge, and everything between them would not evaluate here.
-const grantList = section(serverSource, "const webShellGrantedFeatures",
-  "// GrowthBook gates the web shell reads");
-const grantFn = section(serverSource, "function grantWebShellEntitlements(",
+// The web Code surface reads `claude_code_web` out of the access document, and
+// the composer derives `remoteSessionsAllowed` from it before it will offer any
+// environment at all — so a tenant has to declare it, with or without the web
+// shell, while the operator's own instance is left to upstream. Exercised, not
+// grepped: the grant is evaluated against a real document.
+const grants = section(serverSource, "function grantTenantCodeEntitlements(",
   "function growthbookKey(");
-const grants = `${grantList}\n${grantFn}`;
 function grantedFeatures(codeRunners, initial = []) {
   const sandbox = { codeRunnersEnabled: codeRunners };
   vm.runInNewContext(
     `const codeRunnersEnabled = ${codeRunners};
      ${grants}
      const document = { current_user_access: { features: ${JSON.stringify(initial)} }, features: [] };
-     grantWebShellEntitlements(document);
+     grantTenantCodeEntitlements(document);
      result = document.current_user_access.features;`,
     sandbox,
   );
   return JSON.parse(JSON.stringify(sandbox.result));
 }
-const tenantFeatures = Object.fromEntries(grantedFeatures(true).map((f) => [f.feature, f.status]));
-assert.equal(tenantFeatures.claude_code_web, "available",
+const [tenant] = grantedFeatures(true);
+assert.equal(tenant.feature, "claude_code_web");
+assert.equal(tenant.status, "available",
   "a tenant's access document must declare the web Code surface");
-assert.equal(tenantFeatures.dramatic_shrimp, "available");
-const ownerFeatures = Object.fromEntries(grantedFeatures(false).map((f) => [f.feature, f.status]));
-assert.equal("claude_code_web" in ownerFeatures, false,
+assert.deepEqual(grantedFeatures(false), [],
   "the operator's own instance keeps whatever upstream said about claude_code_web");
 
 // An entry the upstream already carries is never overwritten, whatever its
