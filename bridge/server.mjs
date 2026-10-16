@@ -3581,16 +3581,25 @@ async function handleCodeRunnerApi(request, response, url) {
   throw new ApiError(404, "not found");
 }
 
-// A session's event stream, in the shape the Desktop main process's own SSE
-// reader expects: frames named `client_event` whose data is the envelope, the
-// history replayed first and `from_sequence_num` resuming from a sequence the
-// reader already has. The tail polls the store rather than holding a
-// subscription, so an event written by another process — the runner — is seen
-// even though this is one bridge process.
+// A session's event stream, in the shape the Desktop's own SSE readers expect:
+// frames named `client_event` whose data is the envelope, the history replayed
+// first, and `Last-Event-ID` / `from_sequence_num` resuming from a sequence the
+// reader already has. Every frame carries `id:` — the reader parses it into the
+// sequence it resumes from, so a frame without one cannot advance the reader's
+// cursor. `session_update` frames carry the session's connection state (the
+// page's "Connecting…" clears on them). The tail polls the store rather than
+// holding a subscription, so an event written by another process — the runner
+// — is seen even though this is one bridge process.
 async function sendCodeEventStream(request, response, sessionId, url) {
-  const fromSequence = Number(url.searchParams.get("from_sequence_num") ?? 0) || 0;
-  const backlog = await codeRunners.eventsAfter(sessionId, fromSequence);
-  if (backlog === null) throw new ApiError(404, "session not found");
+  // The Desktop's own transport reconnects with the header; the web subscriber
+  // resumes with the query. Either names the sequence to continue after.
+  const headerFrom = Number(request.headers["last-event-id"] ?? 0) || 0;
+  const fromSequence = Number(url.searchParams.get("from_sequence_num") ?? 0) || headerFrom || 0;
+  // An unknown session is not a 404: the app opens this stream to receive the
+  // turn it is about to send, and 404ing it is the "Connecting" loop (the
+  // phone's facade captured the same rule) — open empty, and the tail starts
+  // delivering the moment the session exists.
+  const backlog = (await codeRunners.eventsAfter(sessionId, fromSequence)) ?? [];
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-store, no-transform",
@@ -3600,16 +3609,28 @@ async function sendCodeEventStream(request, response, sessionId, url) {
     "X-Accel-Buffering": "no",
   });
   let sequence = fromSequence;
+  let connectionStatus;
   const write = (event) => {
-    response.write(`event: client_event\ndata: ${JSON.stringify(event)}\n\n`);
+    response.write(
+      `id: ${event.sequence_num}\nevent: client_event\ndata: ${JSON.stringify(event)}\n\n`);
     sequence = Math.max(sequence, Number(event.sequence_num) || 0);
   };
+  const writeConnection = (status) => {
+    if (!status || status === connectionStatus) return;
+    connectionStatus = status;
+    response.write(`event: session_update\ndata: ${JSON.stringify({ connection_status: status })}\n\n`);
+  };
+  // A session that does not exist yet still opens as connected (the phone's
+  // facade settled the same way): the first message is what creates it.
+  writeConnection((await codeRunners.connectionState({ sessionId })) ?? "connected");
   for (const event of backlog) write(event);
   const timer = setInterval(async () => {
     try {
       const next = await codeRunners.eventsAfter(sessionId, sequence);
-      if (!next) return;
-      for (const event of next) write(event);
+      if (next) {
+        for (const event of next) write(event);
+      }
+      writeConnection(await codeRunners.connectionState({ sessionId }));
     } catch {
       // Keep the stream up; the next tick retries and the reader resumes from
       // the sequence it already holds if the connection does drop.

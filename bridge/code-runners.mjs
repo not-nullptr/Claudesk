@@ -867,6 +867,24 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       return { excluded_count: 0, stuck: false };
     },
 
+    /**
+     * The session's connection state in the stream's own vocabulary.
+     *
+     * `StreamSessionUpdate` uses the two-case `ConnectionStatus` — a bare
+     * `connected` / `disconnected`, not the four-case prefixed enum — and the
+     * page reads it off `session_update` frames; it is what clears
+     * "Connecting…" (the same frame the phone's own facade sends first). A
+     * message can be posted to a session whether or not a runner holds it yet
+     * — it re-queues on the pool — so everything but a failed placement is
+     * `connected`; only a failure reads `disconnected`.
+     */
+    async connectionState({ sessionId } = {}) {
+      const state = await load();
+      const session = sessionById(state, sessionId);
+      if (!session) return null;
+      return session.state === "failed" ? "disconnected" : "connected";
+    },
+
     /** POST /v1/code/runners/self-hosted/sessions/{id}/release */
     async releaseSession({ headers, sessionId }) {
       const state = await load();
@@ -990,6 +1008,9 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       const limit = Number(searchParams?.get?.("limit") ?? 0) || 0;
       const events = (session.events ?? [])
         .filter((event) => Number(event.sequence_num) > after);
+      // `sort_order=desc` is the scrollback read (the app's transcript pages
+      // ask for it): newest first, so a `limit` takes the newest that many.
+      if (searchParams?.get?.("sort_order") === "desc") events.reverse();
       const page = limit > 0 ? events.slice(0, limit) : events;
       return {
         data: page,

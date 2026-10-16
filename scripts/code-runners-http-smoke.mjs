@@ -256,6 +256,26 @@ try {
     "the stream replays the history in order");
   assert.equal(decodeClientEventsResponse({ data: streamed }).length, 2);
 
+  // The stream opens with the connection frame its reader gates on (the same
+  // contract the phone's facade carries — without it the page says
+  // "Connecting…" forever, however many events arrive), and every transcript
+  // frame carries its sequence as the SSE `id:` — the cursor the reader
+  // resumes from. A frame without one cannot advance it, which is what left
+  // rows unplaced.
+  assert.ok(frames.startsWith("event: session_update\n"),
+    "the stream opens with session_update, before the history");
+  assert.match(frames, /event: session_update\ndata: \{"connection_status":"connected"\}\n\n/);
+  assert.ok(frames.includes("id: 1\nevent: client_event"), "frames carry their sequence as the SSE id");
+  assert.ok(frames.includes("id: 2\nevent: client_event"));
+
+  // A stream for a session that does not exist yet opens empty rather than
+  // 404ing — the app opens it to receive the turn it is about to send, and a
+  // 404 here is the "Connecting" loop.
+  const unknownStream = await readStream(tenantPort,
+    "/v1/code/sessions/cse_ffffffffffff_01111111111111111111111111/events/stream", 0, 1500);
+  assert.ok(unknownStream.startsWith("event: session_update\ndata: {\"connection_status\":\"connected\"}\n\n"),
+    "an unknown session's stream opens empty, not 404");
+
   // A session for an environment this instance does not run is refused, not
   // quietly run locally.
   const elsewhere = await tenantRequest("/v1/code/sessions", {
