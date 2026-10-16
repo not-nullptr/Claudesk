@@ -47,14 +47,6 @@ services:
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
       CLAUDE_REMOTE_CODE_ACTIONS: "${CLAUDE_REMOTE_CODE_ACTIONS:-1}"
-      # The account's inference chain, for the runner inside its VM. The guest
-      # cannot be assumed to reach the gateway directly — its egress is its own
-      # allowlist — so the runner's model calls come through the bridge (the
-      # address the guest provably reaches) and are forwarded here with the
-      # account's own credentials. See docs/code-in-cowork-vm.md.
-      CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:-}"
-      CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:-}"
-      CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       # One account's own instance (scripts/provision-user.sh). Read by the
       # container init as well as the bridge: a tenant's Code never runs in this
       # container, so the local Code surface is not written on either — see
@@ -180,6 +172,14 @@ services:
       BRIDGE_HOST: "0.0.0.0"
       BRIDGE_PORT: "8080"
       COWORK_INTERNAL_URL: "http://127.0.0.1:${COWORK_BRIDGE_INTERNAL_PORT:-9222}"
+      # The account's inference chain, for the runner inside its VM. The guest
+      # cannot be assumed to reach the gateway directly — its egress is its own
+      # allowlist — so the runner's model calls come through the bridge (the
+      # address the guest provably reaches) and are forwarded here with the
+      # account's own credentials. See docs/code-in-cowork-vm.md.
+      CLAUDE_GATEWAY_BASE_URL: "${CLAUDE_GATEWAY_BASE_URL:-}"
+      CLAUDE_GATEWAY_API_KEY: "${CLAUDE_GATEWAY_API_KEY:-}"
+      CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       CLAUDE_REMOTE_GATEWAY_SETTINGS: "${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
       CLAUDE_REMOTE_DEVELOPER_ACTIONS: "${CLAUDE_REMOTE_DEVELOPER_ACTIONS:-0}"
       CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS: "${CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS:-0}"
