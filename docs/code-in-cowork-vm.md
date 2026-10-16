@@ -305,6 +305,12 @@ Extracted while building the substrate, so it does not have to be re-read:
   and a worker-attestation-policy parameter. What it does with frames this bridge
   does not model (tool-call row lifecycles, holds) is what a live Desktop would
   show, and it is the first thing to check on the box.
+
+  That is deliberate on the bridge's side: it stores and streams whatever the
+  runner writes rather than interpreting it, so the Desktop's own model is the
+  only one that has to be right. A frame this bridge does not understand is
+  carried, not dropped — which is also why the tail polls the store instead of
+  filtering on anything.
 - **Still unknown:** the renderer's own create transform (see above), and the
   exact internal-event shapes the main process expects on that stream.
 
