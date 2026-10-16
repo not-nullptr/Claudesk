@@ -28,6 +28,7 @@ node scripts/tenant-code-guard-smoke.mjs
 node scripts/code-runners-smoke.mjs
 node scripts/code-runners-http-smoke.mjs
 node scripts/code-runner-loop-smoke.mjs
+node scripts/guest-runner-smoke.mjs
 node scripts/slug-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/package-sync-smoke.mjs

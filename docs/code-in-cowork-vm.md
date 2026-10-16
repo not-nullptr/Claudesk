@@ -240,10 +240,33 @@ Answered from the two binaries, without the box:
 
 So "run a runner in the guest" does not need SSH, a forwarded port or a nested
 Desktop: **the guest already runs things for the host, and the way in is a file +
-an install step.** What remains is driving that path from the Desktop side, which
-is a bundle question rather than a protocol one — and it is why the runner client
-(`scripts/code-runner-client.mjs --exec`) is written as a self-contained script
-that a unit in the guest can run.
+an install step.** It is why the runner client (`scripts/code-runner-client.mjs
+--exec`) is written as a self-contained script a unit in the guest can run.
+
+### The two ways to drive it
+
+- **The product's own knob is `coworkEDRIntegration`** — a managed-settings key
+  (`flatKey: "coworkEDRIntegration"`, category `sandbox`, "EDR Integration
+  package path", hidden from the UI) naming a *package* the Desktop copies,
+  verifies, unpacks and runs in the guest. Its state machine is
+  `copying → verifying → unpacking → running → succeeded | refused | failed`,
+  and it records `vendor`, `packageSha256`, `vendorVerified`, `signatureExpires`
+  and `exitCode`. **It only runs a package signed by a vendor whose certificate
+  it already trusts** (`vendor key %q: the same certificate is already listed as
+  %q under another fingerprint`), and that check is deliberate — it is code that
+  runs in the guest. This deployment should not be in the business of defeating
+  it.
+- **The route that is ours: the guest image.** The repo already patches
+  `rootfs.img` (the vsock port), so a unit that starts the runner at boot —
+  reading its pool id, secret and base URL from the `claudeshared` share the host
+  already provides — is the same kind of change, with the same cost: the guest
+  image is rebuilt every Desktop release, so the patch is re-derived like the
+  vsock one.
+
+The second is what the plan should do. What still needs the box is whether the
+host side can put the script and its environment into that share (the helper
+builds `-shared-dir` from what the Desktop passes) and whether the guest can
+reach the bridge on its own egress allowlist.
 
 ## Operating it
 
@@ -366,17 +389,48 @@ diagnostic for whether a tenant's pool answers and what it offers, and with
 `--exec` it is a working runner — the only thing the box adds is the real
 `claude` and a checkout to run it in.
 
+**The runner in the guest (landed).** `guest/runner.py` is the guest-side
+service: stdlib-only (the guest is a stock Ubuntu image and this must not add
+dependencies), it registers with the pool, polls, takes each offered session,
+reads the prompt out of the session's events, runs Claude Code on it inside the
+VM, writes the transcript back and releases it — or reports the failure. The
+bridge side of that protocol is pinned by `scripts/guest-runner-smoke.mjs`, which
+boots the bridge and drives the runner against it with a stub agent in the
+Claude Code binary's place.
+
+`scripts/install-guest-runner.sh EMAIL` puts it into an account's guest, the way
+the section above concludes it has to be done — a unit in the guest image. It
+attaches `rootfs.img`, mounts the ext4 labelled `cloudimg-rootfs` (the label the
+guest's own micro-init boots by, so the injection point is the guest's real
+root), and writes `/opt/claudesk/runner.py`, `/etc/claudesk/runner.env` and a
+`claudesk-code-runner.service` that starts it. Run it with the VM stopped; the
+image is rebuilt every Desktop release, so it is re-derived on an update exactly
+like the vsock-port patch, and it is stamped so a re-run with the same payload
+and pool is a no-op.
+
+This bakes the payload in rather than reading it from the `claudeshared` share,
+because it does not depend on the still-open question of whether the host can
+write that share's directory. Once that is answered, the env — and the runner
+with it — can move there, leaving only the unit to re-derive on a release; the
+unit reads its environment from a file, so nothing else about it changes.
+
+The bridge address the guest dials follows from the network answer above: QEMU
+runs with `-netdev user,id=net0` (slirp) and no `hostfwd`, so the runner reaches
+the container at **`http://10.0.2.2:8080`** — the slirp gateway, where the bridge
+already listens on every interface. Nothing can dial *into* the guest, which is
+the other half of why the unit has to live in the image. A deployment that
+restricts guest egress must allow that address
+(`CLAUDE_EGRESS_ALLOWED_HOSTS_JSON`).
+
 What is left is the **deployment** half, and it needs the box:
 
-1. **Run the runner in the guest.** The channel is settled (above): the guest's
-   own `install.sh`/systemd path, fed through the virtiofs share. What is left is
-   driving it from the Desktop side — whether a deployment can supply that script
-   the way the `edrIntegration` payload does, or whether the cleaner route is a
-   unit baked into the guest image the way the vsock port is patched today. Then
-   the two facts that still need the box: whether the guest's `claude` exposes
-   `self-hosted-runner`, and whether the guest can reach the bridge (its egress
-   allowlist is its own, and the VM idle-stops under a 30 s poll loop).
-   `code-runner-client.mjs` is the reference for what the bridge expects.
+1. **Install it on a real account and watch it run.** `install-guest-runner.sh`
+   does the image half; what the box still has to answer is the environment:
+   whether the guest's `/opt/cowork/claude-bin` answers `--print` (or
+   `CLAUDESK_RUNNER_AGENT_ARGS` should name something else), whether guest egress
+   reaches `10.0.2.2`, and whether the host can write the `claudeshared` share —
+   if it can, the payload should move out of the image and only the unit need
+   re-deriving per release.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it
