@@ -198,10 +198,12 @@ Extracted while building the substrate, so it does not have to be re-read:
   `anthropic-version: 2023-06-01`, `anthropic-beta: ccr-byoc-2025-07-29`,
   `anthropic-client-feature: ccr` and `x-organization-uuid` — the `ccr-byoc`
   beta is the self-hosted path's own marker. Its body and response are built by
-  minified helpers, and **the helper names collide across chunks**, so a
-  grep-by-name for them returns unrelated code; reading them needs a targeted
-  trace (break on the fetch, or walk the call site's neighbours) rather than a
-  search.
+  minified helpers reached through **cross-chunk alias exports**
+  (`import {a as tO} from "./ca34974e7-…js"`), and the name inside the defining
+  chunk collides with unrelated locals there too — following it statically lands
+  on a query-key builder, not the transform. So this needs a **runtime trace**
+  (break on the `fetch` in the renderer, or log the request body) rather than
+  more grepping.
 - **Session-scoped legs already seen** (all `POST /v1/code/sessions/{id}/…`):
   `events` (the renderer posting its own client events), `archive`, `share`,
   `support-share`, `debug-export`, `move-to-cloud`; `GET …/terminal` (or
