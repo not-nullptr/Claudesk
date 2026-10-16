@@ -42,6 +42,10 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     enqueueRelayedEvent: (value) => enqueued.push(value),
     remoteFolderPickTimeoutMs: 60,
     remoteFolderPickerEnabled: true,
+    // The sliced region carries the file-access-consent section too; that one
+    // has its own smoke (file-consent-smoke.mjs). Off here so it stays out of
+    // this test's way.
+    fileAccessConsentEnabled: false,
     process: { platform: "linux" },
     Date, clearTimeout, console,
     // The wrapper unrefs its timers (Electron keeps the loop alive); the test
@@ -119,6 +123,10 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     enqueueRelayedEvent: (value) => enqueued.push(value),
     remoteFolderPickTimeoutMs: 60,
     remoteFolderPickerEnabled: true,
+    // The sliced region carries the file-access-consent section too; that one
+    // has its own smoke (file-consent-smoke.mjs). Off here so it stays out of
+    // this test's way.
+    fileAccessConsentEnabled: false,
     process: { platform: "darwin" },
     Date, clearTimeout, console,
     setTimeout: (fn, ms) => {

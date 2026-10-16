@@ -199,6 +199,48 @@ paired computer's folders (above) is still unwired, and a deployment that
 authors `workspace.allowedFolders` restricts which roots the grant can mount —
 keep the browsable root (`COWORK_REMOTE_WORKSPACE_ROOT`, `/workspace`) in it.
 
+## File access consent
+
+The Desktop main process asks before it reads a file that is not already covered
+by the session's own folders. `checkFileAccessConsent` (main bundle) allows the
+session's outputs directory, the folders the session was granted, and any path
+the person approved earlier; every other read — `FileSystem.readLocalFile`, which
+is what the file pane uses to load a preview's text, and what the memory editor
+uses to open `CLAUDE.md` — first opens a native card:
+
+```js
+dialog.showMessageBox(window, {
+  title: "File Access Request",
+  message: "Allow Claude to preview this file?",
+  detail: "<path>\n\nThis will allow Claude to preview the file.",
+});
+```
+
+An agent memory file is one of those paths: it lives under the Desktop's own
+userData (`~/.config/Claude-3p/local-agent-mode-sessions/…/memory/`), which no
+session is granted, even though the reader's own allowlist (`getAutoMemoryDir`)
+covers it. So opening a memory file from the browser — the preview pane, the
+memory editor — puts this card up on a display nobody is watching, and the
+renderer's `ipcRenderer.invoke` never settles. The failure is a hang, not an
+error: `showMessageBox` never resolves, the bridge's `/api/remote/ipc` request
+behind it never answers, and the pane spins forever.
+
+With `CLAUDE_REMOTE_FILE_CONSENT` **on (the default)** the wrapper answers that
+one card itself, with Allow, and logs the path it answered for
+(`[cowork-wrapper] answered File Access Request "preview" for …`). The card is
+recognized by its own two literals *and* by its shape — two buttons, with the
+allow index read back from `cancelId`, since `checkFileAccessConsent` builds the
+list as `["Cancel","Allow"]` and hands Electron only the cancel index — so any
+other message box the app opens, and any card whose shape a future build
+changes, still reaches the native dialog. Set `CLAUDE_REMOTE_FILE_CONSENT=0` to
+put the native card back (nobody will see it in this container).
+
+Allow is the only answer that gets the person the file they asked for; Deny would
+only turn the hang into "Unable to read file". The trade is deliberate: the
+browser asking for a path is the instance's own authenticated user, and the
+approval is recorded per file by the official code, so the second read of the
+same file does not reach the wrapper at all.
+
 ## Notifications
 
 Claude notifies: a finished turn ("Claude finished a task"), a session waiting

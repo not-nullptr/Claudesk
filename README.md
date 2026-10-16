@@ -287,6 +287,35 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 尽量保持分页一致；`.xlsx`/`.xls` 采用与 Desktop 相同的“每个工作表一页”导出。大文件超过
 `COWORK_REMOTE_PREVIEW_MAX_BYTES` 时拒绝转换。补丁改动会同步 `patchRelease`，让不可变的渲染器资源 URL 重新加载。
 
+### 文件读取授权（File Access Request）
+
+Desktop 主进程在读取“不属于该会话自己的目录”的文件前会先问使用者一句：`checkFileAccessConsent`（main bundle）放行会话的
+`outputs` 目录、会话被授予的文件夹、以及此前已批准过的路径；其余读取——文件面板加载预览文本用的 `FileSystem.readLocalFile`、
+记忆编辑器打开 `CLAUDE.md` 用的同一条 IPC——都会先弹出原生卡片：
+
+```js
+dialog.showMessageBox(window, {
+  title: "File Access Request",
+  message: "Allow Claude to preview this file?",
+  detail: "<path>\n\nThis will allow Claude to preview the file.",
+});
+```
+
+agent 记忆文件正是这类路径：它位于 Desktop 自己的 userData 下（`~/.config/Claude-3p/local-agent-mode-sessions/…/memory/`），
+不属于任何会话被授予的文件夹（尽管读取器自己的白名单 `getAutoMemoryDir` 覆盖了它）。于是从浏览器打开记忆文件（文件面板预览、
+记忆编辑器）会把这张卡片画在无人观看的显示器上，渲染进程的 `ipcRenderer.invoke` 永不落定：`showMessageBox` 不 resolve，
+Bridge 的 `/api/remote/ipc` 请求也就永远不返回，面板一直转圈——表现为“永远挂住”，既不出错也不超时。
+
+`CLAUDE_REMOTE_FILE_CONSENT` 默认开启时，wrapper 直接替官方答这张卡片，选 Allow，并把所答路径写进日志
+（`[cowork-wrapper] answered File Access Request "preview" for …`）。识别依据是这张卡片自己的两段文案**加上**它的形状——
+两个按钮，且 allow 下标由 `cancelId` 反推（`checkFileAccessConsent` 构造的按钮列表是 `["Cancel","Allow"]`，交给 Electron 的
+只有 cancel 下标）——因此应用弹出的任何其它消息框、以及未来版本改了形状的卡片，都照旧走原生对话框。
+`CLAUDE_REMOTE_FILE_CONSENT=0` 可退回原生卡片（在容器里没人会看到）。
+
+允许是唯一能让人拿到他所请求文件的答案：拒绝只会把挂住换成“Unable to read file”。这个取舍是有意的——向 Bridge 请求路径的
+就是该实例已认证的用户本人，而官方代码会按文件记录这次批准，所以同一个文件第二次读取根本不会再经过 wrapper。
+详见 [web shell 文档](docs/web-shell.md) 的 “File access consent”。
+
 ### 浏览器通知
 
 官方 Desktop 决定何时通知（回合结束、“需要你的输入”、工具许可与 AskUserQuestion 卡片等），并在主进程里弹出原生通知——

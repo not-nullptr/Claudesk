@@ -142,6 +142,19 @@ const coworkHostBashEnabled = process.env.CLAUDE_COWORK_HOST_BASH === "1";
 // below). Default follows the web shell: on with it, off otherwise.
 const remoteFolderPickerEnabled = process.env.CLAUDE_REMOTE_FOLDER_PICKER === "1"
   || (process.env.CLAUDE_REMOTE_WEB_SHELL === "1" && process.env.CLAUDE_REMOTE_FOLDER_PICKER !== "0");
+// Before the Desktop main process lets a renderer read a file that is not in one
+// of the session's own folders, it asks the person at the keyboard — a native
+// "File Access Request" card. Previewing an agent memory file lands there (the
+// memory lives under the Desktop's own userData, not in a folder the session was
+// granted), and so does the memory editor opening CLAUDE.md. On this container's
+// headless display nobody can answer that card, so the read never settles and
+// the browser's IPC call for it hangs forever, with no error and no timeout.
+// When this is on the wrapper answers the card itself, with Allow — the person
+// at the far end of the bridge asked for that file by opening it, and Deny would
+// only trade the hang for a failed preview. See "File access consent" below,
+// which recognizes that one card and leaves every other dialog alone.
+// `CLAUDE_REMOTE_FILE_CONSENT=0` restores the native card.
+const fileAccessConsentEnabled = process.env.CLAUDE_REMOTE_FILE_CONSENT !== "0";
 const rendererReadyTimeoutMs = 15 * 1000;
 const rendererReadyPollMs = 250;
 
@@ -2988,6 +3001,93 @@ if (remoteFolderPickerEnabled) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// File access consent
+//
+// The official file reader (`checkFileAccessConsent`, in the main process) puts
+// a native question in front of every read that the session's own folders do not
+// already cover — its outputs directory, the folders it was granted, or a path
+// the person approved earlier:
+//
+//   dialog.showMessageBox(window, { title: "File Access Request",
+//     message: "Allow Claude to preview this file?", detail: "<path>\n\n…" })
+//
+// The file pane previewing an agent memory file always lands there (the memory
+// lives under the Desktop's own userData, which no session is granted), as does
+// the memory editor opening CLAUDE.md. This container has no display a person is
+// watching, so the card is never answered: `showMessageBox` never resolves, the
+// reader's promise behind it never settles, and the browser's IPC request hangs
+// for good — no error, no timeout, and a pane stuck on its spinner.
+//
+// The wrapper answers the card itself. Allow is the only answer that gets the
+// person the file they asked for; Deny would replace the hang with "Unable to
+// read file". The card is recognized by its own two literals *and* by its shape:
+// two buttons, with the allow index read back from `cancelId`, because
+// `checkFileAccessConsent` builds the list as ["Cancel","Allow"] and hands
+// Electron only the cancel index. A message box that is not this card — or one
+// whose shape this build does not match — still opens for real rather than being
+// answered blind.
+// ---------------------------------------------------------------------------
+
+// Upstream's copy for the card. A localized build would change the message, so
+// the title alone already identifies the card; the message is read only for the
+// action word and the first line of `detail` is the path the log reports.
+const fileAccessCardMessage = /^Allow Claude to (preview|open) this file\?$/;
+
+// Reported by /runtime, so a deployment can see the interception is live (and
+// that it is on) without grepping the Desktop log for the answer lines.
+const fileAccessConsentState = { answered: 0 };
+
+function fileAccessCardAnswer(options) {
+  if (!options || typeof options !== "object") return undefined;
+  const message = typeof options.message === "string" ? options.message : "";
+  const match = fileAccessCardMessage.exec(message);
+  if (!match && options.title !== "File Access Request") return undefined;
+  const buttons = Array.isArray(options.buttons) ? options.buttons : [];
+  if (buttons.length !== 2) return undefined;
+  const cancelIndex = Number.isInteger(options.cancelId)
+    ? options.cancelId
+    : Number.isInteger(options.defaultId) ? options.defaultId : undefined;
+  // The caller computes both indices together (`cancelIndex: +!!defaultAllow,
+  // allowIndex: +!defaultAllow`), so with two buttons the allow index is the
+  // other one.
+  if (cancelIndex !== 0 && cancelIndex !== 1) return undefined;
+  return {
+    action: match ? match[1] : "preview",
+    path: typeof options.detail === "string" ? options.detail.split("\n")[0].slice(0, 512) : "",
+    response: cancelIndex === 0 ? 1 : 0,
+  };
+}
+
+if (fileAccessConsentEnabled) {
+  const electronDialog = require("electron").dialog;
+  if (electronDialog && typeof electronDialog.showMessageBox === "function") {
+    const originalShowMessageBox = electronDialog.showMessageBox.bind(electronDialog);
+    // Like showOpenDialog above, this is called both as showMessageBox(options)
+    // and showMessageBox(window, options); only the options carry the card.
+    electronDialog.showMessageBox = function answeredShowMessageBox(...args) {
+      try {
+        const first = args[0];
+        const options = args.length > 1 && first && typeof first === "object"
+          && typeof first.isDestroyed === "function"
+          ? args[1]
+          : first;
+        const answer = fileAccessCardAnswer(options);
+        if (answer) {
+          fileAccessConsentState.answered += 1;
+          console.info(
+            `[cowork-wrapper] answered File Access Request "${answer.action}" for ${answer.path}`,
+          );
+          // Electron's own result shape; the caller maps `response` back through
+          // its button indices and records the approval for this path.
+          return Promise.resolve({ response: answer.response, checkboxChecked: false });
+        }
+      } catch {}
+      return originalShowMessageBox(...args);
+    };
+  }
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", "http://localhost");
@@ -3028,6 +3128,10 @@ const server = http.createServer(async (request, response) => {
             memoryGB: coworkVmMemoryGB,
             monitor: coworkVmIdleState,
             scheduleGuardMinutes: coworkVmScheduleGuardMinutes,
+          },
+          fileAccessConsent: {
+            answered: fileAccessConsentState.answered,
+            enabled: fileAccessConsentEnabled,
           },
           notifications: {
             clicks: notificationRelay.clicks,

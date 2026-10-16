@@ -34,6 +34,7 @@ node scripts/login-shell-smoke.mjs
 node scripts/updater-smoke.mjs
 node scripts/workspace-folders-smoke.mjs
 node scripts/folder-pick-smoke.mjs
+node scripts/file-consent-smoke.mjs
 node scripts/preload-file-open-smoke.mjs
 node scripts/attachment-mentions-smoke.mjs
 node scripts/upload-stream-smoke.mjs
