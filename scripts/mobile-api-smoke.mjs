@@ -134,6 +134,18 @@ try {
   assert.equal(foreignBody.expectedNamePrefix, "");
   claudesk.state.namePrefix = "";
 
+  // A bridge that does not answer at all is its own failure: a facade that
+  // cannot reach a Desktop can serve nothing, and reporting healthy there is how
+  // a mistyped host hid (an override naming a container that does not exist).
+  claudesk.state.down = true;
+  const gone = await call("/api/health");
+  assert.equal(gone.status, 503, "an unreachable Desktop fails the healthcheck");
+  const goneBody = await gone.json();
+  assert.equal(goneBody.desktop, claudesk.url);
+  assert.equal(goneBody.reportedNamePrefix, null);
+  claudesk.state.down = false;
+  assert.equal((await call("/api/health")).status, 200, "and it recovers when the bridge answers");
+
   // A bridge too old to report an instance is unknown, not wrong: the facade
   // keeps serving (the Desktop's own healthcheck covers its liveness).
   delete claudesk.state.namePrefix;
