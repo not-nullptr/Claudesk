@@ -194,10 +194,22 @@ Extracted while building the substrate, so it does not have to be re-read:
   relation**; the org's default is set through the environment-provider surface,
   so a tenant's default environment is how the self-hosted place becomes the one
   a new session lands on without the user picking it.
-- **Still unknown:** the session-create request body (the literal
-  `/v1/code/sessions` POST shape) and the transcript/event legs the *Desktop's*
-  renderer expects. The mobile facade's translation targets the phone's DTOs, not
-  this client, so it is a starting point rather than a drop-in.
+- **Session create is `POST /v1/code/sessions`** with headers
+  `anthropic-version: 2023-06-01`, `anthropic-beta: ccr-byoc-2025-07-29`,
+  `anthropic-client-feature: ccr` and `x-organization-uuid` — the `ccr-byoc`
+  beta is the self-hosted path's own marker. Its body and response are built by
+  minified helpers, and **the helper names collide across chunks**, so a
+  grep-by-name for them returns unrelated code; reading them needs a targeted
+  trace (break on the fetch, or walk the call site's neighbours) rather than a
+  search.
+- **Session-scoped legs already seen** (all `POST /v1/code/sessions/{id}/…`):
+  `events` (the renderer posting its own client events), `archive`, `share`,
+  `support-share`, `debug-export`, `move-to-cloud`; `GET …/terminal` (or
+  `/v2/ccr-sessions/{id}/terminal` under the `ccr_v2_terminal_ws_web` gate).
+- **Still unknown:** that create body/response, and the transcript and event
+  legs the *Desktop's* renderer expects. The mobile facade's translation targets
+  the phone's DTOs, not this client, so it is a starting point rather than a
+  drop-in.
 - **The renderer dimension.** A tenant must resolve `/code` to the self-hosted
   (cloud) surface rather than the local one, i.e. a renderer generation with
   `desktop-code-route-alias` **not** applied. That is a third input to
