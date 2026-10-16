@@ -259,8 +259,11 @@ assert.ok(
 // shell, while the operator's own instance is left to upstream. Exercised, not
 // grepped: the grant is evaluated against a real document.
 const grants = section(serverSource, "function grantTenantCodeEntitlements(",
-  "function growthbookKey(");
-function grantedFeatures(codeRunners, initial = []) {
+  "function grantWebShellEntitlements(");
+const gateGrant = section(serverSource, "const tenantCodeGates", "function grantWebShellEntitlements(");
+const gateKey = section(serverSource, "function growthbookKey(", "function grantWebShellGates(");
+
+function granted(codeRunners, initial = []) {
   const sandbox = { codeRunnersEnabled: codeRunners };
   vm.runInNewContext(
     `const codeRunnersEnabled = ${codeRunners};
@@ -272,19 +275,48 @@ function grantedFeatures(codeRunners, initial = []) {
   );
   return JSON.parse(JSON.stringify(sandbox.result));
 }
-const [tenant] = grantedFeatures(true);
-assert.equal(tenant.feature, "claude_code_web");
-assert.equal(tenant.status, "available",
-  "a tenant's access document must declare the web Code surface");
-assert.deepEqual(grantedFeatures(false), [],
-  "the operator's own instance keeps whatever upstream said about claude_code_web");
+const tenant = Object.fromEntries(granted(true).map((entry) => [entry.feature, entry.status]));
+assert.equal(tenant.claude_code_web, "available",
+  "the composer's remoteSessionsAllowed is derived from this entry");
+assert.equal(tenant.claude_code_self_hosted_runners, "available",
+  "and the pools query — the menu's self-hosted section — is enabled on this one");
+assert.deepEqual(granted(false), [],
+  "the operator's own instance keeps whatever upstream said");
 
 // An entry the upstream already carries is never overwritten, whatever its
 // status — that is what keeps this from silently undoing org policy.
-const [blocked] = grantedFeatures(true,
-  [{ feature: "claude_code_web", status: "blocked_by_entitlement" }]);
-assert.equal(blocked.status, "blocked_by_entitlement",
-  "an upstream verdict on claude_code_web must survive the grant");
+const blocked = granted(true, [{ feature: "claude_code_web", status: "blocked_by_entitlement" }]);
+assert.equal(blocked.find((entry) => entry.feature === "claude_code_web").status,
+  "blocked_by_entitlement", "an upstream verdict survives the grant");
+
+// The rollout gate the self-hosted-runners check falls back to, granted the way
+// `bad_moon_rising` is — by the key the renderer addresses it by.
+function gated(codeRunners, initial = {}) {
+  const sandbox = { codeRunnersEnabled: codeRunners };
+  vm.runInNewContext(
+    `const codeRunnersEnabled = ${codeRunners};
+     ${gateKey}
+     ${gateGrant}
+     const document = { growthbook: { features: ${JSON.stringify(initial)} } };
+     grantTenantCodeGates(document);
+     result = document.growthbook.features;`,
+    sandbox,
+  );
+  return JSON.parse(JSON.stringify(sandbox.result));
+}
+let key = null;
+{
+  const sandbox = {};
+  vm.runInNewContext(`${gateKey}\nresult = growthbookKey("claude_ai_tamarind")`, sandbox);
+  key = sandbox.result;
+}
+assert.equal(gated(true)[key]?.defaultValue, true,
+  "a tenant grants the self-hosted-runners rollout gate");
+assert.deepEqual(gated(false), {},
+  "and the operator's instance is left alone");
+assert.deepEqual(gated(true, { [key]: { defaultValue: false } }),
+  { [key]: { defaultValue: false } },
+  "an upstream verdict on the gate is left alone too");
 
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 assert.equal(

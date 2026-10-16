@@ -2094,12 +2094,22 @@ function injectPersonalizedGreeting(parsed, name, now = new Date()) {
 // absent — an existing entry (including a `blocked_by_*` one the upstream set)
 // is left exactly as it is, so this cannot silently override org policy.
 // A tenant's Code is real whether or not the web shell is on — its sessions run
-// on its own runner — so its access document says so in either mode. The Code
-// surface's own gates read `claude_code_web` *before* they will offer any
-// environment at all (`remoteSessionsAllowed` is derived from it), and without
-// that entry the composer concludes there is nowhere to run and reports "Local
-// sessions aren't available on this device". Kept separate from the web shell's
-// own grants, which are about its chrome and its Cowork surface.
+// on its own runner — so its access document says so in either mode. Two entries,
+// because the surface reads two:
+//
+//   claude_code_web                   the composer derives `remoteSessionsAllowed`
+//                                     from it, and without it it offers no place
+//                                     at all ("Local sessions aren't available on
+//                                     this device").
+//   claude_code_self_hosted_runners   the *pools* query is enabled on it
+//                                     (`MS({enabled: … && IS()})`), the pools make
+//                                     up the menu's self-hosted section, and that
+//                                     section is one of the terms that decides
+//                                     whether the environments submenu is drawn at
+//                                     all. Without it the menu is Local-only.
+//
+// Kept separate from the web shell's own grants, which are about its chrome and
+// its Cowork surface.
 function grantTenantCodeEntitlements(value) {
   if (!codeRunnersEnabled || !value || typeof value !== "object") return false;
   let changed = false;
@@ -2109,8 +2119,29 @@ function grantTenantCodeEntitlements(value) {
       holder.features.filter((entry) => entry && typeof entry.feature === "string")
         .map((entry) => entry.feature),
     );
-    if (present.has("claude_code_web")) continue;
-    holder.features.push({ feature: "claude_code_web", status: "available" });
+    for (const feature of ["claude_code_web", "claude_code_self_hosted_runners"]) {
+      if (present.has(feature)) continue;
+      holder.features.push({ feature, status: "available" });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// The GrowthBook gate the self-hosted-runners check falls back to — the same
+// kind of rollout flag `bad_moon_rising` is for Code itself, and granted the
+// same way (only where absent, so an upstream value is left alone).
+const tenantCodeGates = ["claude_ai_tamarind"];
+
+function grantTenantCodeGates(value) {
+  if (!codeRunnersEnabled) return false;
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  let changed = false;
+  for (const name of tenantCodeGates) {
+    const key = growthbookKey(name);
+    if (key in features) continue;
+    features[key] = { defaultValue: true };
     changed = true;
   }
   return changed;
@@ -2551,9 +2582,16 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     // Whether or not the web shell is on: a tenant's Code runs on its runner,
-    // and the surface will not offer an environment without this entry.
+    // and the surface will not offer an environment without these entries.
     if ((bootstrapResponsePath.test(url.pathname) || currentUserAccessPath.test(url.pathname))
       && grantTenantCodeEntitlements(parsed)) {
+      rewrote = true;
+    }
+    // The rollout gate the same check falls back to
+    // (`IS()` is `growthbook("claude_ai_tamarind") || the feature above`), so
+    // the self-hosted section does not depend on whichever of the two the
+    // build happens to read first.
+    if (bootstrapResponsePath.test(url.pathname) && grantTenantCodeGates(parsed)) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
