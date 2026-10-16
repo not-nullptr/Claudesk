@@ -1574,4 +1574,40 @@ const embeddedCompiled = await minify(gatewayUrlSchema, {
 });
 assert.equal(patchEmbeddedSources(new Map([["main.js", embeddedCompiled.code]])).patches.length, 1,
   "a re-minified main bundle must still be spliced");
+// The root's caught-error option. React 19 creates the root with
+// `{onCaughtError, onRecoverableError}` and the bundle hands `onCaughtError` the
+// app's own reporter, which does not log — so a boundary-caught render error
+// reaches neither the console nor the network, and the crash page's error code
+// is a hash of the message. In web-shell mode the option's value is wrapped to
+// log the error and React's error info before delegating to the app's handler.
+const crashLogRoot = 'function boot(){start("render_start");'
+  + 'createRoot(el,{onCaughtError:reportCrash,onRecoverableError:reportRecoverable}).render(app)}';
+// A like-named member *read* elsewhere is not the option: React only ever reads
+// `options.onCaughtError`. Nor is a root option without the sibling, and a
+// second root in the same chunk refuses rather than splicing one of two.
+const crashLogDecoy = 'function readOptions(o){if(o.onCaughtError!==void 0)'
+  + 'return o.onCaughtError(e,i);return null;'
+  + 'createRoot(el,{onCaughtError:loneHandler}).render(other)}';
+const crashLogTwin = crashLogRoot.replace("boot", "bootAgain").replace("reportCrash", "reportCrashB");
+assert.equal(inspectRenderer(crashLogRoot, false, false).patches.length, 0,
+  "the caught-error option is left alone outside web-shell mode");
+assert.equal(inspectRenderer(crashLogDecoy, false, true).patches
+  .filter(patch => patch.id === "web-crash-log").length, 0,
+  "a member read and a lone option are not the root's caught-error pair");
+assert.equal(inspectRenderer(`${crashLogRoot}\n${crashLogTwin}`, false, true).patches
+  .filter(patch => patch.id === "web-crash-log").length, 0,
+  "a second root option must refuse rather than splice one of two");
+const crashLogOut = patchRendererSources(
+  new Map([["entry.js", `${webShellFixtures}\n${accountMenuName}\n${crashLogRoot}`]]), false, true)
+  .sources.get("entry.js");
+assert.ok(crashLogOut.includes('console.error("[claudesk] render error",...__claudeskCaught)'),
+  "the handler must log the error in web-shell mode");
+assert.ok(crashLogOut.includes("return (reportCrash)(...__claudeskCaught)"),
+  "the app's own handler must still run after the log");
+const crashLogCompiled = await minify(crashLogRoot, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(crashLogCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-crash-log").length, 1,
+  "a mangled root option must still be wrapped exactly once");
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

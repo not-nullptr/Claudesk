@@ -538,6 +538,25 @@ three others match the shape alone; the page's hook is pinned by the three
 parser. Spliced only in web-shell mode, and none of the three required: a bundle
 that no longer matches leaves the requests to fail as they do today.
 
+`web-crash-log` makes a caught render error audible. React 19 creates its root
+with `{onCaughtError, onRecoverableError}`, and this bundle hands `onCaughtError`
+the app's own reporter, which does not log — so an error caught by an error
+boundary reaches neither the console nor the network, and the crash page is the
+whole of what anyone sees. That page's error code is a **hash**: djb2 over
+`<name>:<message>` with uuids, URLs, chunk filenames and every 1–3 character
+token normalized away, printed base-36 (`shared-21-CGGmSsMS.js`). In the web
+shell that is a dead end — there is no Electron log to read, the shipped bundle
+carries no React DevTools hook, and a `window.onerror` listener never fires
+because React swallowed the error first. The patch wraps each root option's value
+to log the error and React's error info (the raw error prints its stack) and then
+delegate to the app's own handler, which is the one thing React's default gives
+back. Pinned by the option's own property names, which the minifier leaves alone
+— React only ever *reads* these members, so a Property of that name is a root's
+own option — plus the sibling `onRecoverableError` and a callable value, and
+emitted only when exactly one such option is in the chunk. Spliced only in
+web-shell mode, and not required: a bundle that no longer matches leaves the
+silent handler rather than failing preparation.
+
 `web-cowork-hub-writable` puts a local Cowork session back in charge of its own
 settings. Everything session-scoped — the permission picker, the model picker,
 stop, retry — is handed a setter only when the session reports writable:

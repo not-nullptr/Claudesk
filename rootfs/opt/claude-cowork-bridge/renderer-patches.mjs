@@ -695,6 +695,31 @@ const modePickerMarker = "data-compact-mode-switcher";
 // matches must fail preparation rather than warn nobody.
 const toastGlobalPatchId = "toast-global";
 const toastGlobalName = "__CLAUDESK_TOAST__";
+// The renderer's caught-error handler, made audible.
+//
+// React 19 creates its root with `{onCaughtError, onRecoverableError}`, and this
+// bundle hands `onCaughtError` the app's own reporter — which does not log. So a
+// render error caught by an error boundary reaches neither the console nor the
+// network: the only thing anyone sees is the crash page, whose error code is a
+// **hash** of the error's `name:message` (`shared-21-CGGmSsMS.js`: djb2 over the
+// message with uuids/urls/chunk names and every 1–3 character token normalized
+// away, printed base-36). That is a dead end in the web shell specifically:
+// there is no Electron log to read, the shipped bundle has no React DevTools
+// hook, and a `window.onerror` listener never fires because React swallowed the
+// error first. Wrapping the handler restores the one thing React's default
+// gives — the error and its component stack on the console — before the app's
+// own reporting runs.
+//
+// Pinned by the option's own property names, which the minifier leaves alone:
+// React itself only ever *reads* the member (`options.onCaughtError`), so a
+// Property of that name is a root's own option wherever it appears, and the
+// sibling `onRecoverableError` is required so a like-named field elsewhere
+// cannot match. Emitted only when exactly one such option is in the chunk.
+// Spliced only in web-shell mode, and not required: a bundle that no longer
+// matches leaves the silent handler rather than failing preparation.
+const crashLogPatchId = "web-crash-log";
+const crashLogOption = "onCaughtError";
+const crashLogSiblingOption = "onRecoverableError";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 // A minified component body may answer through a comma sequence
@@ -867,6 +892,26 @@ function toastManagerHook(ast) {
 // are not the switcher call, or a switcher call with no `segments` binding,
 // refuses rather than splice over the wrong element. The array's name is read
 // back from the same graph, so a renamed minifier output still matches.
+// A React root's `onCaughtError` option, read back from the graph. The test is
+// the two property names plus the shape: the parent must be an object literal
+// carrying the sibling `onRecoverableError` beside it (that pair is how a root's
+// options are spelled), and the value must be something callable — an identifier
+// or a function expression. React's own internals only ever *read* these
+// members, so a Property of this name cannot be React's.
+function crashLogOptionTarget(node, ancestors) {
+  if (node.type !== "Property" || node.computed) return undefined;
+  const name = node.key?.name ?? node.key?.value;
+  if (name !== crashLogOption) return undefined;
+  const owner = ancestors.at(-1);
+  if (owner?.type !== "ObjectExpression") return undefined;
+  if (!owner.properties.some(entry => entry !== node && key(entry, crashLogSiblingOption))) {
+    return undefined;
+  }
+  const value = unwrap(node.value);
+  if (!functionTypes.has(value?.type) && value?.type !== "Identifier") return undefined;
+  return node;
+}
+
 function modePickerTarget(node) {
   if (node.type !== "CallExpression") return undefined;
   const props = node.arguments.map(unwrap).find(argument => argument?.type === "ObjectExpression");
@@ -1872,6 +1917,7 @@ export const prefilterNeedles = [
   "claude_ai_projects_limits", // projects-allowed predicate
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
   "chatProjectsError", // the projects page's list hook, which the report patch forces
+  "onCaughtError", // the crash-log root option (two chunks: the entry and react-dom)
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -1910,6 +1956,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
   let listenerHost;
   let toastBinding;
   let toastPublished = false;
+  const crashLogOptions = [];
   if (webShellEnabled) {
     // The unified-composer design predicates are forced to their flag operand.
     for (const operand of composerDesignOperands(ast)) {
@@ -2125,6 +2172,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
         original, replacement: "!0" });
     }
     if (webShellEnabled) {
+      const crashOption = crashLogOptionTarget(node, ancestors);
+      if (crashOption) crashLogOptions.push(crashOption);
       // The manager name is read from the whole chunk, so it is resolved once
       // and cached; `toastPublished` keeps the splice from being emitted twice
       // if the marker property were ever rendered by more than one component.
@@ -2272,6 +2321,18 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
     patches.push({ id, start: node.start, end: node.end, original,
       replacement: node.operator.includes("!") ? `(${original}&&!(${remote}))` : `(${original}||${remote})` });
   });
+  // The caught-error handler takes the error and React's error info and returns
+  // nothing; the wrapper logs both (the raw error prints its stack) and then
+  // delegates, so the app's own reporting still runs. A throw from the log line
+  // or from the original handler must not replace the crash the boundary is
+  // already rendering, hence the two `try`s.
+  if (webShellEnabled && crashLogOptions.length === 1) {
+    const option = crashLogOptions[0];
+    const original = source.slice(option.value.start, option.value.end);
+    patches.push({ id: crashLogPatchId, start: option.value.start, end: option.value.end, original,
+      replacement: `(...__claudeskCaught)=>{try{console.error("[claudesk] render error",`
+        + `...__claudeskCaught)}catch{};try{return (${original})(...__claudeskCaught)}catch{}}` });
+  }
   return { evidence, patches };
 }
 
