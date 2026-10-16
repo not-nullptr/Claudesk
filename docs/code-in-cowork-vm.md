@@ -544,6 +544,14 @@ display form `session_<suffix>` resolves the same way, and sessions the store
 held before the prefix are migrated at load while still answering their old
 bare uuid — every lookup compares canonical forms (`sessionById`).
 
+**The pool-wait state rides the same document.** `self_hosted_runner_state`
+carries `pool_name`, and `assigned_runner_label` once a runner has taken the
+session — the page's pool-wait card ("Waiting for a runner…") shows while the
+session is `pending` (which the document's `status: "active"` + absent
+`worker_status` means to the reader) and clears on that label plus transcript
+rows, so both spend exactly as long as the truth warrants: the label appears
+when the runner claims the session at `…/{id}/token`, nothing before.
+
 Deliberately **not** answered (they 404 and are logged as unhandled Code
 requests): the share/support-share links, `/v1/code/github/*` branch-status
 reads, and the adjacent product areas the surface links to but this deployment

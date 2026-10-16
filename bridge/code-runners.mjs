@@ -128,6 +128,18 @@ function sessionDocument(session) {
       ? { worker_status: "idle" } : {}),
     environment_id: session.pool_id,
     self_hosted_runner_pool_id: session.pool_id,
+    // The pool-session state the app reads beside the id: the pool's name, and
+    // — once a runner has taken the session — the label that ends the page's
+    // "Waiting for a runner…" card (the reader clears it only on a label plus
+    // transcript rows; a bare "pending" with no label is exactly what that card
+    // means). An absent field means *unknown* to this reader, so nothing is
+    // claimed before a runner actually has it.
+    self_hosted_runner_state: {
+      ...(typeof session.pool_name === "string" && session.pool_name
+        ? { pool_name: session.pool_name } : {}),
+      ...(typeof session.runner_label === "string" && session.runner_label
+        ? { assigned_runner_label: session.runner_label } : {}),
+    },
     created_at: session.created_at,
     last_event_at: session.last_event_at ?? session.created_at,
     config: sessionConfigOf(session),
@@ -254,6 +266,16 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       if (session.session_uuid !== canonical) {
         session.session_uuid = canonical;
         migrated = true;
+      }
+      // The pool's name travels on the session document (`pool_name` inside
+      // `self_hosted_runner_state`); sessions created before that field existed
+      // get it backfilled from their pool.
+      if (typeof session.pool_name !== "string") {
+        const pool = poolById(cache, session.pool_id);
+        if (pool) {
+          session.pool_name = pool.name;
+          migrated = true;
+        }
       }
     }
     // The deployment names this instance's pool, and a pool the operator named
@@ -507,6 +529,15 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       }
       if (session.state === "pending" || session.state === "offered") session.state = "active";
       session.started_at = session.started_at ?? new Date().toISOString();
+      // Which runner got it, for the label the app shows once the wait is over
+      // (`self_hosted_runner_state.assigned_runner_label` — the page's pool
+      // wait card clears on it). Polls authenticate by the pool secret, so the
+      // pool's most recently seen runner is the best name available here; the
+      // runner id is what the pool API itself mints for it.
+      const runner = state.runners
+        .filter((entry) => entry.pool_id === session.pool_id)
+        .sort((a, b) => String(b.last_poll_at ?? "").localeCompare(String(a.last_poll_at ?? "")))[0];
+      if (runner?.runner_id && !session.runner_label) session.runner_label = runner.runner_id;
       await save();
       log.log(`[code-runners] session ${session.session_uuid} started on pool ${session.pool_id}`);
       return { session_token: session.session_token };
@@ -587,6 +618,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       const session = {
         session_uuid: newSessionId(),
         pool_id: pool.pool_id,
+        pool_name: pool.name,
         attempt: 1,
         state: "pending",
         work_order_jwt: `${randomUUID()}.${randomBytes(16).toString("base64url")}`,

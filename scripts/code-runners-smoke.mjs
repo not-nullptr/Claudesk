@@ -185,6 +185,13 @@ try {
   assert.equal(placed.session.self_hosted_runner_pool_id, primary.pool_id);
   assert.deepEqual(placed.session.tags, ["smoke"]);
   assert.equal(placed.session.config.sources.length, 1, "the create body's sources are echoed back");
+  assert.equal(placed.session.self_hosted_runner_state.pool_name, "dev-box",
+    "the session carries its pool's name for the pool-wait UI");
+  assert.equal(placed.session.self_hosted_runner_state.assigned_runner_label, undefined,
+    "and claims no runner until one has actually taken it");
+  assert.equal((await backend.session("session-1")).session.self_hosted_runner_state
+    .assigned_runner_label, registered.runner_id,
+    "a claimed session names the runner, which is what ends the wait card");
   assert.equal((await backend.session(placed.session.id)).session.title, "hello");
   assert.equal(await backend.session("no-such-session"), null);
   assert.equal(

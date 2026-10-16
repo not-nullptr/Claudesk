@@ -171,6 +171,7 @@ try {
   assert.equal(placedSession.worker_status, undefined);
   assert.equal(placedSession.environment_id, poolId);
   assert.equal(placedSession.self_hosted_runner_pool_id, poolId);
+  assert.equal(placedSession.self_hosted_runner_state.pool_name, "smoke-pool");
 
   // The list the surface reads on every open — it was 404ing, four times a load.
   const listed = await tenantRequest("/v1/code/sessions");
