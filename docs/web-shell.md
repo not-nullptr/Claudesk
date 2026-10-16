@@ -814,6 +814,16 @@ queries — the picker's report object and the page's list hook — to the settl
 empty answer. Requests stop, both surfaces draw what exists here, and the
 declarators stay, so the hooks in them still run.
 
+The rest of the family is no longer left to 404. `GET /projects` and
+`/projects_v2`, the create `POST /projects`, the project detail (`GET`
+`/projects/{uuid}`), the update/delete and the project's sub-resources are
+answered by the bridge itself, backed by the Desktop's CoworkSpaces store over
+IPC — a project *is* a space. That is what makes the create form (whose POST this
+patch does not touch) work without claude.ai; see "Projects" in
+docs/eva-mode.md and bridge/projects.mjs. This patch stays as it is: the
+surfaces it silences are already drawn from spaces, and the bridge routes cover
+the ones that bypass it.
+
 **Session pages are read-only without one flag.** Everything a session scoped
 control writes through — the permission picker's setter, the model picker's,
 stop, retry — is handed over only when the session reports writable:

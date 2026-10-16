@@ -14,6 +14,7 @@ import { createPreviewHandler } from "./preview.mjs";
 import { shimOfficialIndex } from "./official-index.mjs";
 import { createNotificationController } from "./notifications.mjs";
 import { createConnectorStore } from "./connectors.mjs";
+import { createProjectBackend } from "./projects.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { loadNotice, saveNotice } from "./notices.mjs";
@@ -1167,6 +1168,15 @@ const notificationChannelsPath = /^\/api\/organizations\/[0-9a-f-]+\/notificatio
 // (`/{id}/{sub}/{subname}`), which the handler splits.
 const connectorsPath = /^\/api\/organizations\/[0-9a-f-]+\/mcp\/(remote_servers(?:_with_connection)?|ema_health)(\/[^?#]*)?\/?$/i;
 
+// Projects. The official bundle's project surfaces speak claude.ai's projects
+// API — the `/projects` page and create form, the `/projects_v2` list, the
+// `/project/<uuid>` detail route and the composer's project selector — and this
+// deployment has no such backend, so the bridge answers the family from the
+// Desktop's CoworkSpaces store itself (see bridge/projects.mjs). Capture [1] the
+// resource (`projects` or `projects_v2`) and [2] the raw tail
+// (`/{id}/{sub}/{subname}`), which the handler splits.
+const projectsPath = /^\/api\/organizations\/[0-9a-f-]+\/(projects_v2|projects)(\/[^?#]*)?\/?$/i;
+
 const officialAssetPrefixes = [
   "/_frame-rt/",
   "/assets/",
@@ -1435,6 +1445,15 @@ const notifications = createNotificationController({
 // no claude.ai connectors backend (see bridge/connectors.mjs). Per-instance —
 // the bridge data directory is already one account's.
 const connectors = createConnectorStore({
+  stateDir: bridgeStateDir,
+});
+
+// Projects: the `/projects` page, its create form, the project detail route and
+// the composer's project selector all speak claude.ai's projects API, which this
+// deployment answers from the Desktop's CoworkSpaces store over IPC (see
+// bridge/projects.mjs). Per-instance, like the connectors above.
+const projects = createProjectBackend({
+  desktop,
   stateDir: bridgeStateDir,
 });
 
@@ -2970,6 +2989,51 @@ async function invokeWithRoutineFileRepair(surface, method, args, argsEncoding) 
   }
 }
 
+// The settled-empty claude.ai document for each project sub-resource this
+// deployment has no data for. A space keeps none of these — the knowledge base,
+// its syncs, the share roster and the project's conversation list are claude.ai
+// features, and a space's files are the folders the project is bound to — so the
+// renderer is told the true answer: nothing, not loading, nothing failed.
+//
+// The shapes are pinned by their readers, not invented: the share roster
+// (`/roles`) is destructured by the migration client's `qr`, which throws on
+// anything that is not `{account_assignments, group_assignments,
+// org_role_assignments, org_assignment}`; the accounts list (`/accounts`) is
+// walked with `?.find(...)` by the permissions hook, so it must be an array; the
+// permission list (`/permissions`) is read as `.permissions`.
+function emptyProjectResource(sub, accountUuid) {
+  const page = { data: [], pagination: { has_more: false, limit: 30, offset: 0, total: 0 } };
+  switch (sub) {
+    case "roles":
+      return {
+        account_assignments: accountUuid ? [{ uuid: accountUuid }] : [],
+        group_assignments: [],
+        org_role_assignments: {},
+        org_assignment: null,
+      };
+    case "accounts":
+      return accountUuid ? [{ account: { uuid: accountUuid }, role: "creator" }] : [];
+    case "permissions":
+      return { permissions: [] };
+    case "groups":
+    case "files":
+    case "docs":
+    case "syncs":
+      return [];
+    case "kb":
+      return { files: [], documents: [], syncs: [] };
+    case "kb/stats":
+      return { file_count: 0, document_count: 0, sync_count: 0 };
+    case "report":
+      return { report: null, status: "unavailable" };
+    case "activity_v2":
+    case "conversations_v2":
+      return page;
+    default:
+      return { ok: true };
+  }
+}
+
 async function handleApi(request, response, url) {
   // The login shell refuses the entire API surface, with or without a session.
   // It exists to serve the sign-in page and nothing else, so there is no route
@@ -3158,6 +3222,126 @@ async function handleApi(request, response, url) {
       return;
     }
     throw new ApiError(404, "not found");
+  }
+
+  // Projects. The official bundle's project surfaces — the `/projects` page and
+  // its create form, the `/project/<uuid>` detail route, the composer's project
+  // selector — speak claude.ai's projects API, which this deployment answers
+  // from the Desktop's CoworkSpaces store (see bridge/projects.mjs). Same shape
+  // as the connectors block above: bodies go on the wire as plain claude.ai
+  // documents (the renderer parses them itself, never the bridge envelope) and
+  // nothing is forwarded upstream — the org id is the bridge's synthetic one,
+  // which no upstream org would recognize.
+  const projectsMatch = projectsPath.exec(url.pathname);
+  if (projectsMatch) {
+    // Reads go through unconditionally; the writes that create or change a space
+    // are on the IPC allow-list only when the deployment enables infrastructure
+    // actions. Refuse them with the reason rather than letting the wrapper's own
+    // refusal surface as an opaque 500.
+    if (!infrastructureActionsEnabled
+      && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      throw new ApiError(403, "projects are read-only: infrastructure actions are disabled");
+    }
+    const resource = projectsMatch[1].toLowerCase();
+    const segments = (projectsMatch[2] || "").split("/").filter(Boolean).map(decodeURIComponent);
+    const identity = await resolveStoreIdentity(request);
+    const accountUuid = syntheticAccountUuid(
+      String(identity.email || identity.name || "").toLowerCase(),
+    );
+    const projectUuid = segments[0];
+    const sub = segments[1];
+    // `GET /projects_v2` — the paged list. The v1 list and the two writes share
+    // the bare `/projects` path, so they are split by method below.
+    if (resource === "projects_v2" && !projectUuid) {
+      if (request.method !== "GET") throw new ApiError(405, "method not allowed");
+      sendOfficialDocument(response, await projects.page({
+        accountUuid,
+        searchParams: url.searchParams,
+      }));
+      return;
+    }
+    if (!projectUuid) {
+      if (request.method === "GET") {
+        sendOfficialDocument(response, await projects.list({
+          accountUuid,
+          searchParams: url.searchParams,
+        }));
+        return;
+      }
+      if (request.method === "POST") {
+        const body = await readJson(request);
+        sendOfficialDocument(response, await projects.create({ accountUuid, body }));
+        return;
+      }
+      throw new ApiError(405, "method not allowed");
+    }
+    // `/projects/count` and `/projects/request_haystack` are collection actions,
+    // not project ids (a project uuid is a hex uuid and never these words).
+    if (projectUuid === "count" && request.method === "GET") {
+      sendOfficialDocument(response, { count: await projects.count() });
+      return;
+    }
+    if (projectUuid === "request_haystack" && request.method === "POST") {
+      await readJson(request);
+      sendOfficialDocument(response, { ok: true });
+      return;
+    }
+    if (!sub) {
+      if (request.method === "GET") {
+        const document = await projects.get(projectUuid, { accountUuid });
+        if (!document) throw new ApiError(404, "project not found");
+        sendOfficialDocument(response, document);
+        return;
+      }
+      if (request.method === "PUT" || request.method === "PATCH") {
+        const body = await readJson(request);
+        const document = await projects.update({ accountUuid, projectUuid, body });
+        if (!document) throw new ApiError(404, "project not found");
+        sendOfficialDocument(response, document);
+        return;
+      }
+      if (request.method === "DELETE") {
+        await projects.remove({ projectUuid });
+        sendOfficialDocument(response, { ok: true });
+        return;
+      }
+      throw new ApiError(405, "method not allowed");
+    }
+    if (sub === "star") {
+      if (!["POST", "PUT", "DELETE"].includes(request.method)) {
+        throw new ApiError(405, "method not allowed");
+      }
+      await projects.setStar({ projectUuid, starred: request.method !== "DELETE" });
+      const document = await projects.get(projectUuid, { accountUuid });
+      if (!document) throw new ApiError(404, "project not found");
+      sendOfficialDocument(response, document);
+      return;
+    }
+    // The device binding. A project here *is* its local space, so there is
+    // nothing to bind — accept the write and answer the current document, whose
+    // `cowork_bound_device` already names the space.
+    if (sub === "settings" && (request.method === "PUT" || request.method === "PATCH")) {
+      await readJson(request);
+      const document = await projects.get(projectUuid, { accountUuid });
+      if (!document) throw new ApiError(404, "project not found");
+      sendOfficialDocument(response, document);
+      return;
+    }
+    // Knowledge-base shapes claude.ai computes for a project: none of it exists
+    // here (a space's files are its folders), so every read answers the settled
+    // empty document and every write is a no-op.
+    if (request.method === "GET") {
+      sendOfficialDocument(response, emptyProjectResource(sub, accountUuid));
+      return;
+    }
+    if (request.method === "POST" || request.method === "PUT" || request.method === "DELETE") {
+      // The body is deliberately not read: these writes have nothing to record,
+      // and an upload's body may not even be JSON. Answering without consuming
+      // it is what the notification-channel route above already does.
+      sendOfficialDocument(response, { ok: true });
+      return;
+    }
+    throw new ApiError(405, "method not allowed");
   }
 
   if (protocolRules.some((rule) => rule.path.test(url.pathname))) {

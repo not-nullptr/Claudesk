@@ -226,6 +226,33 @@ account does not have, so they now ride their own flag instead of
 `CLAUDE_REMOTE_MCP_CONNECTORS` (`=1` / `=0`) pins either way.
 `scripts/bridge-parity-smoke.mjs` keeps the outer and inner allowlists in step.
 
+### Projects
+
+The bundle's project surfaces — the `/projects` page and its create form, the
+`/project/<uuid>` detail route, the `/projects_v2` list and the composer's
+project selector — speak claude.ai's projects API
+(`/api/organizations/{org}/projects…`). The bridge is the origin for `/api/*`,
+and without a route for the family it answered the fall-through 404, which is
+what a create hit. This deployment does have a projects backend, though: the
+Desktop main process's **CoworkSpaces** store, reached over the
+`claude.web.CoworkSpaces` IPC surface. So the bridge answers the family itself
+from that store (`bridge/projects.mjs`), the way it answers connectors — a
+project is a space, with the space's `id` as the project's `uuid`, its
+`instructions` as the `prompt_template`, and the space announced as this
+device's binding (`cowork_bound_device.local_space_id`), which is the marker the
+renderer reads to treat a project as a local space.
+
+Reads (`getAllSpaces`/`getSpace`) ride the unconditional allow-list; the writes
+(`createSpace`/`updateSpace`/`deleteSpace`) are the same ones the Spaces UI
+already uses, so they need `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS` — with it off
+the routes answer `403 projects are read-only` rather than an opaque failure.
+The sub-resources claude.ai computes for a project (the knowledge base, its
+syncs, the share roster, the conversation list) answer settled-empty documents:
+a space keeps none of them, its files being the folders it is bound to. Stars
+are the one field a space does not model, so they live in a small
+`project-stars.json` beside the connectors file. `scripts/projects-smoke.mjs`
+pins the document shape and each route's IPC call.
+
 ### Deleting an account reclaims its instance
 
 Deleting a user in `/admin` is the mirror of creating one, and just as hands-off:
