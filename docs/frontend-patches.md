@@ -50,11 +50,18 @@ preparer deals the chunks to worker threads by size
 `assembleRenderer` unions the results and holds the required-patch and marker
 invariants, single-threaded and unchanged.
 
-The generation's cache key covers the ion-dist sources, the two flags, the
+The generation's cache key covers the ion-dist sources, the flags, the
 release **and the patcher's own source**. The last one matters: without it,
 editing `renderer-patches.mjs` while leaving `patchRelease` alone leaves the key
 unchanged, the fast path returns the previous generation, and the edit silently
 never runs.
+
+There are three flags, not two: the Gateway setting, the web shell, and
+**`CLAUDESK_TENANT`** — one account's own instance, which does not get the local
+Code route alias (`desktop-code-route-alias`) because its Code runs on a
+self-hosted runner instead. A tenant therefore prepares a generation of its own,
+and `scripts/seed-renderer.sh` builds the tenant combinations alongside the
+deployment's own. See [Code in the Cowork VM](code-in-cowork-vm.md).
 
 ## Current selectors
 
