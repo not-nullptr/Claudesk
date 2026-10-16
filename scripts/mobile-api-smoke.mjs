@@ -32,6 +32,12 @@ process.env.CLAUDE_MOBILE_FRIDA_TOKEN = "smoke-diag-token";
 // Re-check the Desktop's identity on every /api/health read, so the mismatch
 // case below is observable without waiting out the real one-minute cache.
 process.env.CLAUDE_MOBILE_DESKTOP_INSTANCE_TTL_MS = "0";
+// The instance name is deployment config, not a test input: a value inherited
+// from the calling shell (a deployment's own .env reaches the suite) would make
+// the facade expect a name the fake bridge does not report, and the mismatch
+// case below would be indistinguishable from that noise. Pin it.
+delete process.env.CLAUDESK_NAME_PREFIX;
+delete process.env.CLAUDE_MOBILE_DESKTOP_HOST;
 
 // The mobile facade talks to Claude Desktop only through the Claudesk bridge;
 // this fake keeps Desktop-shaped Chat sessions in memory.
