@@ -261,6 +261,20 @@ try {
   assert.equal(unknownV1.body.includes("<!doctype"), false,
     "an API path never gets the app HTML");
 
+  // The org's environment capabilities — asked for wherever a session can be
+  // placed, and parsed strictly: `version` and `repositories` are required and
+  // `absent`/`unreadable` are read unconditionally.
+  const capabilities = await tenantRequest(
+    "/v1/environment_providers/private/organizations/00000000-0000-4000-8000-000000000000/capabilities");
+  assert.equal(capabilities.status, 200, capabilities.body);
+  const provider = JSON.parse(capabilities.body);
+  assert.equal(provider.version, 1);
+  assert.deepEqual(provider.repositories, []);
+  assert.deepEqual(provider.absent, []);
+  assert.deepEqual(provider.unreadable, []);
+  assert.deepEqual(provider.session_files, { upload: true, download: true });
+  assert.equal(provider.vcs.push, false, "nothing here pushes the runner's checkout anywhere");
+
   // The session's edit legs — the calls the Code page makes once a session
   // exists. Rename/tags/metadata arrive through one PUT; archive, mark_read
   // and the MCP editor's save are their own POST/PUT; delete is a DELETE.

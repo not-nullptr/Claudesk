@@ -3237,6 +3237,32 @@ async function handleCodeRunnerApi(request, response, url) {
     return sendJson(response, 200, await codeRunners.environmentList());
   }
 
+  // The org's environment-provider capabilities: what a session host can do —
+  // repositories, file transports, push/PRs, web fetch, stores. The composer
+  // reads it wherever a Code session can be placed, and its reader parses
+  // strictly: `version` and `repositories` are required and `absent`/
+  // `unreadable` are read unconditionally, while the fields left out are the
+  // ones this deployment makes no claim about (the reader treats absence as
+  // unknown, not as "no"). What is claimed here is what is true: no GitHub
+  // wiring, so no repositories; the session's files do move both ways; the
+  // runner hosts clone and push nothing by themselves.
+  const capabilitiesPath =
+    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/capabilities$/i;
+  if (capabilitiesPath.test(pathname) && method === "GET") {
+    return sendJson(response, 200, {
+      version: 1,
+      repositories: [],
+      mcp_servers: [],
+      plugin_marketplaces: [],
+      session_files: { upload: true, download: true },
+      vcs: { push: false, create_pr: false },
+      device_tools_enabled: false,
+      device_tools: { file_tools_bound_to_connected_folders: false },
+      absent: [],
+      unreadable: [],
+    });
+  }
+
   // Placing a session. A tenant has no local executor, so the only environment
   // this answers for is one of its own pools; anything else is refused rather
   // than quietly run here.

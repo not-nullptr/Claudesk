@@ -512,6 +512,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 
 | Call | Shape (what the client sends / requires back) |
 | --- | --- |
+| `GET …/environment_providers/private/organizations/{org}/capabilities` | The org's environment-capabilities document the composer reads wherever a session can be placed — repositories, file transports (`session_files`), push/PRs (`vcs`), web fetch, stores. Its reader parses strictly: `version` and `repositories` are required and `absent`/`unreadable` are read unconditionally; fields left out are treated as *unknown*, not as *no*. This deployment claims only what is true (no repositories, both file transports) and omits the rest. |
 | `POST /v1/code/sessions` | `{title?, environment_id? \| self_hosted_runner_pool_id?, config:{sources, outcomes?, model?, …}, events?: [{payload}], tags?}`. A pool worker names its place with `self_hosted_runner_pool_id`; an environment worker with `environment_id`. The answer is `{session}` (the client's `CD`). |
 | `GET /v1/code/sessions` | The list; the sidebar's call carries `statuses=active&statuses=paused`, which is how archived sessions drop out. Rows are the same session document. |
 | `GET/PUT/DELETE /v1/code/sessions/{id}` | GET reads, PUT is the one edit endpoint (`{title?}`, `{add_tags?}`/`{remove_tags?}`, `{client_metadata?}`), DELETE removes. Each answers `{session}`. |
