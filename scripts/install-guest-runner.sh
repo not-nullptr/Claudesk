@@ -110,15 +110,43 @@ fi
 
 printf 'install-guest-runner: attaching %s\n' "$rootfs" >&2
 loop_device="$(losetup --find --partscan --show "$rootfs")"
-# The root partition is the one the guest itself boots: ext4 labelled
-# cloudimg-rootfs (its micro-init resolves root= by that label).
-root_part="$(lsblk -no NAME,LABEL "$loop_device" 2>/dev/null |
-    awk '$2 == "cloudimg-rootfs" { print "/dev/" $1; exit }')"
+# Partition nodes can be missing even with --partscan (an older kernel, or a
+# loop device created without it), and the labels are only there if blkid can
+# read them — so this asks again rather than trusting the first answer, and
+# falls back to the whole device for an image that carries no partition table.
+refresh_partitions() {
+    partx -u "$loop_device" >/dev/null 2>&1 || partprobe "$loop_device" >/dev/null 2>&1 || true
+    sleep 0.2
+}
+find_root_part() {
+    candidate="$(lsblk -pno NAME,LABEL "$loop_device" 2>/dev/null |
+        awk '$2 == "cloudimg-rootfs" { print $1; exit }')"
+    [ -z "$candidate" ] || { printf '%s\n' "$candidate"; return; }
+    candidate="$(lsblk -pno NAME,FSTYPE "$loop_device" 2>/dev/null |
+        awk '$2 == "ext4" { print $1; exit }')"
+    [ -z "$candidate" ] || { printf '%s\n' "$candidate"; return; }
+    # No partition table: the filesystem is the image.
+    if blkid -s TYPE -o value "$loop_device" 2>/dev/null | grep -qx ext4; then
+        printf '%s\n' "$loop_device"
+    fi
+}
+# An operator who already knows the device can name it and skip the detection.
+root_part="${CLAUDESK_GUEST_ROOT_PART:-}"
 if [ -z "$root_part" ]; then
-    root_part="$(lsblk -no NAME,FSTYPE "$loop_device" 2>/dev/null |
-        awk '$2 == "ext4" { print "/dev/" $1; exit }')"
+    root_part="$(find_root_part)"
 fi
-[ -n "$root_part" ] || { printf 'install-guest-runner: no ext4 root partition in %s\n' "$rootfs" >&2; exit 1; }
+if [ -z "$root_part" ]; then
+    refresh_partitions
+    root_part="$(find_root_part)"
+fi
+if [ -z "$root_part" ]; then
+    printf 'install-guest-runner: no ext4 root found in %s. What is there:\n' "$rootfs" >&2
+    lsblk -fo NAME,SIZE,FSTYPE,LABEL "$loop_device" >&2 || true
+    printf 'install-guest-runner: (the guest boots an ext4 labelled cloudimg-rootfs;\n' >&2
+    printf 'install-guest-runner:  set CLAUDESK_GUEST_ROOT_PART=/dev/loopXpN to name it)\n' >&2
+    exit 1
+fi
+printf 'install-guest-runner: root partition %s\n' "$root_part" >&2
 
 mount "$root_part" "$mount_dir"
 
