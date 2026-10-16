@@ -3610,9 +3610,15 @@ async function sendCodeEventStream(request, response, sessionId, url) {
   });
   let sequence = fromSequence;
   let connectionStatus;
+  let frames = 0;
+  const openedAt = Date.now();
+  console.log(`[cowork-bridge] session ${sessionId}: events stream opened `
+    + `(from_sequence_num=${fromSequence}, last-event-id=${request.headers["last-event-id"] ?? "none"}, `
+    + `backlog=${backlog.length})`);
   const write = (event) => {
     response.write(
       `id: ${event.sequence_num}\nevent: client_event\ndata: ${JSON.stringify(event)}\n\n`);
+    frames += 1;
     sequence = Math.max(sequence, Number(event.sequence_num) || 0);
   };
   const writeConnection = (status) => {
@@ -3636,9 +3642,20 @@ async function sendCodeEventStream(request, response, sessionId, url) {
       // the sequence it already holds if the connection does drop.
     }
   }, 500);
+  // The phone's facade keeps a 15-second comment cadence on this stream, and
+  // it matters here too: a stream that goes silent through a thinking pause is
+  // exactly what an idle timeout in the chain (the Desktop's relay, the
+  // reverse proxy, the fetch client's liveness check) kills — which reads as
+  // "connected but nothing ever arrives until a reload".
+  const keepalive = setInterval(() => {
+    if (!response.writableEnded) response.write(`: keepalive ${Date.now()}\n\n`);
+  }, 15000);
   const close = () => {
     clearInterval(timer);
+    clearInterval(keepalive);
     response.end();
+    console.log(`[cowork-bridge] session ${sessionId}: events stream closed after `
+      + `${Math.round((Date.now() - openedAt) / 1000)}s, ${frames} frames`);
   };
   request.on("close", close);
   response.on("error", close);
@@ -4765,8 +4782,39 @@ const localStaticFiles = new Set([
   "/sw.js",
 ]);
 
+// One line per API request, so a surface that will not update live is
+// diagnosable from this log alone: which transport the client chose (the SSE
+// stream, a WebSocket upgrade, a plain fetch), what a stream resumed from, and
+// how long each connection lived. Static assets and the shell's own pages are
+// skipped — this is the API conversation, not every byte served.
+function logApiRequest(request, response, url) {
+  const upgrade = request.headers.upgrade;
+  if (!url.pathname.startsWith("/v1/") && !url.pathname.startsWith("/api/")
+    && !url.pathname.startsWith("/edge-api/") && !upgrade) {
+    return;
+  }
+  const startedAt = Date.now();
+  const query = url.search ? `?${String(request.url).split("?")[1].slice(0, 240)}` : "";
+  const sse = String(request.headers.accept ?? "").includes("text/event-stream") ? " accept=sse" : "";
+  const lastEventId = request.headers["last-event-id"];
+  const bits = [
+    `[cowork-bridge] req ${request.method} ${url.pathname}${query}${sse}`,
+    ...(upgrade ? [`UPGRADE=${upgrade}`] : []),
+    ...(lastEventId !== undefined ? [`last-event-id=${String(lastEventId).slice(0, 24)}`] : []),
+  ];
+  let logged = false;
+  const done = (how) => {
+    if (logged) return;
+    logged = true;
+    console.log(`${bits.join(" ")} -> ${how} (${Date.now() - startedAt}ms)`);
+  };
+  response.on("finish", () => done(String(response.statusCode)));
+  response.on("close", () => done(`${response.statusCode ?? 0} closed`));
+}
+
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  logApiRequest(request, response, url);
   try {
     // The title/branch the app asks for when it names something — see
     // handleDustApi. Answered before the generic API legs so a browser page
