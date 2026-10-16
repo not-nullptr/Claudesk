@@ -193,6 +193,34 @@ combinations (the deployment's own instance plus each account role, as a tenant)
 `config/release.json`'s `patchRelease` is bumped per the rule that a patcher
 change ships with it, so a `claude-desktop` rebuild is needed to roll it out.
 
+## Operating it
+
+Point a runner at the tenant's instance:
+
+```bash
+# On the tenant's instance (CLAUDESK_TENANT=1, CLAUDESK_CODE_RUNNERS=1), the
+# pool exists as soon as the bridge starts; its id and secret are in the state
+# file, and the secret is also readable by pool id over the proxy (it is a blind
+# write/read: the list never carries it).
+cat /data/code-runners.json            # inside the bridge container
+GET /v1/code/runners/self-hosted/pools/{pool_id}/secrets
+```
+
+The runner is Claude Code, so what it needs is its own environment:
+
+```
+CLAUDE_RUNNER_API_BASE_URL   this instance's origin (the bridge answers /v1/…)
+CLAUDE_RUNNER_POOL_ID        the pool id above
+SELF_HOSTED_RUNNER_ENVIRONMENT_SECRET   the pool secret (or --environment-secret-file)
+CLAUDE_RUNNER_CLAUDE_BIN     the claude to spawn
+CLAUDE_RUNNER_CHECKOUT_PATH  where the session's checkout lives
+```
+
+It registers once (`runners/register`), then polls `spawn-hints/poll` on a 30 s
+timeout. `/api/health` reports `tenant: true` and the `codeRunnerPool` it
+expects, so a runner pointed at the wrong instance is visible rather than
+silently idle.
+
 ## What the next increment needs
 
 Extracted while building the substrate, so it does not have to be re-read:
