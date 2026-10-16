@@ -86,6 +86,14 @@ const bridgeStateDir = process.env.COWORK_BRIDGE_STATE_DIR || "/data";
 const codeRunnersEnabled =
   tenantInstance
   && process.env.CLAUDESK_CODE_RUNNERS === "1";
+// Whether the Code *surface* exists on this instance — a different question from
+// `codeActionsEnabled`, which is about this container's executor. A tenant's
+// surface is real (its sessions run on the self-hosted runner) even though the
+// executor is withheld, and the browser chrome needs to know: the preload marks
+// the document so the titlebar's Claude/Code switcher is not hidden before the
+// app's own bootstrap lands, and the app's config flag (written by the container
+// init) is what keeps the Code segment enabled.
+const codeSurfaceEnabled = codeRunnersEnabled;
 const codeRunners = codeRunnersEnabled
   ? createRunnerBackend({
     stateDir: bridgeStateDir,
@@ -4209,6 +4217,7 @@ async function serveOfficialIndex(request, response) {
     desktopRuntime,
     release,
     codeActionsEnabled,
+    codeSurfaceEnabled,
     developerActionsEnabled,
     gatewaySettingsEnabled,
     webShell: webShellEnabled,

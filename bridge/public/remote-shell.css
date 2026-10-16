@@ -75,8 +75,9 @@ body,
  * from an optimistic default), so the pills painted for a frame before the
  * renderer patch removed them. The preload adds `claude-remote-code-enabled`
  * synchronously from the bootstrap config, before the app mounts, so hide the
- * control outright when Code is off rather than wait for that round trip; a
- * deployment with Code enabled keeps it. */
+ * control outright when there is no Code surface rather than wait for that round
+ * trip; a deployment with Code — local, or a tenant's self-hosted runners —
+ * keeps it. */
 html:not(.claude-remote-code-enabled) [data-compact-mode-switcher] {
   display: none !important;
 }

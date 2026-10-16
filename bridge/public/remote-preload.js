@@ -72,7 +72,12 @@
       && globalThis.navigator.maxTouchPoints > 1
     );
   if (mobileClient) document.documentElement.classList.add("claude-remote-mobile");
-  if (config.codeActionsEnabled) document.documentElement.classList.add("claude-remote-code-enabled");
+  // Either the local executor (the operator's own instance) or a self-hosted
+  // runner pool (a tenant's) makes the Code surface real, and both want the
+  // switcher painted. See docs/code-in-cowork-vm.md.
+  if (config.codeActionsEnabled || config.codeSurfaceEnabled) {
+    document.documentElement.classList.add("claude-remote-code-enabled");
+  }
 
   // Claude Code persists its new-session target independently from the
   // Desktop IPC stores. A fresh browser otherwise starts with no folder and

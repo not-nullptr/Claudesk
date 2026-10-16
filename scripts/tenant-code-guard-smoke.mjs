@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
@@ -96,5 +97,56 @@ assert.ok(provision.includes("CLAUDESK_TENANT=1"),
 // dead one (scripts/code-runners-smoke.mjs pins that).
 assert.ok(provision.includes('CLAUDESK_CODE_RUNNERS="${CLAUDESK_ACCOUNT_CODE_RUNNERS:-1}"'),
   "an account must answer the self-hosted pool API by default");
+
+// The app config carries a *different* flag from the executor: whether the Code
+// surface exists. On a tenant that follows the self-hosted runner API, not the
+// withheld executor — writing it off is what removed the titlebar's Claude/Code
+// switcher (a disabled segment, then the picker patch taking the control away).
+// Exercised, by running the init's own logic rather than reading it.
+const configInit = await readFile(
+  new URL("../rootfs/etc/cont-init.d/30-claude-config.sh", import.meta.url), "utf8");
+const surfaceLogic = configInit.slice(
+  configInit.indexOf('remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"'),
+  configInit.indexOf("gateway_env_authoritative="),
+);
+function surfaceFor(env) {
+  // The block may log a line of its own; the marked line is what is read.
+  const script = `${surfaceLogic}\nprintf 'RESULT:%s|%s\\n' "$remote_code_actions" "$remote_code_surface"`;
+  const run = spawnSync("/bin/sh", ["-c", script], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      CLAUDE_REMOTE_CODE_ACTIONS: env.code,
+      CLAUDESK_TENANT: env.tenant,
+      ...(env.runners === undefined ? {} : { CLAUDESK_CODE_RUNNERS: env.runners }),
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const marked = run.stdout.split("\n").find((line) => line.startsWith("RESULT:"));
+  assert.ok(marked, `no result line in: ${run.stdout}`);
+  const [executor, surface] = marked.slice("RESULT:".length).split("|");
+  return { executor, surface };
+}
+assert.deepEqual(surfaceFor({ tenant: "1", code: "0", runners: "1" }),
+  { executor: "0", surface: "1" },
+  "a tenant with the runner API has the Code surface even though the executor is off");
+assert.deepEqual(surfaceFor({ tenant: "1", code: "1", runners: "1" }),
+  { executor: "0", surface: "1" },
+  "a tenant never gets the executor, whatever the flag says");
+assert.deepEqual(surfaceFor({ tenant: "1", code: "0", runners: "0" }),
+  { executor: "0", surface: "0" },
+  "a tenant without the runner API has no Code surface either");
+assert.deepEqual(surfaceFor({ tenant: "0", code: "1" }),
+  { executor: "1", surface: "1" },
+  "the operator's own instance follows CLAUDE_REMOTE_CODE_ACTIONS for both");
+
+// The browser learns the same thing before the app mounts.
+const preload = await readFile(
+  new URL("../bridge/public/remote-preload.js", import.meta.url), "utf8");
+assert.match(preload, /config\.codeActionsEnabled \|\| config\.codeSurfaceEnabled/,
+  "the preload must paint the switcher for either kind of Code surface");
+assert.match(serverSource, /codeRunnersEnabled;\n/, "the surface flag follows the runner API");
+assert.ok(serverSource.includes("\n    codeSurfaceEnabled,"),
+  "and it must reach the bootstrap the preload reads");
 
 process.stdout.write("tenant-code-guard-smoke: a tenant never offers the local Code executor\n");

@@ -8,14 +8,22 @@ auth_scheme="${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
 models_json="${CLAUDE_INFERENCE_MODELS_JSON:-}"
 remote_gateway_settings="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 remote_code_actions="${CLAUDE_REMOTE_CODE_ACTIONS:-0}"
-# A tenant instance (one account's own, scripts/provision-user.sh) never runs
+# A tenant instance (one account's own, scripts/provision-user.sh) never *runs*
 # Code in this container: the agent belongs on a self-hosted runner inside the
 # account's Cowork guest, and this container is privileged enough that an agent
-# shell here is close to host root. So the local Code surface is written off
-# whatever the flag says — the app config and the bridge agree, and neither is
-# the enforcement point on its own (the bridge withholds the IPC surface too).
-# See docs/code-in-cowork-vm.md.
+# shell here is close to host root. CLAUDE_REMOTE_CODE_ACTIONS is the bridge's
+# executor flag, and on a tenant it stays off.
+#
+# The app config's flag is a different question — whether the Code *surface*
+# exists at all — and a tenant's answer is yes, because that surface is where the
+# self-hosted sessions live (the renderer resolves `/code` to the self-hosted
+# route on a tenant, and the environment list offers only its pools). Writing it
+# off is what hid the titlebar's Claude/Code switcher: with no Code in the app's
+# model the segment is disabled, and the picker patch then removes the control.
+# So on a tenant the surface follows CLAUDESK_CODE_RUNNERS, not the executor
+# flag. See docs/code-in-cowork-vm.md.
 tenant="${CLAUDESK_TENANT:-0}"
+code_runners="${CLAUDESK_CODE_RUNNERS:-0}"
 case "$tenant" in
     0|1)
         ;;
@@ -24,11 +32,23 @@ case "$tenant" in
         exit 1
         ;;
 esac
+case "$code_runners" in
+    0|1)
+        ;;
+    *)
+        printf '[claude-config] ERROR: CLAUDESK_CODE_RUNNERS must be 0 or 1\n' >&2
+        exit 1
+        ;;
+esac
 if [ "$tenant" = "1" ]; then
     if [ "$remote_code_actions" = "1" ]; then
-        printf '[claude-config] CLAUDESK_TENANT=1: keeping the local Code surface off (CLAUDE_REMOTE_CODE_ACTIONS ignored)\n'
+        printf '[claude-config] CLAUDESK_TENANT=1: the local Code executor stays off (CLAUDE_REMOTE_CODE_ACTIONS ignored)\n'
     fi
     remote_code_actions=0
+    # The surface, not the executor: on with the self-hosted runner API.
+    remote_code_surface="$code_runners"
+else
+    remote_code_surface="$remote_code_actions"
 fi
 gateway_env_authoritative="${CLAUDE_GATEWAY_ENV_AUTHORITATIVE:-0}"
 remote_desktop_home="${CLAUDE_REMOTE_DESKTOP_HOME:-}"
@@ -163,7 +183,7 @@ jq -n \
     --arg base_url "$base_url" \
     --arg api_key "$api_key" \
     --arg auth_scheme "$auth_scheme" \
-    --arg code "$remote_code_actions" \
+    --arg code "$remote_code_surface" \
     --arg remote "$remote_gateway_settings" \
     --arg desktop_home "$remote_desktop_home" \
     --argjson models "$models_json" \
@@ -331,7 +351,7 @@ if [ "$remote_gateway_settings" = "1" ]; then
         # it off in an existing writable configuration, not merely fail to turn
         # it on. Only write when it actually differs, so a steady state does not
         # rewrite the file on every boot.
-        if [ "$remote_code_actions" = "1" ]; then
+        if [ "$remote_code_surface" = "1" ]; then
             code_enabled=true
         else
             code_enabled=false
@@ -346,8 +366,8 @@ if [ "$remote_gateway_settings" = "1" ]; then
                 "$code_tmp" "$config_library/$applied_id.json"
             rm -f "$code_tmp"
         fi
-        printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s\n' \
-            "$remote_code_actions"
+        printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s (surface=%s, runners=%s)\n' \
+            "$remote_code_actions" "$remote_code_surface" "$code_runners"
         # The endpoint and its credential are provisioning values: the Cowork VM
         # makes the model calls and is confined to the guest, so an account whose
         # endpoint is not reachable from there simply cannot infer, and one whose

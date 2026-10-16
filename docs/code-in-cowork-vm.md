@@ -178,6 +178,21 @@ so the chain closes at the bridge: create → the pool's runner is offered it �
 this instance's pools is refused rather than quietly run locally, because there
 is no local executor here to run it.
 
+**Two flags, not one.** `CLAUDE_REMOTE_CODE_ACTIONS` is about this container's
+*executor*; the app config's `isClaudeCodeForDesktopEnabled` is about whether the
+Code *surface* exists at all. On a tenant the first is off and the second is on,
+and conflating them is what hid the titlebar's Claude/Code switcher: with no Code
+in the app's model the segment is disabled and the `titlebar-mode-picker-without-code`
+patch — doing exactly what it was written to do — removes the control. So
+
+- the container init writes the surface from `CLAUDESK_CODE_RUNNERS` on a tenant
+  (and from the executor flag elsewhere), and
+- the bridge reports `codeSurfaceEnabled` beside `codeActionsEnabled` in the
+  bootstrap, so the preload paints the switcher before the app mounts
+  (`remote-shell.css` hides it only when neither is set).
+
+`codeReady` stays false on a tenant, because that one is about the executor.
+
 The Code *surface* itself is declared to the renderer: a tenant's access document
 carries `claude_code_web` as available — the entry the Code UI reads, and the one
 the mobile facade declares for the phone — so the pill exists and the surface
