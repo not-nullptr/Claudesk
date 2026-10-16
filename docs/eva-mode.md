@@ -4,9 +4,12 @@ Eva Mode is the multi-user shape of this fork: **main is Eva**, authentication i
 first-class, and every user gets their own light Claude Desktop instance. The
 single-user deployment ("Maddie Mode") lives on the `maddie` branch.
 
-- **Surface:** the unified upstream home (Chat merged into Cowork) with **Code
-  fully disabled**. Not a separate "chat + cowork" pair — internally it is one
-  Cowork surface with the merge flags on.
+- **Surface:** the unified upstream home (Chat merged into Cowork). Not a separate
+  "chat + cowork" pair — internally it is one Cowork surface with the merge flags
+  on. Code is never the *container's*: an account is a **tenant**, and a tenant's
+  Code runs on a self-hosted runner inside its Cowork guest, not in the
+  privileged container it shares the box with. See
+  [Code in the Cowork VM](code-in-cowork-vm.md).
 - **Auth:** the `authd` service owns users, sessions and invites. It is a plain
   component — it never touches a container runtime.
 - **Instances:** one per account. Creating an account provisions its instance via
@@ -200,8 +203,17 @@ of these, and an `Admin` account keeps the deployment's own setting:
 `provision-user.sh` reads the role from `authd --show` and decides;
 `CLAUDESK_ACCOUNT_GATEWAY_SETTINGS` / `_DEVELOPER_ACTIONS` /
 `_INFRASTRUCTURE_ACTIONS` / `_READ_ROOTS` force a value for every account
-regardless of role. Code stays off for accounts separately, and stays off until
-the deployment turns it on.
+regardless of role.
+
+Code is not scoped by role: an account is a **tenant**, and `provision-user.sh`
+marks it `CLAUDESK_TENANT=1`. A tenant never runs Code in its own container —
+that container is privileged enough that an agent shell there is close to host
+root — so the bridge withholds the container-local Code surface whatever
+`CLAUDE_REMOTE_CODE_ACTIONS` says, and the container init writes the app's Code
+flag off to match. The account's Code belongs on a **self-hosted runner** inside
+its Cowork guest (`CLAUDESK_CODE_RUNNERS`, [Code in the Cowork
+VM](code-in-cowork-vm.md)). `CLAUDESK_ACCOUNT_CODE_ACTIONS` no longer lifts any
+of that.
 
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace`; that page refreshes itself, and reaching it nudges the

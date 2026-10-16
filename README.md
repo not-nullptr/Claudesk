@@ -3,8 +3,10 @@
 在 Linux 服务器上以无头 Docker 容器运行 Anthropic 官方 Linux Claude Desktop，并通过轻量级 Remote IPC Bridge 在浏览器中使用 Chat、Cowork 与可选的 Code/Developer 能力。浏览器看到的是 Claude Desktop 随安装包提供的官方 `ion-dist` 界面；本项目只负责容器化、受限桥接和持久化，不重做消息渲染器。
 
 > **Eva Mode。** 本仓库的 `main` 是多用户形态：认证与账户优先（`authd` 服务），每个用户一个由 systemd
-> 托管的轻量实例，Code 关闭，界面是合并后的 Cowork 单一表面。单用户部署保留在 `maddie` 分支。
-> 部署步骤、反向代理配置与 Stage 2 设计见 [Eva Mode](docs/eva-mode.md)。
+> 托管的轻量实例，界面是合并后的 Cowork 单一表面。账户即**租户**：其容器权限很高（`CAP_SYS_ADMIN`、
+> `userns_mode: host`、`apparmor=unconfined`，`app` 用户免密 `sudo`），因此 Code 绝不在租户容器内运行，
+> 而是跑在其 Cowork 访客机里的自建 runner 上；详见 [Code 在 Cowork VM 中运行](docs/code-in-cowork-vm.md)。
+> 单用户部署保留在 `maddie` 分支。部署步骤、反向代理配置与 Stage 2 设计见 [Eva Mode](docs/eva-mode.md)。
 
 ## 界面预览
 

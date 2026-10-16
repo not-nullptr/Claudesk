@@ -153,6 +153,29 @@ runner — which is what "properly inside the VM" needs. The design question is 
 longer "which mechanism", but "where does the runner live" and "how much of the
 pool/runner contract we implement".
 
+## Built so far
+
+**Phase 1 — the guarantee (landed).** An account's instance is marked
+`CLAUDESK_TENANT=1` by `scripts/provision-user.sh`; `bridge/server.mjs` folds
+that into `codeActionsEnabled`, which is what installs the `LocalSessions`
+method and listener allowlists and the AppPreferences settings surface, so a
+tenant cannot reach the container-local executor however
+`CLAUDE_REMOTE_CODE_ACTIONS` is set (a misconfiguration is reported, not
+served). `/api/health` says `tenant: true` so a peer can tell "Code is off here"
+from "this is a tenant". The container init writes the app's Code flag off to
+match. `scripts/tenant-code-guard-smoke.mjs` pins all of it.
+
+**Phase 2 — the runner substrate (landed).** `bridge/code-runners.mjs` holds a
+per-instance store of pools, runners and sessions and answers both sides of the
+self-hosted pool API: the runner's legs (`runners/register`, `deregister`,
+`spawn-hints/poll`, `spawn-hints/nack`, secret-authenticated) and the admin UI's
+(`pools` CRUD, `secrets` by id, `sessions`). A pool is advertised to the Code
+surface as a `byoc` environment (`poolEnvironment`), and `queueSession` is the
+seam the session path will call. `bridge/server.mjs` routes
+`/v1/code/runners/*` to it, but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`,
+so nothing is routed until a deployment turns it on.
+`scripts/code-runners-smoke.mjs` drives the backend directly.
+
 ## Open — the rest of the spike
 
 1. **Runner placement (narrowed).** The guest already carries Claude Code and
