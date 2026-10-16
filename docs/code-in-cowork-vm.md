@@ -217,6 +217,34 @@ combinations (the deployment's own instance plus each account role, as a tenant)
 `config/release.json`'s `patchRelease` is bumped per the rule that a patcher
 change ships with it, so a `claude-desktop` rebuild is needed to roll it out.
 
+## How anything reaches into the guest
+
+Answered from the two binaries, without the box:
+
+- **There is no TCP path in.** The helper launches qemu with
+  `virtio-net-pci,netdev=net0` / `user,id=net0` (user-mode networking) and no
+  `hostfwd` string anywhere, so nothing in the container can dial the guest.
+- **The inbound channel is a virtiofs share**, and there is exactly one:
+  `vhost-user-fs-pci,chardev=virtiofs0,tag=claudeshared`, served by a
+  `virtiofsd --shared-dir <host path>` (`virtiofsd-%d.sock`). The guest mounts it
+  — `[coworkd] mount virtiofs claudeshared at %s` — and runs the Claude Code the
+  host puts there (`/opt/cowork/claude-bin`, `/opt/cowork/cli-wrapper`).
+- **The guest has a script runner.** Its `coworkd` carries a whole `install.sh`
+  path: it makes the script executable, writes a systemd unit for it, starts it
+  (`--no-block`, `OOMScoreAdjust=500`, `UMask=0022`, `DEBIAN_FRONTEND=noninteractive`,
+  `HOME=/root`), writes `install.log`, and reports back `ActiveState` /
+  `ExecMainStatus` — with its own failure vocabulary (`install.sh was not
+  started`, `install.sh's systemd unit already exists`, `runner_unavailable:
+  systemd did not answer within %s`). The same machinery is what the
+  `edrIntegration` payload path drives.
+
+So "run a runner in the guest" does not need SSH, a forwarded port or a nested
+Desktop: **the guest already runs things for the host, and the way in is a file +
+an install step.** What remains is driving that path from the Desktop side, which
+is a bundle question rather than a protocol one — and it is why the runner client
+(`scripts/code-runner-client.mjs --exec`) is written as a self-contained script
+that a unit in the guest can run.
+
 ## Operating it
 
 Point a runner at the tenant's instance:
@@ -340,12 +368,15 @@ diagnostic for whether a tenant's pool answers and what it offers, and with
 
 What is left is the **deployment** half, and it needs the box:
 
-1. **Run the runner in the guest.** The guest already carries a `claude` the host
-   provides at `/opt/cowork/claude-bin`, so the open questions are whether that
-   binary exposes `self-hosted-runner`, whether the guest can reach the bridge
-   through its own egress allowlist, and how the VM's idle-stop sits against a
-   30 s poll loop. `code-runner-client.mjs` is the reference for what the bridge
-   expects of it.
+1. **Run the runner in the guest.** The channel is settled (above): the guest's
+   own `install.sh`/systemd path, fed through the virtiofs share. What is left is
+   driving it from the Desktop side — whether a deployment can supply that script
+   the way the `edrIntegration` payload does, or whether the cleaner route is a
+   unit baked into the guest image the way the vsock port is patched today. Then
+   the two facts that still need the box: whether the guest's `claude` exposes
+   `self-hosted-runner`, and whether the guest can reach the bridge (its egress
+   allowlist is its own, and the VM idle-stops under a 30 s poll loop).
+   `code-runner-client.mjs` is the reference for what the bridge expects.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it
