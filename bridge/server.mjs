@@ -15,6 +15,7 @@ import { shimOfficialIndex } from "./official-index.mjs";
 import { createNotificationController } from "./notifications.mjs";
 import { createConnectorStore } from "./connectors.mjs";
 import { createProjectBackend } from "./projects.mjs";
+import { createRunnerBackend } from "./code-runners.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { loadNotice, saveNotice } from "./notices.mjs";
@@ -75,6 +76,23 @@ const restartNotice = Object.freeze({
   description: "Your task has been interrupted. Please wait a minute or so before trying again.",
 });
 const bridgeStateDir = process.env.COWORK_BRIDGE_STATE_DIR || "/data";
+// Self-hosted Code runners. A tenant's Code runs on a runner we host — inside
+// its Cowork guest — and never in this container, so the runner-facing legs of
+// the self-hosted pool API are answered here instead of upstream: the runner is
+// pointed at this bridge (`CLAUDE_RUNNER_API_BASE_URL`) with a pool secret.
+// The renderer fetches its own `/v1/*` legs with relative URLs, so the same
+// origin serves both sides. Only meaningful for a tenant, and off until the
+// deployment turns it on. See bridge/code-runners.mjs, docs/code-in-cowork-vm.md.
+const codeRunnersEnabled =
+  tenantInstance
+  && process.env.CLAUDESK_CODE_RUNNERS === "1";
+const codeRunners = codeRunnersEnabled
+  ? createRunnerBackend({
+    stateDir: bridgeStateDir,
+    log: console,
+    poolName: process.env.CLAUDESK_CODE_RUNNER_POOL || "self-hosted",
+  })
+  : null;
 // Experimental: render ion-dist's browser (claude.ai) chrome instead of the
 // Desktop chrome. ion-dist picks its shell from the `Claude/<version>` token the
 // preload appends to the user agent; dropping it makes the renderer believe it
@@ -3061,6 +3079,61 @@ function emptyProjectResource(sub, accountUuid) {
   }
 }
 
+// The self-hosted pool API, runner side. A runner — Claude Code running inside
+// the tenant's Cowork guest — registers here and polls for work, authenticated
+// by the pool secret alone. Served only on a tenant instance with the feature
+// on, so the operator's own instance and the account's own container are both
+// untouched by it. Wire shapes: bridge/code-runners.mjs.
+const selfHostedPoolsBase = "/v1/code/runners/self-hosted/pools/";
+
+async function handleCodeRunnerApi(request, response, url) {
+  const method = String(request.method || "GET").toUpperCase();
+  const pathname = url.pathname;
+  const headers = request.headers;
+  const body = method === "GET" || method === "DELETE" ? {} : await readJson(request);
+
+  // Anything the secret does not name is refused here rather than served empty,
+  // so a mis-pointed runner is visible in its own logs.
+  const answer = (result, ok = 200) => {
+    if (result && result.unauthorized) return sendJson(response, 401, { error: "unknown pool secret" });
+    if (result === null) throw new ApiError(404, "not found");
+    return sendJson(response, ok, result);
+  };
+
+  switch (`${method} ${pathname}`) {
+    case "POST /v1/code/runners/self-hosted/runners/register":
+      return answer(await codeRunners.registerRunner({ headers, body }));
+    case "POST /v1/code/runners/self-hosted/deregister":
+      return answer(await codeRunners.deregisterRunner({ headers, body }));
+    case "POST /v1/code/runners/self-hosted/spawn-hints/poll":
+      return answer(await codeRunners.pollSpawnHints({ headers }));
+    case "POST /v1/code/runners/self-hosted/spawn-hints/nack":
+      return answer(await codeRunners.nackSpawnHint({ headers, body }));
+    case `GET ${selfHostedPoolsBase.slice(0, -1)}`:
+      return answer(await codeRunners.listPools());
+    case `POST ${selfHostedPoolsBase.slice(0, -1)}`:
+      return answer(await codeRunners.createPool({ body }));
+    default:
+      break;
+  }
+
+  if (pathname.startsWith(selfHostedPoolsBase)) {
+    const rest = pathname.slice(selfHostedPoolsBase.length);
+    const [poolId, sub] = rest.split("/");
+    if (!poolId || rest.includes("//")) throw new ApiError(404, "not found");
+    if (sub === undefined) {
+      if (method === "GET") return answer(await codeRunners.getPool({ poolId }));
+      if (method === "PATCH") return answer(await codeRunners.updatePool({ poolId, body }));
+      if (method === "DELETE") return answer(await codeRunners.removePool({ poolId }));
+    } else if (sub === "secrets" && method === "GET") {
+      return answer(await codeRunners.poolSecrets({ poolId }));
+    } else if (sub === "sessions" && method === "GET") {
+      return answer(await codeRunners.poolSessions({ poolId, searchParams: url.searchParams }));
+    }
+  }
+  throw new ApiError(404, "not found");
+}
+
 async function handleApi(request, response, url) {
   // The login shell refuses the entire API surface, with or without a session.
   // It exists to serve the sign-in page and nothing else, so there is no route
@@ -3725,6 +3798,12 @@ async function handleApi(request, response, url) {
         // reading this can tell "Code is off here" from "this instance is a
         // tenant, whose Code belongs on its self-hosted runner".
         tenant: tenantInstance,
+        // Which self-hosted pool this tenant's runner registers against, so a
+        // runner that is polling the wrong instance is visible. The pool id
+        // only — never the secret, which is read by pool id.
+        codeRunnerPool: codeRunnersEnabled
+          ? (await codeRunners.primaryPool())?.pool_id ?? null
+          : null,
         infrastructureActionsEnabled,
         // The actual methods the renderer exposes on each surface, filtered by
         // what this bridge allows. `codeReady` only checks request/response
@@ -4089,6 +4168,12 @@ const server = http.createServer(async (request, response) => {
   try {
     if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
+    }
+    // A tenant's Code runners, and the self-hosted pool API they speak. Only on
+    // a tenant with the feature on (see `codeRunners`); every other instance
+    // falls through to the app, exactly as before.
+    else if (codeRunners && url.pathname.startsWith("/v1/code/runners/")) {
+      await handleCodeRunnerApi(request, response, url);
     }
     else if (url.pathname === "/manifest.json") {
       await serveStatic(response, "/manifest.webmanifest");

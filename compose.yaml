@@ -182,6 +182,12 @@ services:
       # inside its Cowork guest — so this withholds that surface whatever
       # CLAUDE_REMOTE_CODE_ACTIONS says. See docs/code-in-cowork-vm.md.
       CLAUDESK_TENANT: "${CLAUDESK_TENANT:-0}"
+      # Answer the self-hosted pool API the runner speaks (bridge/code-runners.mjs).
+      # Requires CLAUDESK_TENANT=1; off by default, so nothing is routed until the
+      # deployment turns it on. The pool name is created on first use and a runner
+      # registers against it with that pool's secret.
+      CLAUDESK_CODE_RUNNERS: "${CLAUDESK_CODE_RUNNERS:-0}"
+      CLAUDESK_CODE_RUNNER_POOL: "${CLAUDESK_CODE_RUNNER_POOL:-self-hosted}"
       # Experimental: render ion-dist's browser (claude.ai) chrome with the local
       # IPC data layer, and grant the org entitlements its Cowork surface checks.
       # See docs/web-shell.md. Off by default.
