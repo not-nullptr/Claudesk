@@ -3232,10 +3232,9 @@ async function handleCodeRunnerApi(request, response, url) {
 
   // Placing a session. A tenant has no local executor, so the only environment
   // this answers for is one of its own pools; anything else is refused rather
-  // than quietly run here. Only these two shapes are claimed — the session's
-  // other legs fall through to the app untouched.
+  // than quietly run here.
   if (pathname === "/v1/code/sessions" && method === "GET") {
-    return sendJson(response, 200, await codeRunners.listSessions());
+    return sendJson(response, 200, await codeRunners.listSessions({ searchParams: url.searchParams }));
   }
   if (pathname === "/v1/code/sessions" && method === "POST") {
     const created = await codeRunners.createSession({ body });
@@ -3243,6 +3242,21 @@ async function handleCodeRunnerApi(request, response, url) {
       throw new ApiError(400, "only a self-hosted environment of this instance can run a session");
     }
     return sendJson(response, 201, created);
+  }
+  // The session list's liveness probe. Its reader posts the sessions it is
+  // showing and reads back per-session heartbeats; a deployment whose runners
+  // are the session's own workers has nothing to probe, and `checks_enabled:
+  // false` is the protocol's own way to say so — the client then stops asking
+  // rather than treating silence as a broken session.
+  if (pathname === "/v1/code/sessions/heartbeat_check" && method === "POST") {
+    return sendJson(response, 200, { results: [], checks_enabled: false });
+  }
+  // The session list's own stream (`…/sessions/watch?…`). Its reader treats a
+  // 400 or 404 as fatal for the whole surface and requires a
+  // `text/event-stream` body, so it is held open and quiet: the list already
+  // answers over HTTP, and a stream with no frames is a valid stream.
+  if (pathname === "/v1/code/sessions/watch" && method === "GET") {
+    return sendSessionsWatchStream(request, response);
   }
   // A session's events: the history (paged), the append the renderer and the
   // runner both use, and the SSE stream the Desktop main process reads. Replayed
@@ -3268,11 +3282,40 @@ async function handleCodeRunnerApi(request, response, url) {
     throw new ApiError(405, "method not allowed");
   }
 
+  // The session's edit legs: rename/tags/metadata arrive as one PUT, then the
+  // per-session actions the page has buttons for. Each answers the app's
+  // `{session}` document; an unknown session is a 404 (the archive reader
+  // treats that as "already archived").
+  const sessionSub = pathname.match(/^\/v1\/code\/sessions\/([^/]+)\/(archive|mark_read|mcp-servers)$/);
+  if (sessionSub) {
+    const sessionId = decodeURIComponent(sessionSub[1]);
+    if (sessionSub[2] === "archive" && method === "POST") {
+      return answer(await codeRunners.archiveSession({ sessionId }));
+    }
+    if (sessionSub[2] === "mark_read" && method === "POST") {
+      return answer(await codeRunners.markSessionRead({ sessionId }));
+    }
+    if (sessionSub[2] === "mcp-servers" && method === "PUT") {
+      return answer(await codeRunners.setSessionMcpServers({ sessionId, body }));
+    }
+    throw new ApiError(405, "method not allowed");
+  }
+
   const sessionDetail = pathname.match(/^\/v1\/code\/sessions\/([^/]+)$/);
-  if (sessionDetail && method === "GET") {
-    const document = await codeRunners.session(decodeURIComponent(sessionDetail[1]));
-    if (!document) throw new ApiError(404, "session not found");
-    return sendJson(response, 200, document);
+  if (sessionDetail) {
+    const sessionId = decodeURIComponent(sessionDetail[1]);
+    if (method === "GET") {
+      const document = await codeRunners.session(sessionId);
+      if (!document) throw new ApiError(404, "session not found");
+      return sendJson(response, 200, document);
+    }
+    if (method === "PUT") {
+      return answer(await codeRunners.updateSession({ sessionId, body }));
+    }
+    if (method === "DELETE") {
+      return answer(await codeRunners.deleteSession({ sessionId }));
+    }
+    throw new ApiError(405, "method not allowed");
   }
 
   // The runner's session-scoped calls: exchange an assignment for the session
@@ -3371,6 +3414,95 @@ async function sendCodeEventStream(request, response, sessionId, url) {
   };
   request.on("close", close);
   response.on("error", close);
+}
+
+// GET /v1/code/sessions/watch — the session list's own SSE stream. The reader
+// refuses anything without a `text/event-stream` body and treats 400/404 as
+// fatal for the whole surface (`SessionsWatchFatalError`; it will not retry),
+// so the bridge holds the stream open and quiet rather than 404ing it: the
+// list it would stream is the one `GET /v1/code/sessions` already answers, and
+// a stream with no frames is a valid stream. Keepalives keep intermediaries
+// from timing it out.
+function sendSessionsWatchStream(request, response) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.write(": connected\n\n");
+  const timer = setInterval(() => {
+    try {
+      response.write(`: keepalive ${Date.now()}\n\n`);
+    } catch {
+      // The close handler tears the timer down; a failed write just means the
+      // reader went away between ticks.
+    }
+  }, 20000);
+  const close = () => {
+    clearInterval(timer);
+    response.end();
+  };
+  request.on("close", close);
+  response.on("error", close);
+}
+
+// The title (and branch) the app asks its backend for when something is named:
+// the Code composer asks before a session's first send, and chapter renaming
+// asks again later. The Desktop main answers these in-process (a custom-3p
+// stub with an on-device model); a browser page fetches its own origin, so the
+// bridge is the only place that can answer them for the web shell. With no
+// on-device model here, the title is derived from the message — the first
+// meaningful line, cleaned and capped — and the branch from the title the way
+// the app's own fallback does (a slug; omitted when nothing survives).
+function suggestedTitle(message) {
+  const first = String(message ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+  const text = first
+    .replace(/^[#>*\-•\s]+/, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= 60) return text;
+  const cut = text.slice(0, 60);
+  const boundary = cut.lastIndexOf(" ");
+  return `${(boundary >= 30 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
+}
+
+function suggestedBranch(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/, "");
+}
+
+async function handleDustApi(request, response, kind) {
+  let body = {};
+  try {
+    body = await readJson(request);
+  } catch {
+    body = {};
+  }
+  if (kind === "command_display_names") {
+    // The slash-command palette's display labels; the Desktop main stubs this
+    // empty (the commands it would name are the runner's own), so the bridge
+    // answers the same shape rather than 404 while the palette opens.
+    sendJson(response, 200, { results: [] });
+    return;
+  }
+  const message = typeof body?.first_session_message === "string"
+    ? body.first_session_message : "";
+  const title = suggestedTitle(message);
+  if (kind === "generate_session_title") {
+    sendJson(response, 200, { title });
+    return;
+  }
+  const branch = suggestedBranch(title);
+  sendJson(response, 200, { title, ...(branch ? { branch_name: branch } : {}) });
 }
 
 async function handleApi(request, response, url) {
@@ -4408,21 +4540,33 @@ const localStaticFiles = new Set([
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   try {
-    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
+    // The title/branch the app asks for when it names something — see
+    // handleDustApi. Answered before the generic API legs so a browser page
+    // gets the same custom-3p stubs the Desktop main serves in-process.
+    const dustMatch =
+      /^\/api\/organizations\/[0-9a-f-]{36}\/dust\/(generate_title_and_branch|generate_session_title|command_display_names)$/
+        .exec(url.pathname);
+    if (dustMatch && request.method === "POST") {
+      await handleDustApi(request, response, dustMatch[1]);
+    } else if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
     }
     // A tenant's Code runners, and the self-hosted pool API they speak — plus
     // the environment list that offers them as the only place a Code session can
-    // run. Only on a tenant with the feature on (see `codeRunners`); every other
-    // instance falls through to the app, exactly as before.
+    // run, and the whole session surface the Code page calls (the list, one
+    // session's document and its edits, events and their stream, the list's
+    // heartbeat probe and watch stream). Only on a tenant with the feature on
+    // (see `codeRunners`); every other instance falls through to the app,
+    // exactly as before. Anything under the session base this handler does not
+    // answer is logged and 404s there, rather than being forwarded to an
+    // upstream that has never heard of this session.
     else if (
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
+        || url.pathname.startsWith("/v1/code/sessions")
         || url.pathname.startsWith("/v1/environment_providers/")
         || url.pathname === "/v1/environments"
-        || /^\/v1\/environments\/[^/]+$/.test(url.pathname)
-        || /^\/v1\/code\/sessions\/([^/]+)(\/events(\/stream)?)?$/.test(url.pathname)
-        || url.pathname === "/v1/code/sessions")
+        || /^\/v1\/environments\/[^/]+$/.test(url.pathname))
     ) {
       await handleCodeRunnerApi(request, response, url);
     }

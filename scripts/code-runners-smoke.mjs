@@ -164,18 +164,27 @@ try {
   assert.equal((await backend.issueSessionToken({ headers: sessionAuth, sessionId: "session-1" })).unauthorized,
     true, "the retired token no longer authenticates after a retry");
 
-  // Placing a session: the create body is the Desktop main process's own shape,
-  // and only an environment that is one of this instance's pools may run it —
-  // there is no local executor here to fall back to.
+  // Placing a session: the create body is the renderer's own serializer's
+  // shape — a pool worker names its place with `self_hosted_runner_pool_id` —
+  // and only a place that is one of this instance's pools may run it; there is
+  // no local executor here to fall back to. The document reads in the app's
+  // vocabulary: `active` with no worker status is what its normalizer paints
+  // as pending.
   const placed = await backend.createSession({
     body: {
       title: "hello",
-      environment_id: primary.pool_id,
+      self_hosted_runner_pool_id: primary.pool_id,
       config: { sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }] },
+      tags: ["smoke"],
     },
   });
-  assert.equal(placed.session.status, "pending");
+  assert.equal(placed.session.status, "active");
+  assert.equal(placed.session.worker_status, undefined,
+    "a session no runner has taken reads pending to the app");
   assert.equal(placed.session.environment_id, primary.pool_id);
+  assert.equal(placed.session.self_hosted_runner_pool_id, primary.pool_id);
+  assert.deepEqual(placed.session.tags, ["smoke"]);
+  assert.equal(placed.session.config.sources.length, 1, "the create body's sources are echoed back");
   assert.equal((await backend.session(placed.session.id)).session.title, "hello");
   assert.equal(await backend.session("no-such-session"), null);
   assert.equal(
@@ -183,6 +192,11 @@ try {
       .unsupported,
     true,
     "a session for anything but this instance's own pool is refused",
+  );
+  assert.equal(
+    (await backend.createSession({ body: { self_hosted_runner_pool_id: "ccpool_nope" } })).unsupported,
+    true,
+    "and a pool worker naming a foreign pool is refused the same way",
   );
   const offered = await backend.pollSpawnHints({ headers: auth });
   assert.ok(offered.hints.some((hint) => hint.session_uuid === placed.session.id),
@@ -223,6 +237,44 @@ try {
   assert.equal(tail.data.length, 3);
   assert.equal((await backend.eventsAfter(placed.session.id, 1)).length, 2);
   assert.equal(await backend.appendEvents({ sessionId: "no-such-session", body: {} }), null);
+
+  // The create body may carry the session's first events; they land in the
+  // same log, and deleting the session takes its log with it.
+  const withEvents = await backend.createSession({
+    body: { self_hosted_runner_pool_id: primary.pool_id,
+      events: [{ payload: { type: "control_request", request: { subtype: "initialize" } } }] },
+  });
+  assert.equal((await backend.listEvents({ sessionId: withEvents.session.id, searchParams: new URLSearchParams() }))
+    .data.length, 1, "the create body's first events land in the log");
+  assert.deepEqual(await backend.deleteSession({ sessionId: withEvents.session.id }), {});
+  assert.equal(await backend.session(withEvents.session.id), null, "a deleted session is gone");
+  assert.equal(await backend.deleteSession({ sessionId: "no-such-session" }), null);
+
+  // The edit legs the Code page uses once a session exists: one PUT for
+  // rename/tags/metadata, archive, mark_read, the MCP editor's save.
+  const renamed = await backend.updateSession({
+    sessionId: placed.session.id,
+    body: { title: "renamed by the reader", add_tags: ["pinned"], remove_tags: ["smoke"],
+      client_metadata: { last_seen_cwd: "/workspace" } },
+  });
+  assert.equal(renamed.session.title, "renamed by the reader");
+  assert.deepEqual(renamed.session.tags, ["pinned"]);
+  assert.equal(renamed.session.client_metadata.last_seen_cwd, "/workspace");
+  assert.equal((await backend.updateSession({ sessionId: "no-such-session", body: {} })), null);
+  assert.equal((await backend.setSessionMcpServers({
+    sessionId: placed.session.id, body: { mcp_servers: [{ name: "docs", type: "http", url: "https://example.invalid/mcp" }] },
+  })).session.config.mcp_servers.length, 1);
+  assert.equal((await backend.markSessionRead({ sessionId: placed.session.id })).session.unread, undefined,
+    "mark_read leaves a session read");
+  const archived = await backend.archiveSession({ sessionId: placed.session.id });
+  assert.equal(archived.session.status, "archived");
+  const activeOnly = await backend.listSessions({
+    searchParams: new URLSearchParams("statuses=active&statuses=paused"),
+  });
+  assert.equal(activeOnly.data.some((row) => row.id === placed.session.id), false,
+    "an archived session leaves the list the sidebar reads");
+  const archivedOnly = await backend.listSessions({ searchParams: new URLSearchParams("statuses=archived") });
+  assert.equal(archivedOnly.data.some((row) => row.id === placed.session.id), true);
 
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });

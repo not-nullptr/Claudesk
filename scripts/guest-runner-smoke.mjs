@@ -111,8 +111,9 @@ try {
   assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
   assert.equal(decoded[1].message.message.content[0].text, "agent saw: summarise the repo",
     "the agent ran on the prompt the session carried");
-  assert.equal(JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session.status,
-    "released", "a clean run releases the session");
+  const releasedDoc = JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session;
+  assert.equal(releasedDoc.status, "active", "a session the app reads stays active");
+  assert.equal(releasedDoc.worker_status, "idle", "a clean run leaves it idle");
 
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {

@@ -503,6 +503,43 @@ could change it. A tenant with runners now declares
 on such a tenant sessions genuinely do run on its own infrastructure); the
 operator's own instance keeps exactly what the wrapper relayed.
 
+### The session surface the app calls
+
+With the menu open, a session page is what exercises the API next, so the whole
+surface a Code session touches is replicated here — read out of the renderer's
+own readers (`shared-100`'s session module) and the Desktop main's custom-3p
+stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
+
+| Call | Shape (what the client sends / requires back) |
+| --- | --- |
+| `POST /v1/code/sessions` | `{title?, environment_id? \| self_hosted_runner_pool_id?, config:{sources, outcomes?, model?, …}, events?: [{payload}], tags?}`. A pool worker names its place with `self_hosted_runner_pool_id`; an environment worker with `environment_id`. The answer is `{session}` (the client's `CD`). |
+| `GET /v1/code/sessions` | The list; the sidebar's call carries `statuses=active&statuses=paused`, which is how archived sessions drop out. Rows are the same session document. |
+| `GET/PUT/DELETE /v1/code/sessions/{id}` | GET reads, PUT is the one edit endpoint (`{title?}`, `{add_tags?}`/`{remove_tags?}`, `{client_metadata?}`), DELETE removes. Each answers `{session}`. |
+| `POST …/{id}/archive`, `…/mark_read` | The page's buttons; archive is its own axis (log and place stay, the list filter above stops carrying it). `{session}` back. |
+| `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. |
+| `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. |
+| `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
+| `GET /v1/code/sessions/watch` | The list's SSE stream. Its reader treats 400/404 as **fatal for the whole surface**, so it is held open and quiet (a comment frame, keepalives) rather than 404ed. |
+| `POST /api/organizations/{org}/dust/generate_title_and_branch` | `{first_session_message, title_style, model?}` → `{title, branch_name?}`. The Desktop main answers this in-process with an on-device model; a browser fetches its own origin, so the bridge derives the title (first meaningful line, cleaned, capped) and the branch (its slug). `generate_session_title` (`{title}`) and `command_display_names` (`{results: []}`) are served the same way. |
+
+**The session document.** The renderer normalizes every session through its own
+parser, which folds the wire `status`/`worker_status`/`connection_status`
+triple into what the UI paints: `active` + no worker status = **pending**,
+`active` + `running`/`connected` = running, `active` + `idle` = idle,
+`archived` passes through. There is no displayed "failed" — a failed run is an
+idle session whose transcript says why (the pool's admin list still records
+`state: "failed"`). The store's states are the runner's vocabulary
+(pending → offered → active → released/failed) and the app's spelling is
+derived at serialization (`sessionDocument` in `bridge/code-runners.mjs`)
+rather than stored twice.
+
+Deliberately **not** answered (they 404 and are logged as unhandled Code
+requests): the share/support-share links, `/v1/code/github/*` branch-status
+reads, and the adjacent product areas the surface links to but this deployment
+does not run — triggers, agents, channels, spaces, project templates,
+`agent-proxy`, PR-steward, approvals and org memory. None is on a session's
+normal path; each is its own feature.
+
 ## Open — the rest of the spike
 
 1. **Runner placement (narrowed).** The guest already carries Claude Code and

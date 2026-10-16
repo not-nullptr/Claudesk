@@ -94,6 +94,102 @@ export function poolEnvironment(pool, { online = true } = {}) {
   };
 }
 
+// The `config` keys a create body carries and the session echoes back — the
+// renderer's own create serializer builds exactly this set from the session
+// context, so the document the session page renders its sources, model and
+// permission mode from is the same one the create body held.
+const sessionConfigKeys = ["sources", "outcomes", "model", "cwd", "effort_level",
+  "permission_mode", "custom_system_prompt", "append_system_prompt",
+  "allowed_tools", "disallowed_tools", "reuse_outcome_branches", "mcp_servers"];
+
+/**
+ * One session, in the app's own vocabulary.
+ *
+ * The renderer normalizes every session document it reads through its own
+ * parser, which folds the wire `status`/`worker_status`/`connection_status`
+ * triple into the state the UI paints: `active` with no worker status reads as
+ * **pending**, `active` + `running` + `connected` as running, `active` +
+ * `idle` as idle, and `archived` passes through. There is no displayed
+ * "failed" — a failed run is an idle session whose transcript says why — so
+ * the wire status is archived or active and nothing else. The store's states
+ * are the runner's vocabulary (pending → offered → active → released/failed);
+ * the app's spelling is derived here rather than stored twice.
+ */
+function sessionDocument(session) {
+  const archived = session.archived === true;
+  const state = session.state;
+  return {
+    id: session.session_uuid,
+    title: typeof session.title === "string" ? session.title : "",
+    status: archived ? "archived" : "active",
+    ...(!archived && state === "active"
+      ? { worker_status: "running", connection_status: "connected" } : {}),
+    ...(!archived && (state === "released" || state === "failed")
+      ? { worker_status: "idle" } : {}),
+    environment_id: session.pool_id,
+    self_hosted_runner_pool_id: session.pool_id,
+    created_at: session.created_at,
+    last_event_at: session.last_event_at ?? session.created_at,
+    config: sessionConfigOf(session),
+    tags: Array.isArray(session.tags) ? session.tags : [],
+    ...(session.client_metadata ? { client_metadata: session.client_metadata } : {}),
+    ...(session.unread ? { unread: true } : {}),
+  };
+}
+
+/** The `config` of a session document — see `sessionConfigKeys`. Sessions the
+ * store already held before this shape keep their sources at the top level,
+ * so both spellings are read. */
+function sessionConfigOf(session) {
+  const stored = isRecord(session.session_config) ? session.session_config : {};
+  const config = {
+    sources: Array.isArray(stored.sources) ? stored.sources
+      : Array.isArray(session.sources) ? session.sources : [],
+  };
+  const outcomes = Array.isArray(stored.outcomes) && stored.outcomes.length
+    ? stored.outcomes : session.outcomes;
+  if (Array.isArray(outcomes) && outcomes.length) config.outcomes = outcomes;
+  const model = typeof stored.model === "string" && stored.model
+    ? stored.model : session.model;
+  if (typeof model === "string" && model) config.model = model;
+  for (const key of sessionConfigKeys) {
+    if (key === "sources" || key === "outcomes" || key === "model") continue;
+    if (stored[key] !== undefined) config[key] = stored[key];
+  }
+  return config;
+}
+
+/**
+ * Append entries to a session's log, assigning `event_id` and `sequence_num`
+ * here: the wire contract requires a non-empty `event_id` and a `sequence_num`
+ * that is a **positive digit string** — the renderer's own reader rejects zero
+ * and a non-string — so a caller-supplied one is ignored rather than trusted.
+ * Returns the appended envelopes.
+ */
+function appendToSession(session, incoming) {
+  session.events = Array.isArray(session.events) ? session.events : [];
+  let sequence = session.events.reduce(
+    (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
+  const appended = [];
+  for (const entry of incoming) {
+    const payload = isRecord(entry?.payload) ? entry.payload : entry;
+    if (!isRecord(payload)) continue;
+    sequence += 1;
+    const envelope = {
+      event_id: randomUUID(),
+      sequence_num: String(sequence),
+      payload,
+      ...(typeof entry?.event_type === "string" && entry.event_type
+        ? { event_type: entry.event_type } : {}),
+      created_at: new Date().toISOString(),
+    };
+    session.events.push(envelope);
+    appended.push(envelope);
+  }
+  if (appended.length) session.last_event_at = appended[appended.length - 1].created_at;
+  return appended;
+}
+
 export function createRunnerBackend({ stateDir, log = console, poolName = null } = {}) {
   const statePath = join(stateDir, stateFileName);
   let cache = null;
@@ -411,22 +507,28 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /**
      * POST /v1/code/sessions — place a session on one of this instance's pools.
      *
-     * The body is the Desktop main process's own create shape (read from its
-     * bundle, not guessed): `{title?, environment_id, config:{sources, outcomes?,
-     * model?}}`, where `sources`/`outcomes` entries are
-     * `{type:"git_repository", url, revision}`. The answer is
-     * `{session:{id, title, status}}`, which is the shape that build reads.
-     *
-     * Only a self-hosted pool can be placed on: an environment that is not one of
-     * this instance's pools is refused rather than quietly run locally, because
-     * there is no local executor here to run it.
+     * The body is the renderer's own create serializer (read from its bundle,
+     * not guessed): `{title?, environment_id? | self_hosted_runner_pool_id?,
+     * config:{sources, outcomes?, model?, …}, events?: [{payload}], tags?}`. A
+     * pool worker names its place with `self_hosted_runner_pool_id` and an
+     * environment worker with `environment_id`; both must name one of this
+     * instance's pools — there is no local executor here, so anything else is
+     * refused rather than quietly run somewhere else. The answer is
+     * `{session: …}` in the app's session shape (see `sessionDocument`).
      */
     async createSession({ body } = {}) {
       const state = await load();
       const environmentId = typeof body?.environment_id === "string" ? body.environment_id : "";
-      const pool = poolById(state, environmentId);
+      const requestedPoolId = typeof body?.self_hosted_runner_pool_id === "string"
+        ? body.self_hosted_runner_pool_id : "";
+      const pool = poolById(state, environmentId || requestedPoolId);
       if (!pool) return { unsupported: true };
       const config = isRecord(body?.config) ? body.config : {};
+      const sessionConfig = { sources: [] };
+      for (const key of sessionConfigKeys) {
+        if (config[key] !== undefined) sessionConfig[key] = config[key];
+      }
+      if (!Array.isArray(sessionConfig.sources)) sessionConfig.sources = [];
       const session = {
         session_uuid: randomUUID(),
         pool_id: pool.pool_id,
@@ -434,23 +536,19 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
         state: "pending",
         work_order_jwt: `${randomUUID()}.${randomBytes(16).toString("base64url")}`,
         title: typeof body?.title === "string" ? body.title : "",
-        sources: Array.isArray(config.sources) ? config.sources : [],
-        ...(Array.isArray(config.outcomes) && config.outcomes.length
-          ? { outcomes: config.outcomes } : {}),
-        ...(typeof config.model === "string" && config.model ? { model: config.model } : {}),
+        session_config: sessionConfig,
+        ...(Array.isArray(body?.tags) && body.tags.length
+          ? { tags: body.tags.filter((tag) => typeof tag === "string") } : {}),
         created_at: new Date().toISOString(),
       };
       state.sessions.push(session);
+      // The create body may carry the session's first events (a schema init
+      // control request, or an eager first message); they land in the same log
+      // the runner reads and the stream replays.
+      if (Array.isArray(body?.events)) appendToSession(session, body.events);
       await save();
       log.log(`[code-runners] session ${session.session_uuid} placed on pool ${pool.pool_id}`);
-      return {
-        session: {
-          id: session.session_uuid,
-          title: session.title,
-          status: session.state,
-          environment_id: pool.pool_id,
-        },
-      };
+      return { session: sessionDocument(session) };
     },
 
     /**
@@ -471,25 +569,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       if (!session) return null;
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
-      session.events = Array.isArray(session.events) ? session.events : [];
-      let sequence = session.events.reduce(
-        (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
-      const appended = [];
-      for (const entry of incoming) {
-        const payload = isRecord(entry?.payload) ? entry.payload : entry;
-        if (!isRecord(payload)) continue;
-        sequence += 1;
-        const envelope = {
-          event_id: randomUUID(),
-          sequence_num: String(sequence),
-          payload,
-          ...(typeof entry?.event_type === "string" && entry.event_type
-            ? { event_type: entry.event_type } : {}),
-          created_at: new Date().toISOString(),
-        };
-        session.events.push(envelope);
-        appended.push(envelope);
-      }
+      const appended = appendToSession(session, incoming);
       if (appended.length) await save();
       return { data: appended };
     },
@@ -526,22 +606,22 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /**
      * GET /v1/code/sessions — the list. The pager reads `has_more` / `last_id`,
      * and a row is filtered on `tags`, so both are stated rather than implied;
-     * `next_cursor` is the same page's other name for it.
+     * `next_cursor` is the same page's other name for it. The sidebar's own
+     * call carries the `statuses` it wants (`active` and `paused`), which is
+     * how an archived session leaves the list the moment it is archived. The
+     * whole store is the page — it is one JSON file per deployment — so `limit`
+     * is accepted and not enforced.
      */
-    async listSessions() {
+    async listSessions({ searchParams } = {}) {
       const state = await load();
-      const rows = state.sessions
+      const statuses = (searchParams?.getAll?.("statuses") ?? []).filter(Boolean);
+      let rows = state.sessions
         .slice()
-        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-        .map((session) => ({
-          id: session.session_uuid,
-          session_id: session.session_uuid,
-          title: session.title,
-          status: session.state,
-          environment_id: session.pool_id,
-          created_at: session.created_at,
-          tags: Array.isArray(session.tags) ? session.tags : [],
-        }));
+        .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))
+        .map((session) => sessionDocument(session));
+      if (statuses.length) {
+        rows = rows.filter((row) => statuses.includes(row.status));
+      }
       return {
         data: rows,
         has_more: false,
@@ -555,14 +635,88 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       const state = await load();
       const session = state.sessions.find((entry) => entry.session_uuid === sessionUuid);
       if (!session) return null;
-      return {
-        session: {
-          id: session.session_uuid,
-          title: session.title,
-          status: session.state,
-          environment_id: session.pool_id,
-        },
+      return { session: sessionDocument(session) };
+    },
+
+    /**
+     * PUT /v1/code/sessions/{id} — the one endpoint the app edits a session
+     * with: `{title?}` (a rename — an automatic title also arrives this way),
+     * `{add_tags?}` / `{remove_tags?}`, and `{client_metadata?}` (the reader
+     * carries it under `metadata`). Every caller parses the answer as the
+     * updated `{session…}`.
+     */
+    async updateSession({ sessionId, body } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      if (typeof body?.title === "string") session.title = body.title;
+      if (Array.isArray(body?.add_tags) || Array.isArray(body?.remove_tags)) {
+        const tags = new Set(Array.isArray(session.tags) ? session.tags : []);
+        for (const tag of Array.isArray(body?.remove_tags) ? body.remove_tags : []) {
+          if (typeof tag === "string") tags.delete(tag);
+        }
+        for (const tag of Array.isArray(body?.add_tags) ? body.add_tags : []) {
+          if (typeof tag === "string") tags.add(tag);
+        }
+        session.tags = [...tags];
+      }
+      if (isRecord(body?.client_metadata)) {
+        session.client_metadata = {
+          ...(isRecord(session.client_metadata) ? session.client_metadata : {}),
+          ...body.client_metadata,
+        };
+      }
+      await save();
+      return { session: sessionDocument(session) };
+    },
+
+    /**
+     * POST /v1/code/sessions/{id}/archive — archiving is its own axis, not a
+     * runner state: the session keeps its log and its place, and stops being in
+     * the list the sidebar reads. Archiving twice is fine (the client treats a
+     * 404 as "already archived" too).
+     */
+    async archiveSession({ sessionId } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      session.archived = true;
+      await save();
+      return { session: sessionDocument(session) };
+    },
+
+    /** POST /v1/code/sessions/{id}/mark_read — the reader names the event it read to. */
+    async markSessionRead({ sessionId } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      session.unread = false;
+      await save();
+      return { session: sessionDocument(session) };
+    },
+
+    /** PUT /v1/code/sessions/{id}/mcp-servers — the session's MCP editor saves here. */
+    async setSessionMcpServers({ sessionId, body } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      const servers = Array.isArray(body?.mcp_servers) ? body.mcp_servers : [];
+      session.session_config = {
+        ...(isRecord(session.session_config) ? session.session_config : {}),
+        mcp_servers: servers,
       };
+      await save();
+      return { session: sessionDocument(session) };
+    },
+
+    /** DELETE /v1/code/sessions/{id} — the caller ignores the answer's body. */
+    async deleteSession({ sessionId } = {}) {
+      const state = await load();
+      const index = state.sessions.findIndex((entry) => entry.session_uuid === sessionId);
+      if (index === -1) return null;
+      state.sessions.splice(index, 1);
+      await save();
+      return {};
     },
 
     /**

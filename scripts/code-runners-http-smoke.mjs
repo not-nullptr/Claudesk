@@ -155,17 +155,22 @@ try {
   assert.equal(anonymousPoll.status, 401, "an unauthenticated poll is refused");
 
   // Placing a session over HTTP, then watching the same runner be offered it:
-  // the dispatch chain the tenant's Code surface rides.
+  // the dispatch chain the tenant's Code surface rides. The body is the
+  // renderer's own serializer's shape — a pool worker names its place with
+  // `self_hosted_runner_pool_id` — and the document reads in the app's
+  // vocabulary (`active`, no worker status → its normalizer paints pending).
   const placed = await tenantRequest("/v1/code/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "from the smoke", environment_id: poolId,
+    body: JSON.stringify({ title: "from the smoke", self_hosted_runner_pool_id: poolId,
       config: { sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }] } }),
   });
   assert.equal(placed.status, 201, placed.body);
   const placedSession = JSON.parse(placed.body).session;
-  assert.equal(placedSession.status, "pending");
+  assert.equal(placedSession.status, "active");
+  assert.equal(placedSession.worker_status, undefined);
   assert.equal(placedSession.environment_id, poolId);
+  assert.equal(placedSession.self_hosted_runner_pool_id, poolId);
 
   // The list the surface reads on every open — it was 404ing, four times a load.
   const listed = await tenantRequest("/v1/code/sessions");
@@ -227,6 +232,104 @@ try {
     body: JSON.stringify({ environment_id: "00000000-0000-4000-8000-000000000000" }),
   });
   assert.equal(elsewhere.status, 400, elsewhere.body);
+
+  // The session's edit legs — the calls the Code page makes once a session
+  // exists. Rename/tags/metadata arrive through one PUT; archive, mark_read
+  // and the MCP editor's save are their own POST/PUT; delete is a DELETE.
+  const renamed = await tenantRequest(`/v1/code/sessions/${placedSession.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "renamed over http", add_tags: ["smoke"],
+      client_metadata: { last_seen_cwd: "/workspace" } }),
+  });
+  assert.equal(renamed.status, 200, renamed.body);
+  assert.equal(JSON.parse(renamed.body).session.title, "renamed over http");
+  assert.deepEqual(JSON.parse(renamed.body).session.tags, ["smoke"]);
+  assert.equal(JSON.parse(renamed.body).session.client_metadata.last_seen_cwd, "/workspace");
+
+  const markedRead = await tenantRequest(`/v1/code/sessions/${placedSession.id}/mark_read`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ event_id: "1" }),
+  });
+  assert.equal(markedRead.status, 200, markedRead.body);
+  assert.equal(JSON.parse(markedRead.body).session.id, placedSession.id);
+
+  const mcpSaved = await tenantRequest(`/v1/code/sessions/${placedSession.id}/mcp-servers`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mcp_servers: [] }),
+  });
+  assert.equal(mcpSaved.status, 200, mcpSaved.body);
+
+  const heartbeat = await tenantRequest("/v1/code/sessions/heartbeat_check", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session_ids: [placedSession.id] }),
+  });
+  assert.deepEqual(JSON.parse(heartbeat.body), { results: [], checks_enabled: false },
+    "the heartbeat probe declines the protocol rather than pretending to check");
+
+  // The session list's own stream: held open, quiet, carrying the content type
+  // its reader requires (it treats a 400/404 here as fatal for the surface).
+  const watchController = new AbortController();
+  const watchTimer = setTimeout(() => watchController.abort(), 5000);
+  const watchResponse = await fetch(
+    `http://127.0.0.1:${tenantPort}/v1/code/sessions/watch?exclude_tags=-`,
+    { headers: { accept: "text/event-stream" }, signal: watchController.signal });
+  assert.equal(watchResponse.status, 200);
+  assert.match(watchResponse.headers.get("content-type") || "", /text\/event-stream/,
+    "the watch stream must carry the content type its reader requires");
+  let watchHead = "";
+  for await (const chunk of watchResponse.body) {
+    watchHead += Buffer.from(chunk).toString("utf8");
+    if (watchHead.includes(": connected")) break;
+  }
+  clearTimeout(watchTimer);
+  watchController.abort();
+  assert.ok(watchHead.includes(": connected"), "and it opens with a comment frame");
+
+  // Title generation — the custom-3p stubs the Desktop main answers in-process,
+  // served here too because a browser page fetches its own origin, never
+  // through that process.
+  const titleAndBranch = await tenantRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_title_and_branch",
+    { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ first_session_message: "Add a dark mode toggle to the settings page, with tests",
+        title_style: "default" }) });
+  assert.equal(titleAndBranch.status, 200, titleAndBranch.body);
+  const naming = JSON.parse(titleAndBranch.body);
+  assert.equal(naming.title, "Add a dark mode toggle to the settings page, with tests");
+  assert.equal(naming.branch_name, "add-a-dark-mode-toggle-to-the-settings-page-with",
+    "the branch is the title's slug, capped");
+  const sessionTitle = await tenantRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_session_title",
+    { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ first_session_message: "## Fix the flaky test\nand more" }) });
+  assert.equal(JSON.parse(sessionTitle.body).title, "Fix the flaky test",
+    "a markdown heading is stripped for the title");
+  const commandNames = await tenantRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/command_display_names",
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  assert.deepEqual(JSON.parse(commandNames.body), { results: [] });
+
+  const archived = await tenantRequest(`/v1/code/sessions/${placedSession.id}/archive`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(archived.status, 200, archived.body);
+  assert.equal(JSON.parse(archived.body).session.status, "archived");
+  const activeList = JSON.parse((await tenantRequest("/v1/code/sessions?statuses=active&statuses=paused")).body);
+  assert.equal(activeList.data.some((row) => row.id === placedSession.id), false,
+    "an archived session leaves the default list");
+  const archivedList = JSON.parse((await tenantRequest("/v1/code/sessions?statuses=archived")).body);
+  assert.equal(archivedList.data.some((row) => row.id === placedSession.id), true);
+
+  const deleted = await tenantRequest(`/v1/code/sessions/${placedSession.id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 200, deleted.body);
+  assert.equal((await tenantRequest(`/v1/code/sessions/${placedSession.id}`)).status, 404,
+    "a deleted session is gone");
 
   // --- the deployment's own instance --------------------------------------
   const ownerPort = 8157;

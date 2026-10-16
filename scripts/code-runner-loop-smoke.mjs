@@ -144,7 +144,11 @@ try {
   });
   assert.equal(failing.exit, 3);
   const failed = JSON.parse((await request(`/v1/code/sessions/${secondId}`)).body);
-  assert.equal(failed.session.status, "failed", "a failed agent leaves the session failed");
+  // The app has no displayed "failed" — the session reads active and idle, and
+  // the failure is what the transcript says (and what the pool's own session
+  // list — the admin view — records as `state: "failed"`).
+  assert.equal(failed.session.status, "active");
+  assert.equal(failed.session.worker_status, "idle", "a failed run leaves the session idle");
 } finally {
   if (child) child.kill("SIGTERM");
   if (createdRelease) rmSync(releaseFile, { force: true });
