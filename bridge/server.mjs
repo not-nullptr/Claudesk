@@ -3262,7 +3262,16 @@ async function handleCodeRunnerApi(request, response, url) {
   // runner both use, and the SSE stream the Desktop main process reads. Replayed
   // as `client_event` frames and resumed with `from_sequence_num`, which is that
   // reader's own contract (see scripts/lib/code-wire-contract.mjs).
-  const eventsPath = pathname.match(/^\/v1\/code\/sessions\/([^/]+)\/events(\/stream)?$/);
+  //
+  // Answered under both generations of the path. The same client posts its
+  // first message under `/v1/code/sessions/{id}/events` only while its
+  // `ccr_v2_send_events_web` GrowthBook gate reads true; when it reads false —
+  // which is what the Desktop build's hardcoded feature table carries — the
+  // send goes to the original `/v1/sessions/{id}/events` instead. Before that
+  // leg was answered, the POST landed on the app's HTML catch-all: a **200 of
+  // HTML**, which the client's API layer classifies as an edge/upstream
+  // failure — the composer's "Service temporarily unreachable".
+  const eventsPath = pathname.match(/^\/v1\/(?:code\/sessions|sessions)\/([^/]+)\/events(\/stream)?$/);
   if (eventsPath) {
     const sessionId = decodeURIComponent(eventsPath[1]);
     if (eventsPath[2]) {
@@ -4564,6 +4573,7 @@ const server = http.createServer(async (request, response) => {
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
         || url.pathname.startsWith("/v1/code/sessions")
+        || url.pathname.startsWith("/v1/sessions/")
         || url.pathname.startsWith("/v1/environment_providers/")
         || url.pathname === "/v1/environments"
         || /^\/v1\/environments\/[^/]+$/.test(url.pathname))
@@ -4592,6 +4602,15 @@ const server = http.createServer(async (request, response) => {
         "X-Content-Type-Options": "nosniff",
       });
       response.end(body);
+    } else if (url.pathname.startsWith("/v1/")) {
+      // An API-shaped path this instance does not answer must never be handed
+      // the app's HTML: a client reading the response as JSON classifies a
+      // 200-of-HTML as an edge/upstream failure ("Service temporarily
+      // unreachable"), which is exactly how a missing route disguised itself.
+      // Answer in the API's own envelope, and say so in the log — an
+      // unhandled request is a gap, not a page.
+      console.warn(`[cowork-bridge] unhandled API request: ${request.method} ${url.pathname}`);
+      sendJson(response, 404, { ok: false, error: `no route for ${request.method} ${url.pathname}` });
     } else {
       await serveOfficialIndex(request, response);
     }

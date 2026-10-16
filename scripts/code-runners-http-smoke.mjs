@@ -233,6 +233,34 @@ try {
   });
   assert.equal(elsewhere.status, 400, elsewhere.body);
 
+  // The original (v1) events leg: what the renderer actually sends its first
+  // message over when its `ccr_v2_send_events_web` gate reads false — which is
+  // what the Desktop build's hardcoded feature table carries. Before this leg
+  // was answered the POST landed on the app-HTML catch-all (a 200 of HTML),
+  // which the client's API layer classifies as "Service temporarily
+  // unreachable". Both generations write one log.
+  const v1Append = await tenantRequest(`/v1/sessions/${placedSession.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "sent over the v1 leg" } } }] }),
+  });
+  assert.equal(v1Append.status, 200, v1Append.body);
+  assert.equal(JSON.parse(v1Append.body).data[0].sequence_num, "3");
+  const v1History = JSON.parse((await tenantRequest(`/v1/sessions/${placedSession.id}/events`)).body);
+  assert.equal(decodeClientEventsResponse(v1History).length, 3,
+    "both events legs read and write one log");
+
+  // An API-shaped path with no route answers the API's own envelope — never the
+  // app's HTML page, which a JSON reader classifies as an upstream failure.
+  const unknownV1 = await tenantRequest("/v1/code/no-such-thing", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(unknownV1.status, 404, unknownV1.body);
+  assert.ok(unknownV1.type.includes("json"), `expected JSON, got ${unknownV1.type}`);
+  assert.equal(unknownV1.body.includes("<!doctype"), false,
+    "an API path never gets the app HTML");
+
   // The session's edit legs — the calls the Code page makes once a session
   // exists. Rename/tags/metadata arrive through one PUT; archive, mark_read
   // and the MCP editor's save are their own POST/PUT; delete is a DELETE.

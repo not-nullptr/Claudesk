@@ -517,7 +517,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 | `GET/PUT/DELETE /v1/code/sessions/{id}` | GET reads, PUT is the one edit endpoint (`{title?}`, `{add_tags?}`/`{remove_tags?}`, `{client_metadata?}`), DELETE removes. Each answers `{session}`. |
 | `POST …/{id}/archive`, `…/mark_read` | The page's buttons; archive is its own axis (log and place stay, the list filter above stops carrying it). `{session}` back. |
 | `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. |
-| `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. |
+| `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. Answered under **both generations of the path**: `ccr_v2_send_events_web` decides whether the client posts to `/v1/code/sessions/{id}/events` or the original `/v1/sessions/{id}/events`, and the Desktop build's hardcoded feature table carries the gate false — so the original leg is the one the browser actually sends its first message over. |
 | `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
 | `GET /v1/code/sessions/watch` | The list's SSE stream. Its reader treats 400/404 as **fatal for the whole surface**, so it is held open and quiet (a comment frame, keepalives) rather than 404ed. |
 | `POST /api/organizations/{org}/dust/generate_title_and_branch` | `{first_session_message, title_style, model?}` → `{title, branch_name?}`. The Desktop main answers this in-process with an on-device model; a browser fetches its own origin, so the bridge derives the title (first meaningful line, cleaned, capped) and the branch (its slug). `generate_session_title` (`{title}`) and `command_display_names` (`{results: []}`) are served the same way. |
@@ -539,6 +539,14 @@ reads, and the adjacent product areas the surface links to but this deployment
 does not run — triggers, agents, channels, spaces, project templates,
 `agent-proxy`, PR-steward, approvals and org memory. None is on a session's
 normal path; each is its own feature.
+
+One rule holds those 404s together, and it is worth stating on its own: **an
+API-shaped path (`/v1/…`) this bridge does not answer is answered with the
+API's own JSON envelope, never the app's HTML.** The catch-all that serves
+index.html for document routes used to take API paths too, and a client that
+reads JSON classifies a 200-of-HTML as an edge/upstream failure — the
+composer's "Service temporarily unreachable". A missing route should look like
+a missing route.
 
 ## Open — the rest of the spike
 
