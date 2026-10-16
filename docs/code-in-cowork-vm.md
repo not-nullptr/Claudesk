@@ -282,10 +282,18 @@ Extracted while building the substrate, so it does not have to be re-read:
   attestation header) and `worker/register` (`Authorization: Bearer
   <session token>` → `{worker_epoch, …}`); `GET …/terminal` (or
   `/v2/ccr-sessions/{id}/terminal` under the `ccr_v2_terminal_ws_web` gate).
+- **The event stream is the large remaining piece, and it is the Desktop's *main
+  process* that consumes it, not the renderer.** `index.chunk-DcP6Ha83.js`
+  carries an SSE transport that reconnects with `from_sequence_num`, a
+  keepalive-interval parameter and a worker-attestation-policy parameter, and a
+  session event model tracking `client_events` and `internal_events` separately,
+  with tool-call rows, lanes, hold policies and gates around them. A faithful
+  bridge-side stream therefore has to speak that whole model, and neither the
+  mobile facade's DTOs (the phone's client) nor the local-session events this
+  bridge already forwards describe it. This is where the next increment starts,
+  and it wants a live Desktop to check against.
 - **Still unknown:** the renderer's own create transform (see above), and the
-  transcript and event legs it reads. The mobile facade's translation targets
-  the phone's DTOs, not this client, so it is a starting point rather than a
-  drop-in.
+  exact transcript/envelope shapes the main process expects on that stream.
 
 ## Open — the rest of the spike
 
