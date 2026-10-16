@@ -399,6 +399,66 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     },
 
     /**
+     * POST /v1/code/sessions — place a session on one of this instance's pools.
+     *
+     * The body is the Desktop main process's own create shape (read from its
+     * bundle, not guessed): `{title?, environment_id, config:{sources, outcomes?,
+     * model?}}`, where `sources`/`outcomes` entries are
+     * `{type:"git_repository", url, revision}`. The answer is
+     * `{session:{id, title, status}}`, which is the shape that build reads.
+     *
+     * Only a self-hosted pool can be placed on: an environment that is not one of
+     * this instance's pools is refused rather than quietly run locally, because
+     * there is no local executor here to run it.
+     */
+    async createSession({ body } = {}) {
+      const state = await load();
+      const environmentId = typeof body?.environment_id === "string" ? body.environment_id : "";
+      const pool = poolById(state, environmentId);
+      if (!pool) return { unsupported: true };
+      const config = isRecord(body?.config) ? body.config : {};
+      const session = {
+        session_uuid: randomUUID(),
+        pool_id: pool.pool_id,
+        attempt: 1,
+        state: "pending",
+        work_order_jwt: `${randomUUID()}.${randomBytes(16).toString("base64url")}`,
+        title: typeof body?.title === "string" ? body.title : "",
+        sources: Array.isArray(config.sources) ? config.sources : [],
+        ...(Array.isArray(config.outcomes) && config.outcomes.length
+          ? { outcomes: config.outcomes } : {}),
+        ...(typeof config.model === "string" && config.model ? { model: config.model } : {}),
+        created_at: new Date().toISOString(),
+      };
+      state.sessions.push(session);
+      await save();
+      log.log(`[code-runners] session ${session.session_uuid} placed on pool ${pool.pool_id}`);
+      return {
+        session: {
+          id: session.session_uuid,
+          title: session.title,
+          status: session.state,
+          environment_id: pool.pool_id,
+        },
+      };
+    },
+
+    /** GET /v1/code/sessions/{id} */
+    async session(sessionUuid) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionUuid);
+      if (!session) return null;
+      return {
+        session: {
+          id: session.session_uuid,
+          title: session.title,
+          status: session.state,
+          environment_id: session.pool_id,
+        },
+      };
+    },
+
+    /**
      * Hand a session to a pool's runners. The Code session path calls this once
      * a session is placed on a self-hosted environment; until then it is the
      * seam a smoke drives and the next increment fills.

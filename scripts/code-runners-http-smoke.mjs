@@ -114,6 +114,38 @@ try {
     { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(anonymousPoll.status, 401, "an unauthenticated poll is refused");
 
+  // Placing a session over HTTP, then watching the same runner be offered it:
+  // the dispatch chain the tenant's Code surface rides.
+  const placed = await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "from the smoke", environment_id: poolId,
+      config: { sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }] } }),
+  });
+  assert.equal(placed.status, 201, placed.body);
+  const placedSession = JSON.parse(placed.body).session;
+  assert.equal(placedSession.status, "pending");
+  assert.equal(placedSession.environment_id, poolId);
+
+  const detail = await tenantRequest(`/v1/code/sessions/${placedSession.id}`);
+  assert.equal(detail.status, 200, detail.body);
+  assert.equal(JSON.parse(detail.body).session.title, "from the smoke");
+
+  const offered = await tenantRequest("/v1/code/runners/self-hosted/spawn-hints/poll",
+    { method: "POST", headers: auth, body: "{}" });
+  const hints = JSON.parse(offered.body).hints;
+  assert.ok(hints.some((hint) => hint.session_uuid === placedSession.id),
+    "the pool's runner is offered the session just placed");
+
+  // A session for an environment this instance does not run is refused, not
+  // quietly run locally.
+  const elsewhere = await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ environment_id: "00000000-0000-4000-8000-000000000000" }),
+  });
+  assert.equal(elsewhere.status, 400, elsewhere.body);
+
   // --- the deployment's own instance --------------------------------------
   const ownerPort = 8157;
   const ownerRequest = await boot({ port: ownerPort, env: { CLAUDESK_TENANT: "0" } });

@@ -147,6 +147,30 @@ try {
   assert.equal((await backend.issueSessionToken({ headers: sessionAuth, sessionId: "session-1" })).unauthorized,
     true, "the retired token no longer authenticates after a retry");
 
+  // Placing a session: the create body is the Desktop main process's own shape,
+  // and only an environment that is one of this instance's pools may run it —
+  // there is no local executor here to fall back to.
+  const placed = await backend.createSession({
+    body: {
+      title: "hello",
+      environment_id: primary.pool_id,
+      config: { sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }] },
+    },
+  });
+  assert.equal(placed.session.status, "pending");
+  assert.equal(placed.session.environment_id, primary.pool_id);
+  assert.equal((await backend.session(placed.session.id)).session.title, "hello");
+  assert.equal(await backend.session("no-such-session"), null);
+  assert.equal(
+    (await backend.createSession({ body: { environment_id: "00000000-0000-4000-8000-000000000000" } }))
+      .unsupported,
+    true,
+    "a session for anything but this instance's own pool is refused",
+  );
+  const offered = await backend.pollSpawnHints({ headers: auth });
+  assert.ok(offered.hints.some((hint) => hint.session_uuid === placed.session.id),
+    "a placed session is offered to the pool's runners");
+
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });
   assert.equal((await backend.listPools()).pools.length, 0);

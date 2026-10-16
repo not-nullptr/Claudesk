@@ -170,12 +170,21 @@ per-instance store of pools, runners and sessions and answers both sides of the
 self-hosted pool API: the runner's legs (`runners/register`, `deregister`,
 `spawn-hints/poll`, `spawn-hints/nack`, secret-authenticated) and the admin UI's
 (`pools` CRUD, `secrets` by id, `sessions`). A pool is advertised to the Code
-surface as a `byoc` environment (`poolEnvironment`), and `queueSession` is the
-seam the session path will call. `bridge/server.mjs` routes
-`/v1/code/runners/*` and `/v1/environment_providers/…/environments[/{id}]` to it,
-but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`, so nothing is routed until
-a deployment turns it on. `scripts/code-runners-smoke.mjs` drives the backend
-directly.
+surface as a `byoc` environment (`poolEnvironment`). `POST /v1/code/sessions`
+places a session on one of the instance's pools — the create body is the Desktop
+main process's own shape, not a guess — and that is what hands it to the runners,
+so the chain closes at the bridge: create → the pool's runner is offered it →
+`…/sessions/{id}/token` → `report-failure`/`release`. Anything that is not one of
+this instance's pools is refused rather than quietly run locally, because there
+is no local executor here to run it.
+
+`bridge/server.mjs` routes `/v1/code/runners/*`,
+`/v1/environment_providers/…/environments[/{id}]` and those two session shapes to
+it, but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`, so nothing is routed
+until a deployment turns it on. `scripts/code-runners-smoke.mjs` drives the
+backend directly, and `scripts/code-runners-http-smoke.mjs` drives the whole
+thing over the bridge's real HTTP surface — twice, once as a tenant and once as
+the deployment's own instance, which must serve none of it.
 
 The environment list is the guarantee stated where the choice is made: a
 tenant's list is its self-hosted pools and **nothing else**, so the Code UI has
@@ -244,29 +253,39 @@ Extracted while building the substrate, so it does not have to be re-read:
   `/v1/code/sessions/{id}/…` legs above. All are answered by
   `bridge/code-runners.mjs` except the session's own traffic, which is the next
   increment.
-- **Session create is `POST /v1/code/sessions`** with headers
-  `anthropic-version: 2023-06-01`, `anthropic-beta: ccr-byoc-2025-07-29`,
-  `anthropic-client-feature: ccr` and `x-organization-uuid` — the `ccr-byoc`
-  beta is the self-hosted path's own marker. Its body and response are built by
-  minified helpers reached through **cross-chunk alias exports**
-  (`import {a as tO} from "./ca34974e7-…js"`), and the name inside the defining
-  chunk collides with unrelated locals there too — following it statically lands
-  on a query-key builder, not the transform. So this needs a **runtime trace**
-  (break on the `fetch` in the renderer, or log the request body) rather than
-  more grepping.
+- **Session create, settled from the Desktop main process's own bundle**
+  (`[TeleportToCloud] createCloudSession`, readable there where the renderer's
+  is not):
+
+  ```
+  POST /v1/code/sessions          (or /v1/sessions when gate 133902057 is off)
+  headers: content-type, anthropic-version 2023-06-01,
+           anthropic-beta ccr-byoc-2025-07-29, anthropic-client-feature ccr,
+           x-organization-uuid <org>
+  body: {
+    title?,                         only when the session has one
+    environment_id: <uuid>,         the environment to run in
+    config: { sources: [...], outcomes?: [...], model?: string }
+  }                                 (that build); the older arm sends
+                                    `session_context` instead of `config`
+  sources/outcomes entries: { type: "git_repository", url, revision }
+                            { type: "git_repository", git_info: { type: "github", repo, branches } }
+  -> { session: { id, title } }     (that build)  |  { id, title }  (older)
+  ```
+- **Session-create is the one leg whose shape is *not* guessed**: it comes from
+  that bundle. The renderer's own (minified) transform is still unresolved, and
+  the helper names collide across chunks, so a renderer-side change there needs
+  a runtime trace rather than a grep.
 - **Session-scoped legs already seen** (all `POST /v1/code/sessions/{id}/…`):
   `events` (the renderer posting its own client events), `archive`, `share`,
-  `support-share`, `debug-export`, `move-to-cloud`; `GET …/terminal` (or
+  `support-share`, `debug-export`, `move-to-cloud`, `files` (with a device
+  attestation header) and `worker/register` (`Authorization: Bearer
+  <session token>` → `{worker_epoch, …}`); `GET …/terminal` (or
   `/v2/ccr-sessions/{id}/terminal` under the `ccr_v2_terminal_ws_web` gate).
-- **Still unknown:** that create body/response, and the transcript and event
-  legs the *Desktop's* renderer expects. The mobile facade's translation targets
+- **Still unknown:** the renderer's own create transform (see above), and the
+  transcript and event legs it reads. The mobile facade's translation targets
   the phone's DTOs, not this client, so it is a starting point rather than a
   drop-in.
-- **Session dispatch is the seam still bare.** `queueSession` in
-  `bridge/code-runners.mjs` hands a session to a pool's runners, but nothing
-  calls it yet: the Code session path (the create/list/transcript legs above)
-  does. Until it does, a runner registered against a tenant polls and is offered
-  no work.
 
 ## Open — the rest of the spike
 

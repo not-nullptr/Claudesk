@@ -3118,6 +3118,24 @@ async function handleCodeRunnerApi(request, response, url) {
     return sendJson(response, 200, await codeRunners.environmentList());
   }
 
+  // Placing a session. A tenant has no local executor, so the only environment
+  // this answers for is one of its own pools; anything else is refused rather
+  // than quietly run here. Only these two shapes are claimed — the session's
+  // other legs fall through to the app untouched.
+  if (pathname === "/v1/code/sessions" && method === "POST") {
+    const created = await codeRunners.createSession({ body });
+    if (created?.unsupported) {
+      throw new ApiError(400, "only a self-hosted environment of this instance can run a session");
+    }
+    return sendJson(response, 201, created);
+  }
+  const sessionDetail = pathname.match(/^\/v1\/code\/sessions\/([^/]+)$/);
+  if (sessionDetail && method === "GET") {
+    const document = await codeRunners.session(decodeURIComponent(sessionDetail[1]));
+    if (!document) throw new ApiError(404, "session not found");
+    return sendJson(response, 200, document);
+  }
+
   // The runner's session-scoped calls: exchange an assignment for the session
   // token, then report on the run. Every one is authenticated by that token (or
   // by the pool secret of the pool the session belongs to).
@@ -4211,7 +4229,8 @@ const server = http.createServer(async (request, response) => {
     else if (
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
-        || url.pathname.startsWith("/v1/environment_providers/"))
+        || url.pathname.startsWith("/v1/environment_providers/")
+        || /^\/v1\/code\/sessions(\/[^/]+)?$/.test(url.pathname))
     ) {
       await handleCodeRunnerApi(request, response, url);
     }
