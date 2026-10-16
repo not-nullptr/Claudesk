@@ -167,6 +167,16 @@ try {
   assert.equal(placedSession.status, "pending");
   assert.equal(placedSession.environment_id, poolId);
 
+  // The list the surface reads on every open — it was 404ing, four times a load.
+  const listed = await tenantRequest("/v1/code/sessions");
+  assert.equal(listed.status, 200, listed.body);
+  const listBody = JSON.parse(listed.body);
+  assert.equal(listBody.data.length, 1);
+  assert.equal(listBody.data[0].id, placedSession.id);
+  assert.deepEqual(listBody.data[0].tags, [], "a row carries the tags the reader filters on");
+  assert.equal(listBody.has_more, false);
+  assert.equal(listBody.last_id, placedSession.id, "the pager resumes from last_id");
+
   const detail = await tenantRequest(`/v1/code/sessions/${placedSession.id}`);
   assert.equal(detail.status, 200, detail.body);
   assert.equal(JSON.parse(detail.body).session.title, "from the smoke");

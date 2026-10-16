@@ -523,6 +523,33 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       return (session.events ?? []).filter((event) => Number(event.sequence_num) > sequence);
     },
 
+    /**
+     * GET /v1/code/sessions — the list. The pager reads `has_more` / `last_id`,
+     * and a row is filtered on `tags`, so both are stated rather than implied;
+     * `next_cursor` is the same page's other name for it.
+     */
+    async listSessions() {
+      const state = await load();
+      const rows = state.sessions
+        .slice()
+        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+        .map((session) => ({
+          id: session.session_uuid,
+          session_id: session.session_uuid,
+          title: session.title,
+          status: session.state,
+          environment_id: session.pool_id,
+          created_at: session.created_at,
+          tags: Array.isArray(session.tags) ? session.tags : [],
+        }));
+      return {
+        data: rows,
+        has_more: false,
+        last_id: rows.length ? rows[rows.length - 1].id : null,
+        next_cursor: null,
+      };
+    },
+
     /** GET /v1/code/sessions/{id} */
     async session(sessionUuid) {
       const state = await load();

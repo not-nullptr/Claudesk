@@ -3146,6 +3146,9 @@ async function handleCodeRunnerApi(request, response, url) {
   // this answers for is one of its own pools; anything else is refused rather
   // than quietly run here. Only these two shapes are claimed — the session's
   // other legs fall through to the app untouched.
+  if (pathname === "/v1/code/sessions" && method === "GET") {
+    return sendJson(response, 200, await codeRunners.listSessions());
+  }
   if (pathname === "/v1/code/sessions" && method === "POST") {
     const created = await codeRunners.createSession({ body });
     if (created?.unsupported) {
