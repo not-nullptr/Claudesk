@@ -90,5 +90,11 @@ const provision = await readFile(
   new URL("./provision-user.sh", import.meta.url), "utf8");
 assert.ok(provision.includes("CLAUDESK_TENANT=1"),
   "provision-user.sh must mark an account's instance as a tenant");
+// An account is ready for a self-hosted runner by default. That is only safe
+// because the bridge offers a pool as a place once a runner has registered with
+// it, so an account with no runner yet is offered no environment rather than a
+// dead one (scripts/code-runners-smoke.mjs pins that).
+assert.ok(provision.includes('CLAUDESK_CODE_RUNNERS="${CLAUDESK_ACCOUNT_CODE_RUNNERS:-1}"'),
+  "an account must answer the self-hosted pool API by default");
 
 process.stdout.write("tenant-code-guard-smoke: a tenant never offers the local Code executor\n");

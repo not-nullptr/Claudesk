@@ -120,9 +120,13 @@ chown -R "$puid:$pgid" "$user_root/config" 2>/dev/null || true
 #   - no Code in this container (Eva semantics, set here rather than inherited
 #     from the shared .env): `CLAUDESK_TENANT=1` marks one account's own
 #     instance, which never exposes the container-local Code executor — its Code
-#     belongs on a self-hosted runner inside its Cowork guest
-#     (docs/code-in-cowork-vm.md). Both are overridable for a deployment that
-#     wants something else.
+#     belongs on a self-hosted runner inside its Cowork guest.
+#   - `CLAUDESK_CODE_RUNNERS=1` answers the self-hosted pool API that runner
+#     speaks, so an account is ready the moment one registers. It is on by
+#     default and harmless before then: the bridge advertises a pool as a place
+#     only once a runner has registered with it, so an account with no runner yet
+#     is offered no environment rather than a dead one. Force either with
+#     CLAUDESK_ACCOUNT_CODE_RUNNERS. See docs/code-in-cowork-vm.md.
 
 # The gateway a provisioned account talks to, and how it authenticates. The
 # endpoint must be reachable from inside the Cowork VM, which makes the model
@@ -209,6 +213,7 @@ CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 CLAUDESK_TENANT=1 \
+CLAUDESK_CODE_RUNNERS="${CLAUDESK_ACCOUNT_CODE_RUNNERS:-1}" \
 CLAUDE_REMOTE_LOGIN_SHELL=0 \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \

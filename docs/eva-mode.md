@@ -210,10 +210,15 @@ marks it `CLAUDESK_TENANT=1`. A tenant never runs Code in its own container —
 that container is privileged enough that an agent shell there is close to host
 root — so the bridge withholds the container-local Code surface whatever
 `CLAUDE_REMOTE_CODE_ACTIONS` says, and the container init writes the app's Code
-flag off to match. The account's Code belongs on a **self-hosted runner** inside
-its Cowork guest (`CLAUDESK_CODE_RUNNERS`, [Code in the Cowork
-VM](code-in-cowork-vm.md)). `CLAUDESK_ACCOUNT_CODE_ACTIONS` no longer lifts any
-of that.
+flag off to match. `CLAUDESK_ACCOUNT_CODE_ACTIONS` no longer lifts any of that.
+
+The account's Code belongs on a **self-hosted runner** inside its Cowork guest,
+and accounts answer that runner's pool API by default
+(`CLAUDESK_CODE_RUNNERS=1`, forced either way with
+`CLAUDESK_ACCOUNT_CODE_RUNNERS`). That is safe before a runner exists: the bridge
+offers a pool as a place only once a runner has registered with it, so an
+account with no runner is offered no environment rather than a dead one. See
+[Code in the Cowork VM](code-in-cowork-vm.md).
 
 Until an account's instance exists, `/api/auth/verify` answers `503 Setting up
 your workspace`; that page refreshes itself, and reaching it nudges the
