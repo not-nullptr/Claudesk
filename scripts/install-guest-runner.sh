@@ -179,14 +179,24 @@ else
     printf 'install-guest-runner: set CLAUDESK_GUEST_CLAUDE_SOURCE=container:/path to stage one\n' >&2
 fi
 
-# What the agent is invoked with. The claude these guests carry accepts exactly
-# `claude -p "<prompt>"` — anything else is refused by the binary's own argv
-# validator ("only claude -p \"<prompt>\" is supported in this environment") —
-# so the one flag it names is the default and the prompt follows it. The
-# Desktop's own behaviour is untouched; this only shapes how the runner asks.
-agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:--p}"
+# What the agent is invoked with — flag for flag what the product's own runner
+# passes its child (read from the shipped binary's spawn: `--print`, stream-json
+# both ways, `--verbose`, partial messages), minus `--sdk-url`, whose compiled
+# host allowlist only admits Anthropic's own endpoints. The prompt never rides
+# argv: the runner writes it to the agent's stdin as a stream-json message, so
+# the agent is never started "without a prompt". The Desktop's own behaviour is
+# untouched; this only shapes how the runner asks.
+agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:---print --input-format stream-json --output-format stream-json --verbose --include-partial-messages}"
+# The agent's model calls ride the bridge (below); its own nonessential traffic
+# (update checks, telemetry) would ride the guest's narrow egress allowlist,
+# where a blocked call hangs rather than fails, and none of it is needed to
+# answer.
 model_env="ANTHROPIC_BASE_URL=\"$runner_base\"
-ANTHROPIC_AUTH_TOKEN=\"$secret\""
+ANTHROPIC_AUTH_TOKEN=\"$secret\"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+DISABLE_AUTOUPDATER=1
+DISABLE_TELEMETRY=1
+DISABLE_ERROR_REPORTING=1"
 
 # A stamp over everything that lands in the image, so a re-run with an unchanged
 # payload and the same pool is a no-op while an edited runner, a new agent or a
@@ -333,6 +343,9 @@ fi
 
 install -d "$mount_dir/opt/claudesk" "$mount_dir/etc/claudesk" \
     "$mount_dir/etc/systemd/system/multi-user.target.wants"
+# The agent's HOME: the unit runs with ProtectHome=read-only, so the guest's
+# /root cannot hold the transcripts `--resume` replays; this can.
+install -d -m 0700 "$mount_dir/var/lib/claudesk-runner/home"
 install -m 0755 "$project_dir/guest/runner.py" "$mount_dir/opt/claudesk/runner.py"
 
 if [ -n "$agent_source" ]; then

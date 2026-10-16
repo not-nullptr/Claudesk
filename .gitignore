@@ -20,3 +20,11 @@ compose.override.yml
 
 # Instrumented app builds (tools/frida/) — large binaries, never committed.
 *.ipa
+
+# Python bytecode (the runner is shipped as source; nothing compiled is tracked).
+__pycache__/
+*.pyc
+
+# The bridge reads release.json beside itself; deployments provide it and the
+# smokes fabricate it from config/ on a bare checkout — never committed.
+bridge/release.json

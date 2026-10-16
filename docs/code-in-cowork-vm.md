@@ -466,12 +466,27 @@ What is left is the **deployment** half, and it needs the box:
    container when one is there, else fetched once from the pinned npm artifact
    into the account's data root), carries the account's model endpoint and key
    into the guest's root-only `runner.env` (loopback rewritten to `10.0.2.2`),
-   and the runner invokes `claude -p "<prompt>"`. The agent answers through the
-   **bridge** — its model calls ride `/v1/messages`, forwarded by the bridge to
-   the account's gateway with the account's credentials — because the guest's
-   egress allowlist makes dialing the gateway directly from inside the VM
-   unreliable (a blocked call hangs rather than failing). Remaining: a real
-   end-to-end run through that chain, and whether the host can write the
+   and the runner asks the agent the way the product's own runner asks its
+   child — read from the shipped binary: `--print`, `--input-format
+   stream-json` / `--output-format stream-json`, `--verbose`,
+   `--include-partial-messages`, the session's model and permission mode, and
+   `--resume` for later turns — minus `--sdk-url`, which the compiled binary
+   reserves for Anthropic's own hosts. The prompt is a stream-json user message
+   on the agent's stdin, never an argument (so the agent is never started
+   "without a prompt"); every assistant message, tool result and partial update
+   lands in the transcript as its own event the moment the agent emits it (text
+   streams, and tool calls render as the tool rows they are); stderr stays out
+   of the transcript; and the conversation id the agent stamps on its own
+   events is what a follow-up message resumes, so a session keeps its memory
+   across turns even though each turn is a fresh process — and a message that
+   lands after a turn released the session re-queues it on its pool, the same
+   as the first placement, so the conversation continues rather than ending
+   with the turn. The agent answers
+   through the **bridge** — its model calls ride `/v1/messages`, forwarded by
+   the bridge to the account's gateway with the account's credentials — because
+   the guest's egress allowlist makes dialing the gateway directly from inside
+   the VM unreliable (a blocked call hangs rather than failing). Remaining: a
+   real end-to-end run through that chain, and whether the host can write the
    `claudeshared` share — if it can, the payload should move out of the image
    and only the unit need re-deriving per release.
 2. **Check the main process's richer expectations.** It tracks client and

@@ -287,6 +287,23 @@ function appendToSession(session, incoming) {
   return appended;
 }
 
+/**
+ * Is this entry a message the human typed? (A client user event, as the
+ * renderer posts it — string content or text blocks; a tool result is also a
+ * `user` payload on the wire and is deliberately not one of these.)
+ */
+function isUserMessage(entry) {
+  const payload = isRecord(entry?.payload) ? entry.payload : entry;
+  if (!isRecord(payload) || payload.type !== "user") return false;
+  const content = (payload.message ?? {}).content;
+  if (typeof content === "string") return content.trim() !== "";
+  if (Array.isArray(content)) {
+    return content.some((part) => isRecord(part) && part.type === "text"
+      && typeof part.text === "string" && part.text.trim() !== "");
+  }
+  return false;
+}
+
 export function createRunnerBackend({ stateDir, log = console, poolName = null } = {}) {
   const statePath = join(stateDir, stateFileName);
   let cache = null;
@@ -942,6 +959,20 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
       const appended = appendToSession(session, incoming);
+      // A user message on a session no runner holds starts its next turn: the
+      // session goes back on its pool, the way it was placed the first time,
+      // and the runner that claims it replays the conversation (the agent's
+      // own `--resume`). Only the client leg requeues — the runner's writes
+      // come through the worker leg, where a `user` payload is a tool result,
+      // not a new turn.
+      if (appended.length && (session.state === "released" || session.state === "failed")
+          && incoming.some(isUserMessage)) {
+        session.state = "pending";
+        session.attempt += 1;
+        session.assigned_runner_id = undefined;
+        session.failure = undefined;
+        log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
+      }
       if (appended.length) await save();
       return { data: appended };
     },

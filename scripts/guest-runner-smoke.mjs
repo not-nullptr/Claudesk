@@ -24,11 +24,18 @@ writeFileSync(stateDir, "", { flag: "w+" });
 rmSync(stateDir);
 // The agent lives where the guest keeps its own: a `claude-bin` directory with
 // the runnable inside it — the runner is pointed at the directory and must
-// resolve the binary (the product's path is exactly this shape).
+// resolve the binary (the product's path is exactly this shape). The stub
+// answers the way the agent does: the prompt is read from the stream-json
+// message on stdin, and the turn comes back as stream-json lines on stdout.
 const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
-writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s' \"$*\"\n");
+writeFileSync(stub, `#!/bin/sh
+prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+printf '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}\\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent saw: %s | prompt: %s"}]},"session_id":"11111111-1111-4111-8111-111111111111"}\\n' "$*" "$prompt"
+printf '{"type":"result","subtype":"success","session_id":"11111111-1111-4111-8111-111111111111","is_error":false,"result":"done"}\\n'
+`);
 chmodSync(stub, 0o755);
 let child;
 
@@ -46,6 +53,7 @@ function runRunner({ secret, once = true }) {
       CLAUDESK_RUNNER_SECRET: secret,
       CLAUDESK_RUNNER_CLAUDE_BIN: stub_dir,
       CLAUDESK_RUNNER_CHECKOUT: work,
+      CLAUDESK_RUNNER_HOME: join(work, "home"),
     },
   });
 }
@@ -115,11 +123,36 @@ try {
   const decoded = decodeClientEventsResponse(history);
   assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
   assert.equal(decoded[1].message.message.content[0].text,
-    "agent saw: -p --model claude-opus-5-5 summarise the repo",
-    "the agent ran on the prompt the session carried");
+    "agent saw: --print --input-format stream-json --output-format stream-json"
+    + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + " | prompt: summarise the repo",
+    "the agent ran with the product runner's own flags on the session's prompt");
   const releasedDoc = JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session;
   assert.equal(releasedDoc.status, "active", "a session the app reads stays active");
   assert.equal(releasedDoc.worker_status, "idle", "a clean run leaves it idle");
+
+  // The next message re-queues the session and the runner continues the
+  // conversation: the agent's own session id (stamped on its events) comes
+  // back on `--resume`, so the turn after a release keeps the memory.
+  await request(`/v1/code/sessions/${sessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "and tighten the summary" } } }] }),
+  });
+  const ran2 = runRunner({ secret });
+  assert.equal(ran2.status, 0, ran2.stderr);
+  const history2 = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
+  const decoded2 = decodeClientEventsResponse(history2);
+  assert.deepEqual(decoded2.map((entry) => entry.message.type),
+    ["user", "assistant", "user", "assistant"],
+    "the second turn lands after the first one released");
+  assert.equal(decoded2[3].message.message.content[0].text,
+    "agent saw: --print --input-format stream-json --output-format stream-json"
+    + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + " --resume 11111111-1111-4111-8111-111111111111"
+    + " | prompt: and tighten the summary",
+    "the runner resumed the conversation the agent's own events named");
 
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {
