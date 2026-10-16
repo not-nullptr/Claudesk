@@ -160,6 +160,20 @@ function sessionConfigOf(session) {
 }
 
 /**
+ * Find a session by id under whatever spelling of it arrived. The renderer
+ * carries two generations of the id around its own display form (`cse_…` on
+ * the wire of its newer legs, `session_…` in its reader), so a lookup strips
+ * whichever prefix came in — the same session answers under every spelling.
+ */
+function sessionById(state, sessionId) {
+  const raw = typeof sessionId === "string" ? sessionId : "";
+  const bare = raw.replace(/^(?:cse_|session_)/, "");
+  return state.sessions.find(
+    (entry) => entry.session_uuid === raw || entry.session_uuid === bare,
+  );
+}
+
+/**
  * Append entries to a session's log, assigning `event_id` and `sequence_num`
  * here: the wire contract requires a non-empty `event_id` and a `sequence_num`
  * that is a **positive digit string** — the renderer's own reader rejects zero
@@ -261,7 +275,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
   // else is refused — the runner's own retry loop backs off on that, which is
   // the correct outcome for a secret that names nothing here.
   function sessionFor(state, headers, sessionId) {
-    const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+    const session = sessionById(state, sessionId);
     if (!session) return null;
     const token = bearerToken(headers);
     if (!token) return { unauthorized: true };
@@ -279,7 +293,10 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       session_uuid: session.session_uuid,
       attempt: session.attempt,
       work_order_jwt: session.work_order_jwt,
-      sources: session.sources,
+      // Sources live in the session's `config` now (the create body's shape);
+      // sessions the store held before that keep them top-level, and both are
+      // read (see sessionConfigOf).
+      sources: sessionConfigOf(session).sources,
     };
   }
 
@@ -565,7 +582,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      */
     async appendEvents({ sessionId, body } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
@@ -581,7 +598,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      */
     async listEvents({ sessionId, searchParams } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       const after = Number(searchParams?.get?.("after_sequence_num") ?? 0) || 0;
       const limit = Number(searchParams?.get?.("limit") ?? 0) || 0;
@@ -598,7 +615,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /** The events after a sequence, for the SSE replay and its tail. */
     async eventsAfter(sessionId, sequence) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       return (session.events ?? []).filter((event) => Number(event.sequence_num) > sequence);
     },
@@ -633,7 +650,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /** GET /v1/code/sessions/{id} */
     async session(sessionUuid) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionUuid);
+      const session = sessionById(state, sessionUuid);
       if (!session) return null;
       return { session: sessionDocument(session) };
     },
@@ -647,7 +664,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      */
     async updateSession({ sessionId, body } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       if (typeof body?.title === "string") session.title = body.title;
       if (Array.isArray(body?.add_tags) || Array.isArray(body?.remove_tags)) {
@@ -678,7 +695,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      */
     async archiveSession({ sessionId } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       session.archived = true;
       await save();
@@ -688,7 +705,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /** POST /v1/code/sessions/{id}/mark_read — the reader names the event it read to. */
     async markSessionRead({ sessionId } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       session.unread = false;
       await save();
@@ -698,7 +715,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /** PUT /v1/code/sessions/{id}/mcp-servers — the session's MCP editor saves here. */
     async setSessionMcpServers({ sessionId, body } = {}) {
       const state = await load();
-      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      const session = sessionById(state, sessionId);
       if (!session) return null;
       const servers = Array.isArray(body?.mcp_servers) ? body.mcp_servers : [];
       session.session_config = {
@@ -712,9 +729,9 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     /** DELETE /v1/code/sessions/{id} — the caller ignores the answer's body. */
     async deleteSession({ sessionId } = {}) {
       const state = await load();
-      const index = state.sessions.findIndex((entry) => entry.session_uuid === sessionId);
-      if (index === -1) return null;
-      state.sessions.splice(index, 1);
+      const session = sessionById(state, sessionId);
+      if (!session) return null;
+      state.sessions.splice(state.sessions.indexOf(session), 1);
       await save();
       return {};
     },

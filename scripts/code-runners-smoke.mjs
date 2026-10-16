@@ -201,6 +201,13 @@ try {
   const offered = await backend.pollSpawnHints({ headers: auth });
   assert.ok(offered.hints.some((hint) => hint.session_uuid === placed.session.id),
     "a placed session is offered to the pool's runners");
+  assert.equal(
+    offered.hints.find((hint) => hint.session_uuid === placed.session.id).sources.length,
+    1,
+    "the runner's hint carries the create body's sources — they live in `config` now",
+  );
+  assert.equal((await backend.session(`cse_${placed.session.id}`)).session.id, placed.session.id,
+    "a session answers under the wire generation's `cse_` spelling of its id too");
 
   // A session's events: the runner writes the transcript, the renderer reads it,
   // and the envelopes are the app's own contract — checked with the in-tree

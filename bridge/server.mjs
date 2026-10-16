@@ -3204,6 +3204,13 @@ async function handleCodeRunnerApi(request, response, url) {
     if (result === null) throw new ApiError(404, "not found");
     return sendJson(response, ok, result);
   };
+  // A session leg for an id the store does not know is worth saying out loud:
+  // the renderer turns such a 404 into its "This session couldn't be found"
+  // page, and the request carried whatever spelling of the id the client had.
+  const missingSession = () => {
+    console.warn(`[code-runners] no such session: ${method} ${pathname}`);
+    throw new ApiError(404, "session not found");
+  };
 
   // The environment list the Code surface reads. A tenant's list is its pools
   // and nothing else — the local (this-computer) place is deliberately never
@@ -3280,12 +3287,12 @@ async function handleCodeRunnerApi(request, response, url) {
     }
     if (method === "GET") {
       const document = await codeRunners.listEvents({ sessionId, searchParams: url.searchParams });
-      if (!document) throw new ApiError(404, "session not found");
+      if (!document) missingSession();
       return sendJson(response, 200, document);
     }
     if (method === "POST") {
       const appended = await codeRunners.appendEvents({ sessionId, body });
-      if (!appended) throw new ApiError(404, "session not found");
+      if (!appended) missingSession();
       return sendJson(response, 200, appended);
     }
     throw new ApiError(405, "method not allowed");
@@ -3315,7 +3322,7 @@ async function handleCodeRunnerApi(request, response, url) {
     const sessionId = decodeURIComponent(sessionDetail[1]);
     if (method === "GET") {
       const document = await codeRunners.session(sessionId);
-      if (!document) throw new ApiError(404, "session not found");
+      if (!document) missingSession();
       return sendJson(response, 200, document);
     }
     if (method === "PUT") {
