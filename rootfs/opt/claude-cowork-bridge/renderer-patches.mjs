@@ -1945,7 +1945,15 @@ const prefilter = new RegExp(
 // handed a different candidate set than the preparer itself would choose.
 export const rendererPrefilter = prefilter;
 
-export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false) {
+// `tenantEnabled` marks one account's own instance (CLAUDESK_TENANT). Its Code
+// never runs in its container — it belongs on a self-hosted runner in the
+// Cowork guest — so it must resolve `/code` to the *self-hosted* surface rather
+// than the local one. That is exactly the `desktop-code-route-alias` patch
+// withheld: without it the browser client takes ion-dist's own cloud branch,
+// which is the surface this deployment backs with a runner pool. Everything
+// else the web shell adds is unchanged. See docs/code-in-cowork-vm.md.
+export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
+  tenantEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
@@ -2209,7 +2217,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false)
           original, replacement: `(${original}||${accountPhoto.account}?.avatar_image_url)` });
       }
       const routeFlag = desktopRouteFlagName(node);
-      if (routeFlag) {
+      if (routeFlag && !tenantEnabled) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
           original: "", replacement: `${routeFlag}=!0;` });
       }
@@ -2369,10 +2377,11 @@ export function patchEmbeddedSources(sources) {
 // are only combined afterwards. What the prefilter lets through (see
 // prefilterNeedles) is ~25 MB of the official chunks — a minute of acorn on one
 // core, a few seconds spread over the box's cores.
-export function inspectAll(sources, gatewayEnabled, webShellEnabled = false) {
+export function inspectAll(sources, gatewayEnabled, webShellEnabled = false,
+  tenantEnabled = false) {
   const analyses = new Map();
   for (const [path, source] of sources) {
-    analyses.set(path, inspectRenderer(source, gatewayEnabled, webShellEnabled));
+    analyses.set(path, inspectRenderer(source, gatewayEnabled, webShellEnabled, tenantEnabled));
   }
   return analyses;
 }
@@ -2381,7 +2390,8 @@ export function inspectAll(sources, gatewayEnabled, webShellEnabled = false) {
 // it) produced, hold it to the required-patch and marker invariants, and splice.
 // `analyses` is a Map of path -> { patches, evidence }, keyed the same way as
 // `sources`.
-export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnabled = false) {
+export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnabled = false,
+  tenantEnabled = false) {
   const matches = new Map();
   const markers = new Map(markerIds.map(id => [id, []]));
   for (const [path, result] of analyses) {
@@ -2393,10 +2403,14 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
+  // A tenant deliberately does not get the route alias (see the note on
+  // `inspectRenderer`), so it must not be a required patch there either — the
+  // withheld patch is the point, not a bundle that stopped matching.
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
     ...(webShellEnabled
-      ? [routeAliasPatchId, sessionViewerPatchId, localSessionPlacementPatchId,
+      ? [...(tenantEnabled ? [] : [routeAliasPatchId]),
+          sessionViewerPatchId, localSessionPlacementPatchId,
           accountChipPatchId, accountPhotoPatchId,
           coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId,
           scheduledTaskRunnerPatchId, scheduledTaskHostsPatchId, toastGlobalPatchId]
@@ -2425,7 +2439,11 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
     markers: [...markers].map(([id, found]) => ({ id, matches: found })) };
 }
 
-export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false) {
-  return assembleRenderer(sources, inspectAll(sources, gatewayEnabled, webShellEnabled),
-    gatewayEnabled, webShellEnabled);
+export function patchRendererSources(sources, gatewayEnabled, webShellEnabled = false,
+  tenantEnabled = false) {
+  return assembleRenderer(
+    sources,
+    inspectAll(sources, gatewayEnabled, webShellEnabled, tenantEnabled),
+    gatewayEnabled, webShellEnabled, tenantEnabled,
+  );
 }

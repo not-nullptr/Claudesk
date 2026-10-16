@@ -42,10 +42,11 @@ seed_dir="${CLAUDESK_RENDERER_SEED_DIR:-/opt/claudesk/data/renderer-seed}"
 # shellcheck source=scripts/lib/account-scope.sh
 . "$project_dir/scripts/lib/account-scope.sh"
 
-# The flag combinations that exist: the deployment's own instance and any Admin
-# account carry the deployment's values, every other account is scoped down.
-# Both matter because the gateway flag is spliced into the renderer, so the two
-# produce different generations.
+# The flag combinations that exist: the deployment's own instance (tenant=0)
+# carries the deployment's values, a provisioned account is a tenant (tenant=1)
+# and is scoped by role. All three matter — the gateway flag is spliced into the
+# renderer and the tenant flag withholds the local Code route alias, so each
+# combination is its own generation.
 webshell="${CLAUDE_REMOTE_WEB_SHELL:-0}"
 gateway_deployment="${CLAUDE_REMOTE_GATEWAY_SETTINGS:-0}"
 account_scope User
@@ -57,12 +58,16 @@ gateway_admin="$ACCOUNT_GATEWAY_SETTINGS"
 sudo mkdir -p "$seed_dir"
 
 built=""
-for spec in "$gateway_deployment:$webshell" "$gateway_admin:$webshell" "$gateway_user:$webshell"; do
+for spec in "$gateway_deployment:$webshell:0" "$gateway_admin:$webshell:1" \
+    "$gateway_user:$webshell:1"; do
     case " $built " in *" $spec "*) continue ;; esac
     built="$built $spec"
     gateway="${spec%%:*}"
-    shell_flag="${spec##*:}"
-    printf 'seed-renderer: preparing for gateway=%s web-shell=%s\n' "$gateway" "$shell_flag" >&2
+    rest="${spec#*:}"
+    shell_flag="${rest%%:*}"
+    tenant_flag="${rest##*:}"
+    printf 'seed-renderer: preparing for gateway=%s web-shell=%s tenant=%s\n' \
+        "$gateway" "$shell_flag" "$tenant_flag" >&2
     # `--entrypoint node` skips the image's /init: the container init scripts
     # patch the app and write configuration, which needs a whole desktop's worth
     # of environment and has nothing to do with preparing a renderer. This runs
@@ -72,6 +77,7 @@ for spec in "$gateway_deployment:$webshell" "$gateway_admin:$webshell" "$gateway
         -e CLAUDE_DESKTOP_VERSION="$version" \
         -e CLAUDE_REMOTE_GATEWAY_SETTINGS="$gateway" \
         -e CLAUDE_REMOTE_WEB_SHELL="$shell_flag" \
+        -e CLAUDESK_TENANT="$tenant_flag" \
         -e CLAUDESK_RENDERER_SEED_PUBLISH=/seed \
         -e CLAUDESK_RENDERER_JOBS="${CLAUDESK_RENDERER_JOBS:-8}" \
         -v "$seed_dir:/seed" \

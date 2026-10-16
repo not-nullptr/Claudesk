@@ -312,6 +312,17 @@ for (const [i, variant] of variants.entries()) {
   const webResult = patchRendererSources(inputs, true, true);
   assert.equal(webResult.patches.length, 18,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  // A tenant resolves `/code` to the self-hosted surface, so the route alias
+  // that forces the local one is withheld — and withheld deliberately, which is
+  // why it must not be a required patch there either (the bundle still matches;
+  // the splice is simply not made).
+  const tenantResult = patchRendererSources(inputs, true, true, true);
+  assert.equal(tenantResult.patches.length, 17,
+    "a tenant's web shell drops exactly the Code route alias");
+  assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 0,
+    "a tenant must not have the local Code route alias spliced in");
+  assert.equal(tenantResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
+    "the rest of the web shell is unchanged for a tenant");
   assert.equal(webResult.patches.filter(p => p.id === "toast-global").length, 1,
     "the toast manager must be published exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)

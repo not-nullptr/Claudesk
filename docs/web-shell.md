@@ -417,6 +417,14 @@ renderer; on a desktop-identified client the flag is already true, so the splice
 is a no-op. The flag must be set on the `claude-desktop` service as well as the
 bridge, because the renderer preparer (cont-init) reads it.
 
+**A tenant withholds this patch.** An account's instance is marked
+`CLAUDESK_TENANT=1` and never runs Code in its own container, so its `/code` must
+resolve to the *self-hosted* surface — which is the cloud branch the alias
+replaces — rather than the local one. That makes the tenant flag a third input to
+the renderer generation alongside gateway and web shell, and it is why the alias
+is not a *required* patch there: the withheld splice is the intent, not a bundle
+that stopped matching. See [Code in the Cowork VM](code-in-cowork-vm.md).
+
 The Code *pill* is a second, independent gate. On a non-desktop client, clicking
 it raises the "download the desktop app" upsell instead of navigating, unless
 `hasClaudeCodeWebAccess` holds — which is `bad_moon_rising` (the "Claude Code web

@@ -182,6 +182,17 @@ tenant's list is its self-hosted pools and **nothing else**, so the Code UI has
 no local place to offer. The IPC guard (Phase 1) and the environment list say
 the same thing to the two layers that could independently enable a session.
 
+**Phase 2 — the tenant renderer generation (landed).** `tenantEnabled` is a third
+input to `patchRendererSources` alongside gateway and web shell: when set, the
+`desktop-code-route-alias` patch is withheld (and dropped from the required set,
+because withholding it is the intent) so `/code` resolves to the self-hosted
+surface instead of the local one. It reaches `prepare-renderer.mjs` (the
+generation key includes it, so a tenant and the operator's instance never adopt
+each other's renderer), the inspection worker, and `scripts/seed-renderer.sh`'s
+combinations (the deployment's own instance plus each account role, as a tenant).
+`config/release.json`'s `patchRelease` is bumped per the rule that a patcher
+change ships with it, so a `claude-desktop` rebuild is needed to roll it out.
+
 ## What the next increment needs
 
 Extracted while building the substrate, so it does not have to be re-read:
@@ -212,14 +223,11 @@ Extracted while building the substrate, so it does not have to be re-read:
   legs the *Desktop's* renderer expects. The mobile facade's translation targets
   the phone's DTOs, not this client, so it is a starting point rather than a
   drop-in.
-- **The renderer dimension.** A tenant must resolve `/code` to the self-hosted
-  (cloud) surface rather than the local one, i.e. a renderer generation with
-  `desktop-code-route-alias` **not** applied. That is a third input to
-  `patchRendererSources` alongside gateway/web-shell, it must reach
-  `prepare-renderer.mjs`'s generation key and `scripts/seed-renderer.sh`'s combos,
-  and it ships with a `patchRelease` bump and a `claude-desktop` rebuild. It is
-  deliberately **not** landed yet: it only pays off once the session legs above
-  exist, and until then it would enable a surface that cannot work.
+- **Session dispatch is the seam still bare.** `queueSession` in
+  `bridge/code-runners.mjs` hands a session to a pool's runners, but nothing
+  calls it yet: the Code session path (the create/list/transcript legs above)
+  does. Until it does, a runner registered against a tenant polls and is offered
+  no work.
 
 ## Open — the rest of the spike
 

@@ -29,21 +29,34 @@ try {
   // account chip avatar, account photo fallback, identity seed, permission
   // wiring, notification enable, the scheduled-task runner gate, the
   // scheduled-task hosts, the new-page home-layout assignment and the forced
-  // unified-composer design predicates).
+  // unified-composer design predicates) — plus a **tenant** web shell, which is
+  // the same generation with the Code route alias withheld so `/code` resolves
+  // to the self-hosted surface. See docs/code-in-cowork-vm.md.
   // A selector that drifts against a new official bundle must fail here, not
   // in production.
-  for (const [gateway, webShell] of [["0", "0"], ["1", "0"], ["1", "1"]]) {
-    const state = join(temporary, `renderer-${gateway}${webShell === "1" ? "-web" : ""}`);
+  for (const [gateway, webShell, tenant] of [["0", "0", "0"], ["1", "0", "0"],
+    ["1", "1", "0"], ["1", "1", "1"]]) {
+    const state = join(temporary,
+      `renderer-${gateway}${webShell === "1" ? "-web" : ""}${tenant === "1" ? "-tenant" : ""}`);
     const result = run("rootfs/opt/claude-cowork-bridge/prepare-renderer.mjs",
       [resolve(ionRoot), state, releasePath], {
         CLAUDE_DESKTOP_VERSION: release.desktopVersion,
         CLAUDE_REMOTE_GATEWAY_SETTINGS: gateway,
         CLAUDE_REMOTE_WEB_SHELL: webShell,
+        CLAUDESK_TENANT: tenant,
       });
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
-    assert.equal(manifest.patches.length, webShell === "1" ? 50 : gateway === "1" ? 8 : 6);
+    assert.equal(manifest.patches.length,
+      webShell === "1" ? (tenant === "1" ? 50 : 51) : gateway === "1" ? 8 : 6);
+    // A tenant resolves `/code` to the self-hosted surface, so the route alias
+    // that forces the local one is withheld — deliberately, which is also why it
+    // is not a required patch on a tenant.
+    assert.equal(
+      manifest.patches.some(patch => patch.id === "desktop-code-route-alias"),
+      webShell === "1" && tenant !== "1",
+      "only a non-tenant's web shell keeps the local Code route alias");
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");

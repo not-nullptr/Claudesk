@@ -43,6 +43,11 @@ if (!outputRoot.startsWith(`${stateRoot}${sep}`)) throw new Error("renderer outp
 
 const gatewayEnabled = process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1";
 const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
+// A tenant instance resolves `/code` to the self-hosted surface rather than the
+// local one, so it needs a generation of its own (the route alias withheld).
+// It is a third input to the key below, so a tenant and the operator's own
+// instance never adopt each other's renderer. docs/code-in-cowork-vm.md.
+const tenantEnabled = process.env.CLAUDESK_TENANT === "1";
 
 async function listJavaScriptFiles(directory) {
   const files = [];
@@ -108,7 +113,8 @@ async function patcherKey() {
 // the least-loaded bucket) and the results are merged back into the Map
 // `assembleRenderer` expects. Only the chunks the prefilter accepts are ever
 // handed out, and only ~25 MB of the official 113 MB survives it.
-async function inspectInParallel(paths, sizes, gatewayEnabledFlag, webShellEnabledFlag) {
+async function inspectInParallel(paths, sizes, gatewayEnabledFlag, webShellEnabledFlag,
+  tenantEnabledFlag) {
   // `availableParallelism` is Node 18.14+; the image's distro node may predate
   // it, so fall back rather than fail the whole preparation on the import.
   const cores = typeof availableParallelism === "function" ? availableParallelism() : cpus().length;
@@ -127,7 +133,8 @@ async function inspectInParallel(paths, sizes, gatewayEnabledFlag, webShellEnabl
   const batches = await Promise.all(buckets.filter(bucket => bucket.paths.length).map(bucket =>
     new Promise((resolveBatch, rejectBatch) => {
       const worker = new Worker(workerPath, {
-        workerData: { paths: bucket.paths, gatewayEnabled: gatewayEnabledFlag, webShellEnabled: webShellEnabledFlag },
+        workerData: { paths: bucket.paths, gatewayEnabled: gatewayEnabledFlag,
+          webShellEnabled: webShellEnabledFlag, tenantEnabled: tenantEnabledFlag },
       });
       let settled = false;
       worker.once("message", (analyses) => { settled = true; worker.terminate().then(() => resolveBatch(analyses), () => resolveBatch(analyses)); });
@@ -211,9 +218,9 @@ async function prepareRenderer() {
 
   // What this generation was made from, so an unchanged start can skip the work
   // entirely. The preparation is a pure function of the renderer sources plus the
-  // two flags, the patcher and the release it is stamped with, and it costs tens
+  // flags, the patcher and the release it is stamped with, and it costs tens
   // of seconds for every container that starts — this deployment's own instance
-  // and every account's, all of them byte-identical. Container initialization
+  // and every account's. Container initialization
   // runs it on *every* start, including the "already patched" fast path, so
   // without a key a restart or a redundant recreate pays that cost again for
   // output it already has.
@@ -221,6 +228,7 @@ async function prepareRenderer() {
   for (const value of [installedVersion, release.patchRelease,
     gatewayEnabled ? "gateway" : "no-gateway",
     webShellEnabled ? "web-shell" : "desktop-shell",
+    tenantEnabled ? "tenant" : "owner",
     await patcherKey()]) {
     inputsHash.update(value).update("\0");
   }
@@ -247,8 +255,8 @@ async function prepareRenderer() {
   const sizes = new Map([...sources].map(([path, source]) => [path, source.length]));
   const candidates = [...sources].filter(([, source]) => rendererPrefilter.test(source)).map(([path]) => path);
   const result = assembleRenderer(sources,
-    await inspectInParallel(candidates, sizes, gatewayEnabled, webShellEnabled),
-    gatewayEnabled, webShellEnabled);
+    await inspectInParallel(candidates, sizes, gatewayEnabled, webShellEnabled, tenantEnabled),
+    gatewayEnabled, webShellEnabled, tenantEnabled);
   sources = result.sources;
   const patchRecords = result.patches.map(patch => ({
     id: patch.id,
