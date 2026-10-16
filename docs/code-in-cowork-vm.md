@@ -129,9 +129,12 @@ the **agent runs on the runner**, not in the Desktop container.
 `resources/smol-bin.x64.img` (28 MiB, FAT32, `!SDK_DAEMON`) is not a stub. Its
 strings show a full Linux guest:
 
-- **Claude Code is already there**: `/opt/cowork/claude-bin` and
-  `/opt/cowork/cli-wrapper`, with `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_TMPDIR`,
-  `COWORKD_DEBUG`, and `AskClaude` — plus `getRunner`/`putRunner`.
+- **Claude Code is expected at `/opt/cowork/claude-bin`** (with
+  `/opt/cowork/cli-wrapper`), alongside `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_TMPDIR`,
+  `COWORKD_DEBUG`, `AskClaude` and `getRunner`/`putRunner`. The image itself
+  carries **no** `self-hosted-runner` strings, so that path is *provided from
+  outside the image* — i.e. the guest runs a `claude` the host supplies, most
+  likely the Desktop's own Claude Code (2.1.295), which does carry the runner.
 - **It runs systemd and installs things**: `install.sh`'s "systemd unit",
   `runner_unavailable: systemd did not answer within …`, `srt-settings` (sandbox
   runtime settings), and the EDR-integration payload path.
