@@ -534,6 +534,16 @@ idle session whose transcript says why (the pool's admin list still records
 derived at serialization (`sessionDocument` in `bridge/code-runners.mjs`)
 rather than stored twice.
 
+**The id is part of the shape.** The app classifies a session id by its prefix
+— `session_`/`cse_` is a code session, and a bare uuid (or anything else) reads
+as a *local* one — and every code-session reader answers "not found" for an id
+it does not classify, starting with the meta fetch that renders "This session
+couldn't be found" before the bridge is even asked. Wire ids are therefore
+`cse_<32 hex>` (the app's id shape takes `[A-Za-z0-9_]`, no dashes), its
+display form `session_<suffix>` resolves the same way, and sessions the store
+held before the prefix are migrated at load while still answering their old
+bare uuid — every lookup compares canonical forms (`sessionById`).
+
 Deliberately **not** answered (they 404 and are logged as unhandled Code
 requests): the share/support-share links, `/v1/code/github/*` branch-status
 reads, and the adjacent product areas the surface links to but this deployment

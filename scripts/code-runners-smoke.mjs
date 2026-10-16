@@ -206,8 +206,11 @@ try {
     1,
     "the runner's hint carries the create body's sources — they live in `config` now",
   );
-  assert.equal((await backend.session(`cse_${placed.session.id}`)).session.id, placed.session.id,
-    "a session answers under the wire generation's `cse_` spelling of its id too");
+  assert.match(placed.session.id, /^cse_[0-9a-z]{32}$/,
+    "a session id speaks the wire's generation — a bare uuid reads as a local session to the app");
+  const sessionSuffix = placed.session.id.replace(/^cse_/, "");
+  assert.equal((await backend.session(`session_${sessionSuffix}`)).session.id, placed.session.id,
+    "and answers under the display generation's `session_` spelling too");
 
   // A session's events: the runner writes the transcript, the renderer reads it,
   // and the envelopes are the app's own contract — checked with the in-tree

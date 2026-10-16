@@ -159,18 +159,38 @@ function sessionConfigOf(session) {
   return config;
 }
 
+/** The canonical bare form of a session id: no generation prefix, no dashes. */
+function bareSessionId(id) {
+  return String(id ?? "").replace(/^(?:cse_|session_)/, "").replaceAll("-", "").toLowerCase();
+}
+
+/**
+ * The id a new session gets on the wire. The app classifies an id by its
+ * prefix — `session_`/`cse_` is a code session, anything else (a bare uuid
+ * very much included) reads as a *local* one — and every code-session reader,
+ * the meta fetch first among them, answers "not found" for an id it does not
+ * classify. So session ids carry the wire generation's `cse_` prefix and an
+ * alphabet the app's own id shape accepts (`[A-Za-z0-9_]`, no dashes).
+ */
+function newSessionId() {
+  return `cse_${randomUUID().replaceAll("-", "")}`;
+}
+
 /**
  * Find a session by id under whatever spelling of it arrived. The renderer
  * carries two generations of the id around its own display form (`cse_…` on
- * the wire of its newer legs, `session_…` in its reader), so a lookup strips
- * whichever prefix came in — the same session answers under every spelling.
+ * the wire of its newer legs, `session_…` in its reader), and sessions this
+ * store held before the prefix moved onto its ids answer to their old bare
+ * uuid too — so the lookup compares canonical forms when the exact string
+ * does not match.
  */
 function sessionById(state, sessionId) {
   const raw = typeof sessionId === "string" ? sessionId : "";
-  const bare = raw.replace(/^(?:cse_|session_)/, "");
-  return state.sessions.find(
-    (entry) => entry.session_uuid === raw || entry.session_uuid === bare,
-  );
+  const exact = state.sessions.find((entry) => entry.session_uuid === raw);
+  if (exact) return exact;
+  const bare = bareSessionId(raw);
+  if (!bare) return undefined;
+  return state.sessions.find((entry) => bareSessionId(entry.session_uuid) === bare);
 }
 
 /**
@@ -220,6 +240,22 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     } catch {
       cache = { pools: [], runners: [], sessions: [] };
     }
+    // Sessions the store held before ids spoke the wire's generation get their
+    // prefix here, once — a bare uuid is classified "local" by every reader in
+    // the app, so an un-migrated session reads as not a code session at all
+    // (its meta fetch answers null before it ever asks the bridge, and the page
+    // says "This session couldn't be found"). Lookups keep answering the old
+    // spelling (see sessionById), so a page already open on one heals on its
+    // next request.
+    let migrated = false;
+    for (const session of cache.sessions) {
+      if (typeof session.session_uuid !== "string") continue;
+      const canonical = `cse_${bareSessionId(session.session_uuid)}`;
+      if (session.session_uuid !== canonical) {
+        session.session_uuid = canonical;
+        migrated = true;
+      }
+    }
     // The deployment names this instance's pool, and a pool the operator named
     // is created on first use so a runner can be pointed at it without anyone
     // clicking through the admin UI.
@@ -232,7 +268,9 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
         created_at: new Date().toISOString(),
       });
       await save();
+      migrated = false;
     }
+    if (migrated) await save();
     return cache;
   }
 
@@ -547,7 +585,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       }
       if (!Array.isArray(sessionConfig.sources)) sessionConfig.sources = [];
       const session = {
-        session_uuid: randomUUID(),
+        session_uuid: newSessionId(),
         pool_id: pool.pool_id,
         attempt: 1,
         state: "pending",
