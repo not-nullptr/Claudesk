@@ -308,6 +308,33 @@ Extracted while building the substrate, so it does not have to be re-read:
 - **Still unknown:** the renderer's own create transform (see above), and the
   exact internal-event shapes the main process expects on that stream.
 
+## Where this stands
+
+The bridge side is complete and tested: a tenant's Code can be offered only its
+self-hosted places, a session can be placed on one and handed to that pool's
+runner, and its events can be written and read (including the stream). Phase 3 is
+in — accounts answer the pool API by default and are offered no place until a
+runner registers, which is what makes that default safe.
+
+What is left is the **deployment** half, and it needs the box:
+
+1. **Run the runner in the guest.** The guest already carries a `claude` the host
+   provides at `/opt/cowork/claude-bin`, so the open questions are whether that
+   binary exposes `self-hosted-runner`, whether the guest can reach the bridge
+   through its own egress allowlist, and how the VM's idle-stop sits against a
+   30 s poll loop.
+2. **Check the main process's richer expectations.** It tracks client and
+   internal events separately, with tool-call rows, lanes and hold policies on
+   top of the envelope contract this bridge answers. A live Desktop shows what it
+   does with frames this bridge does not model.
+3. **The renderer's own create transform** is still minified beyond a static
+   trace; a runtime trace settles it if the main process's shape above turns out
+   not to be what the renderer sends.
+
+Per-account **mobile** Code is a separate piece of work, not a gap here: the
+facade is one-per-deployment and accounts run no `claude-mobile` container, so it
+needs a facade per account (its own port, login and proxy entry).
+
 ## Open — the rest of the spike
 
 1. **Runner placement (narrowed).** The guest already carries Claude Code and
