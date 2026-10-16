@@ -3232,6 +3232,11 @@ async function handleCodeRunnerApi(request, response, url) {
       return answer(await codeRunners.poolSessions({ poolId, searchParams: url.searchParams }));
     }
   }
+  // Which legs the Code surface asks for and this bridge does not answer. There
+  // is no way to know from the surface alone — it reports a state ("local
+  // sessions aren't available"), not the request behind it — and the set is not
+  // documented anywhere, so a miss is logged where an operator can read it.
+  console.warn(`[code-runners] unhandled Code request: ${method} ${pathname}`);
   throw new ApiError(404, "not found");
 }
 
