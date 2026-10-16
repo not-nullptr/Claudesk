@@ -199,6 +199,13 @@ tenant's list is its self-hosted pools and **nothing else**, so the Code UI has
 no local place to offer. The IPC guard (Phase 1) and the environment list say
 the same thing to the two layers that could independently enable a session.
 
+It is also *earned*: a pool is advertised only once a runner has registered with
+it. The bridge mints the pool at start-up, before anything can run on it, and
+offering it then would let a session be placed where nothing is polling — pending
+forever, which reads as broken rather than unconfigured. So the surface starts
+empty and gains the place when a runner arrives, and this is what makes turning
+`CLAUDESK_CODE_RUNNERS` on ahead of the runner harmless.
+
 **Phase 2 — the tenant renderer generation (landed).** `tenantEnabled` is a third
 input to `patchRendererSources` alongside gateway and web shell: when set, the
 `desktop-code-route-alias` patch is withheld (and dropped from the required set,

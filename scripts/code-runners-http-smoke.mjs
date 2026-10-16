@@ -98,17 +98,14 @@ try {
   assert.ok(poolId.startsWith("ccpool_"), "a pool id is ccpool_-prefixed");
   assert.equal(poolList.pools[0].secret, undefined, "the pool list never carries the secret");
 
-  // The environments a tenant's Code surface is offered: its pools, and no local
-  // place to put a session on.
-  const environments = await tenantRequest(
-    "/v1/environment_providers/private/organizations/00000000-0000-4000-8000-000000000000/environments");
-  assert.equal(environments.status, 200, environments.body);
-  const environmentList = JSON.parse(environments.body);
-  assert.equal(environmentList.environments.length, 1);
-  assert.equal(environmentList.environments[0].kind, "byoc");
-  assert.equal(environmentList.environments[0].environment_id, poolId);
-  assert.ok(environmentList.environments.every((environment) => environment.kind === "byoc"),
-    "a tenant is never offered a local environment");
+  const environmentsPath =
+    "/v1/environment_providers/private/organizations/00000000-0000-4000-8000-000000000000/environments";
+
+  // Before a runner exists there is no place to offer — a tenant's list is
+  // empty rather than holding a pool nothing polls.
+  const early = JSON.parse((await tenantRequest(environmentsPath)).body);
+  assert.deepEqual(early.environments, [],
+    "an unclaimed pool is not advertised as a place a session can run");
 
   // Registration is authenticated by the pool secret alone.
   const registered = await tenantRequest("/v1/code/runners/self-hosted/runners/register", {
@@ -127,6 +124,15 @@ try {
   });
   assert.equal(accepted.status, 200, accepted.body);
   assert.ok(JSON.parse(accepted.body).runner_id.startsWith("ccrunner_"));
+
+  // With a runner registered the pool becomes a real place — and still the only
+  // kind offered.
+  const environmentList = JSON.parse((await tenantRequest(environmentsPath)).body);
+  assert.equal(environmentList.environments.length, 1);
+  assert.equal(environmentList.environments[0].kind, "byoc");
+  assert.equal(environmentList.environments[0].environment_id, poolId);
+  assert.ok(environmentList.environments.every((environment) => environment.kind === "byoc"),
+    "a tenant is never offered a local environment");
 
   const polled = await tenantRequest("/v1/code/runners/self-hosted/spawn-hints/poll",
     { method: "POST", headers: auth, body: "{}" });

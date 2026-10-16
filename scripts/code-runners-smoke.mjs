@@ -26,6 +26,13 @@ try {
   const auth = { authorization: `Bearer ${primary.secret}` };
   const wrong = { authorization: "Bearer not-the-secret" };
 
+  // Nothing is advertised until a runner exists: a pool the bridge minted at
+  // start-up is not a place anything can run yet, and offering it would let a
+  // session be placed where nothing polls.
+  assert.deepEqual((await backend.environmentList()).environments, [],
+    "a pool with no runner is not offered as a place");
+  assert.equal((await backend.environment(primary.pool_id)).state, "unknown");
+
   // No secret, or the wrong one, is the same answer: no pool.
   assert.equal((await backend.registerRunner({ headers: {}, body: {} })).unauthorized, true,
     "register without a secret is unauthorized");

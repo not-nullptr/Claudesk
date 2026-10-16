@@ -137,9 +137,19 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     return state.pools.find((pool) => pool.pool_id === poolId) ?? null;
   }
 
+  // Advertised places are pools a runner has actually registered with. A pool is
+  // created the moment the bridge starts, before anything can run on it, and
+  // offering it then would let a session be placed somewhere nothing is polling
+  // — it would sit pending forever, which reads as a broken product rather than
+  // an unconfigured one. So the surface starts empty and gains the place when a
+  // runner arrives, and `poolEnvironment` marks a pool without one offline.
   async function environments() {
     const state = await load();
-    return state.pools.map((pool) => poolEnvironment(pool));
+    return state.pools
+      .map((pool) => poolEnvironment(pool, {
+        online: state.runners.some((runner) => runner.pool_id === pool.pool_id),
+      }))
+      .filter((environment) => environment.state === "active");
   }
 
   // Which pool a runner call belongs to, from its secret. A wrong secret and an
@@ -577,7 +587,12 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     async environment(id) {
       const state = await load();
       const pool = poolById(state, id);
-      return pool ? poolEnvironment(pool) : null;
+      if (!pool) return null;
+      // Same rule as the list: a pool with no registered runner is not a place
+      // anything can run, so it reads as offline rather than as a live choice.
+      return poolEnvironment(pool, {
+        online: state.runners.some((runner) => runner.pool_id === pool.pool_id),
+      });
     },
 
     /** The pool a runner is pointed at, for provisioning and diagnostics. */
