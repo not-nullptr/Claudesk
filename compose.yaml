@@ -87,7 +87,18 @@ services:
     shm_size: "2gb"
     mem_limit: "${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
     networks:
-      - gateway_net
+      gateway_net:
+        # A name only this deployment answers to. A compose *service* name is
+        # registered as a network alias by every stack that joins the network,
+        # and gateway_net is shared with the box gateway, with this deployment
+        # and with the eva deployment's own instance and accounts, so a lookup
+        # of `claude-desktop` resolves to all of them — and whatever dials it
+        # reaches whichever instance it connected to, not necessarily its own.
+        # The mobile facade dials this alias (CLAUDE_MOBILE_DESKTOP_HOST below);
+        # the reverse proxy already routes by loopback port. The default keeps a
+        # lone deployment unique with an empty CLAUDESK_NAME_PREFIX.
+        aliases:
+          - "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
     healthcheck:
       test:
         - CMD-SHELL
@@ -142,6 +153,11 @@ services:
       CLAUDE_REMOTE_ACCOUNT_PLAN: "${CLAUDE_REMOTE_ACCOUNT_PLAN:-}"
       CLAUDE_REMOTE_ACCOUNT_AVATAR: "${CLAUDE_REMOTE_ACCOUNT_AVATAR:-}"
       CLAUDE_REMOTE_DEPLOYMENT_NAME: "${CLAUDE_REMOTE_DEPLOYMENT_NAME:-}"
+      # Which deployment this bridge belongs to: it names this stack's network
+      # alias (see claude-desktop above) and is reported on /api/health, where
+      # the mobile facade compares it with its own to catch a Desktop that is
+      # not this deployment's. The containers keep their fixed names.
+      CLAUDESK_NAME_PREFIX: "${CLAUDESK_NAME_PREFIX:-}"
       # Model the title generator is asked to use. Empty falls back to the
       # session's own model; set it to a cheap model the gateway serves.
       CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
@@ -248,7 +264,16 @@ services:
       CLAUDE_MOBILE_API_BASE_BAN_SECONDS: "${CLAUDE_MOBILE_API_BASE_BAN_SECONDS:-600}"
       # Chats, models, uploads and tools all go through Claudesk (the bridge in
       # front of Claude Desktop); this service no longer talks to the gateway.
-      CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-http://claude-desktop:8080}"
+      # The default host is this deployment's own alias for its Desktop, not the
+      # service name `claude-desktop` — that name resolves to every stack on
+      # gateway_net, so the facade would drive whichever Desktop it reached.
+      CLAUDE_MOBILE_DESKTOP_HOST: "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
+      # Dial this URL instead of the host above. Empty means the host.
+      CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-}"
+      # Our own deployment name, compared with the bridge's on every health read:
+      # a definite mismatch means this facade is driving a Desktop that is not
+      # ours, which is reported rather than served. See mobile/server.mjs.
+      CLAUDESK_NAME_PREFIX: "${CLAUDESK_NAME_PREFIX:-}"
       CLAUDE_MOBILE_CAPTURE: "${CLAUDE_MOBILE_CAPTURE:-0}"
       CLAUDE_MOBILE_TOOL_BLOCKS: "${CLAUDE_MOBILE_TOOL_BLOCKS:-1}"
       CLAUDE_MOBILE_THINKING: "${CLAUDE_MOBILE_THINKING:-1}"
@@ -283,7 +308,11 @@ services:
       - /opt/claudesk/data/mobile-data:/data
     mem_limit: "${CLAUDE_MOBILE_API_MEMORY_LIMIT:-256m}"
     networks:
-      - gateway_net
+      gateway_net:
+        # This deployment's own name for the phone's ingress, beside the shared
+        # `claude-mobile` service alias (see the note on claude-desktop above).
+        aliases:
+          - "${CLAUDESK_NAME_PREFIX:-claudesk-}mobile"
     healthcheck:
       test:
         - CMD

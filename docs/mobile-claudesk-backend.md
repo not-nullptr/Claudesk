@@ -12,6 +12,18 @@ iOS app ──REST/SSE + Connect──▶ mobile service ──HTTP (docker netw
                                   uploads, auth                           /api/events (SSE)
 ```
 
+That middle arrow is a *name*, and on a host running more than one deployment the
+obvious one is not this deployment's: compose registers a service's name as a
+network alias on every network it joins, and `gateway_net` is shared with the box
+gateway, with this deployment and with the other deployment's own instance and
+accounts. The facade therefore dials `CLAUDE_MOBILE_DESKTOP_HOST` — this
+deployment's own alias, which compose derives from `CLAUDESK_NAME_PREFIX` — with
+`CLAUDE_MOBILE_DESKTOP_URL` as the override, and on each health read it compares
+the deployment the bridge reports with its own. A definite mismatch fails the
+container's healthcheck instead of serving another deployment's Desktop, which
+would look like an empty phone (or, against a login-shell instance, like an app
+that can only log in).
+
 ## How it maps
 
 | Phone | Desktop |

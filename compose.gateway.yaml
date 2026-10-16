@@ -1,16 +1,21 @@
-# Operator's private gateway chain — NOT part of Claudesk.
-#
-# Merge this on top of compose.yaml to reach an inference gateway:
+# Merge this on top of compose.yaml for a deployment that reaches the box-level
+# inference gateway:
 #
 #   docker compose -f compose.yaml -f compose.gateway.yaml up -d
 #
-# `shitproxy` is a separate project built from its own private repository; it
-# is referenced here by a locally-built image and is deliberately never built
-# or published from this repo. Nothing in this file ships an image name that
-# resolves off this host.
+# The gateway chain itself (`shitproxy` + the caddy `gateway`) is **box-level**:
+# it belongs to whichever stack owns it and is reached over gateway_net. It used
+# to be declared here as well, which is how this file came to fight that stack
+# for the fixed container names `shitproxy` and `gateway` — two stacks cannot own
+# one container name, so a deployment that merged this file could take the box's
+# routing away from every other deployment on the machine (the running containers
+# keep running when the declarations go, but never start them from here).
 #
-# Only Claudesk's own services live in compose.yaml; keep that file standalone
-# deployable.
+# What is left is per-deployment: the host-gateway entry, and the loopback relays
+# that expose the box gateway as 127.0.0.1:4000 inside this deployment's Desktop
+# and mobile network namespaces. The Desktop's applied inference config points at
+# `http://127.0.0.1:4000`, so those relays are load-bearing; they reach the box
+# gateway by name over gateway_net.
 
 services:
   # Reach the host from inside the Desktop/mobile network namespaces.
@@ -18,46 +23,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  # Local caching/routing proxy in front of the upstream provider. Built from
-  # /opt/shitproxy (its own project); infra, not Claudesk. It is referenced by
-  # an image, never a build context, so nothing here builds or publishes it.
-  # Set SHITPROXY_IMAGE (in the repo-root .env, which Compose reads for ${}
-  # interpolation, or in the shell) to whatever this host already tags it as;
-  # the default is just a conventional local name.
-  shitproxy:
-    image: ${SHITPROXY_IMAGE:-local/shitproxy:latest}
-    container_name: shitproxy
-    restart: unless-stopped
-    env_file:
-      - /etc/shitproxy/gateway.env
-    environment:
-      HOST: "0.0.0.0"
-      PORT: "4000"
-    ports:
-      - "127.0.0.1:14000:4000"
-    init: true
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
-  # TLS front door for the proxy, with the gateway routes in its Caddyfile.
-  gateway:
-    image: caddy:2
-    container_name: gateway
-    restart: unless-stopped
-    networks:
-      - default
-      - gateway_net
-    env_file:
-      - /etc/litellm/litellm.env
-    volumes:
-      - /etc/litellm/Caddyfile:/etc/caddy/Caddyfile:ro
-    depends_on:
-      - shitproxy
-
-  # Expose the gateway on 127.0.0.1:4000 inside the Desktop / mobile network
+  # Expose the box gateway on 127.0.0.1:4000 inside the Desktop / mobile network
   # namespace, so each service's CLAUDE_GATEWAY_BASE_URL can be a loopback URL.
   claude-gateway-loopback:
     image: alpine/socat
@@ -66,7 +32,6 @@ services:
     network_mode: "service:claude-desktop"
     depends_on:
       - claude-desktop
-      - gateway
     command:
       - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
       - "TCP:gateway:4000"
@@ -78,7 +43,6 @@ services:
     network_mode: "service:claude-mobile"
     depends_on:
       - claude-mobile
-      - gateway
     command:
       - "TCP-LISTEN:4000,bind=127.0.0.1,reuseaddr,fork"
       - "TCP:gateway:4000"

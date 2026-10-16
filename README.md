@@ -99,17 +99,19 @@ CLAUDE_INFERENCE_MODELS_JSON='[{"name":"claude-sonnet-minimax-m3","labelOverride
 ./scripts/smoke.sh
 ```
 
-`deploy.sh` 用两个 Compose 文件构建并强制重建全部服务：`compose.yaml`（Claudesk 本体）叠加
-`compose.gateway.yaml`（本部署私有的网关链，见该文件头部注释；其中的镜像 `local/shitproxy` 由独立项目
-构建，不在本仓库）。等价的命令是：
+`deploy.sh` 用两个 Compose 文件构建并强制重建本部署的服务：`compose.yaml`（Claudesk 本体）叠加
+`compose.gateway.yaml`（本部署的 host-gateway 条目与 127.0.0.1:4000 loopback 中继）。网关链本身
+（`shitproxy` 与 caddy `gateway`）是**全机级别**的，由拥有它的那个 stack 启动、经 `gateway_net`
+访问：本部署**不要**再声明或启动它，否则会和其它部署抢同一个容器名，把全机的推理路由从别的部署
+手里拿走（见该文件头部注释）。等价的命令是：
 
 ```bash
 sudo docker compose -f compose.yaml -f compose.gateway.yaml up -d --build --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \
-    claude-mobile claude-mobile-gateway-loopback shitproxy
+    claude-mobile claude-mobile-gateway-loopback
 ```
 
-查看状态或停止：
+查看状态或停止（只影响本部署；网关链由它的 stack 管理）：
 
 ```bash
 sudo docker compose -f compose.yaml -f compose.gateway.yaml ps
@@ -327,6 +329,14 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 3. **模型列表为空**：确认 `CLAUDE_INFERENCE_MODELS_JSON` 是合法 JSON，模型 ID 与 Gateway 实际接受的路由一致。
 4. **PWA 无法安装**：HTTP LAN 入口可浏览但不能安装 PWA；改用 Authelia 保护的 HTTPS 主机名。
 5. **配置泄露风险**：不要执行会打印渲染后环境变量的 `docker compose config`，因为其中可能包含 API Key。
+6. **手机端列表为空、无法新建会话/看不到 Code 会话**：同一台机器跑多个部署时，compose 的服务名
+   `claude-desktop` 在共享的 `gateway_net` 上会解析到**所有**部署的 Desktop（以及 eva 各账号的），
+   移动端 facade 可能驱动了别人的 Desktop —— 请求仍返回 200，只是内容不是你的；若落到 login shell
+   实例上，则连模型列表都取不到（`models: 0`）。本部署通过自己的网络别名 `*desktop` 与
+   `CLAUDE_MOBILE_DESKTOP_HOST` 访问自己的 Desktop，facade 会在每次健康检查中核对
+   `/api/health` 里的 `instance.namePrefix`：不一致时该容器转为 unhealthy（body 带
+   `expectedNamePrefix`/`reportedNamePrefix`）并在日志里打出原因，而不会继续用别人的 Desktop。
+   排查用：`curl -s http://127.0.0.1:8081/api/health`（`desktop` 应指向本部署别名）。
 
 ## 持久化数据
 

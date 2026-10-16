@@ -1744,6 +1744,50 @@ async function desktopReady() {
   }
 }
 
+// Which deployment the Desktop behind `desktop.baseUrl` belongs to. It is
+// reached by a name on gateway_net, a network every stack on the host shares and
+// on which every stack registers the compose service names, so that name can
+// resolve to another deployment's Desktop — the eva deployment's own instance,
+// or one of its accounts' — and this facade would then list and write *their*
+// chats instead of ours. That reads as "nothing shows up", not as an error: a
+// login-shell instance refuses the API (this service answers models: 0 and the
+// phone shows its generic failure), an account's lists as empty. The bridge
+// reports which deployment it is; this compares that with our own name. Only a
+// definite disagreement is a failure; an unreachable or older bridge that
+// reports nothing is "unknown" and stays healthy (the Desktop's own healthcheck
+// covers its liveness).
+const instanceNamePrefix = process.env.CLAUDESK_NAME_PREFIX || "";
+// How long one answer is reused. The container healthcheck probes /api/health
+// every 15s, so this keeps the identity check to at most one bridge read a
+// minute. 0 re-checks on every request (the suite pins it that way).
+const desktopInstanceTtlMs = (() => {
+  const raw = Number(process.env.CLAUDE_MOBILE_DESKTOP_INSTANCE_TTL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 60 * 1000;
+})();
+let desktopInstanceCheck = null;
+
+async function desktopInstance() {
+  if (desktopInstanceCheck
+    && Date.now() - desktopInstanceCheck.at < desktopInstanceTtlMs) {
+    return desktopInstanceCheck;
+  }
+  const report = await desktop.healthReport().catch(() => null);
+  const reported = report?.instance?.namePrefix;
+  const state = typeof reported !== "string"
+    ? "unknown"
+    : reported === instanceNamePrefix ? "ok" : "mismatch";
+  const value = { at: Date.now(), state, reported: typeof reported === "string" ? reported : null };
+  if (value.state === "mismatch" && desktopInstanceCheck?.state !== "mismatch") {
+    console.error(
+      `[mobile-api] ${desktop.baseUrl} is not this deployment's Desktop: it belongs to instance "${value.reported}", ours is "${instanceNamePrefix}". `
+      + "Every stack on gateway_net registers the name `claude-desktop`, so this facade is driving whichever one it reached. "
+      + "It should dial this deployment's own alias (CLAUDE_MOBILE_DESKTOP_URL, default http://claudesk-desktop:8080).",
+    );
+  }
+  desktopInstanceCheck = value;
+  return value;
+}
+
 function desktopVersion() {
   return process.env.CLAUDE_DESKTOP_VERSION || null;
 }
@@ -2626,12 +2670,31 @@ async function handleStreamTimeline(request, response, url) {
 async function handleApi(request, response, url) {
   // Auth-free health check for the container.
   if (url.pathname === "/api/health" && request.method === "GET") {
+    const instance = await desktopInstance();
+    // Fail the container's healthcheck when the Desktop behind this facade
+    // demonstrably belongs to another deployment (see desktopInstance): an
+    // unhealthy container is the only thing `docker compose ps` shows about a
+    // facade that would otherwise look fine while serving the wrong Desktop.
+    if (instance.state === "mismatch") {
+      sendJson(response, 503, {
+        ok: false,
+        error: "the Desktop behind this facade is another deployment's",
+        desktop: desktop.baseUrl,
+        expectedNamePrefix: instanceNamePrefix,
+        reportedNamePrefix: instance.reported,
+      });
+      return;
+    }
     sendJson(response, 200, {
       ok: true,
       email: identity.email,
       inference: "applied-3p-config",
       models: await engine.listModels().then((models) => models.length).catch(() => 0),
       activeTurns: engine.activeTurnCount?.() ?? undefined,
+      desktop: desktop.baseUrl,
+      // "ok" when the bridge named this deployment, "unknown" when it is too old
+      // to say or did not answer; "mismatch" never reaches here.
+      desktopInstance: instance.state,
     });
     return;
   }

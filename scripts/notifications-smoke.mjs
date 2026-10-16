@@ -910,6 +910,8 @@ function dispatchWorkerEvent(worker, type, event) {
       COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "99",
       CLAUDE_INFERENCE_MODELS_JSON: "[]",
       CLAUDE_REMOTE_WEB_SHELL: "1",
+      // The deployment this bridge belongs to; /api/health reports it verbatim.
+      CLAUDESK_NAME_PREFIX: "eva-",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -962,6 +964,14 @@ function dispatchWorkerEvent(worker, type, event) {
       .then((response) => response.json());
     assert.equal(typeof pushConfig.value?.vapidPublicKey, "string",
       "the bridge's own push routes keep the {ok, value} envelope");
+
+    // /api/health names the deployment this bridge belongs to (from
+    // CLAUDESK_NAME_PREFIX), so a peer that reached a Desktop by a name every
+    // stack on the shared network registers can tell whose it is and refuse to
+    // serve another deployment's chats.
+    const health = await fetch(`${origin}/api/health`).then((response) => response.json());
+    assert.deepEqual(health.instance, { namePrefix: "eva-" },
+      "health must report the deployment name this bridge runs under");
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", resolve));

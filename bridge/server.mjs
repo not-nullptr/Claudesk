@@ -27,6 +27,14 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Which deployment this bridge belongs to (CLAUDESK_NAME_PREFIX from the .env).
+// Reported on /api/health so a peer that reaches *a* Desktop can tell whether it
+// reached its own: gateway_net is shared, and every stack on it registers the
+// compose service names, so `claude-desktop` resolves to every deployment's
+// container — and to each of the eva deployment's accounts. The mobile facade
+// compares this with its own name and refuses to serve a Desktop that is not
+// its own.
+const instanceNamePrefix = process.env.CLAUDESK_NAME_PREFIX || "";
 // Experimental: render ion-dist's browser (claude.ai) chrome instead of the
 // Desktop chrome. ion-dist picks its shell from the `Claude/<version>` token the
 // preload appends to the user agent; dropping it makes the renderer believe it
@@ -2341,6 +2349,9 @@ async function handleApi(request, response, url) {
         release,
         renderer: desktopRuntime.renderer,
         transport: "official-renderer-ipc",
+        // This container's deployment, for a peer checking that the Desktop it
+        // reached is the one it meant to.
+        instance: { namePrefix: instanceNamePrefix },
         runtimeControlReady,
         coworkReady: Boolean(
           surfaces?.LocalAgentModeSessions?.includes("getAll")

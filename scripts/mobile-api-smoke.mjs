@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { base32Decode, hotp, totpCounter } from "../mobile/totp.mjs";
+import { desktopBaseUrl } from "../mobile/desktop-client.mjs";
 import { startFakeClaudesk } from "./lib/fake-claudesk.mjs";
 
 process.env.CLAUDE_MOBILE_API_EMAIL = "smoke@example.com";
@@ -28,6 +29,15 @@ delete process.env.CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID;
 // The on-device Frida probe's report sink (tools/frida). Its token is a shared
 // secret, so the suite pins one and proves the route is closed without it.
 process.env.CLAUDE_MOBILE_FRIDA_TOKEN = "smoke-diag-token";
+// Re-check the Desktop's identity on every /api/health read, so the mismatch
+// case below is observable without waiting out the real one-minute cache.
+process.env.CLAUDE_MOBILE_DESKTOP_INSTANCE_TTL_MS = "0";
+// The deployment name is deployment config, not a test input: a value left in
+// the calling shell (a deployment's own .env is inherited by the suite) would
+// make the facade expect a name the fake bridge does not report, and the
+// mismatch case below would be indistinguishable from that noise. Pin it.
+delete process.env.CLAUDESK_NAME_PREFIX;
+delete process.env.CLAUDE_MOBILE_DESKTOP_HOST;
 
 // The mobile facade talks to Claude Desktop only through the Claudesk bridge;
 // this fake keeps Desktop-shaped Chat sessions in memory.
@@ -90,8 +100,60 @@ const parseSse = (text) => text.split("\n\n").filter(Boolean).map((record) => {
 });
 
 try {
+  // Which Desktop the facade dials is wired in compose, and getting it wrong
+  // points the whole facade at another deployment's Desktop (gateway_net is
+  // shared, and every stack on it registers `claude-desktop`). Pin the wiring
+  // here so a later edit to compose.yaml cannot quietly put the shared name
+  // back: the mobile service dials this deployment's own alias, and both
+  // services carry the deployment name the identity check compares.
+  const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
+  assert.match(compose, /CLAUDE_MOBILE_DESKTOP_HOST: "\$\{CLAUDESK_NAME_PREFIX:-claudesk-\}desktop"/,
+    "the facade must default to this deployment's own alias, not `claude-desktop`");
+  assert.match(compose, /aliases:\n\s+- "\$\{CLAUDESK_NAME_PREFIX:-claudesk-\}desktop"\n/,
+    "claude-desktop needs its own network alias");
+  assert.match(compose, /aliases:\n\s+- "\$\{CLAUDESK_NAME_PREFIX:-claudesk-\}mobile"\n/,
+    "claude-mobile needs its own network alias");
+  assert.equal((compose.match(/CLAUDESK_NAME_PREFIX: "\$\{CLAUDESK_NAME_PREFIX:-\}"/g) ?? []).length, 2,
+    "the bridge and the mobile service must both be told this deployment's name");
+
   const health = await (await call("/api/health")).json();
   assert.equal(health.ok, true);
+  assert.equal(health.desktopInstance, "ok", "the fake bridge names the deployment the facade expects");
+  assert.equal(health.desktop, claudesk.url, "health reports the bridge the facade drives");
+
+  // How that host is chosen: the explicit URL wins, otherwise the deployment's
+  // own alias, with the service name only as a last resort.
+  assert.equal(desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_HOST: "eva-desktop" }), "http://eva-desktop:8080");
+  assert.equal(
+    desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_HOST: "eva-desktop", CLAUDE_MOBILE_DESKTOP_URL: "http://elsewhere:9000/" }),
+    "http://elsewhere:9000",
+    "an explicit URL wins, with its trailing slash trimmed",
+  );
+  assert.equal(
+    desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_URL: "  " }),
+    "http://claude-desktop:8080",
+    "a blank URL and no host fall back to the service name",
+  );
+
+  // The failure this guard exists for: the name resolved to another deployment's
+  // Desktop. Its bridge reports a different name, and serving that Desktop would
+  // list and write to someone else's chats, so the probe — and the container
+  // healthcheck reading it — must fail instead.
+  claudesk.state.namePrefix = "eva-";
+  const foreign = await call("/api/health");
+  assert.equal(foreign.status, 503, "another deployment's Desktop fails the healthcheck");
+  const foreignBody = await foreign.json();
+  assert.equal(foreignBody.reportedNamePrefix, "eva-");
+  assert.equal(foreignBody.expectedNamePrefix, "");
+  claudesk.state.namePrefix = "";
+
+  // A bridge too old to report an instance is unknown, not wrong: the facade
+  // keeps serving (the Desktop's own healthcheck covers its liveness).
+  delete claudesk.state.namePrefix;
+  const silent = await (await call("/api/health")).json();
+  assert.equal(silent.ok, true);
+  assert.equal(silent.desktopInstance, "unknown");
+  claudesk.state.namePrefix = "";
 
   const legal = await (await call("/api/legal")).json();
   assert.deepEqual(legal, {});

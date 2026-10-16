@@ -53,8 +53,22 @@ function parseSseRecord(record) {
   return { event, id, data: parsed };
 }
 
+// Which bridge the facade drives. CLAUDE_MOBILE_DESKTOP_URL wins when set;
+// otherwise the host comes from CLAUDE_MOBILE_DESKTOP_HOST, this deployment's
+// own alias for its Desktop (compose derives it from CLAUDESK_NAME_PREFIX).
+// `claude-desktop` is only the fallback for a caller that sets neither: it is
+// the compose *service* name, which every stack sharing the network registers,
+// so on a host running more than one deployment it resolves to all of them and
+// the facade would drive whichever Desktop it connected to first.
+export function desktopBaseUrl(env = process.env) {
+  const url = String(env.CLAUDE_MOBILE_DESKTOP_URL || "").trim();
+  if (url) return url.replace(/\/$/, "");
+  const host = String(env.CLAUDE_MOBILE_DESKTOP_HOST || "").trim() || "claude-desktop";
+  return `http://${host}:8080`;
+}
+
 export function createDesktopClient({
-  baseUrl = process.env.CLAUDE_MOBILE_DESKTOP_URL || "http://claude-desktop:8080",
+  baseUrl = desktopBaseUrl(),
   fetchImpl = globalThis.fetch,
   log = console,
 } = {}) {
@@ -155,6 +169,18 @@ export function createDesktopClient({
       return Boolean(payload?.ok);
     } catch {
       return false;
+    }
+  }
+
+  // The same read as `health`, with the bridge's own report — null when the
+  // bridge did not answer. The instance check needs the body, not the verdict.
+  async function healthReport() {
+    try {
+      const response = await fetchImpl(`${root}/api/health`, { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
     }
   }
 
@@ -275,5 +301,5 @@ export function createDesktopClient({
     return payload?.value ?? null;
   }
 
-  return { ipc, upload, generateTitle, chatModels, health, folders, subscribe, baseUrl: root };
+  return { ipc, upload, generateTitle, chatModels, health, healthReport, folders, subscribe, baseUrl: root };
 }
