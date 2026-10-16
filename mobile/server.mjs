@@ -1752,10 +1752,12 @@ async function desktopReady() {
 // chats instead of ours. That reads as "nothing shows up", not as an error: a
 // login-shell instance refuses the API (this service answers models: 0 and the
 // phone shows its generic failure), an account's lists as empty. The bridge
-// reports which deployment it is; this compares that with our own name. Only a
-// definite disagreement is a failure; an unreachable or older bridge that
-// reports nothing is "unknown" and stays healthy (the Desktop's own healthcheck
-// covers its liveness).
+// reports which deployment it is; this compares that with our own name. A
+// disagreement fails the healthcheck, and so does a bridge that does not answer
+// at all — a facade that cannot reach a Desktop can serve nothing, and without
+// that verdict the failure hides behind a healthy container. A bridge that
+// answers but is too old to name itself is "unknown" and stays healthy: there
+// is nothing to compare, and the Desktop's own healthcheck covers its liveness.
 const instanceNamePrefix = process.env.CLAUDESK_NAME_PREFIX || "";
 // How long one answer is reused. The container healthcheck probes /api/health
 // every 15s, so this keeps the identity check to at most one bridge read a
@@ -1773,16 +1775,19 @@ async function desktopInstance() {
   }
   const report = await desktop.healthReport().catch(() => null);
   const reported = report?.instance?.namePrefix;
-  const state = typeof reported !== "string"
-    ? "unknown"
-    : reported === instanceNamePrefix ? "ok" : "mismatch";
+  const state = report === null
+    ? "unreachable"
+    : typeof reported !== "string"
+      ? "unknown"
+      : reported === instanceNamePrefix ? "ok" : "mismatch";
   const value = { at: Date.now(), state, reported: typeof reported === "string" ? reported : null };
-  if (value.state === "mismatch" && desktopInstanceCheck?.state !== "mismatch") {
-    console.error(
-      `[mobile-api] ${desktop.baseUrl} is not this deployment's Desktop: it belongs to instance "${value.reported}", ours is "${instanceNamePrefix}". `
-      + "Every stack on gateway_net registers the name `claude-desktop`, so this facade is driving whichever one it reached. "
-      + "It should dial this deployment's own alias (CLAUDE_MOBILE_DESKTOP_URL, default http://claudesk-desktop:8080).",
-    );
+  if (value.state !== desktopInstanceCheck?.state && value.state !== "ok" && value.state !== "unknown") {
+    console.error(value.state === "mismatch"
+      ? `[mobile-api] ${desktop.baseUrl} is not this deployment's Desktop: it belongs to instance "${value.reported}", ours is "${instanceNamePrefix}". `
+        + "Every stack on gateway_net registers the name `claude-desktop`, so this facade is driving whichever one it reached. "
+        + "It should dial this deployment's own alias (default http://claudesk-desktop:8080; see the alias in compose.yaml)."
+      : `[mobile-api] nothing answered at ${desktop.baseUrl}: the bridge this facade dials is not reachable. `
+        + "Check that the host is this deployment's own alias (CLAUDE_MOBILE_DESKTOP_HOST, or the CLAUDE_MOBILE_DESKTOP_URL override — an override that names a container which does not exist wins over the alias and lands here).");
   }
   desktopInstanceCheck = value;
   return value;
@@ -2671,14 +2676,17 @@ async function handleApi(request, response, url) {
   // Auth-free health check for the container.
   if (url.pathname === "/api/health" && request.method === "GET") {
     const instance = await desktopInstance();
-    // Fail the container's healthcheck when the Desktop behind this facade
-    // demonstrably belongs to another deployment (see desktopInstance): an
-    // unhealthy container is the only thing `docker compose ps` shows about a
-    // facade that would otherwise look fine while serving the wrong Desktop.
-    if (instance.state === "mismatch") {
+    // Fail the container's healthcheck when the facade cannot serve: the Desktop
+    // it reached belongs to another deployment, or no Desktop answered at all
+    // (see desktopInstance). An unhealthy container is the only thing
+    // `docker compose ps` shows about a facade that would otherwise look fine
+    // while serving the wrong Desktop, or nothing.
+    if (instance.state === "mismatch" || instance.state === "unreachable") {
       sendJson(response, 503, {
         ok: false,
-        error: "the Desktop behind this facade is another deployment's",
+        error: instance.state === "mismatch"
+          ? "the Desktop behind this facade is another deployment's"
+          : "nothing answered at the bridge this facade dials",
         desktop: desktop.baseUrl,
         expectedNamePrefix: instanceNamePrefix,
         reportedNamePrefix: instance.reported,
