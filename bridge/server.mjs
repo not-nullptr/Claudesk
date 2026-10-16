@@ -2147,6 +2147,36 @@ function grantTenantCodeGates(value) {
   return changed;
 }
 
+// The renderer's whole remote-place machinery hangs on one flag that comes from
+// the page, not from any access document: `shared-50`'s `RM` turns
+// `appFeatures.selfHostedSessions.status === "supported"` into the module flag
+// `shared-0`'s `yL` — the `remoteSessionsAllowed` every session-target read
+// starts from (`k = R() && …`), the first term of the environment-list filter
+// (`if (!remoteSessionsAllowed) return { bridges: [], cloud: [] }`) and of the
+// pools query's `enabled` (`be = IS() && remoteSessionsAllowed`). With it false
+// the composer's places menu is Local-only — no bootstrap entitlement, no
+// environments response and no pool grant downstream can change that, because
+// the data never passes the filter.
+//
+// `appFeatures` starts as `window.desktopBootFeatures` — the table relayed into
+// the remote preload from here — and in a browser it is never resampled: the
+// async refresher calls `claude.settings.AppFeatures.getSupportedFeatures`, a
+// native surface the remote preload does not shim (the settings surfaces are
+// AppPreferences, Custom3pSetup and Custom3pHelperRun). The Desktop wrapper's
+// own relay whitelist (`relayedBootFeatures` in bridge-wrapper/main.cjs —
+// chatIn3p, chatTab, desktopHome, yukonSilver) copies nothing else, so
+// selfHostedSessions is always absent from the table and the flag is false on
+// every page load. A tenant whose Code runners this deployment serves genuinely
+// runs its sessions on its own infrastructure, so it declares them; the
+// operator's own instance keeps exactly the relayed table.
+function withSelfHostedSessions(bootFeatures) {
+  const table = bootFeatures && typeof bootFeatures === "object" ? { ...bootFeatures } : {};
+  if (codeSurfaceEnabled) {
+    table.selfHostedSessions = { status: "supported" };
+  }
+  return table;
+}
+
 function grantWebShellEntitlements(value) {
   if (!value || typeof value !== "object") return false;
   let changed = false;
@@ -4286,7 +4316,9 @@ async function serveOfficialIndex(request, response) {
     // state: the interactive-auth store carries the operator's display name and
     // the chat session list is theirs. The sign-in page reads neither.
     chatSessionIds: loginShellEnabled ? [] : await initialChatSessionIds(),
-    desktopBootFeatures: await desktop.bootFeatures(),
+    // The preload table the renderer's app features come from — see
+    // withSelfHostedSessions for why a tenant's entry must be in it.
+    desktopBootFeatures: withSelfHostedSessions(await desktop.bootFeatures()),
     desktopRuntime,
     release,
     codeActionsEnabled,

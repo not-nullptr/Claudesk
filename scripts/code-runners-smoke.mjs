@@ -318,6 +318,44 @@ assert.deepEqual(gated(true, { [key]: { defaultValue: false } }),
   { [key]: { defaultValue: false } },
   "an upstream verdict on the gate is left alone too");
 
+// The one flag the renderer's whole remote-place machinery reads from the page:
+// `shared-50`'s `RM` turns `appFeatures.selfHostedSessions.status` into the
+// `remoteSessionsAllowed` every session-target and the pools query start from,
+// and in a browser `appFeatures` is exactly the preload table this bridge hands
+// the page — the Desktop wrapper's relay whitelist drops selfHostedSessions, and
+// the renderer's async resample needs a native surface the web shell does not
+// shim, so without this entry the composer's places menu is Local-only however
+// the bootstrap is granted. Exercised, not grepped: the table builder runs
+// against the relayed table.
+const bootTable = section(serverSource, "function withSelfHostedSessions(",
+  "function grantWebShellEntitlements(");
+
+function bootFeatures(codeSurface, initial) {
+  const sandbox = {};
+  vm.runInNewContext(
+    `const codeSurfaceEnabled = ${codeSurface};
+     ${bootTable}
+     result = withSelfHostedSessions(${JSON.stringify(initial)});`,
+    sandbox,
+  );
+  return JSON.parse(JSON.stringify(sandbox.result));
+}
+assert.equal(bootFeatures(true, {}).selfHostedSessions?.status, "supported",
+  "a tenant declares the self-hosted sessions its runners serve");
+assert.equal(
+  bootFeatures(true, { selfHostedSessions: { status: "unavailable" } })
+    .selfHostedSessions.status,
+  "supported",
+  "overriding a relayed table that omits or denies it — the claim is the deployment's to make",
+);
+assert.deepEqual(bootFeatures(false, { chatIn3p: { status: "supported" } }),
+  { chatIn3p: { status: "supported" } },
+  "while the operator's instance keeps exactly the relayed table");
+assert.ok(
+  serverSource.includes("withSelfHostedSessions(await desktop.bootFeatures())"),
+  "and the browser's preload config is built through the table builder",
+);
+
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 assert.equal(
   (compose.match(/CLAUDESK_CODE_RUNNERS: "\$\{CLAUDESK_CODE_RUNNERS:-0\}"/g) || []).length, 1,

@@ -468,6 +468,41 @@ Per-account **mobile** Code is a separate piece of work, not a gap here: the
 facade is one-per-deployment and accounts run no `claude-mobile` container, so it
 needs a facade per account (its own port, login and proxy entry).
 
+### Why the places menu stayed Local-only (found)
+
+The first live attempts showed the right things everywhere except the browser's
+place menu: the bootstrap carried the entitlements, both environments legs and
+the pools API answered the byoc pool with `state: "active"`, and a session could
+be placed and handed to the guest runner — yet the composer still offered Local
+and nothing else. The gate was one module flag in the renderer, and it does not
+read any access document:
+
+- `shared-50`'s `RM` sets the flag (shared-0's `yL`) from
+  **`appFeatures.selfHostedSessions.status === "supported"`**. `yL` is the
+  `remoteSessionsAllowed` every session-target read starts from
+  (`c593f7513`'s `af`: `k = R() && …`), the first term of the environment-list
+  filter (`kK`'s `envsByKind`: `if (!E) return { bridges: [], cloud: [] }`) and
+  of the pools query's `enabled` (`be = IS() && E`).
+- `appFeatures` starts as `window.desktopBootFeatures` (`shared-50`'s `IM`) and,
+  in a browser, is never resampled — the async refresher calls
+  `claude.settings.AppFeatures.getSupportedFeatures`, a native surface the
+  remote preload does not shim (only AppPreferences, Custom3pSetup and
+  Custom3pHelperRun are).
+- That table is relayed here: `bridge/server.mjs` → `remote-preload.js` →
+  `globalThis.desktopBootFeatures`, and it originates in the Desktop wrapper's
+  `/boot-features`, whose `relayedBootFeatures` whitelist carries only
+  `chatIn3p`, `chatTab`, `desktopHome`, `yukonSilver` (+ the code-actions set).
+  `selfHostedSessions` is not in it.
+
+So on every page load the flag was false, `envsByKind` returned empty lists
+whatever the endpoints said, and the composer's menu was Local-only by
+construction — which is why none of the bootstrap-side grants (however correct)
+could change it. A tenant with runners now declares
+`selfHostedSessions: {status: "supported"}` in that table
+(`withSelfHostedSessions` in `bridge/server.mjs`, over the relayed table, since
+on such a tenant sessions genuinely do run on its own infrastructure); the
+operator's own instance keeps exactly what the wrapper relayed.
+
 ## Open — the rest of the spike
 
 1. **Runner placement (narrowed).** The guest already carries Claude Code and
