@@ -30,6 +30,10 @@ export async function startFakeClaudesk() {
     down: false,
     chunkDelayMs: 5,
     titleDelayMs: 0,
+    // What /api/health reports as the instance this bridge belongs to. Empty
+    // matches a facade with no CLAUDESK_NAME_PREFIX; the suite sets it to prove
+    // a mismatch is caught.
+    namePrefix: "",
     titleResult: undefined,
     codeWorkspaceFolder: "/workspace",
     // What `/api/remote/folders` lists at the workspace root. The real bridge
@@ -406,6 +410,12 @@ export async function startFakeClaudesk() {
     };
     if (state.down) return json(503, { ok: false, error: "bridge unavailable" });
 
+    // The bridge's own report. `namePrefix` is which instance this bridge
+    // belongs to (CLAUDESK_NAME_PREFIX on the real one); the facade compares it
+    // with its own to notice that it reached someone else's Desktop.
+    if (request.method === "GET" && url.pathname === "/api/health") {
+      return json(200, { ok: true, instance: { namePrefix: state.namePrefix } });
+    }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       response.write(": connected\n\n");

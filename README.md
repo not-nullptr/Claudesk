@@ -349,6 +349,7 @@ Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
 3. **模型列表为空**：确认 `CLAUDE_INFERENCE_MODELS_JSON` 是合法 JSON，模型 ID 与 Gateway 实际接受的路由一致。
 4. **PWA 无法安装**：HTTP LAN 入口可浏览但不能安装 PWA；改用 Authelia 保护的 HTTPS 主机名。
 5. **配置泄露风险**：不要执行会打印渲染后环境变量的 `docker compose config`，因为其中可能包含 API Key。
+6. **手机端列表为空、无法新建会话/看不到 Code 会话**：同一台机器跑多个实例时，compose 的服务名 `claude-desktop` 在共享的 `gateway_net` 上会解析到**所有**实例的 Desktop，移动端 facade 可能驱动了别的实例的 Desktop（请求仍返回 200，只是内容不是你的）。给每个实例设置唯一的 `CLAUDESK_NAME_PREFIX`（compose 用它派生 `*desktop`/`*mobile` 网络别名与 `CLAUDE_MOBILE_DESKTOP_HOST`），然后重建容器；`curl -s http://127.0.0.1:8081/api/health` 返回 503 且 body 带 `expectedNamePrefix`/`reportedNamePrefix` 即为此问题（该服务也会在日志里打出修复方法）。详见 docs/eva-mode.md「Two deployments on one box」。
 
 ## 持久化数据
 

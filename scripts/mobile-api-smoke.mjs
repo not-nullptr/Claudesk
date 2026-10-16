@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { base32Decode, hotp, totpCounter } from "../mobile/totp.mjs";
+import { desktopBaseUrl } from "../mobile/desktop-client.mjs";
 import { startFakeClaudesk } from "./lib/fake-claudesk.mjs";
 
 process.env.CLAUDE_MOBILE_API_EMAIL = "smoke@example.com";
@@ -28,6 +29,9 @@ delete process.env.CLAUDE_MOBILE_EXPERIMENT_HIDE_BRIDGE_BY_ID;
 // The on-device Frida probe's report sink (tools/frida). Its token is a shared
 // secret, so the suite pins one and proves the route is closed without it.
 process.env.CLAUDE_MOBILE_FRIDA_TOKEN = "smoke-diag-token";
+// Re-check the Desktop's identity on every /api/health read, so the mismatch
+// case below is observable without waiting out the real one-minute cache.
+process.env.CLAUDE_MOBILE_DESKTOP_INSTANCE_TTL_MS = "0";
 
 // The mobile facade talks to Claude Desktop only through the Claudesk bridge;
 // this fake keeps Desktop-shaped Chat sessions in memory.
@@ -90,8 +94,47 @@ const parseSse = (text) => text.split("\n\n").filter(Boolean).map((record) => {
 });
 
 try {
+  // How the facade picks which bridge to drive. `claude-desktop` is the compose
+  // service name, which every instance sharing the network registers, so the
+  // host comes from CLAUDE_MOBILE_DESKTOP_HOST (this instance's own alias) and
+  // the URL only overrides it. Getting this wrong points the whole facade at
+  // another instance's Desktop, so pin all three shapes.
+  assert.equal(desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_HOST: "eva-desktop" }), "http://eva-desktop:8080");
+  assert.equal(
+    desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_HOST: "eva-desktop", CLAUDE_MOBILE_DESKTOP_URL: "http://elsewhere:9000/" }),
+    "http://elsewhere:9000",
+    "an explicit URL wins, with its trailing slash trimmed",
+  );
+  assert.equal(
+    desktopBaseUrl({ CLAUDE_MOBILE_DESKTOP_URL: "  " }),
+    "http://claude-desktop:8080",
+    "a blank URL and no host fall back to the service name",
+  );
+
   const health = await (await call("/api/health")).json();
   assert.equal(health.ok, true);
+  assert.equal(health.desktopInstance, "ok", "the fake bridge names the instance the facade expects");
+  assert.equal(health.desktop, claudesk.url, "health reports the bridge the facade drives");
+
+  // The failure this guard exists for: the name resolved to another instance's
+  // Desktop. Its bridge reports a different name prefix, and serving that
+  // Desktop would list and write to someone else's chats, so the probe — and
+  // the container healthcheck reading it — must fail instead.
+  claudesk.state.namePrefix = "eva-";
+  const foreign = await call("/api/health");
+  assert.equal(foreign.status, 503, "a foreign Desktop fails the healthcheck");
+  const foreignBody = await foreign.json();
+  assert.equal(foreignBody.reportedNamePrefix, "eva-");
+  assert.equal(foreignBody.expectedNamePrefix, "");
+  claudesk.state.namePrefix = "";
+
+  // A bridge too old to report an instance is unknown, not wrong: the facade
+  // keeps serving (the Desktop's own healthcheck covers its liveness).
+  delete claudesk.state.namePrefix;
+  const silent = await (await call("/api/health")).json();
+  assert.equal(silent.ok, true);
+  assert.equal(silent.desktopInstance, "unknown");
+  claudesk.state.namePrefix = "";
 
   const legal = await (await call("/api/legal")).json();
   assert.deepEqual(legal, {});

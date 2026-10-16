@@ -1744,6 +1744,47 @@ async function desktopReady() {
   }
 }
 
+// Which instance the Desktop behind `desktop.baseUrl` belongs to. It is reached
+// by a name on gateway_net, a network every instance on the host shares and on
+// which every instance registers the compose service names, so that name can
+// resolve to another instance's Desktop: this facade would then list and write
+// to *their* chats instead of ours — a wrong-Desktop bug that reads as "nothing
+// shows up", not as an error. The bridge reports which instance it is, and this
+// compares that with our own prefix. Only a definite disagreement is a failure;
+// an unreachable or older bridge that reports nothing is "unknown", which stays
+// healthy (the Desktop's own healthcheck covers its liveness).
+const instanceNamePrefix = process.env.CLAUDESK_NAME_PREFIX || "";
+// How long one answer is reused. The container healthcheck probes /api/health
+// every 15s, so this keeps the identity check to at most one bridge read a
+// minute. 0 re-checks on every request (the suite pins it that way).
+const desktopInstanceTtlMs = (() => {
+  const raw = Number(process.env.CLAUDE_MOBILE_DESKTOP_INSTANCE_TTL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 60 * 1000;
+})();
+let desktopInstanceCheck = null;
+
+async function desktopInstance() {
+  if (desktopInstanceCheck
+    && Date.now() - desktopInstanceCheck.at < desktopInstanceTtlMs) {
+    return desktopInstanceCheck;
+  }
+  const report = await desktop.healthReport().catch(() => null);
+  const reported = report?.instance?.namePrefix;
+  const state = typeof reported !== "string"
+    ? "unknown"
+    : reported === instanceNamePrefix ? "ok" : "mismatch";
+  const value = { at: Date.now(), state, reported: typeof reported === "string" ? reported : null };
+  if (value.state === "mismatch" && desktopInstanceCheck?.state !== "mismatch") {
+    console.error(
+      `[mobile-api] ${desktop.baseUrl} is not this instance's Desktop: it belongs to name prefix "${value.reported}", ours is "${instanceNamePrefix}". `
+      + "Every instance sharing the network registers the name `claude-desktop`, so this facade is driving whichever one it reached. "
+      + "Give each instance a unique CLAUDESK_NAME_PREFIX in .env (this derives CLAUDE_MOBILE_DESKTOP_HOST) and recreate its containers. See docs/eva-mode.md.",
+    );
+  }
+  desktopInstanceCheck = value;
+  return value;
+}
+
 function desktopVersion() {
   return process.env.CLAUDE_DESKTOP_VERSION || null;
 }
@@ -2626,12 +2667,31 @@ async function handleStreamTimeline(request, response, url) {
 async function handleApi(request, response, url) {
   // Auth-free health check for the container.
   if (url.pathname === "/api/health" && request.method === "GET") {
+    const instance = await desktopInstance();
+    // Fail the container's healthcheck when the Desktop behind this facade
+    // demonstrably belongs to another instance (see desktopInstance): an
+    // unhealthy container is the only thing `docker compose ps` shows about a
+    // facade that would otherwise look fine while serving the wrong Desktop.
+    if (instance.state === "mismatch") {
+      sendJson(response, 503, {
+        ok: false,
+        error: "the Desktop behind this facade is another instance's",
+        desktop: desktop.baseUrl,
+        expectedNamePrefix: instanceNamePrefix,
+        reportedNamePrefix: instance.reported,
+      });
+      return;
+    }
     sendJson(response, 200, {
       ok: true,
       email: identity.email,
       inference: "applied-3p-config",
       models: await engine.listModels().then((models) => models.length).catch(() => 0),
       activeTurns: engine.activeTurnCount?.() ?? undefined,
+      desktop: desktop.baseUrl,
+      // "ok" when the bridge named this instance, "unknown" when it is too old
+      // to say or did not answer; "mismatch" never reaches here.
+      desktopInstance: instance.state,
     });
     return;
   }

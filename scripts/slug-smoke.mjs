@@ -43,6 +43,8 @@ assert.equal(slugFor("---"), "", "punctuation-only collapses to empty");
 assert.equal(accepts("ada"), "yes");
 assert.equal(accepts(""), "no", "an empty slug is never a valid account");
 assert.equal(accepts("gateway"), "no", "the gateway stack's project name is reserved");
+assert.equal(accepts("claudesk"), "no",
+  "the deployment's own instance registers the claudesk-desktop/-mobile network aliases");
 
 // --- end-to-end: the real script plans the matching project and data root ----
 // Off a throwaway tree so the repo root's .env is not required or touched.

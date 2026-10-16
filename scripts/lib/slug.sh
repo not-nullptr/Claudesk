@@ -21,9 +21,15 @@ claudesk_slug() {
 # claudesk-<slug>, so a colliding slug would let provisioning or teardown reach a
 # fixed stack instead of a user's. The box gateway stack is pinned to the project
 # name claudesk-gateway (compose.gateway.yaml), so an account like gateway@… would
-# resolve to `gateway` and hand a teardown the gateway itself. Keep this in sync
-# with any other fixed claudesk-* compose project.
-CLAUDESK_RESERVED_SLUGS="gateway"
+# resolve to `gateway` and hand a teardown the gateway itself.
+#
+# `claudesk` is reserved for a name rather than a project: the deployment's own
+# instance registers the network aliases `${CLAUDESK_NAME_PREFIX:-claudesk-}desktop`
+# and `…mobile` on the shared gateway_net, so an account slugging to `claudesk`
+# would register the same two and put back the ambiguity those aliases exist to
+# remove (see docs/eva-mode.md, "Two deployments on one box"). Keep this in sync
+# with any other fixed claudesk-* name.
+CLAUDESK_RESERVED_SLUGS="gateway claudesk"
 
 # claudesk_slug_ok SLUG — true when the slug is non-empty and safe to key an
 # account by. Fails closed, so a caller can `|| { error; exit 1; }`.

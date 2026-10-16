@@ -117,7 +117,17 @@ services:
     shm_size: "2gb"
     mem_limit: "${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
     networks:
-      - gateway_net
+      gateway_net:
+        # A name only this instance answers to. A compose *service* name is
+        # registered as a network alias by every stack that joins the network,
+        # and gateway_net is shared with the box gateway and with each account's
+        # instance, so a lookup of `claude-desktop` resolves to all of them.
+        # Anything that must reach *this* Desktop — the mobile facade, the
+        # reverse proxy — addresses this alias instead. The default keeps a
+        # lone instance unique even with an empty CLAUDESK_NAME_PREFIX.
+        # See docs/eva-mode.md, "Two deployments on one box".
+        aliases:
+          - "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
     healthcheck:
       test:
         - CMD-SHELL
@@ -182,6 +192,10 @@ services:
       # user from the auth service per request instead of the env identity, so
       # the sidebar/greeting read as that person. Empty keeps the env identity.
       AUTH_IDENTITY_URL: "${AUTH_IDENTITY_URL:-}"
+      # This instance's name prefix, reported on /api/health so a peer can tell
+      # whether the Desktop behind this bridge is its own instance's or another
+      # one's (the mobile facade does that on startup). See docs/eva-mode.md.
+      CLAUDESK_NAME_PREFIX: "${CLAUDESK_NAME_PREFIX:-}"
       # Model the title generator is asked to use. Empty falls back to the
       # session's own model; set it to a cheap model the gateway serves.
       CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
@@ -299,7 +313,17 @@ services:
       CLAUDE_MOBILE_API_BASE_BAN_SECONDS: "${CLAUDE_MOBILE_API_BASE_BAN_SECONDS:-600}"
       # Chats, models, uploads and tools all go through Claudesk (the bridge in
       # front of Claude Desktop); this service no longer talks to the gateway.
-      CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-http://claude-desktop:8080}"
+      # The host is this instance's own alias for its Desktop, not the service
+      # name `claude-desktop` — on a host running more than one instance that
+      # name resolves to every instance's Desktop, and the facade would drive
+      # whichever one it happened to connect to. See docs/eva-mode.md.
+      CLAUDE_MOBILE_DESKTOP_HOST: "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
+      # Dial this URL instead of the host above. Empty means the host.
+      CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-}"
+      # Our own prefix, compared against the bridge's on startup: a mismatch
+      # means this facade is driving a Desktop that is not its instance's, which
+      # is reported instead of served. See mobile/server.mjs.
+      CLAUDESK_NAME_PREFIX: "${CLAUDESK_NAME_PREFIX:-}"
       CLAUDE_MOBILE_CAPTURE: "${CLAUDE_MOBILE_CAPTURE:-0}"
       CLAUDE_MOBILE_TOOL_BLOCKS: "${CLAUDE_MOBILE_TOOL_BLOCKS:-1}"
       CLAUDE_MOBILE_THINKING: "${CLAUDE_MOBILE_THINKING:-1}"
@@ -334,7 +358,11 @@ services:
       - ${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/mobile-data:/data
     mem_limit: "${CLAUDE_MOBILE_API_MEMORY_LIMIT:-256m}"
     networks:
-      - gateway_net
+      gateway_net:
+        # This instance's own name for the phone's ingress, beside the shared
+        # `claude-mobile` service alias (see the note on claude-desktop above).
+        aliases:
+          - "${CLAUDESK_NAME_PREFIX:-claudesk-}mobile"
     healthcheck:
       test:
         - CMD

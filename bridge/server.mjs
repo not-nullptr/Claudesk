@@ -30,6 +30,13 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// Which instance this bridge belongs to (CLAUDESK_NAME_PREFIX from the .env that
+// names the containers). Reported on /api/health so a peer that reaches *a*
+// Desktop can tell whether it reached its own: gateway_net is shared, and every
+// instance on it registers the compose service names, so `claude-desktop`
+// resolves to every instance's container. See docs/eva-mode.md, "Two
+// deployments on one box".
+const instanceNamePrefix = process.env.CLAUDESK_NAME_PREFIX || "";
 // The restart warning. On SIGTERM the bridge tells every connected page the VM
 // is going down, holds for this long so the write flushes and the reader has a
 // moment to see it, and only then exits — the browser's SSE stream drops right
@@ -3669,6 +3676,10 @@ async function handleApi(request, response, url) {
         release,
         renderer: desktopRuntime.renderer,
         transport: "official-renderer-ipc",
+        // This container's instance, for a peer checking that the Desktop it
+        // reached is the one it meant to. A single-instance host answers "",
+        // which is what a peer with an empty prefix expects too.
+        instance: { namePrefix: instanceNamePrefix },
         runtimeControlReady,
         coworkReady: Boolean(
           surfaces?.LocalAgentModeSessions?.includes("getAll")

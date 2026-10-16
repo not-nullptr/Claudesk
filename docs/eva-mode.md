@@ -528,7 +528,7 @@ one collides on four things. Three are the checkout's to set; one is box-level.
 | --- | --- |
 | Host data paths (`/opt/claudesk/data/…`) | `CLAUDESK_DATA_ROOT` |
 | Persistent-root state | `CLAUDESK_ROOT_STATE` |
-| Container names | `CLAUDESK_NAME_PREFIX` (e.g. `eva-`) |
+| Container names, and the per-instance network aliases | `CLAUDESK_NAME_PREFIX` (e.g. `eva-`) |
 | Host ports | `COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`, `AUTH_PORT` — set distinct values |
 | Reconciler systemd units & watched spools | `install-reconciler.sh <checkout> <name>` — a distinct `NAME` per deployment |
 
@@ -548,13 +548,40 @@ Two things are **not** per-checkout:
   `docker compose -f compose.gateway.yaml up -d`, and every deployment on the
   host reaches it over `gateway_net`. Neither deployment declares it, so neither
   fights the other for its name or its host port.
-- **Service aliases on the shared `gateway_net` are not project-scoped.** Both
-  stacks attach `authd` and `claude-desktop` to that external network, so a
-  bridge asking for `authd` can resolve the *other* deployment's container. The
-  cookie will not validate there, so it degrades to the env identity rather than
-  leaking — but it is wrong. Until this is scoped per deployment (giving each its
-  own network, which the per-user work in Stage 2 will produce anyway), don't run
-  both stacks' bridges against the same `gateway_net`.
+- **Service aliases on the shared `gateway_net` are not project-scoped.** Compose
+  registers a service's *name* as a network alias on every network the service
+  joins, and `gateway_net` carries the gateway stack, the deployment's own
+  instance and (since Stage 2) one instance per account. A lookup of
+  `claude-desktop` or `authd` therefore answers with *all* of them, and the
+  container that replies is whichever the client connected to — not necessarily
+  its own.
+
+  For `authd` that degrades: the cookie does not validate against the other
+  deployment's database, so the bridge falls back to the env identity. For
+  `claude-desktop` it does not degrade — the mobile facade *drives* the Desktop it
+  reached, so a facade left on the service name lists and writes another
+  instance's chats. The phone renders an empty world (Recents, new chats and the
+  Code tab are all read from that Desktop) while every request returns 200, and
+  the only trace is `Session "local_…" not found` from a later `setEffort`. Give
+  each instance a distinct `CLAUDESK_NAME_PREFIX` — including the deployment's
+  own, which is what makes it distinct from the accounts — and two things follow:
+
+  - `claude-desktop` and `claude-mobile` also carry the per-instance aliases
+    `${CLAUDESK_NAME_PREFIX:-claudesk-}desktop` and `…mobile`, and the facade
+    dials its own alias (`CLAUDE_MOBILE_DESKTOP_HOST`, with
+    `CLAUDE_MOBILE_DESKTOP_URL` as the override) instead of the shared name. The
+    default keeps a lone instance unique with an empty prefix, and `claudesk` is
+    a reserved account slug (`scripts/lib/slug.sh`) so no account can take it.
+  - the bridge reports its own prefix on `/api/health`, and the facade compares it
+    with its own on every health read. A definite mismatch fails the facade's
+    container healthcheck — the body carries the expected and reported prefixes —
+    and logs the fix, so a facade driving someone else's Desktop shows up in
+    `docker compose ps` instead of merely looking empty.
+
+  The reverse proxy is unaffected: it reaches each instance by its published host
+  port (`COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`), which is already per-instance.
+  An upstream that names `claude-desktop` directly — rather than the loopback port
+  — should be pointed at the instance's alias instead.
 
 ## Stage 2 — per-user light instances
 
