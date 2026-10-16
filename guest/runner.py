@@ -19,7 +19,8 @@ messages, the session's model and permission mode — minus the `--sdk-url`
 transport, which the compiled binary only allows for Anthropic's own hosts. The
 prompt is a stream-json user message on the agent's stdin, never an argument, so
 the agent is never started "without a prompt"; every assistant message, tool
-result and partial update is written back as an event as it happens; stderr is
+result, partial update and the turn's own `result` message (the terminal the
+reader closes a turn on) is written back as an event as it happens; stderr is
 the agent's own logging and stays out of the transcript; and later turns
 `--resume` the conversation id the agent stamped on its own events.
 
@@ -38,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 
 def env(name, default=""):
@@ -357,6 +358,17 @@ def run_session(hint):
         log("session %s: turn done in %.1fs (%s events, %s turns, cost %s)" % (
             session, duration, forwarded, result.get("num_turns"),
             result.get("total_cost_usd")))
+    # The turn's own `result` message belongs in the transcript too: it is the
+    # terminal the reader closes the turn on (the SDK stream carries it, the
+    # wire contract lists it as a transcript type, and a reader that never
+    # sees one holds the turn open — rows around tool calls stay unplaced).
+    # Written after the retry decision, so a discarded first attempt leaves
+    # nothing behind.
+    if result is not None and not failures:
+        try:
+            write(result)
+        except Exception as error:  # noqa: BLE001 - recorded with the run
+            failures.append(str(error))
 
     if failures:
         finish("report-failure", {"reason": "could not write events: %s" % failures[0][:300],

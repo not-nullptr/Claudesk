@@ -121,7 +121,8 @@ try {
 
   const history = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
   const decoded = decodeClientEventsResponse(history);
-  assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
+  assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant", "result"],
+    "the turn's own result message is part of the transcript — the turn terminal the reader closes on");
   assert.equal(decoded[1].message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model claude-opus-5-5"
@@ -145,9 +146,9 @@ try {
   const history2 = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
   const decoded2 = decodeClientEventsResponse(history2);
   assert.deepEqual(decoded2.map((entry) => entry.message.type),
-    ["user", "assistant", "user", "assistant"],
+    ["user", "assistant", "result", "user", "assistant", "result"],
     "the second turn lands after the first one released");
-  assert.equal(decoded2[3].message.message.content[0].text,
+  assert.equal(decoded2[4].message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model claude-opus-5-5"
     + " --resume 11111111-1111-4111-8111-111111111111"

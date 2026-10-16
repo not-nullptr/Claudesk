@@ -473,9 +473,11 @@ What is left is the **deployment** half, and it needs the box:
    `--resume` for later turns — minus `--sdk-url`, which the compiled binary
    reserves for Anthropic's own hosts. The prompt is a stream-json user message
    on the agent's stdin, never an argument (so the agent is never started
-   "without a prompt"); every assistant message, tool result and partial update
-   lands in the transcript as its own event the moment the agent emits it (text
-   streams, and tool calls render as the tool rows they are); stderr stays out
+   "without a prompt"); every assistant message, tool result, partial update
+   and the turn's own `result` message — the terminal the reader closes a turn
+   on, so a turn never stays pending — lands in the transcript as its own event
+   the moment the agent emits it (text streams, and tool calls render as the
+   tool rows they are); stderr stays out
    of the transcript; and the conversation id the agent stamps on its own
    events is what a follow-up message resumes, so a session keeps its memory
    across turns even though each turn is a fresh process — and a message that
