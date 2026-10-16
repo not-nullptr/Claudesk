@@ -92,24 +92,59 @@ try {
   assert.equal(placed.status, 201, placed.body);
   const sessionId = JSON.parse(placed.body).session.id;
 
-  // The runner is offered it, runs it, and releases it.
+  // The user's prompt arrives as a client event, the way the composer sends it.
+  await request(`/v1/code/sessions/${sessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "what is this repo" } } }] }),
+  });
+
+  // The runner is offered it, runs an agent on it, and releases it. The agent
+  // here is a stub standing in for the Claude Code binary the guest carries —
+  // everything from the runner's protocol to the transcript it writes is real.
   const offered = await runner.poll();
   assert.equal(offered.hints.length, 1, "the runner is offered the placed session");
   assert.equal(offered.hints[0].session_uuid, sessionId);
-  const ran = await runner.runSession(offered.hints[0], { message: "ran on the runner" });
+  const ran = await runner.runSession(offered.hints[0], {
+    execute: { bin: process.execPath,
+      args: (prompt) => ["--eval", `process.stdout.write("ran on the runner: " + ${JSON.stringify(prompt)})`] },
+  });
   assert.equal(ran.session_uuid, sessionId);
-  assert.equal(ran.events, 1, "the runner's transcript write is recorded");
+  assert.equal(ran.exit, 0, "the agent exited cleanly");
+  assert.equal(ran.events, 1, "the agent's output is written back to the session");
 
-  // What the app then reads: the transcript under its own contract, and the
-  // session no longer offered to anyone.
+  // What the app then reads: the prompt it sent, the agent's answer, both under
+  // its own contract — and the session no longer offered to anyone.
   const history = JSON.parse(
     (await request(`/v1/code/sessions/${sessionId}/events`)).body);
   const decoded = decodeClientEventsResponse(history);
-  assert.equal(decoded.length, 1);
-  assert.equal(decoded[0].message.type, "assistant");
-  assert.equal(decoded[0].message.message.content[0].text, "ran on the runner");
+  assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
+  assert.equal(decoded[1].message.message.content[0].text,
+    "ran on the runner: what is this repo", "the agent ran on the prompt the session carried");
   assert.deepEqual((await runner.poll()).hints, [],
     "a released session is not handed out again");
+
+  // An agent that fails is reported rather than released, and its partial output
+  // still lands — the operator sees why on the session.
+  const second = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "the loop, failing", environment_id: poolId }),
+  });
+  const secondId = JSON.parse(second.body).session.id;
+  await request(`/v1/code/sessions/${secondId}/events`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "fail please" } } }] }),
+  });
+  const failing = await runner.runSession((await runner.poll()).hints[0], {
+    execute: { bin: process.execPath,
+      args: () => ["--eval", 'process.stderr.write("boom"); process.exit(3)'] },
+  });
+  assert.equal(failing.exit, 3);
+  const failed = JSON.parse((await request(`/v1/code/sessions/${secondId}`)).body);
+  assert.equal(failed.session.status, "failed", "a failed agent leaves the session failed");
 } finally {
   if (child) child.kill("SIGTERM");
   if (createdRelease) rmSync(releaseFile, { force: true });

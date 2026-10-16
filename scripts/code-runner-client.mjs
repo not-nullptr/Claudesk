@@ -19,7 +19,23 @@
 //
 // Auth is the pool secret on every runner call, as `Authorization: Bearer …`.
 // See docs/code-in-cowork-vm.md.
+import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
+
+/** The text of the last user message a session carries — what the runner runs. */
+export function promptOf(events) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const message = events[i]?.payload;
+    if (message?.type !== "user") continue;
+    const content = message.message?.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      const text = content.filter((part) => part?.type === "text").map((part) => part.text).join("\n");
+      if (text) return text;
+    }
+  }
+  return "";
+}
 
 export function createRunnerClient({ base, secret, runnerVersion = "2.1.295", log = () => {} }) {
   const root = String(base).replace(/\/+$/, "");
@@ -60,21 +76,68 @@ export function createRunnerClient({ base, secret, runnerVersion = "2.1.295", lo
   }
 
   /**
-   * Run one offered session the way a real runner would: take the session token,
-   * write the transcript through the session's own events leg, then release it.
-   * Executing Claude Code against the session is what a real runner adds here.
+   * Run one offered session: take the session token, then either execute an
+   * agent for it (`execute`) or write the transcript directly.
+   *
+   * With `execute` the runner does what the real one does — read the session's
+   * events for the user's prompt, spawn the Claude Code binary on it, write the
+   * agent's output back as assistant messages, and release (or report the
+   * failure). `execute` is `{ bin, args(prompt), cwd?, env? }`; the default
+   * below is `claude --print <prompt>`, the non-interactive form.
    */
-  async function runSession(hint, { message = "runner: session started" } = {}) {
+  async function runSession(hint, { execute = null, message = "runner: session started" } = {}) {
     const sessionId = encodeURIComponent(hint.session_uuid);
     const { session_token: token } = expect(
       await call(`/v1/code/runners/self-hosted/sessions/${sessionId}/token`), "token");
-    const wrote = expect(await call(`/v1/code/sessions/${sessionId}/events`, {
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: { payload: { type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: message }] } } },
-    }), "events");
-    expect(await call(`/v1/code/runners/self-hosted/sessions/${sessionId}/release`), "release");
-    return { session_uuid: hint.session_uuid, events: wrote.data?.length ?? 0 };
+    const sessionAuth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const write = async (payload) => {
+      const wrote = expect(await call(`/v1/code/sessions/${sessionId}/events`, {
+        headers: sessionAuth, body: { payload },
+      }), "events");
+      return wrote.data?.length ?? 0;
+    };
+    const release = async () => {
+      expect(await call(`/v1/code/runners/self-hosted/sessions/${sessionId}/release`), "release");
+    };
+
+    if (!execute) {
+      const written = await write({ type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: message }] } });
+      await release();
+      return { session_uuid: hint.session_uuid, events: written, exit: 0 };
+    }
+
+    const history = await call(`/v1/code/sessions/${sessionId}/events`,
+      { method: "GET", headers: sessionAuth });
+    const prompt = promptOf(history.body?.data ?? []);
+    let events = 0;
+    let output = "";
+    const child = spawn(execute.bin, execute.args(prompt), {
+      cwd: execute.cwd ?? process.cwd(),
+      env: { ...process.env, ...execute.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (chunk) => { output += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString("utf8"); });
+    const code = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    const text = output.trim();
+    if (text) {
+      events += await write({ type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text }] } });
+    }
+    if (code === 0) {
+      await release();
+    } else {
+      expect(await call(`/v1/code/runners/self-hosted/sessions/${sessionId}/report-failure`, {
+        headers: sessionAuth,
+        body: { reason: `agent exited ${code}`, failure_kind: "agent_failed" },
+      }), "report-failure");
+    }
+    log(`session ${hint.session_uuid}: agent exited ${code}, ${events} event(s) written`);
+    return { session_uuid: hint.session_uuid, events, exit: code };
   }
 
   return { register, poll, runSession };
@@ -90,14 +153,25 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       once: { type: "boolean", default: false },
       poll: { type: "string" },
       message: { type: "string" },
+      // Execute an agent for each session instead of writing a canned message.
+      // The binary is the one the guest carries (CLAUDE_RUNNER_CLAUDE_BIN in the
+      // real runner's own environment); non-interactive, so `--print`.
+      exec: { type: "boolean", default: false },
+      "claude-bin": { type: "string", default: process.env.CLAUDE_RUNNER_CLAUDE_BIN || "claude" },
+      cwd: { type: "string", default: process.env.CLAUDE_RUNNER_CHECKOUT_PATH },
     },
   });
   if (!values.base || !values.secret) {
-    process.stderr.write("usage: code-runner-client.mjs --base URL --pool POOL_ID --secret SECRET [--once]\n");
+    process.stderr.write("usage: code-runner-client.mjs --base URL --pool POOL_ID --secret SECRET "
+      + "[--once] [--exec [--claude-bin PATH] [--cwd DIR]]\n");
     process.exit(2);
   }
   const log = (line) => process.stdout.write(`[runner] ${line}\n`);
   const client = createRunnerClient({ base: values.base, secret: values.secret, log });
+  const execute = values.exec
+    ? { bin: values["claude-bin"], args: (prompt) => ["--print", prompt],
+        ...(values.cwd ? { cwd: values.cwd } : {}) }
+    : null;
   await client.register();
   const interval = Math.max(1, Number(values.poll ?? 5)) * 1000;
   for (;;) {
@@ -111,8 +185,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await new Promise((resolve) => setTimeout(resolve, interval));
       continue;
     }
-    const ran = await client.runSession(hint, values.message ? { message: values.message } : {});
-    log(`ran ${ran.session_uuid} (${ran.events} event(s) written)`);
+    const ran = await client.runSession(hint, {
+      ...(execute ? { execute } : {}),
+      ...(values.message ? { message: values.message } : {}),
+    });
+    log(`ran ${ran.session_uuid} (${ran.events} event(s) written, exit ${ran.exit})`);
     if (values.once) break;
   }
 }

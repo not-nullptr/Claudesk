@@ -322,13 +322,21 @@ runner, and its events can be written and read (including the stream). Phase 3 i
 in — accounts answer the pool API by default and are offered no place until a
 runner registers, which is what makes that default safe.
 
-The runner's half of the loop is exercised too, without a runner binary:
+The runner's half of the loop is exercised too, without a Claude Code binary:
 `scripts/code-runner-client.mjs` speaks the runner's protocol (register, poll,
-token, transcript, release) and `scripts/code-runner-loop-smoke.mjs` boots the
-bridge, has a runner claim the pool, places a session, runs it and reads the
-transcript back under the app's contract. The same client pointed at a live
-instance (`--base URL --secret …`) is the diagnostic for whether a tenant's pool
-answers and what it offers.
+session token, transcript, release) and, with `--exec`, *runs an agent* for each
+session — it reads the prompt out of the session's own events, spawns
+`CLAUDE_RUNNER_CLAUDE_BIN` (`claude --print`) on it, writes the output back as
+assistant messages, and then releases the session or reports the failure.
+`scripts/code-runner-loop-smoke.mjs` boots the bridge, has a runner claim the
+pool, places a session, runs a **stub binary** in the agent's place, and reads
+the transcript back under the app's contract — including the failure path, where
+an agent that exits non-zero leaves the session `failed` rather than released.
+
+The same client pointed at a live instance (`--base URL --secret …`) is the
+diagnostic for whether a tenant's pool answers and what it offers, and with
+`--exec` it is a working runner — the only thing the box adds is the real
+`claude` and a checkout to run it in.
 
 What is left is the **deployment** half, and it needs the box:
 
