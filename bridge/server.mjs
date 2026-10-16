@@ -3122,13 +3122,20 @@ async function handleCodeRunnerApi(request, response, url) {
   // advertised, so the renderer cannot offer one to place a session on. That is
   // the guarantee stated where the choice is actually made, alongside the IPC
   // one in `codeActionsEnabled`.
+  // Two environments legs, because the product has two: the org's provider list
+  // (`…/environment_providers/private/organizations/{org}/environments`, the
+  // Cloud-environments page) and the workspace-scoped one the *new session*
+  // sheet reads its places from (`/v1/environments`, `{environments: […]}`
+  // beside the pools query). Answering only the first is what left the sheet
+  // saying it had no local sessions and nothing else to offer.
   const environmentsMatch = pathname.match(
     /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments(?:\/([^/]+))?\/?$/i,
   );
-  if (environmentsMatch && method === "GET") {
-    const id = environmentsMatch[1];
-    if (id) {
-      const environment = await codeRunners.environment(decodeURIComponent(id));
+  const workspaceEnvironmentsMatch = pathname.match(/^\/v1\/environments(?:\/([^/]+))?\/?$/);
+  const environmentId = environmentsMatch?.[1] ?? workspaceEnvironmentsMatch?.[1];
+  if ((environmentsMatch || workspaceEnvironmentsMatch) && method === "GET") {
+    if (environmentId) {
+      const environment = await codeRunners.environment(decodeURIComponent(environmentId));
       if (!environment) throw new ApiError(404, "environment not found");
       return sendJson(response, 200, environment);
     }
@@ -4314,6 +4321,8 @@ const server = http.createServer(async (request, response) => {
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
         || url.pathname.startsWith("/v1/environment_providers/")
+        || url.pathname === "/v1/environments"
+        || /^\/v1\/environments\/[^/]+$/.test(url.pathname)
         || /^\/v1\/code\/sessions\/([^/]+)(\/events(\/stream)?)?$/.test(url.pathname)
         || url.pathname === "/v1/code/sessions")
     ) {

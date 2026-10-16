@@ -208,8 +208,11 @@ the store's to number (`event_id`, a positive digit-string `sequence_num`), and
 they are held to the app's own contract by `scripts/lib/code-wire-contract.mjs`
 in the smokes, not to a hand-written idea of the shape.
 
-`bridge/server.mjs` routes `/v1/code/runners/*`,
-`/v1/environment_providers/…/environments[/{id}]` and those two session shapes to
+`bridge/server.mjs` routes `/v1/code/runners/*`, both environments legs —
+`…/environment_providers/private/organizations/{org}/environments[/{id}]` (the
+Cloud-environments page) and `/v1/environments[/{id}]`, which is where the *new
+session* sheet reads its places from, beside the pools query — and those two
+session shapes to
 it, but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`, so nothing is routed
 until a deployment turns it on. `scripts/code-runners-smoke.mjs` drives the
 backend directly, and `scripts/code-runners-http-smoke.mjs` drives the whole

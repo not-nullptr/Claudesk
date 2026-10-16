@@ -106,6 +106,8 @@ try {
   const early = JSON.parse((await tenantRequest(environmentsPath)).body);
   assert.deepEqual(early.environments, [],
     "an unclaimed pool is not advertised as a place a session can run");
+  assert.deepEqual(JSON.parse((await tenantRequest("/v1/environments")).body).environments, [],
+    "and the sheet's own leg says the same");
 
   // Registration is authenticated by the pool secret alone.
   const registered = await tenantRequest("/v1/code/runners/self-hosted/runners/register", {
@@ -133,6 +135,15 @@ try {
   assert.equal(environmentList.environments[0].environment_id, poolId);
   assert.ok(environmentList.environments.every((environment) => environment.kind === "byoc"),
     "a tenant is never offered a local environment");
+
+  // The new-session sheet reads a *second* environments leg for its places —
+  // `/v1/environments`, workspace-scoped — and answering only the provider one
+  // left it reporting no local sessions and nothing else to offer.
+  const placeList = JSON.parse((await tenantRequest("/v1/environments")).body);
+  assert.deepEqual(placeList.environments.map((environment) => environment.environment_id),
+    [poolId], "the sheet's own leg answers with the pool");
+  assert.equal((await tenantRequest(`/v1/environments/${poolId}`)).status, 200);
+  assert.equal((await tenantRequest("/v1/environments/no-such-pool")).status, 404);
 
   const polled = await tenantRequest("/v1/code/runners/self-hosted/spawn-hints/poll",
     { method: "POST", headers: auth, body: "{}" });
