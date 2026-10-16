@@ -187,6 +187,30 @@
     writable: false,
   });
 
+  // The renderer picks its composer design ("marlin", the deployment's choice)
+  // from the device latch — `composer-card-latch` in localStorage (`shared-75`'s
+  // `Fd`/`Yh`) — and, on the New page only, from the static stamp the shell
+  // rewrites to `data-composer-arm="marlin"` (bridge/official-index.mjs; the
+  // renderer's `Nh` refuses the stamp unless `location.pathname === "/new"` and
+  // the element is un-hidden, which is true only there). Every other surface —
+  // the project pages among them — therefore falls back to a latch nothing ever
+  // writes, draws the pre-marlin composer (the model control inside the card,
+  // the project and permission controls in a tray below it) and, with the
+  // surface switch, the pre-merge Chat/Cowork pair. Seed the latch so every
+  // surface resolves the same design the New page does. The app writes this key
+  // when a person picks a card, and the bridge's own resets clear it, so an
+  // explicit "classic" is left alone; only an absent or unrecognised value is
+  // seeded.
+  try {
+    const composerLatch = globalThis.localStorage?.getItem("composer-card-latch");
+    if (composerLatch !== "classic" && composerLatch !== "marlin") {
+      globalThis.localStorage?.setItem("composer-card-latch", "marlin");
+    }
+  } catch {
+    // Private-mode storage, or none at all: the composer falls back to the
+    // renderer's own default rather than failing the page.
+  }
+
   const listenerCallbacks = new Map();
   const latestTranscriptEvents = new Map();
   const storeCallbacks = new Map();

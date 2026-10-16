@@ -572,6 +572,24 @@ flag operand true, leaving the side-panel guard they all end with in place.
 Spliced only in web-shell mode, and not required: a bundle that no longer
 matches leaves the arm to the flag.
 
+Forcing the predicates is not enough on its own, because the design is not read
+from the feature alone. The renderer resolves the composer design from a
+**device latch** — `composer-card-latch` in localStorage, answering `"classic"`
+when nothing wrote it — and from the **static stamp**, which the shell rewrites
+to `data-composer-arm="marlin"` on the skeleton composer element. The stamp is
+consulted only on the New page: the renderer's reader refuses it unless
+`location.pathname === "/new"` and the element is un-hidden, which is true
+nowhere else. So the New page gets the marlin card from the stamp while every
+other surface — project pages, session pages — falls back to a latch no one
+writes, and draws the pre-marlin composer: the model control inside the card,
+the project and permission controls in a tray below it, and the pre-merge
+Chat/Cowork switch above. The remote preload seeds the latch with `"marlin"`
+(nothing is stored, or the stored value is unrecognised), so every surface
+resolves the design the New page does; an explicit `"classic"` — the app writes
+that key when a person picks a card — is left alone, and a storage that refuses
+writes is ignored rather than fatal. `scripts/composer-latch-smoke.mjs` pins all
+four.
+
 Two decisions downstream of that arm are forced for the same reason, because a
 deployment that grants the arm has already made them:
 

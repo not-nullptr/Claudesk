@@ -45,6 +45,7 @@ node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
 node scripts/notifications-smoke.mjs
 node scripts/projects-smoke.mjs
+node scripts/composer-latch-smoke.mjs
 node scripts/docker-copy-smoke.mjs
 node scripts/start-permission-mode-smoke.mjs
 node scripts/cowork-skip-approvals-smoke.mjs
