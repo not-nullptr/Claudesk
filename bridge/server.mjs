@@ -2087,6 +2087,15 @@ function injectPersonalizedGreeting(parsed, name, now = new Date()) {
 // is left exactly as it is, so this cannot silently override org policy.
 function grantWebShellEntitlements(value) {
   if (!value || typeof value !== "object") return false;
+  // `claude_code_web` is granted only where it is true: a tenant whose Code runs
+  // on a self-hosted runner. It is the entry the renderer's Code UI reads —
+  // `xe("claude_code_web").status === "available"`, alongside the
+  // `bad_moon_rising` gate the pill navigates on — and it is what the mobile
+  // facade declares for the phone. The operator's own instance is left alone: its
+  // Code is the container's and already carries whatever it needs.
+  const granted = codeRunnersEnabled
+    ? [...webShellGrantedFeatures, "claude_code_web"]
+    : webShellGrantedFeatures;
   let changed = false;
   for (const holder of [value.current_user_access, value]) {
     if (!holder || !Array.isArray(holder.features)) continue;
@@ -2094,7 +2103,7 @@ function grantWebShellEntitlements(value) {
       holder.features.filter((entry) => entry && typeof entry.feature === "string")
         .map((entry) => entry.feature),
     );
-    for (const feature of webShellGrantedFeatures) {
+    for (const feature of granted) {
       if (present.has(feature)) continue;
       holder.features.push({ feature, status: "available" });
       changed = true;

@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import vm from "node:vm";
 
 import { createRunnerBackend, poolEnvironment } from "../bridge/code-runners.mjs";
 import { decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
+
+function section(source, start, end) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex);
+  assert.notEqual(startIndex, -1, `missing section start: ${start}`);
+  assert.notEqual(endIndex, -1, `missing section end: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
 
 // The runner substrate a tenant's Code uses instead of its own container: a
 // self-hosted pool the Claude Code runner registers with and polls, and the
@@ -244,6 +253,44 @@ assert.ok(
   serverSource.includes('url.pathname.startsWith("/v1/environment_providers/")'),
   "the environment list a tenant's Code surface reads is served here too",
 );
+// The web Code surface reads `claude_code_web` out of the access document, so a
+// tenant with the runner backend has to declare it — the same entry the mobile
+// facade declares for the phone — while the operator's own instance is left
+// alone. Exercised, not grepped: the grant is evaluated against a document.
+// Two slices, not one: the granted list and the function that applies it sit
+// far apart in the bridge, and everything between them would not evaluate here.
+const grantList = section(serverSource, "const webShellGrantedFeatures",
+  "// GrowthBook gates the web shell reads");
+const grantFn = section(serverSource, "function grantWebShellEntitlements(",
+  "function growthbookKey(");
+const grants = `${grantList}\n${grantFn}`;
+function grantedFeatures(codeRunners, initial = []) {
+  const sandbox = { codeRunnersEnabled: codeRunners };
+  vm.runInNewContext(
+    `const codeRunnersEnabled = ${codeRunners};
+     ${grants}
+     const document = { current_user_access: { features: ${JSON.stringify(initial)} }, features: [] };
+     grantWebShellEntitlements(document);
+     result = document.current_user_access.features;`,
+    sandbox,
+  );
+  return JSON.parse(JSON.stringify(sandbox.result));
+}
+const tenantFeatures = Object.fromEntries(grantedFeatures(true).map((f) => [f.feature, f.status]));
+assert.equal(tenantFeatures.claude_code_web, "available",
+  "a tenant's access document must declare the web Code surface");
+assert.equal(tenantFeatures.dramatic_shrimp, "available");
+const ownerFeatures = Object.fromEntries(grantedFeatures(false).map((f) => [f.feature, f.status]));
+assert.equal("claude_code_web" in ownerFeatures, false,
+  "the operator's own instance keeps whatever upstream said about claude_code_web");
+
+// An entry the upstream already carries is never overwritten, whatever its
+// status — that is what keeps this from silently undoing org policy.
+const [blocked] = grantedFeatures(true,
+  [{ feature: "claude_code_web", status: "blocked_by_entitlement" }]);
+assert.equal(blocked.status, "blocked_by_entitlement",
+  "an upstream verdict on claude_code_web must survive the grant");
+
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 assert.equal(
   (compose.match(/CLAUDESK_CODE_RUNNERS: "\$\{CLAUDESK_CODE_RUNNERS:-0\}"/g) || []).length, 1,

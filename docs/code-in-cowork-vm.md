@@ -178,6 +178,13 @@ so the chain closes at the bridge: create → the pool's runner is offered it �
 this instance's pools is refused rather than quietly run locally, because there
 is no local executor here to run it.
 
+The Code *surface* itself is declared to the renderer: a tenant's access document
+carries `claude_code_web` as available — the entry the Code UI reads, and the one
+the mobile facade declares for the phone — so the pill exists and the surface
+opens, on a tenant only. The operator's own instance keeps whatever upstream said
+about it, and an entry that is already there (`blocked_by_*` included) is never
+overridden.
+
 A session's events are served too: `GET …/sessions/{id}/events` (paged,
 `after_sequence_num` resumes), `POST` to append — `{events:[{payload}]}` from the
 renderer, a bare `{payload}` from a runner — and `GET …/events/stream`, which

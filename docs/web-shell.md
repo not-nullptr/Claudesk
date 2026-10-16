@@ -433,6 +433,14 @@ adds `bad_moon_rising` to the bootstrap's `growthbook.features` (addressed by
 ion-dist's Java-style name hash), so the pill navigates to the route above
 instead of upselling.
 
+**A tenant is granted the surface itself.** The Code UI also reads
+`claude_code_web` out of the access document
+(`xe("claude_code_web").status === "available"`), so the bridge adds that entry
+for an instance whose Code runs on a self-hosted runner — the same entry the
+mobile facade declares for the phone — while leaving the operator's own instance
+to whatever upstream said. An entry that is already there is never overridden,
+including a `blocked_by_*` one. See [Code in the Cowork VM](code-in-cowork-vm.md).
+
 ## Cowork scheduled tasks
 
 The Cowork scheduled-task list has one route in — the hub sidebar's **Scheduled**
