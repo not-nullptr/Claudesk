@@ -110,20 +110,56 @@ if command -v docker >/dev/null 2>&1 &&
     container_running=true
 fi
 
+# What gets staged has to be a *plain* Claude Code. Every claude build the
+# product itself ships is cowork-flavoured and talks to coworkd instead of
+# answering: the guest's staged SDK binary refuses outside a session ("claude:
+# no session for this uid"), and the Desktop container's own copy forwards the
+# prompt into coworkd's ask-claude socket ("claude: send: write unix
+# @->/run/coworkd/ask-claude.sock: write: broken pipe"). Neither is patched
+# here — nothing about the product is modified — the runner is simply given
+# the upstream binary: found in the account's container when a plain one is
+# there (large, and without the cowork socket), else fetched once from the
+# pinned npm artifact (the same native package the Desktop installs from) and
+# cached under the account's data root, so later installs need no network.
+agent_version="${CLAUDESK_GUEST_CLAUDE_VERSION:-2.1.295}"
 agent_source="${CLAUDESK_GUEST_CLAUDE_SOURCE:-}"
 if [ -z "$agent_source" ] && [ "$container_running" = true ]; then
-    # The real binary is the big one; the small files with the same name are
-    # the stubs the Desktop writes to funnel host invocations elsewhere.
     agent_source="$(docker exec "$desktop_container" sh -c '
         for p in /usr/local/bin/claude "$HOME/.local/share/claude/claude" \
-                 /opt/claude/claude /opt/cowork/claude-bin/claude; do
+                 /opt/claude/claude; do
             [ -f "$p" ] || continue
             size=$(stat -c %s "$p" 2>/dev/null || echo 0)
-            [ "$size" -gt 20000000 ] && { echo "$p"; exit 0; }
+            [ "$size" -gt 100000000 ] && { echo "$p"; exit 0; }
         done
-        find /usr/local /opt /root /home -maxdepth 6 -type f -name claude -size +20M 2>/dev/null | head -n 1
+        find /usr/local /opt /root /home -maxdepth 8 -type f -name claude -size +100M 2>/dev/null |
+            while read -r candidate; do
+                if ! grep -q "ask-claude.sock" "$candidate" 2>/dev/null; then
+                    echo "$candidate"
+                    break
+                fi
+            done
     ' 2>/dev/null || true)"
     [ -z "$agent_source" ] || agent_source="$desktop_container:$agent_source"
+fi
+agent_download=""
+if [ -z "$agent_source" ]; then
+    agent_cache="$user_root/bridge-data/guest-claude-$agent_version"
+    if [ ! -s "$agent_cache" ]; then
+        agent_url="https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$agent_version.tgz"
+        agent_download="$(mktemp)"
+        printf 'install-guest-runner: fetching Claude Code %s for staging\n' "$agent_version" >&2
+        if ! curl -fsSL --connect-timeout 20 "$agent_url" 2>/dev/null |
+            tar -xzO package/claude > "$agent_download" 2>/dev/null || [ ! -s "$agent_download" ]; then
+            printf 'install-guest-runner: could not fetch %s\n' "$agent_url" >&2
+            printf 'install-guest-runner: set CLAUDESK_GUEST_CLAUDE_SOURCE=container:/path to a plain claude\n' >&2
+            exit 1
+        fi
+        chmod 0755 "$agent_download"
+        mv "$agent_download" "$agent_cache" 2>/dev/null || cp "$agent_download" "$agent_cache"
+        agent_download=""
+    fi
+    chmod 0755 "$agent_cache" 2>/dev/null || true
+    agent_source="$agent_cache"
 fi
 
 # The account's model endpoint and key, as the instance itself holds them. The
@@ -184,6 +220,7 @@ cleanup() {
         umount "$mount_dir" || true
     fi
     [ -z "$loop_device" ] || losetup -d "$loop_device" || true
+    [ -z "${agent_download:-}" ] || rm -f "$agent_download"
     rmdir "$mount_dir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM

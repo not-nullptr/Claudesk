@@ -455,19 +455,23 @@ What is left is the **deployment** half, and it needs the box:
    the SDK binary the host puts on the `claudeshared` share; the share itself
    is noexec). A runner pointed at the bare directory gets `[Errno 13]
    Permission denied` on execve — execve on a directory is EACCES — so
-   `guest/runner.py` resolves either form (directory → `claude` inside). That
-   staged binary is also **session-bound**: run outside a coworkd session it
-   refuses with `claude: no session for this uid`, and its argv validator
-   accepts exactly **`claude -p "<prompt>"`** ("only claude -p \"<prompt>\" is
-   supported in this environment") — so the installer stages the account's
-   *own* Claude Code into the guest as `/opt/claudesk/claude` (leaving the
-   product's binary and the Desktop's own behaviour untouched), carries the
-   account's model endpoint and key into the guest's root-only `runner.env`
-   (loopback rewritten to `10.0.2.2`), and the runner invokes the one form the
-   binary allows. Remaining: whether the staged agent answers through the
-   gateway from inside the guest, and whether the host can write the
-   `claudeshared` share — if it can, the payload should move out of the image
-   and only the unit need re-deriving per release.
+   `guest/runner.py` resolves either form (directory → `claude` inside). But
+   **every product claude is cowork-flavoured and talks to coworkd instead of
+   answering**: the guest's staged binary refuses outside a session (`claude:
+   no session for this uid`) and accepts exactly `claude -p "<prompt>"`, and
+   the Desktop container's own copy forwards the prompt into the guest's
+   ask-claude socket (`claude: send: write unix @->/run/coworkd/ask-claude.sock:
+   write: broken pipe`). Nothing about the product is modified for this — the
+   installer stages a **plain upstream Claude Code** instead (found in the
+   container when one is there, else fetched once from the pinned npm artifact
+   into the account's data root), carries the account's model endpoint and key
+   into the guest's root-only `runner.env` (loopback rewritten to `10.0.2.2`),
+   and the runner invokes `claude -p "<prompt>"`. Remaining: whether the
+   staged agent's endpoint is reachable from inside the guest (the gateway URL
+   must be one the guest can resolve — the provisioning docs already say so),
+   and whether the host can write the `claudeshared` share — if it can, the
+   payload should move out of the image and only the unit need re-deriving per
+   release.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it
