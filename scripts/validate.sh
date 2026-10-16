@@ -26,6 +26,7 @@ node scripts/account-settings-smoke.mjs
 node scripts/account-scope-smoke.mjs
 node scripts/tenant-code-guard-smoke.mjs
 node scripts/code-runners-smoke.mjs
+node scripts/code-runners-http-smoke.mjs
 node scripts/slug-smoke.mjs
 node scripts/update-resilience-smoke.mjs
 node scripts/package-sync-smoke.mjs
