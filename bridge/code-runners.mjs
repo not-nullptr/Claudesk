@@ -443,6 +443,76 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       };
     },
 
+    /**
+     * Append a session's events — the transcript a runner produces and the
+     * client events the renderer posts.
+     *
+     * `body` is either `{events: [...]}` (how the renderer posts: each entry
+     * carries a `payload`) or a single envelope (`{payload, event_type?}`, how a
+     * runner writes one message). `event_id` and `sequence_num` are the store's
+     * to assign: the wire contract requires a non-empty `event_id` and a
+     * `sequence_num` that is a **positive digit string** — the renderer's own
+     * reader rejects zero and a non-string — so a caller-supplied one is
+     * ignored rather than trusted.
+     */
+    async appendEvents({ sessionId, body } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      const incoming = Array.isArray(body?.events) ? body.events
+        : body && typeof body === "object" ? [body] : [];
+      session.events = Array.isArray(session.events) ? session.events : [];
+      let sequence = session.events.reduce(
+        (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
+      const appended = [];
+      for (const entry of incoming) {
+        const payload = isRecord(entry?.payload) ? entry.payload : entry;
+        if (!isRecord(payload)) continue;
+        sequence += 1;
+        const envelope = {
+          event_id: randomUUID(),
+          sequence_num: String(sequence),
+          payload,
+          ...(typeof entry?.event_type === "string" && entry.event_type
+            ? { event_type: entry.event_type } : {}),
+          created_at: new Date().toISOString(),
+        };
+        session.events.push(envelope);
+        appended.push(envelope);
+      }
+      if (appended.length) await save();
+      return { data: appended };
+    },
+
+    /**
+     * GET /v1/code/sessions/{id}/events — the history, paged. `after_sequence_num`
+     * resumes (that is the parameter the stream and the app's pager both use),
+     * `limit` caps one page.
+     */
+    async listEvents({ sessionId, searchParams } = {}) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      const after = Number(searchParams?.get?.("after_sequence_num") ?? 0) || 0;
+      const limit = Number(searchParams?.get?.("limit") ?? 0) || 0;
+      const events = (session.events ?? [])
+        .filter((event) => Number(event.sequence_num) > after);
+      const page = limit > 0 ? events.slice(0, limit) : events;
+      return {
+        data: page,
+        next_cursor: limit > 0 && page.length < events.length
+          ? String(page[page.length - 1]?.sequence_num ?? after) : null,
+      };
+    },
+
+    /** The events after a sequence, for the SSE replay and its tail. */
+    async eventsAfter(sessionId, sequence) {
+      const state = await load();
+      const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+      if (!session) return null;
+      return (session.events ?? []).filter((event) => Number(event.sequence_num) > sequence);
+    },
+
     /** GET /v1/code/sessions/{id} */
     async session(sessionUuid) {
       const state = await load();

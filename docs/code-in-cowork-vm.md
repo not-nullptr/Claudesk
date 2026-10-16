@@ -178,6 +178,14 @@ so the chain closes at the bridge: create → the pool's runner is offered it �
 this instance's pools is refused rather than quietly run locally, because there
 is no local executor here to run it.
 
+A session's events are served too: `GET …/sessions/{id}/events` (paged,
+`after_sequence_num` resumes), `POST` to append — `{events:[{payload}]}` from the
+renderer, a bare `{payload}` from a runner — and `GET …/events/stream`, which
+replays the history as `client_event` frames and then tails it. The envelopes are
+the store's to number (`event_id`, a positive digit-string `sequence_num`), and
+they are held to the app's own contract by `scripts/lib/code-wire-contract.mjs`
+in the smokes, not to a hand-written idea of the shape.
+
 `bridge/server.mjs` routes `/v1/code/runners/*`,
 `/v1/environment_providers/…/environments[/{id}]` and those two session shapes to
 it, but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`, so nothing is routed
@@ -282,18 +290,16 @@ Extracted while building the substrate, so it does not have to be re-read:
   attestation header) and `worker/register` (`Authorization: Bearer
   <session token>` → `{worker_epoch, …}`); `GET …/terminal` (or
   `/v2/ccr-sessions/{id}/terminal` under the `ccr_v2_terminal_ws_web` gate).
-- **The event stream is the large remaining piece, and it is the Desktop's *main
-  process* that consumes it, not the renderer.** `index.chunk-DcP6Ha83.js`
-  carries an SSE transport that reconnects with `from_sequence_num`, a
-  keepalive-interval parameter and a worker-attestation-policy parameter, and a
-  session event model tracking `client_events` and `internal_events` separately,
-  with tool-call rows, lanes, hold policies and gates around them. A faithful
-  bridge-side stream therefore has to speak that whole model, and neither the
-  mobile facade's DTOs (the phone's client) nor the local-session events this
-  bridge already forwards describe it. This is where the next increment starts,
-  and it wants a live Desktop to check against.
+- **The event stream's remaining depth.** The bridge now answers the stream in
+  the envelope contract the app's own reader is pinned to, but the Desktop *main
+  process* runs a richer model on top of it: `index.chunk-DcP6Ha83.js` tracks
+  `client_events` and `internal_events` separately, with tool-call rows, lanes,
+  hold policies and gates, and its SSE transport also sends a keepalive-interval
+  and a worker-attestation-policy parameter. What it does with frames this bridge
+  does not model (tool-call row lifecycles, holds) is what a live Desktop would
+  show, and it is the first thing to check on the box.
 - **Still unknown:** the renderer's own create transform (see above), and the
-  exact transcript/envelope shapes the main process expects on that stream.
+  exact internal-event shapes the main process expects on that stream.
 
 ## Open — the rest of the spike
 

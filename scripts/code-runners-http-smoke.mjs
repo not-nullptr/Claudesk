@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
+
 // The pool API over the real HTTP surface: the other smokes drive the backend
 // directly, so nothing there proves the bridge actually routes these paths, on a
 // tenant only, with the refusals they promise. This boots the bridge twice —
@@ -21,6 +23,27 @@ if (createdRelease) writeFileSync(releaseFile, readFileSync(`${root}config/relea
 
 const stateDir = mkdtempSync(join(tmpdir(), "code-runners-http-"));
 const children = [];
+
+// Read an SSE stream until it has carried `frames` client events (or it goes
+// quiet), then drop the connection — the stream tails forever by design.
+async function readStream(port, path, frames, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: controller.signal });
+  const chunks = [];
+  try {
+    for await (const chunk of response.body) {
+      chunks.push(Buffer.from(chunk).toString("utf8"));
+      if (chunks.join("").split("event: client_event").length - 1 >= frames) break;
+    }
+  } catch {
+    // Aborted once enough frames arrived, or the timeout fired; either way the
+    // text collected so far is what the assertions read.
+  }
+  clearTimeout(timer);
+  controller.abort();
+  return chunks.join("");
+}
 
 async function boot({ port, env }) {
   const started = spawn(process.execPath, [server], {
@@ -136,6 +159,38 @@ try {
   const hints = JSON.parse(offered.body).hints;
   assert.ok(hints.some((hint) => hint.session_uuid === placedSession.id),
     "the pool's runner is offered the session just placed");
+
+  // The session's events over HTTP, in the app's own contract (checked with the
+  // in-tree model), and the SSE stream the Desktop main process reads.
+  const appended = await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [
+      { payload: { type: "user", message: { role: "user", content: "over http" } } },
+      { payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } } },
+    ] }),
+  });
+  assert.equal(appended.status, 200, appended.body);
+  assert.equal(JSON.parse(appended.body).data.length, 2);
+
+  const history = await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`);
+  assert.equal(history.status, 200, history.body);
+  const decoded = decodeClientEventsResponse(JSON.parse(history.body));
+  assert.equal(decoded.length, 2, "the history satisfies the app's envelope contract");
+  assert.equal(decoded[0].sequence, 1n);
+
+  const resumed = await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events?after_sequence_num=1`);
+  assert.equal(JSON.parse(resumed.body).data.length, 1, "after_sequence_num resumes");
+
+  // The stream replays the history as `client_event` frames, then tails it.
+  const frames = await readStream(tenantPort, `/v1/code/sessions/${placedSession.id}/events/stream`, 2);
+  assert.ok(frames.includes("event: client_event"), "the stream names its frames client_event");
+  const streamed = frames.split("event: client_event").slice(1)
+    .map((frame) => JSON.parse(frame.slice(frame.indexOf("data: ") + 6).split("\n")[0]));
+  assert.deepEqual(streamed.map((event) => event.sequence_num), ["1", "2"],
+    "the stream replays the history in order");
+  assert.equal(decodeClientEventsResponse({ data: streamed }).length, 2);
 
   // A session for an environment this instance does not run is refused, not
   // quietly run locally.

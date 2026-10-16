@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createRunnerBackend, poolEnvironment } from "../bridge/code-runners.mjs";
+import { decodeClientEventsResponse } from "./lib/code-wire-contract.mjs";
 
 // The runner substrate a tenant's Code uses instead of its own container: a
 // self-hosted pool the Claude Code runner registers with and polls, and the
@@ -170,6 +171,42 @@ try {
   const offered = await backend.pollSpawnHints({ headers: auth });
   assert.ok(offered.hints.some((hint) => hint.session_uuid === placed.session.id),
     "a placed session is offered to the pool's runners");
+
+  // A session's events: the runner writes the transcript, the renderer reads it,
+  // and the envelopes are the app's own contract — checked with the in-tree
+  // model rather than our idea of the shape (event_id non-empty, sequence_num a
+  // positive digit string, a JSONObject payload).
+  await backend.appendEvents({
+    sessionId: placed.session.id,
+    body: {
+      events: [
+        { payload: { type: "user", message: { role: "user", content: "hi" } } },
+        { payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } } },
+      ],
+    },
+  });
+  const history = await backend.listEvents({ sessionId: placed.session.id, searchParams: new URLSearchParams() });
+  const decoded = decodeClientEventsResponse(history);
+  assert.equal(decoded.length, 2, "both events are on the wire");
+  assert.deepEqual(history.data.map((event) => event.sequence_num), ["1", "2"],
+    "sequence numbers are positive digit strings, assigned by the store");
+  assert.equal(decoded[1].message.type, "assistant");
+
+  const resumed = await backend.listEvents({
+    sessionId: placed.session.id,
+    searchParams: new URLSearchParams({ after_sequence_num: "1" }),
+  });
+  assert.equal(resumed.data.length, 1, "after_sequence_num resumes the history");
+
+  // A runner writes one message at a time, and takes the next sequence.
+  await backend.appendEvents({
+    sessionId: placed.session.id,
+    body: { payload: { type: "user", message: { role: "user", content: "again" } } },
+  });
+  const tail = await backend.listEvents({ sessionId: placed.session.id, searchParams: new URLSearchParams() });
+  assert.equal(tail.data.length, 3);
+  assert.equal((await backend.eventsAfter(placed.session.id, 1)).length, 2);
+  assert.equal(await backend.appendEvents({ sessionId: "no-such-session", body: {} }), null);
 
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });

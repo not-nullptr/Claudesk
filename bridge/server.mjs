@@ -3129,6 +3129,30 @@ async function handleCodeRunnerApi(request, response, url) {
     }
     return sendJson(response, 201, created);
   }
+  // A session's events: the history (paged), the append the renderer and the
+  // runner both use, and the SSE stream the Desktop main process reads. Replayed
+  // as `client_event` frames and resumed with `from_sequence_num`, which is that
+  // reader's own contract (see scripts/lib/code-wire-contract.mjs).
+  const eventsPath = pathname.match(/^\/v1\/code\/sessions\/([^/]+)\/events(\/stream)?$/);
+  if (eventsPath) {
+    const sessionId = decodeURIComponent(eventsPath[1]);
+    if (eventsPath[2]) {
+      if (method !== "GET") throw new ApiError(405, "method not allowed");
+      return sendCodeEventStream(request, response, sessionId, url);
+    }
+    if (method === "GET") {
+      const document = await codeRunners.listEvents({ sessionId, searchParams: url.searchParams });
+      if (!document) throw new ApiError(404, "session not found");
+      return sendJson(response, 200, document);
+    }
+    if (method === "POST") {
+      const appended = await codeRunners.appendEvents({ sessionId, body });
+      if (!appended) throw new ApiError(404, "session not found");
+      return sendJson(response, 200, appended);
+    }
+    throw new ApiError(405, "method not allowed");
+  }
+
   const sessionDetail = pathname.match(/^\/v1\/code\/sessions\/([^/]+)$/);
   if (sessionDetail && method === "GET") {
     const document = await codeRunners.session(decodeURIComponent(sessionDetail[1]));
@@ -3185,6 +3209,48 @@ async function handleCodeRunnerApi(request, response, url) {
     }
   }
   throw new ApiError(404, "not found");
+}
+
+// A session's event stream, in the shape the Desktop main process's own SSE
+// reader expects: frames named `client_event` whose data is the envelope, the
+// history replayed first and `from_sequence_num` resuming from a sequence the
+// reader already has. The tail polls the store rather than holding a
+// subscription, so an event written by another process — the runner — is seen
+// even though this is one bridge process.
+async function sendCodeEventStream(request, response, sessionId, url) {
+  const fromSequence = Number(url.searchParams.get("from_sequence_num") ?? 0) || 0;
+  const backlog = await codeRunners.eventsAfter(sessionId, fromSequence);
+  if (backlog === null) throw new ApiError(404, "session not found");
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    // Buffering proxies in front of the bridge (the deployment's reverse proxy)
+    // must pass frames straight through or the stream looks dead.
+    "X-Accel-Buffering": "no",
+  });
+  let sequence = fromSequence;
+  const write = (event) => {
+    response.write(`event: client_event\ndata: ${JSON.stringify(event)}\n\n`);
+    sequence = Math.max(sequence, Number(event.sequence_num) || 0);
+  };
+  for (const event of backlog) write(event);
+  const timer = setInterval(async () => {
+    try {
+      const next = await codeRunners.eventsAfter(sessionId, sequence);
+      if (!next) return;
+      for (const event of next) write(event);
+    } catch {
+      // Keep the stream up; the next tick retries and the reader resumes from
+      // the sequence it already holds if the connection does drop.
+    }
+  }, 500);
+  const close = () => {
+    clearInterval(timer);
+    response.end();
+  };
+  request.on("close", close);
+  response.on("error", close);
 }
 
 async function handleApi(request, response, url) {
@@ -4230,7 +4296,8 @@ const server = http.createServer(async (request, response) => {
       codeRunners
       && (url.pathname.startsWith("/v1/code/runners/")
         || url.pathname.startsWith("/v1/environment_providers/")
-        || /^\/v1\/code\/sessions(\/[^/]+)?$/.test(url.pathname))
+        || /^\/v1\/code\/sessions\/([^/]+)(\/events(\/stream)?)?$/.test(url.pathname)
+        || url.pathname === "/v1/code/sessions")
     ) {
       await handleCodeRunnerApi(request, response, url);
     }
