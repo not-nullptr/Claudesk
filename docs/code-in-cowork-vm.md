@@ -316,13 +316,22 @@ runner, and its events can be written and read (including the stream). Phase 3 i
 in — accounts answer the pool API by default and are offered no place until a
 runner registers, which is what makes that default safe.
 
+The runner's half of the loop is exercised too, without a runner binary:
+`scripts/code-runner-client.mjs` speaks the runner's protocol (register, poll,
+token, transcript, release) and `scripts/code-runner-loop-smoke.mjs` boots the
+bridge, has a runner claim the pool, places a session, runs it and reads the
+transcript back under the app's contract. The same client pointed at a live
+instance (`--base URL --secret …`) is the diagnostic for whether a tenant's pool
+answers and what it offers.
+
 What is left is the **deployment** half, and it needs the box:
 
 1. **Run the runner in the guest.** The guest already carries a `claude` the host
    provides at `/opt/cowork/claude-bin`, so the open questions are whether that
    binary exposes `self-hosted-runner`, whether the guest can reach the bridge
    through its own egress allowlist, and how the VM's idle-stop sits against a
-   30 s poll loop.
+   30 s poll loop. `code-runner-client.mjs` is the reference for what the bridge
+   expects of it.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it
