@@ -3118,6 +3118,23 @@ async function handleCodeRunnerApi(request, response, url) {
     return sendJson(response, 200, await codeRunners.environmentList());
   }
 
+  // The runner's session-scoped calls: exchange an assignment for the session
+  // token, then report on the run. Every one is authenticated by that token (or
+  // by the pool secret of the pool the session belongs to).
+  const runnerSessionsBase = "/v1/code/runners/self-hosted/sessions/";
+  if (method === "POST" && pathname.startsWith(runnerSessionsBase)) {
+    const rest = pathname.slice(runnerSessionsBase.length);
+    const slash = rest.indexOf("/");
+    const sessionId = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+    const sub = slash === -1 ? "" : rest.slice(slash + 1);
+    if (!sessionId) throw new ApiError(404, "not found");
+    const call = { headers, sessionId, body };
+    if (sub === "token") return answer(await codeRunners.issueSessionToken(call));
+    if (sub === "report-failure") return answer(await codeRunners.reportSessionFailure(call));
+    if (sub === "release") return answer(await codeRunners.releaseSession(call));
+    if (sub === "retry-spawn") return answer(await codeRunners.retrySpawn(call));
+  }
+
   switch (`${method} ${pathname}`) {
     case "POST /v1/code/runners/self-hosted/runners/register":
       return answer(await codeRunners.registerRunner({ headers, body }));

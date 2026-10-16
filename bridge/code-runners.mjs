@@ -29,6 +29,12 @@
 //   POST /v1/code/runners/self-hosted/spawn-hints/nack
 //     -> {...hint, error}   <- {}
 //   POST /v1/code/runners/self-hosted/deregister
+//   POST /v1/code/runners/self-hosted/sessions/{id}/token
+//     <- {session_token}            (the token the session itself is then run with)
+//   POST /v1/code/runners/self-hosted/sessions/{id}/report-failure
+//     -> {reason, setup_failure_kind?, failure_kind?}  <- {excluded_count, stuck}
+//   POST /v1/code/runners/self-hosted/sessions/{id}/release
+//   POST /v1/code/runners/self-hosted/sessions/{id}/retry-spawn   (Activity → Retry)
 //   GET  /v1/code/runners/self-hosted/pools[/{id}[/secrets|/sessions]]
 //
 // Auth is the pool secret on those calls (the runner sends it as
@@ -142,6 +148,21 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     const token = bearerToken(headers);
     if (!token) return null;
     return state.pools.find((pool) => pool.secret === token) ?? null;
+  }
+
+  // Session-scoped calls carry the session token the runner was issued (or the
+  // pool secret, for a runner acting on behalf of a pool it owns). Anything
+  // else is refused — the runner's own retry loop backs off on that, which is
+  // the correct outcome for a secret that names nothing here.
+  function sessionFor(state, headers, sessionId) {
+    const session = state.sessions.find((entry) => entry.session_uuid === sessionId);
+    if (!session) return null;
+    const token = bearerToken(headers);
+    if (!token) return { unauthorized: true };
+    if (session.session_token === token) return session;
+    const pool = state.pools.find((entry) => entry.secret === token);
+    if (pool && pool.pool_id === session.pool_id) return session;
+    return { unauthorized: true };
   }
 
   // A pending session, in the shape the runner's poll reader expects. The
@@ -306,6 +327,74 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
         session.attempt += 1;
         await save();
       }
+      return {};
+    },
+
+    /**
+     * POST /v1/code/runners/self-hosted/sessions/{id}/token — the runner
+     * exchanges its assignment for the token it then uses for the session
+     * itself. The token is minted once and reused, so a runner that reconnects
+     * mid-session keeps the same one.
+     */
+    async issueSessionToken({ headers, sessionId }) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      if (!session.session_token) {
+        session.session_token = `ccsess_${randomBytes(24).toString("base64url")}`;
+      }
+      if (session.state === "pending" || session.state === "offered") session.state = "active";
+      session.started_at = session.started_at ?? new Date().toISOString();
+      await save();
+      log.log(`[code-runners] session ${session.session_uuid} started on pool ${session.pool_id}`);
+      return { session_token: session.session_token };
+    },
+
+    /**
+     * POST /v1/code/runners/self-hosted/sessions/{id}/report-failure. The runner
+     * says why it could not run the session; `excluded_count`/`stuck` are the
+     * pool-health numbers it reads back, and this deployment has no exclusion
+     * list to report, so both are zero/false.
+     */
+    async reportSessionFailure({ headers, sessionId, body } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      session.state = "failed";
+      session.failure = {
+        reason: typeof body?.reason === "string" ? body.reason : "",
+        ...(body?.setup_failure_kind ? { setup_failure_kind: body.setup_failure_kind } : {}),
+        ...(body?.failure_kind ? { failure_kind: body.failure_kind } : {}),
+      };
+      await save();
+      (log.warn ?? log.log)
+        .call(log, `[code-runners] session ${session.session_uuid} failed: ${session.failure.reason}`);
+      return { excluded_count: 0, stuck: false };
+    },
+
+    /** POST /v1/code/runners/self-hosted/sessions/{id}/release */
+    async releaseSession({ headers, sessionId }) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      session.state = "released";
+      await save();
+      return {};
+    },
+
+    /** POST …/sessions/{id}/retry-spawn — the operator's Activity → Retry. */
+    async retrySpawn({ headers, sessionId }) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      session.state = "pending";
+      session.attempt += 1;
+      session.session_token = undefined;
+      await save();
       return {};
     },
 

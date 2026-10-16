@@ -205,6 +205,17 @@ Extracted while building the substrate, so it does not have to be re-read:
   relation**; the org's default is set through the environment-provider surface,
   so a tenant's default environment is how the self-hosted place becomes the one
   a new session lands on without the user picking it.
+- **The runner's session legs** (all `POST /v1/code/runners/self-hosted/sessions/{id}/…`,
+  authenticated by the session token or the pool secret): `token` → `{session_token}`,
+  `report-failure` (`{reason, setup_failure_kind?, failure_kind?}` →
+  `{excluded_count, stuck}`), `release`, and `retry-spawn` (the operator's
+  Activity → Retry). The poll response also carries `available_capacity`,
+  `wake_source`, `warmup_complete`, `assignment_ids`, `lease_expires_at`,
+  `suggested_poll_interval` and `session_assignments`; the session itself then
+  runs against `/v2/ccr-sessions/{id}/…` (e.g. `/mcp`) alongside the
+  `/v1/code/sessions/{id}/…` legs above. All are answered by
+  `bridge/code-runners.mjs` except the session's own traffic, which is the next
+  increment.
 - **Session create is `POST /v1/code/sessions`** with headers
   `anthropic-version: 2023-06-01`, `anthropic-beta: ccr-byoc-2025-07-29`,
   `anthropic-client-feature: ccr` and `x-organization-uuid` — the `ccr-byoc`

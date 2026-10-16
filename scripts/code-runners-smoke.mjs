@@ -107,6 +107,46 @@ try {
   assert.equal(sessions.data.length, 1);
   assert.equal(sessions.data[0].session_uuid, "session-1");
 
+  // The runner exchanges its assignment for a session token, then reports on the
+  // run with it. The token is minted once — a reconnecting runner keeps it.
+  const token = await backend.issueSessionToken({ headers: auth, sessionId: "session-1" });
+  assert.match(token.session_token, /^ccsess_/, "a session token is minted for the runner");
+  assert.equal(
+    (await backend.issueSessionToken({ headers: auth, sessionId: "session-1" })).session_token,
+    token.session_token,
+    "a reconnecting runner keeps the session token it already holds",
+  );
+  const sessionAuth = { authorization: `Bearer ${token.session_token}` };
+  assert.equal(
+    (await backend.issueSessionToken({ headers: wrong, sessionId: "session-1" })).unauthorized,
+    true,
+    "the session legs refuse a secret that names nothing",
+  );
+  assert.equal(
+    (await backend.issueSessionToken({ headers: sessionAuth, sessionId: "nope" })),
+    null,
+    "an unknown session is not found",
+  );
+
+  const failure = await backend.reportSessionFailure({
+    headers: sessionAuth,
+    sessionId: "session-1",
+    body: { reason: "checkout failed", setup_failure_kind: "git" },
+  });
+  assert.deepEqual(failure, { excluded_count: 0, stuck: false },
+    "report-failure answers the pool-health numbers the runner reads back");
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id })).data[0].state, "failed",
+    "a reported failure is recorded on the session");
+
+  // Retry-spawn is the operator's Activity → Retry: back to pending, one more
+  // attempt, and a fresh token (the old one must not keep working).
+  await backend.retrySpawn({ headers: sessionAuth, sessionId: "session-1" });
+  const retried = (await backend.poolSessions({ poolId: primary.pool_id })).data[0];
+  assert.equal(retried.state, "pending");
+  assert.equal(retried.attempt, 3, "retry-spawn bumps the attempt");
+  assert.equal((await backend.issueSessionToken({ headers: sessionAuth, sessionId: "session-1" })).unauthorized,
+    true, "the retired token no longer authenticates after a retry");
+
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });
   assert.equal((await backend.listPools()).pools.length, 0);
