@@ -176,6 +176,31 @@ seam the session path will call. `bridge/server.mjs` routes
 so nothing is routed until a deployment turns it on.
 `scripts/code-runners-smoke.mjs` drives the backend directly.
 
+## What the next increment needs
+
+Extracted while building the substrate, so it does not have to be re-read:
+
+- **A pool id is `ccpool_`-prefixed, and the renderer keys off that.** It decides
+  whether a session is self-hosted by
+  `id.startsWith("ccpool_") || environments?.find(e => e.environment_id === id)?.kind !== "byoc"`,
+  which is why `bridge/code-runners.mjs` mints `ccpool_…` ids.
+- **Environments carry `environment_id`, `default_environment_id` and the pool
+  relation**; the org's default is set through the environment-provider surface,
+  so a tenant's default environment is how the self-hosted place becomes the one
+  a new session lands on without the user picking it.
+- **Still unknown:** the session-create request body (the literal
+  `/v1/code/sessions` POST shape) and the transcript/event legs the *Desktop's*
+  renderer expects. The mobile facade's translation targets the phone's DTOs, not
+  this client, so it is a starting point rather than a drop-in.
+- **The renderer dimension.** A tenant must resolve `/code` to the self-hosted
+  (cloud) surface rather than the local one, i.e. a renderer generation with
+  `desktop-code-route-alias` **not** applied. That is a third input to
+  `patchRendererSources` alongside gateway/web-shell, it must reach
+  `prepare-renderer.mjs`'s generation key and `scripts/seed-renderer.sh`'s combos,
+  and it ships with a `patchRelease` bump and a `claude-desktop` rebuild. It is
+  deliberately **not** landed yet: it only pays off once the session legs above
+  exist, and until then it would enable a surface that cannot work.
+
 ## Open — the rest of the spike
 
 1. **Runner placement (narrowed).** The guest already carries Claude Code and
