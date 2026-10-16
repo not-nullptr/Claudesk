@@ -36,6 +36,11 @@ export async function startFakeClaudesk() {
     namePrefix: "",
     titleResult: undefined,
     codeWorkspaceFolder: "/workspace",
+    // Folders the fake's LocalSessions.getGitInfo calls a git repository. Only
+    // these can be started with `useWorktree` (Desktop's own composer hides the
+    // worktree toggle for any other folder, and the facade mirrors that), so a
+    // session in the workspace root itself stays a plain same-dir start.
+    codeGitRepos: new Set(["/workspace/Claudesk"]),
     // What `/api/remote/folders` lists at the workspace root. The real bridge
     // returns the directories under the mounted workspace; the facade advertises
     // each as a bridge environment (the remote folder picker) and maps a repo
@@ -267,11 +272,27 @@ export async function startFakeClaudesk() {
     getSession: ([id]) => (codeSessions.has(id) ? summary(codeSessions.get(id)) : undefined),
     getTranscript: ([id]) => codeSessions.get(id)?.transcript ?? [],
     // `start` takes one `info` object whose `cwd` and `message` are both
-    // required strings — verified from Desktop's own IPC schema.
+    // required strings — verified from Desktop's own IPC schema. `useWorktree`
+    // is optional and must be a boolean (`ywt` in Desktop's schema).
     start: ([info]) => {
       if (typeof info?.cwd !== "string") throw ipcValidationError("LocalSessions", "start", "info", 0);
       if (typeof info?.message !== "string") throw ipcValidationError("LocalSessions", "start", "info", 0);
+      if (info.useWorktree !== undefined && typeof info.useWorktree !== "boolean") {
+        throw ipcValidationError("LocalSessions", "start", "info", 0);
+      }
       const session = addCodeSession({ sessionId: info.sessionId, title: info.title, model: info.model, cwd: info.cwd });
+      // Desktop's worktree start moves the session's working directory into the
+      // isolated checkout and keeps the repository it came from as `originCwd`
+      // (its record's `worktreePath` / `startedWithWorktree` say so). Mirrored
+      // here, because the facade's DTOs must report the repository folder and
+      // the worktree spawn mode from exactly this shape.
+      if (info.useWorktree === true) {
+        session.originCwd = info.cwd;
+        session.worktreeName = `wt-${(info.sessionId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(-8) || "session"}`;
+        session.worktreePath = `${info.cwd}/.claude/worktrees/${session.worktreeName}`;
+        session.cwd = session.worktreePath;
+        session.startedWithWorktree = true;
+      }
       void runCodeTurn(session, { text: info.message, messageUuid: info.messageUuid, permission: /\[permission\]/.test(info.message) });
       return { sessionId: info.sessionId };
     },
@@ -337,6 +358,15 @@ export async function startFakeClaudesk() {
       if (session) session.isArchived = true;
     },
     getDefaultWorkspaceFolders: () => [state.codeWorkspaceFolder],
+    // Desktop's own git status for a folder, or null when it is not a repo
+    // (the real one also answers null for an untrusted or non-local path).
+    // One required string argument, per its IPC schema.
+    getGitInfo: ([cwd]) => {
+      if (typeof cwd !== "string") throw ipcValidationError("LocalSessions", "getGitInfo", "cwd", 0);
+      return state.codeGitRepos.has(cwd)
+        ? { repo: cwd.split("/").pop() || "", remote: "", branch: "main", defaultBranch: "main", root: cwd }
+        : null;
+    },
   };
 
   const handlers = {

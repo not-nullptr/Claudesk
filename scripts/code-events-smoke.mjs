@@ -271,7 +271,9 @@ assert.deepEqual(translator.permissions(), []);
 const environment = bridgeEnvironment({ name: "Claudesk Desktop", cliVersion: "2.1.284" });
 assert.equal(environment.kind, "bridge");
 assert.equal(environment.environment_id, BRIDGE_ENVIRONMENT_ID);
-assert.equal(environment.bridge_info.spawn_mode, "same-dir");
+// Worktree, not same-dir: the facade starts every mobile session in its own git
+// worktree, and the app's only spawn-mode UI is a `same-dir` advisory toast.
+assert.equal(environment.bridge_info.spawn_mode, "worktree");
 // `config` is `EnvironmentConfiguration`, decoded FLAT off the `environment_type`
 // discriminator (its declared CodingKeys hold only `environmentType`), so the
 // payload sits beside `environment_type`, not nested under a case name or `_0`.
@@ -298,7 +300,7 @@ assert.equal(cloud.config.environment_type, "anthropic");
 // either way. So the cloud record carries one too rather than risking the
 // whole `[EnvironmentResource]` on a null.
 assert.equal(cloud.bridge_info.machine_name, "Claudesk Desktop");
-assert.equal(cloud.bridge_info.spawn_mode, "same-dir");
+assert.equal(cloud.bridge_info.spawn_mode, "worktree");
 assert.ok(Number.isFinite(Date.parse(cloud.created_at)), "createdAt is a non-null ISO date");
 // The same "never null an unconfirmed-optional field" rule applies to the
 // anthropic config's network settings; a null here would fail a non-optional

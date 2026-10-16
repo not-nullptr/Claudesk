@@ -103,6 +103,21 @@ export const BRIDGE_SPAWN_MODE = Object.freeze({
   sameDir: "same-dir",
 });
 
+// The spawn mode this facade reports for its device AND asks Desktop for on
+// every session start: worktree mode, always. The app's Code composer carries
+// no worktree toggle (only the Desktop UI has one, beside its folder picker),
+// and the ONLY worktree copy in the app is the advisory toast it shows when the
+// advertised mode is `same-dir` ("Running in the shared directory %@. Other
+// sessions may conflict — consider worktree mode to isolate changes.") — a
+// warning the phone cannot act on. So the facade starts every session in an
+// isolated git worktree (code-engine.mjs sends `useWorktree`), and advertises
+// the same mode here so the app never warns about a directory the session is
+// not in. `CLAUDE_MOBILE_WORKTREE=0` restores a plain `same-dir` on both.
+export const WORKTREE_SESSIONS = process.env.CLAUDE_MOBILE_WORKTREE !== "0";
+export const ADVERTISED_SPAWN_MODE = WORKTREE_SESSIONS
+  ? BRIDGE_SPAWN_MODE.worktree
+  : BRIDGE_SPAWN_MODE.sameDir;
+
 // Desktop's own session record is flat and says `isRunning` / `isArchived`,
 // while the app wants the `sessionStatus` axis. Approval prompts Desktop is
 // waiting on surface as `requires_action`.

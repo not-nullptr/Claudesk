@@ -259,6 +259,15 @@ Desktop surface is needed; the mobile facade must **translate**:
 | archive / delete / rename | `archive`, `unarchive`, `delete`, `updateSession` |
 | projects / channels | `getDetectedProjects`, `getLocalBranches`, `getRemoteSessionSpaces` |
 
+Every session this facade starts **is asked for in an isolated git worktree**:
+`start`'s `info` takes `useWorktree?: boolean` (the same field Desktop's own
+composer sets from its worktree toggle, which the phone has no equivalent of),
+preceded by a `getGitInfo` read of the folder, because Desktop's worktree
+manager has no fallback for a folder that is not a repository. The advertised
+environment's `spawn_mode` is therefore `worktree` too — `same-dir` is what
+triggers the app's "Running in the shared directory …" advisory toast, the only
+worktree string it carries. `CLAUDE_MOBILE_WORKTREE=0` turns both off.
+
 This is exactly the shape `mobile/engine.mjs` already uses for Chat
 (`SURFACE = "LocalAgentModeSessions"`), so the Code work is a parallel
 `LocalSessions` module: a new `mobile/code-*.mjs` translation layer plus routes

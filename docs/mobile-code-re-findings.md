@@ -791,6 +791,16 @@ off the bridge **spawn mode**, not the repository: the facade advertises the
 paired Desktop as `same-dir`, so the advisory toast is expected for every
 session on it and is independent of which folder the session runs in.
 
+**Superseded (2026-10-16).** The facade now starts every mobile session in an
+isolated git worktree and advertises `worktree`, so the toast no longer fires.
+`start` carries `useWorktree?: boolean` (part of the same `info` object, checked
+by the `ywt` validator), which is how Desktop's own composer asks for one — the
+phone's composer has no such toggle, and `bridge_spawn_toast_same_dir` is the
+only worktree string in the app. Desktop's record then reports the worktree as
+the session's `cwd` with the repository kept as `originCwd`; the DTOs name the
+repository (see `sessionDirectoryOf` in `mobile/code-transcript.mjs`).
+`CLAUDE_MOBILE_WORKTREE=0` restores the old behaviour.
+
 ## A device's directories are environments — the native folder picker (2026-10-05)
 
 The app has a **native remote folder picker** for Code, and it is built on

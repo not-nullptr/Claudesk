@@ -301,7 +301,11 @@ try {
   // case is `paired` but its payload reports the same `bridge` axis its `kind`
   // does; a literal "paired" would fail the whole EnvironmentConfiguration.
   assert.equal(bridge.config.environment_type, "bridge");
-  assert.equal(bridge.bridge_info.spawn_mode, "same-dir");
+  // The device starts every mobile session in an isolated git worktree (the
+  // app's Code composer has no worktree toggle), so the advertised spawn mode
+  // is `worktree` — the app only has UI for `same-dir`, an advisory toast the
+  // phone cannot act on (see code-ids.mjs WORKTREE_SESSIONS).
+  assert.equal(bridge.bridge_info.spawn_mode, "worktree");
   // A directory with a session must not read as "at capacity": the app gates the
   // new-session button on the directory's session count against this.
   assert.ok(bridge.bridge_info.max_sessions > 1, "directories are not capped at one session");
@@ -1077,6 +1081,12 @@ try {
   assert.equal(startCall.args[0].sessionId, codeDesktopId);
   assert.equal(typeof startCall.args[0].cwd, "string");
   assert.equal(startCall.args[0].sessionType, undefined);
+  // Worktree mode is asked for by probing the folder first: the workspace root
+  // is not a git repository (the fake's `getGitInfo` says so), so this start
+  // carries no flag and runs in the folder itself. Desktop has no fallback for
+  // a non-repo worktree start, so sending the flag here would fail the session.
+  assert.equal(claudesk.codeIpcCalls("getGitInfo").at(-1).args[0], "/workspace", "the folder is probed before start");
+  assert.equal(startCall.args[0].useWorktree, undefined, "a non-repo folder starts in place");
   await waitFor(() => claudesk.codeSessions.get(codeDesktopId)?.isRunning === false, "the code turn to finish");
 
   // ---- the repository picker decides the session's cwd ----
@@ -1102,21 +1112,36 @@ try {
   const repoReply = (await repoCreate.json()).session;
   // The list-row projection echoes the app's own source encoding verbatim.
   assert.deepEqual(repoReply.config.sources, [repoSource], "the create reply reports the picked repository");
+  // Nothing has spawned yet at create time, so the row carries no spawn mode —
+  // it is the `SessionResource` (the detail read below) that reports it.
+  assert.equal(repoReply.bridge_spawn_path, undefined, "the list row carries no spawn path");
   // The session does not exist on Desktop until the first message, so the
   // resolved cwd is checked on the `start` call and on the detail read after it.
   await sseStream(codePath(repoReply.id, "/messages/stream"), {
     method: "POST", body: { body: "where am I" },
   });
   assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].cwd, "/workspace/Claudesk", "start runs in the picked repository");
+  assert.equal(claudesk.codeIpcCalls("start").at(-1).args[0].useWorktree, true, "a repo session asks Desktop for a worktree");
   await waitFor(() => claudesk.codeSessions.get(repoReply.id.slice("code_".length))?.isRunning === false, "the repo turn to finish");
+  const repoRecord = claudesk.codeSessions.get(repoReply.id.slice("code_".length));
+  // Desktop moved the session into the isolated checkout (its record's `cwd`
+  // left `originCwd`) — the `start` returned before this, so the DTO below is
+  // read from a session that really is in a worktree.
+  assert.match(repoRecord.worktreePath, /^\/workspace\/Claudesk\/\.claude\/worktrees\//, "Desktop started the session in a worktree");
+  assert.notEqual(repoRecord.cwd, repoRecord.originCwd, "the worktree moved the session's working directory");
   const repoDetail = await (await call(codePath(repoReply.id))).json();
+  // The DTO names the repository the user picked, not the worktree path under
+  // `.claude/worktrees` — the app groups a session by the folder it was created
+  // against, and has no environment for the worktree's own path.
   assert.equal(repoDetail.session_context.cwd, "/workspace/Claudesk", "the repository resolves to its workspace folder");
+  assert.equal(repoDetail.bridge_spawn_path, "worktree", "the detail read reports the worktree spawn mode");
   assert.deepEqual(repoDetail.session_context.sources, [repoSource], "the detail read reports the picked repository");
   // A session reports the environment of the directory it ran in, so the
   // device's directory list counts it under that folder, not the workspace root.
   assert.equal(repoDetail.environment_id, folderEnv.environment_id, "a folder session reports the folder environment");
   const rootDetail = await (await call(codePath(createdResource.id))).json();
   assert.equal(rootDetail.environment_id, "anthropic-bridge-local", "a workspace-root session reports the base device");
+  assert.equal(rootDetail.bridge_spawn_path, "same-dir", "a non-repo session is reported as the shared directory");
 
   // A `file://` source resolves to the exact path, not by name.
   const fileId = (await (await call("/v1/code/sessions", {

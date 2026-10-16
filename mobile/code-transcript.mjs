@@ -31,6 +31,7 @@ function environmentMode() {
   return process.env.CLAUDE_MOBILE_ENV_MODE || "default";
 }
 import {
+  ADVERTISED_SPAWN_MODE,
   BRIDGE_SPAWN_MODE,
   ENVIRONMENT_KIND,
   codeIdFor,
@@ -101,7 +102,11 @@ function bridgeInfoFor({ name, online, cliVersion, directory = "/workspace", bra
     branch,
     git_repo_url: gitRepoUrl,
     online,
-    spawn_mode: BRIDGE_SPAWN_MODE.sameDir,
+    // What this device asks Desktop for on every session start (worktree mode
+    // by default — see WORKTREE_SESSIONS). The app's only use of this field is
+    // the `same-dir` advisory toast, so it must state the mode the facade
+    // actually starts sessions in, not Desktop's own preference.
+    spawn_mode: ADVERTISED_SPAWN_MODE,
     cli_version: cliVersion ?? "",
   };
 }
@@ -335,6 +340,37 @@ export function environmentForSession(meta = {}, cwd = null) {
   return { id: BRIDGE_ENVIRONMENT_ID, kind: ENVIRONMENT_KIND.bridge };
 }
 
+// The directory to report for a session. A worktree session runs in an isolated
+// checkout (`<repo>/.claude/worktrees/<name>`), and Desktop reports that path as
+// the session's `cwd` while keeping the repository it came from as `originCwd`.
+// The phone knows a session by the folder it was created against — the one the
+// app advertises and the user picked — so report the origin instead of a path
+// under `.claude/worktrees` the app has no environment for. `bridge_spawn_path`
+// is what tells the phone the session runs isolated.
+function sessionDirectoryOf(record) {
+  const cwd = typeof record?.cwd === "string" ? record.cwd : null;
+  const origin = typeof record?.originCwd === "string" ? record.originCwd : null;
+  if (cwd && origin && cwd !== origin) return origin;
+  return cwd ?? origin ?? null;
+}
+
+// The spawn mode to report for one session. `record.spawnMode` is read first in
+// case Desktop ever publishes one (it currently does not); otherwise the record
+// itself is the evidence — a session running out of an isolated checkout has a
+// `worktreePath` and a `cwd` that left its `originCwd`. `meta.use_worktree` is
+// the facade's own record of the start it made, and the last resort is the plain
+// folder (`same-dir`), which is what an untouched Desktop session is.
+function spawnPathOf(record, meta) {
+  const raw = record?.spawnMode;
+  if (raw && Object.values(BRIDGE_SPAWN_MODE).includes(raw)) return raw;
+  const inWorktree = Boolean(record?.worktreePath)
+    || record?.startedWithWorktree === true
+    || (typeof record?.cwd === "string" && typeof record?.originCwd === "string" && record.cwd !== record.originCwd);
+  if (inWorktree) return BRIDGE_SPAWN_MODE.worktree;
+  if (meta?.use_worktree === true) return BRIDGE_SPAWN_MODE.worktree;
+  return BRIDGE_SPAWN_MODE.sameDir;
+}
+
 // The list row (ListSessionsResponse.data[]). `SessionResponse` is 23 fields;
 // the ones a self-hosted Desktop does not have are emitted as null/[] so the
 // app's non-optional decodes still succeed.
@@ -342,7 +378,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
   // Only the bucket is derived from this axis on the row; the row's own
   // `status` is the lifecycle one below.
   const sessionStatus = sessionStatusOf(record, { pendingApproval });
-  const environment = environmentForSession(meta, record?.cwd ?? null);
+  const environment = environmentForSession(meta, sessionDirectoryOf(record));
   return {
     id: codeIdFor(desktopIdOf(record)),
     environment_id: environment.id,
@@ -389,7 +425,7 @@ export function sessionResponse(record, { meta = {}, pendingApproval = false } =
 // `revision` is a millisecond timestamp (see `wireDate`).
 export function sessionResource(record, { meta = {}, revision = null, pendingApproval = false } = {}) {
   const sessionStatus = sessionStatusOf(record, { pendingApproval });
-  const environment = environmentForSession(meta, record?.cwd ?? null);
+  const environment = environmentForSession(meta, sessionDirectoryOf(record));
   return {
     id: codeIdFor(desktopIdOf(record)),
     title: record?.title || record?.name || "Untitled session",
@@ -400,7 +436,7 @@ export function sessionResource(record, { meta = {}, revision = null, pendingApp
     updated_at: wireDate(record?.lastActivityAt, record?.createdAt),
     session_context: {
       sources: sourcesFromMeta(meta),
-      cwd: record?.cwd ?? meta?.cwd ?? null,
+      cwd: sessionDirectoryOf(record) ?? meta?.cwd ?? null,
       outcomes: [],
       custom_system_prompt: null,
       append_system_prompt: null,
@@ -409,7 +445,13 @@ export function sessionResource(record, { meta = {}, revision = null, pendingApp
       memory_mode: null,
     },
     permission_mode: record?.permissionMode ?? meta?.permission_mode ?? "default",
-    bridge_spawn_path: record?.spawnMode ?? BRIDGE_SPAWN_MODE.sameDir,
+    // Where this session actually runs. Desktop does not put a spawn mode on
+    // the session record, so read the worktree it reports first — a session
+    // Desktop started (or entered) in a worktree stays truthful however it was
+    // created — then the mode the facade chose for it (`meta.use_worktree`,
+    // written by code-engine when it asked Desktop for the worktree), and fall
+    // back to the plain path in the folder itself.
+    bridge_spawn_path: spawnPathOf(record, meta),
     // The detail record decodes the two-case ConnectionStatus/WorkerStatus, not
     // the row's wider Session* vocabulary.
     connection_status: resourceConnectionStatusOf(record),

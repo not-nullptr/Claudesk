@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import { DesktopError } from "./desktop-client.mjs";
-import { SESSION_STATUS, codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
+import { SESSION_STATUS, WORKTREE_SESSIONS, codeIdFor, desktopSessionIdFor, sessionStatusOf } from "./code-ids.mjs";
 import { eventEnvelopes, folderDirectoryFromEnvironmentId, pageEvents, sessionResource, sessionResponse } from "./code-transcript.mjs";
 import { createCodeEventTranslator, isCodeRecord } from "./code-events.mjs";
 
@@ -62,6 +62,14 @@ function desktopPermissionMode(mode) {
   return mode;
 }
 
+// Every mobile-started Code session asks Desktop for its own git worktree
+// (`WORKTREE_SESSIONS`, shared with the spawn mode this facade advertises so
+// the phone never warns about a directory the session is not in — see
+// code-ids.mjs). `start` takes `useWorktree?: boolean`; Desktop's own composer
+// sends it only for a folder that is a real git checkout, and its worktree
+// manager has no fallback for one that is not, so `startWorktreeFlag` probes
+// the folder first rather than turning a non-repo start into a failure.
+
 function asCodeError(error) {
   if (error instanceof CodeError) return error;
   if (error instanceof DesktopError) {
@@ -93,7 +101,7 @@ const ipcArgs = {
   // `start` takes one argument named `info`; its validator requires BOTH
   // `cwd` and `message` to be strings. Omitting `cwd` is what made every
   // earlier probe shape fail identically ("Argument \"info\" at position 0").
-  start: (desktopId, { cwd, message, messageUuid, model, title, permissionMode, effort }) => [{
+  start: (desktopId, { cwd, message, messageUuid, model, title, permissionMode, effort, useWorktree }) => [{
     cwd,
     message,
     sessionId: desktopId,
@@ -105,6 +113,11 @@ const ipcArgs = {
     // rather than Desktop's default (which is what "it stays at high" looked
     // like for a session that was never re-set).
     ...(effort ? { effort } : {}),
+    // `useWorktree` is part of the same `info` object (`ywt` validator in
+    // Desktop's schema: `e.useWorktree!==void 0 && typeof e.useWorktree!="boolean"`
+    // rejects a non-boolean). Sent as `true` only — absent means Desktop's own
+    // default, which is the folder itself.
+    ...(useWorktree ? { useWorktree: true } : {}),
   }],
   // `messageUuid` is the EIGHTH positional argument, not the third: Desktop's
   // implementation is
@@ -135,6 +148,11 @@ const ipcArgs = {
     ...(updatedInput === undefined ? [] : [updatedInput]),
   ],
   getDefaultWorkspaceFolders: () => [],
+  // One string, the folder to describe. Returns Desktop's own git status for it
+  // (`{repo, remote, branch, defaultBranch, root}`) or null when the folder is
+  // no repo, is untrusted, or is not a local path — the same answer Desktop's
+  // composer uses to decide whether its worktree toggle applies.
+  getGitInfo: (cwd) => [cwd],
 };
 
 export function createCodeEngine({
@@ -378,6 +396,24 @@ export function createCodeEngine({
     }
     cachedDefaultCwd = (Array.isArray(folders) && folders.find((folder) => typeof folder === "string")) || "/workspace";
     return cachedDefaultCwd;
+  }
+
+  // Whether this start should ask Desktop for an isolated worktree. Desktop
+  // only accepts the flag for a folder its git manager can use, and its UI
+  // proves that with the same read, so ask it and treat "no answer" as "no
+  // worktree": a folder that is not a repo (or is not trusted, or is not local)
+  // starts in place exactly as it did before, rather than failing the start.
+  // The probe is per start, not cached: a folder can become a repo (or gain
+  // trust) between sessions.
+  async function startWorktreeFlag(cwd) {
+    if (!WORKTREE_SESSIONS || !cwd) return false;
+    try {
+      const info = await desktop.ipc(SURFACE, "getGitInfo", ipcArgs.getGitInfo(cwd));
+      return Boolean(info && (info.root || info.repo));
+    } catch (error) {
+      log.warn(`[mobile-code] worktree probe failed for ${cwd}: ${error.message}`);
+      return false;
+    }
   }
 
   // The new-session picker attaches the repository the session was created
@@ -845,8 +881,10 @@ export function createCodeEngine({
     try {
       if (!exists) {
         const meta = (await loadMeta()).sessions[desktopId];
+        const cwd = await resolveCwd(loaded?.session?.cwd ?? meta?.cwd ?? null);
+        const useWorktree = await startWorktreeFlag(cwd);
         await desktop.ipc(SURFACE, "start", ipcArgs.start(desktopId, {
-          cwd: await resolveCwd(loaded?.session?.cwd ?? meta?.cwd ?? null),
+          cwd,
           message: body,
           messageUuid,
           model: loaded?.session?.model ?? meta?.model ?? undefined,
@@ -859,7 +897,17 @@ export function createCodeEngine({
           // `CLAUDE_MOBILE_PERMISSION_MODE` (e.g. `bypassPermissions`) wins over
           // the app's pick, since the Code composer has no bypass row.
           permissionMode: FORCED_PERMISSION_MODE ?? desktopPermissionMode(meta?.permission_mode) ?? undefined,
+          // Worktree mode is forced for every mobile session in a git folder
+          // (see WORKTREE_SESSIONS); the folder itself is the fallback.
+          useWorktree,
         }));
+        // Remember what this start did. The session DTOs report the spawn mode
+        // the app warns about ("Running in the shared directory …"), and this
+        // is the facade's own record of the choice it made.
+        await updateMeta(desktopId, (entry) => {
+          if (useWorktree) entry.use_worktree = true;
+          else delete entry.use_worktree;
+        });
       } else {
         if (interrupt) await desktop.ipc(SURFACE, "interrupt", ipcArgs.interrupt(desktopId)).catch(() => {});
         await desktop.ipc(SURFACE, "sendMessage", ipcArgs.sendMessage(desktopId, { message: body, messageUuid }));
