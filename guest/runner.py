@@ -59,9 +59,12 @@ def resolve_claude_bin(configured):
 CLAUDE_BIN = resolve_claude_bin(env("CLAUDESK_RUNNER_CLAUDE_BIN", "/opt/cowork/claude-bin"))
 CHECKOUT = env("CLAUDESK_RUNNER_CHECKOUT", "/sessions")
 POLL_SECONDS = float(env("CLAUDESK_RUNNER_POLL_SECONDS", "5") or 5)
-# How the binary is asked to answer one prompt. `--print` is Claude Code's
-# non-interactive form; a deployment that wants something else sets this.
-AGENT_ARGS = env("CLAUDESK_RUNNER_AGENT_ARGS", "--print").split()
+# How the binary is asked to answer one prompt. The claude these guests carry
+# accepts exactly `claude -p "<prompt>"` — its own argv validator refuses
+# anything else ("only claude -p \"<prompt>\" is supported in this environment")
+# — so the default is the one flag it names and the prompt is the argv that
+# follows it. A deployment whose agent accepts more sets this.
+AGENT_ARGS = env("CLAUDESK_RUNNER_AGENT_ARGS", "-p").split()
 ONCE = "--once" in sys.argv[1:]
 
 

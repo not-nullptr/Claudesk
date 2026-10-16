@@ -449,18 +449,25 @@ restricts guest egress must allow that address
 
 What is left is the **deployment** half, and it needs the box:
 
-1. **Install it on a real account and watch it run** *(partly answered on the
-   box)*. `/opt/cowork/claude-bin` is a **directory** — the agent the product
-   runs is `claude` inside it, staged by the guest's own `coworkd` (the daemon
-   copies the SDK binary the host puts on the `claudeshared` share; the share
-   itself is noexec). A runner pointed at the bare directory gets
-   `[Errno 13] Permission denied` on execve — execve on a directory is EACCES —
-   so `guest/runner.py` now resolves either form (directory → `claude` inside,
-   with `/usr/local/bin/claude` as a fallback). What the box still answers:
-   whether that binary accepts `CLAUDESK_RUNNER_AGENT_ARGS` (`--print` by
-   default) in the shape the runner passes it, and whether the host can write
-   the `claudeshared` share — if it can, the payload should move out of the
-   image and only the unit need re-deriving per release.
+1. **Install it on a real account and watch it run** *(answered on the box)*.
+   `/opt/cowork/claude-bin` is a **directory** — the agent the product runs is
+   `claude` inside it, staged by the guest's own `coworkd` (the daemon copies
+   the SDK binary the host puts on the `claudeshared` share; the share itself
+   is noexec). A runner pointed at the bare directory gets `[Errno 13]
+   Permission denied` on execve — execve on a directory is EACCES — so
+   `guest/runner.py` resolves either form (directory → `claude` inside). That
+   staged binary is also **session-bound**: run outside a coworkd session it
+   refuses with `claude: no session for this uid`, and its argv validator
+   accepts exactly **`claude -p "<prompt>"`** ("only claude -p \"<prompt>\" is
+   supported in this environment") — so the installer stages the account's
+   *own* Claude Code into the guest as `/opt/claudesk/claude` (leaving the
+   product's binary and the Desktop's own behaviour untouched), carries the
+   account's model endpoint and key into the guest's root-only `runner.env`
+   (loopback rewritten to `10.0.2.2`), and the runner invokes the one form the
+   binary allows. Remaining: whether the staged agent answers through the
+   gateway from inside the guest, and whether the host can write the
+   `claudeshared` share — if it can, the payload should move out of the image
+   and only the unit need re-deriving per release.
 2. **Check the main process's richer expectations.** It tracks client and
    internal events separately, with tool-call rows, lanes and hold policies on
    top of the envelope contract this bridge answers. A live Desktop shows what it

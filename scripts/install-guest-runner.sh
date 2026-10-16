@@ -152,10 +152,12 @@ else
     printf 'install-guest-runner: set CLAUDESK_GUEST_CLAUDE_SOURCE=container:/path to stage one\n' >&2
 fi
 
-# What the agent answers with. `--print` is Claude Code's non-interactive form;
-# the permissions it would otherwise prompt for are the VM's own to give — the
-# VM is the sandbox this deployment chose — so they are skipped there.
-agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:---print --dangerously-skip-permissions}"
+# What the agent is invoked with. The claude these guests carry accepts exactly
+# `claude -p "<prompt>"` — anything else is refused by the binary's own argv
+# validator ("only claude -p \"<prompt>\" is supported in this environment") —
+# so the one flag it names is the default and the prompt follows it. The
+# Desktop's own behaviour is untouched; this only shapes how the runner asks.
+agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:--p}"
 model_env=""
 if [ -n "$guest_gateway_url" ] && [ -n "$gateway_key" ]; then
     case "${gateway_scheme:-bearer}" in

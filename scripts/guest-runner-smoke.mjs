@@ -28,7 +28,7 @@ rmSync(stateDir);
 const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
-writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s' \"$2\"\n");
+writeFileSync(stub, "#!/bin/sh\nprintf 'agent saw: %s %s' \"$1\" \"$2\"\n");
 chmodSync(stub, 0o755);
 let child;
 
@@ -114,7 +114,7 @@ try {
   const history = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
   const decoded = decodeClientEventsResponse(history);
   assert.deepEqual(decoded.map((entry) => entry.message.type), ["user", "assistant"]);
-  assert.equal(decoded[1].message.message.content[0].text, "agent saw: summarise the repo",
+  assert.equal(decoded[1].message.message.content[0].text, "agent saw: -p summarise the repo",
     "the agent ran on the prompt the session carried");
   const releasedDoc = JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session;
   assert.equal(releasedDoc.status, "active", "a session the app reads stays active");
