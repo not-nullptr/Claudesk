@@ -318,6 +318,14 @@ assert.ok(
   serverSource.includes("await handleCodeRunnerApi(request, response, url)"),
   "and delegates to the runner handler",
 );
+// The runner lives in the Cowork VM, and the VM idles out on its own — a
+// placed session must be the thing that wakes it, the way the renderer's own
+// computer flow does (ClaudeVM.startVM with no config; the main resolves the
+// bundle, the wrapper pins the memory).
+assert.ok(
+  serverSource.includes('desktop.invoke("ClaudeVM", "startVM", [])'),
+  "a placed session asks the Desktop to start the Cowork VM its runner lives in",
+);
 assert.ok(
   serverSource.includes('url.pathname.startsWith("/v1/environment_providers/")'),
   "the environment list a tenant's Code surface reads is served here too",

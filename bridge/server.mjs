@@ -3191,6 +3191,22 @@ function emptyProjectResource(sub, accountUuid) {
 // untouched by it. Wire shapes: bridge/code-runners.mjs.
 const selfHostedPoolsBase = "/v1/code/runners/self-hosted/pools/";
 
+// A placed session waits for the runner inside the account's Cowork VM, and
+// that runner lives only while the VM does — the VM idle-stops on its own, and
+// a Code session is not otherwise a thing that wakes it (the Cowork surfaces
+// start it for themselves). So placement asks the Desktop to start it the same
+// way the renderer's own computer flow does: `ClaudeVM.startVM` with no config
+// — the main resolves the bundle and the wrapper pins the memory. Best-effort:
+// a Desktop that refuses leaves the session waiting, exactly as before.
+async function wakeRunnerVm() {
+  try {
+    await desktop.invoke("ClaudeVM", "startVM", []);
+    console.log("[code-runners] asked the Desktop to start the Cowork VM for the placed session");
+  } catch (error) {
+    console.warn(`[code-runners] could not start the Cowork VM: ${error.message}`);
+  }
+}
+
 async function handleCodeRunnerApi(request, response, url) {
   const method = String(request.method || "GET").toUpperCase();
   const pathname = url.pathname;
@@ -3274,6 +3290,7 @@ async function handleCodeRunnerApi(request, response, url) {
     if (created?.unsupported) {
       throw new ApiError(400, "only a self-hosted environment of this instance can run a session");
     }
+    void wakeRunnerVm();
     return sendJson(response, 201, created);
   }
   // The session list's liveness probe. Its reader posts the sessions it is

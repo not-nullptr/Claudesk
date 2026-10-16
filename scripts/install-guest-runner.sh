@@ -3,6 +3,13 @@
 # Install the guest-side Code runner into an account's Cowork VM.
 #
 #   sudo scripts/install-guest-runner.sh EMAIL
+#   sudo scripts/install-guest-runner.sh EMAIL --status
+#
+# `--status` mounts the image read-only and reports what is in it — whether the
+# payload and service are present, whether they are current for this checkout
+# and pool, and where the live logs are. It is the check to run when a session
+# says "Waiting for a runner…": the bridge log says whether a runner ever
+# polled, and this says whether one is installed to poll at all.
 #
 # Run it on the host, with the account's VM stopped. It mounts that account's
 # guest rootfs (rootfs.img, ext4, LABEL=cloudimg-rootfs) and writes in a systemd
@@ -34,7 +41,12 @@
 # second run with the same stamp and the same pool does nothing.
 set -eu
 
-email="${1:?usage: install-guest-runner.sh EMAIL}"
+email="${1:?usage: install-guest-runner.sh EMAIL [--status]}"
+mode="${2:-}"
+case "$mode" in
+    ""|--status) ;;
+    *) printf 'install-guest-runner: unknown argument %s\n' "$mode" >&2; exit 1 ;;
+esac
 project_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$project_dir"
 
@@ -95,15 +107,16 @@ trap cleanup EXIT HUP INT TERM
 # The VM must not have the image open. Writing behind a running guest would
 # corrupt it, and the guest mounts this image itself — so ask the account's own
 # container whether its VM is up, falling back to the host's mount table when
-# docker is not reachable from here.
+# docker is not reachable from here. `--status` mounts read-only and is allowed
+# while the VM runs (a live read can be stale, but nothing is written).
 desktop_container="${slug}-claude-desktop"
-if command -v docker >/dev/null 2>&1 &&
+if [ "$mode" != "--status" ] && command -v docker >/dev/null 2>&1 &&
     docker exec "$desktop_container" pgrep -f qemu-system-x86_64 >/dev/null 2>&1; then
     printf 'install-guest-runner: %s has a running Cowork VM; stop it first\n' "$email" >&2
     printf 'install-guest-runner: it idle-stops on its own (CLAUDE_COWORK_VM_IDLE_MINUTES)\n' >&2
     exit 1
 fi
-if grep -q "rootfs.img" /proc/mounts 2>/dev/null; then
+if [ "$mode" != "--status" ] && grep -q "rootfs.img" /proc/mounts 2>/dev/null; then
     printf 'install-guest-runner: a guest image is mounted on the host; stop the VM first\n' >&2
     exit 1
 fi
@@ -151,6 +164,40 @@ if [ -z "$root_part" ]; then
     exit 1
 fi
 printf 'install-guest-runner: root partition %s\n' "$root_part" >&2
+
+if [ "$mode" = "--status" ]; then
+    mount -o ro "$root_part" "$mount_dir" || {
+        printf 'install-guest-runner: could not read the image (is the VM mounting it?); stop the VM and retry\n' >&2
+        exit 1
+    }
+    printf 'install-guest-runner: %s — guest Code runner\n' "$email"
+    if [ -f "$mount_dir/etc/claudesk/runner.stamp" ]; then
+        if [ "$(cat "$mount_dir/etc/claudesk/runner.stamp")" = "$stamp" ]; then
+            printf '  payload:  installed, current for this checkout and pool\n'
+        else
+            printf '  payload:  installed, but stale — re-run without --status to update\n'
+        fi
+    else
+        printf '  payload:  absent — the image was re-derived by a Desktop update, or never had it\n'
+        printf '            (re-run this script without --status)\n'
+    fi
+    if [ -f "$mount_dir/etc/claudesk/runner.env" ]; then
+        grep -E '^CLAUDESK_RUNNER_(BASE|CLAUDE_BIN|CHECKOUT)=' "$mount_dir/etc/claudesk/runner.env" \
+            | sed 's/^/  /'
+        printf '  secret:   present (not printed)\n'
+    else
+        printf '  env:      absent — the service has no pool to talk to\n'
+    fi
+    if [ -e "$mount_dir/etc/systemd/system/multi-user.target.wants/claudesk-code-runner.service" ]; then
+        printf '  service:  enabled at boot\n'
+    else
+        printf '  service:  not enabled — it would never start\n'
+    fi
+    printf '  with the VM running, the live answers are:\n'
+    printf '    bridge:  sudo docker logs --since 30m %s-claude-cowork-bridge 2>&1 | grep -E "runner ccrunner|placed on pool|started on pool"\n' "$slug"
+    printf '    guest:   journalctl -u claudesk-code-runner -n 50   (inside the guest)\n'
+    exit 0
+fi
 
 mount "$root_part" "$mount_dir"
 
