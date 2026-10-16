@@ -3191,6 +3191,36 @@ function emptyProjectResource(sub, accountUuid) {
 // untouched by it. Wire shapes: bridge/code-runners.mjs.
 const selfHostedPoolsBase = "/v1/code/runners/self-hosted/pools/";
 
+// Fields the staged Claude Code sends that the account's gateway chain does
+// not carry to the provider intact: the chain drops (or never forwards) the
+// `anthropic-beta` headers that would make the provider accept them, so the
+// provider validates strictly and answers 400 ("thinking: Unrecognized key:
+// \"display\"; Unrecognized key: \"context_management\""). The bridge is the
+// account's API surface for the VM, so it normalizes here — and says so, one
+// log line per request that needed it — rather than pinning the CLI to
+// whichever version the chain happens to understand today.
+const gatewayDroppedFields = ["context_management", "thinking.display"];
+
+function stripGatewayUnsupported(payload) {
+  const dropped = [];
+  for (const path of gatewayDroppedFields) {
+    const [head, tail] = path.split(".");
+    if (tail === undefined) {
+      if (head in payload) {
+        delete payload[head];
+        dropped.push(path);
+      }
+      continue;
+    }
+    const parent = payload[head];
+    if (parent && typeof parent === "object" && !Array.isArray(parent) && tail in parent) {
+      delete parent[tail];
+      dropped.push(path);
+    }
+  }
+  return dropped;
+}
+
 // The model calls of the runner inside the VM, forwarded through the one
 // address the guest provably reaches: the guest dials the bridge on slirp's
 // host address for its own polling, and its egress is filtered by an allowlist
@@ -3211,6 +3241,19 @@ async function handleInferencePassthrough(request, response, url) {
     throw new ApiError(502, "this instance has no inference gateway configured");
   }
   const body = await readRequestBuffer(request, 32 * 1024 * 1024);
+  let forwardBody = body;
+  if (String(request.headers["content-type"] || "").includes("application/json")) {
+    try {
+      const payload = JSON.parse(body.toString("utf8"));
+      const dropped = stripGatewayUnsupported(payload);
+      if (dropped.length > 0) {
+        forwardBody = Buffer.from(JSON.stringify(payload));
+        console.log(`[inference] dropped gateway-unsupported field(s): ${dropped.join(", ")}`);
+      }
+    } catch {
+      // Not JSON this bridge recognizes: forward it untouched.
+    }
+  }
   const headers = {
     "content-type": request.headers["content-type"] || "application/json",
   };
@@ -3229,7 +3272,7 @@ async function handleInferencePassthrough(request, response, url) {
   const upstream = await fetch(`${String(gatewayBase).replace(/\/+$/, "")}${url.pathname}`, {
     method: "POST",
     headers,
-    body,
+    body: forwardBody,
     signal: controller.signal,
   });
   response.writeHead(upstream.status, {

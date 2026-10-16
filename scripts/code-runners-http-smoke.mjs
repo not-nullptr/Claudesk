@@ -305,13 +305,27 @@ try {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${secret}`,
       "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: "smoke", messages: [] }),
+    body: JSON.stringify({
+      model: "smoke", messages: [],
+      thinking: { type: "enabled", budget_tokens: 1024, display: "summarized" },
+      context_management: { edits: [] },
+    }),
   });
   assert.equal(modelCall.status, 200, modelCall.body);
   assert.ok(modelCall.type.includes("text/event-stream"), modelCall.type);
   assert.ok(modelCall.body.includes("message_stop"), "the stream passes through untouched");
   assert.equal(gatewayHits.at(-1).authorization, "Bearer smoke-gateway-key",
     "the account's own gateway credential is attached by the bridge");
+  // The chain cannot carry the newest fields to the provider (it drops the
+  // beta headers that would enable them), so the bridge normalizes them away —
+  // and the rest of the body survives that surgery.
+  const forwarded = JSON.parse(gatewayHits.at(-1).body);
+  assert.equal(forwarded.thinking.display, undefined,
+    "thinking.display is dropped for the gateway");
+  assert.equal(forwarded.thinking.type, "enabled", "the rest of thinking survives");
+  assert.equal("context_management" in forwarded, false,
+    "context_management is dropped for the gateway");
+  assert.equal(forwarded.model, "smoke", "and the payload is otherwise itself");
 
   const tokenCount = await tenantRequest("/v1/messages/count_tokens", {
     method: "POST",
