@@ -119,12 +119,16 @@ refresh_partitions() {
     sleep 0.2
 }
 find_root_part() {
-    candidate="$(lsblk -pno NAME,LABEL "$loop_device" 2>/dev/null |
+    # `-l` matters: without it lsblk draws a tree and the name column comes back
+    # as "├─/dev/loop0p1", which is not a device anyone can mount. The sed is a
+    # second line of defence for an lsblk that drops the glyphs somewhere else.
+    as_device() { printf '%s\n' "$1" | sed 's|^[^/]*||'; }
+    candidate="$(lsblk -lpno NAME,LABEL "$loop_device" 2>/dev/null |
         awk '$2 == "cloudimg-rootfs" { print $1; exit }')"
-    [ -z "$candidate" ] || { printf '%s\n' "$candidate"; return; }
-    candidate="$(lsblk -pno NAME,FSTYPE "$loop_device" 2>/dev/null |
+    [ -z "$candidate" ] || { as_device "$candidate"; return; }
+    candidate="$(lsblk -lpno NAME,FSTYPE "$loop_device" 2>/dev/null |
         awk '$2 == "ext4" { print $1; exit }')"
-    [ -z "$candidate" ] || { printf '%s\n' "$candidate"; return; }
+    [ -z "$candidate" ] || { as_device "$candidate"; return; }
     # No partition table: the filesystem is the image.
     if blkid -s TYPE -o value "$loop_device" 2>/dev/null | grep -qx ext4; then
         printf '%s\n' "$loop_device"
