@@ -75,13 +75,27 @@ try {
   const listed = await backend.listPools();
   assert.equal(listed.pools[0].secret, undefined, "the pool list never carries the secret");
 
-  // What the Code surface is offered: a byoc environment per pool.
-  const environments = await backend.poolEnvironments();
-  assert.equal(environments.length, 1);
-  assert.equal(environments[0].kind, "byoc", "a pool is advertised as a byoc environment");
-  assert.equal(environments[0].environment_id, primary.pool_id);
-  assert.equal(environments[0].config.environment_type, "byoc");
-  assert.equal(environments[0].state, "active");
+  // What the Code surface is offered: a byoc environment per pool, and nothing
+  // else. The local (this-computer) place is never in the list — that is the
+  // guarantee stated where the renderer picks a place, so no session can be
+  // started on one locally.
+  const listed_environments = await backend.environmentList();
+  assert.equal(listed_environments.environments.length, 1);
+  assert.equal(listed_environments.has_more, false);
+  assert.equal(listed_environments.first_id, primary.pool_id);
+  assert.ok(
+    listed_environments.environments.every((environment) => environment.kind === "byoc"),
+    "a tenant is offered self-hosted environments only — never a local place",
+  );
+  const [environment] = listed_environments.environments;
+  assert.equal(environment.kind, "byoc", "a pool is advertised as a byoc environment");
+  assert.equal(environment.environment_id, primary.pool_id);
+  assert.equal(environment.config.environment_type, "byoc");
+  assert.equal(environment.state, "active");
+
+  // The by-id read the detail screen makes.
+  assert.equal((await backend.environment(primary.pool_id)).environment_id, primary.pool_id);
+  assert.equal(await backend.environment("no-such-pool"), null);
 
   // The same record built from a bare pool (no store) keeps its shape.
   const standalone = poolEnvironment({ pool_id: "ccpool_x", name: "n", status: "active", created_at: "t" });
@@ -111,12 +125,16 @@ assert.match(
   "the pool API is served only on a tenant instance",
 );
 assert.ok(
-  serverSource.includes("if (codeRunners && url.pathname.startsWith(\"/v1/code/runners/\"))"),
+  serverSource.includes('url.pathname.startsWith("/v1/code/runners/")'),
   "the bridge routes /v1/code/runners/* through the backend",
 );
 assert.ok(
   serverSource.includes("await handleCodeRunnerApi(request, response, url)"),
   "and delegates to the runner handler",
+);
+assert.ok(
+  serverSource.includes('url.pathname.startsWith("/v1/environment_providers/")'),
+  "the environment list a tenant's Code surface reads is served here too",
 );
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 assert.equal(

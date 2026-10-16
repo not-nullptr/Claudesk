@@ -3100,6 +3100,24 @@ async function handleCodeRunnerApi(request, response, url) {
     return sendJson(response, ok, result);
   };
 
+  // The environment list the Code surface reads. A tenant's list is its pools
+  // and nothing else — the local (this-computer) place is deliberately never
+  // advertised, so the renderer cannot offer one to place a session on. That is
+  // the guarantee stated where the choice is actually made, alongside the IPC
+  // one in `codeActionsEnabled`.
+  const environmentsMatch = pathname.match(
+    /^\/v1\/environment_providers\/private\/organizations\/[0-9a-f-]{36}\/environments(?:\/([^/]+))?\/?$/i,
+  );
+  if (environmentsMatch && method === "GET") {
+    const id = environmentsMatch[1];
+    if (id) {
+      const environment = await codeRunners.environment(decodeURIComponent(id));
+      if (!environment) throw new ApiError(404, "environment not found");
+      return sendJson(response, 200, environment);
+    }
+    return sendJson(response, 200, await codeRunners.environmentList());
+  }
+
   switch (`${method} ${pathname}`) {
     case "POST /v1/code/runners/self-hosted/runners/register":
       return answer(await codeRunners.registerRunner({ headers, body }));
@@ -4169,10 +4187,15 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
     }
-    // A tenant's Code runners, and the self-hosted pool API they speak. Only on
-    // a tenant with the feature on (see `codeRunners`); every other instance
-    // falls through to the app, exactly as before.
-    else if (codeRunners && url.pathname.startsWith("/v1/code/runners/")) {
+    // A tenant's Code runners, and the self-hosted pool API they speak — plus
+    // the environment list that offers them as the only place a Code session can
+    // run. Only on a tenant with the feature on (see `codeRunners`); every other
+    // instance falls through to the app, exactly as before.
+    else if (
+      codeRunners
+      && (url.pathname.startsWith("/v1/code/runners/")
+        || url.pathname.startsWith("/v1/environment_providers/"))
+    ) {
       await handleCodeRunnerApi(request, response, url);
     }
     else if (url.pathname === "/manifest.json") {

@@ -172,9 +172,15 @@ self-hosted pool API: the runner's legs (`runners/register`, `deregister`,
 (`pools` CRUD, `secrets` by id, `sessions`). A pool is advertised to the Code
 surface as a `byoc` environment (`poolEnvironment`), and `queueSession` is the
 seam the session path will call. `bridge/server.mjs` routes
-`/v1/code/runners/*` to it, but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`,
-so nothing is routed until a deployment turns it on.
-`scripts/code-runners-smoke.mjs` drives the backend directly.
+`/v1/code/runners/*` and `/v1/environment_providers/…/environments[/{id}]` to it,
+but only for a tenant with `CLAUDESK_CODE_RUNNERS=1`, so nothing is routed until
+a deployment turns it on. `scripts/code-runners-smoke.mjs` drives the backend
+directly.
+
+The environment list is the guarantee stated where the choice is made: a
+tenant's list is its self-hosted pools and **nothing else**, so the Code UI has
+no local place to offer. The IPC guard (Phase 1) and the environment list say
+the same thing to the two layers that could independently enable a session.
 
 ## What the next increment needs
 

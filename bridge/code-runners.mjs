@@ -131,6 +131,11 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     return state.pools.find((pool) => pool.pool_id === poolId) ?? null;
   }
 
+  async function environments() {
+    const state = await load();
+    return state.pools.map((pool) => poolEnvironment(pool));
+  }
+
   // Which pool a runner call belongs to, from its secret. A wrong secret and an
   // unknown pool are the same answer: no pool.
   function poolForSecret(state, headers) {
@@ -329,8 +334,31 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
 
     /** The `byoc` environments this instance's pools are advertised as. */
     async poolEnvironments() {
+      return environments();
+    },
+
+    /**
+     * The environment list the Code surface reads. A tenant's list carries its
+     * self-hosted pools and **nothing else**: the local (this-computer) place is
+     * never advertised, so the UI cannot offer one to place a session on. That
+     * is the guarantee at the environment level — the same thing Phase 1 does at
+     * the IPC level, stated where the renderer makes its choice.
+     */
+    async environmentList() {
+      const list = await environments();
+      return {
+        environments: list,
+        has_more: false,
+        first_id: list[0]?.environment_id ?? null,
+        last_id: list[list.length - 1]?.environment_id ?? null,
+      };
+    },
+
+    /** GET /v1/environment_providers/…/environments/{id} */
+    async environment(id) {
       const state = await load();
-      return state.pools.map((pool) => poolEnvironment(pool));
+      const pool = poolById(state, id);
+      return pool ? poolEnvironment(pool) : null;
     },
 
     /** The pool a runner is pointed at, for provisioning and diagnostics. */
