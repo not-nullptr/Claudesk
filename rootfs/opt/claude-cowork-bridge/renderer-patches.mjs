@@ -90,6 +90,21 @@ const sessionViewerReason = "not_desktop_app";
 // declarator directly following the one reading the shrimp gate. Spliced only
 // in web-shell mode, like the other chrome patches.
 const localSessionPlacementPatchId = "web-local-session-placement";
+// The Code session view's live transcript transport is a feature read: the
+// session-subscription hook receives `subscribeSse: z("ccr_v2_subscribe_sse_web")`
+// and, when that reads off, holds the live leg over a WebSocket
+// (`/v1/sessions/ws/{id}/subscribe`) this bridge does not speak — history is
+// hydrated by one-shot reads and nothing ever streams, however healthy the
+// bridge's SSE leg is. The bridge grants the gate in its bootstrap
+// (`grantCcrSubscribeSse`), but the renderer's own feature read can still
+// answer off — a persisted feature table answers in place of the fresh one,
+// the same hazard `web-composer-design-forced` exists for — so the
+// subscription's transport property is forced on here as well. `subscribeSse`
+// is an object property, not a mangled name; the same-named local binding and
+// a shorthand property are not targets, and only a plain expression value is
+// spliced. Spliced only in web-shell mode, and deliberately not required: a
+// bundle that no longer matches leaves the transport to the flag.
+const subscribeSsePatchId = "web-code-subscribe-sse";
 // The web New page's "home" layout — the compact greeting, the composer's
 // controls docked below the card, the below-fold feed — is chosen by an
 // assignment the Desktop build compiles out. The chunk that reads the
@@ -1051,6 +1066,25 @@ function projectsAllowedTarget(node) {
   if (!literal(limits.arguments[0], projectsLimitsFeature)) return false;
   if (!literal(limits.arguments[1], projectsLimitsField)) return false;
   return sequence.expressions[4].type === "Identifier";
+}
+
+// The Code session subscription's options object: the `subscribeSse` property
+// names the live transport. Only a property of an object *expression* whose
+// value is a plain expression qualifies — the hook's own signature carries the
+// same key as a destructuring binding with a default (`subscribeSse:l=!1`),
+// where a splice would not even parse, and a shorthand property carries no
+// transport read to replace.
+function subscribeSseProperty(node, ancestors) {
+  if (node.type !== "Property" || node.computed || node.shorthand) return false;
+  const parent = ancestors[ancestors.length - 1];
+  if (!parent || parent.type !== "ObjectExpression") return false;
+  const name = node.key.type === "Identifier" ? node.key.name
+    : node.key.type === "Literal" ? node.key.value : null;
+  if (name !== "subscribeSse") return false;
+  const value = node.value;
+  if (!value) return false;
+  if (value.type === "FunctionExpression" || value.type === "ArrowFunctionExpression") return false;
+  return value;
 }
 
 // The predicate's body rebuilt as claude.ai's disjunction. The four reads are
@@ -2239,6 +2273,15 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           patches.push({ id: sessionViewerPatchId, start: init.start, end: init.end,
             original: source.slice(init.start, init.end), replacement: "!0" });
         }
+      }
+      // The Code session view's live leg: hold its transport to SSE (see
+      // subscribeSsePatchId).
+      const subscribeValue = subscribeSseProperty(node, ancestors);
+      if (subscribeValue) {
+        patches.push({ id: subscribeSsePatchId, start: subscribeValue.start,
+          end: subscribeValue.end,
+          original: source.slice(subscribeValue.start, subscribeValue.end),
+          replacement: "!0" });
       }
       const wiringHost = desktopChecksComponent(node);
       if (wiringHost) {

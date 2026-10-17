@@ -67,6 +67,23 @@ const sessionPlacementDecoy = 'function notThePlacement(){'
   + 'settings=(account)=>account.settings.dramatic_shrimp_disabled_at,'
   + 'shrimp=rule("yukon_silver_dramatic_shrimp"),isApp=desktopClient(user);'
   + 'return isApp&&shrimp}';
+// The Code session view's subscription: its options object carries the live
+// transport as the `subscribeSse` property, read from the ccr feature. With it
+// off the hook holds the live leg over a WebSocket the bridge does not speak,
+// so the patcher forces the property on and the leg stays on SSE. The
+// same-named local binding and a shorthand property are decoys — only the
+// property's plain expression value is spliced.
+const codeSubscription = 'function useSessionLive(e){'
+  + 'let subscribeSse=readFeature("ccr_v2_subscribe_sse_web"),tailFirst=readFeature("ccr_tail_first");'
+  + 'return useMemo(()=>e?openSession({orgUuid:e,fetch:api,subscribeSse:subscribeSse,'
+  + 'tailFirstTranscript:tailFirst}):null,[e]);}';
+const codeSubscriptionDecoy = 'function notTheSubscription(){let subscribeSse=!0;'
+  + 'return{subscribeSse}}';
+// The hook's own signature carries the same key as a destructuring binding with
+// a default — the shape the shipping bundle has beside the call site. A splice
+// there would not even parse, so it must be left alone.
+const codeSubscriptionDefaults = 'function openSessionLive({orgUuid:e,fetch:t,intl:n,'
+  + 'subscribeSse:o=!1,tailFirstTranscript:r}){return open(e,t,n,o,r)}';
 // The account chip: reads the account view — its src binding — and then returns
 // the deployment mark, the one shape that fetches the photo and drops it. The
 // chip takes extra placement props and answers through a comma sequence, like
@@ -290,7 +307,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 7);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -310,19 +327,34 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 18,
-    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  assert.equal(webResult.patches.length, 19,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  assert.equal(webResult.patches.filter(p => p.id === "web-code-subscribe-sse").length, 1,
+    "the Code session's live transport must be held to SSE exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("subscribeSse:!0"),
+    "the subscription's transport property is forced on, whatever the feature answers");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('let subscribeSse=readFeature("ccr_v2_subscribe_sse_web")'),
+    "the same-named local binding must not be mistaken for the property");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("return{subscribeSse}"),
+    "a shorthand property carries no transport read and must stay byte-identical");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("subscribeSse:o=!1"),
+    "the hook's destructuring default is a binding, not a transport read — splicing it would not parse");
+  assert.equal(result.patches.filter(p => p.id === "web-code-subscribe-sse").length, 0,
+    "the transport splice is a web-shell patch and must not appear in the Desktop shell");
   // A tenant resolves `/code` to the self-hosted surface, so the route alias
   // that forces the local one is withheld — and withheld deliberately, which is
   // why it must not be a required patch there either (the bundle still matches;
   // the splice is simply not made).
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 17,
+  assert.equal(tenantResult.patches.length, 18,
     "a tenant's web shell drops exactly the Code route alias");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 0,
     "a tenant must not have the local Code route alias spliced in");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
     "the rest of the web shell is unchanged for a tenant");
+  assert.equal(tenantResult.patches.filter(p => p.id === "web-code-subscribe-sse").length, 1,
+    "a tenant's Code page gets the SSE transport too — it is the deployment that serves it");
   assert.equal(webResult.patches.filter(p => p.id === "toast-global").length, 1,
     "the toast manager must be published exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
