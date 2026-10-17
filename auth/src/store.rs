@@ -542,4 +542,60 @@ impl Store {
             .await?;
         Ok(())
     }
+
+    // --- routine fire tokens ----------------------------------------------
+
+    /// Replace an account's token for one routine. One row per routine, so
+    /// rotating a token revokes the previous one in the same step.
+    pub async fn upsert_routine_token(
+        &self,
+        user_id: i64,
+        routine_id: &str,
+        token_sha256: &str,
+    ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM routine_tokens WHERE user_id = ?1 AND routine_id = ?2")
+            .bind(user_id)
+            .bind(routine_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO routine_tokens (token_sha256, user_id, routine_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(token_sha256)
+        .bind(user_id)
+        .bind(routine_id)
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_routine_token(&self, user_id: i64, routine_id: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM routine_tokens WHERE user_id = ?1 AND routine_id = ?2")
+            .bind(user_id)
+            .bind(routine_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The account and instance a fire token names. A disabled account resolves
+    /// to nothing, the same as a signed-out session.
+    pub async fn resolve_routine_token(
+        &self,
+        token_sha256: &str,
+    ) -> AppResult<Option<(i64, Option<String>)>> {
+        Ok(sqlx::query_as(
+            "SELECT routine_tokens.user_id, users.upstream
+             FROM routine_tokens
+             JOIN users ON users.id = routine_tokens.user_id
+             WHERE routine_tokens.token_sha256 = ?1 AND users.disabled = 0",
+        )
+        .bind(token_sha256)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
 }

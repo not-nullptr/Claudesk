@@ -358,6 +358,18 @@ web-shell mode. Both patches are **required**, like the rest of the web-shell
 set: without them the Routines list still offers creation and the failure is
 silent, which is exactly the shape a required patch exists to refuse.
 
+`routine-fire-origin` points the API-trigger card's copied URL at this
+deployment. The card builds
+`https://api.anthropic.com/v1/claude_code/routines/{id}/fire` (staging for a
+staging host), which is the cloud endpoint — not something a 3P deployment can
+serve. The patch finds the return whose two arms are exactly those origin
+literals, the only such conditional in the renderer graph, and replaces it with
+`window.location.origin`. The bridge serves `/v1/claude_code/routines/{id}/fire`
+itself (see `docs/routines.md`), so the copied curl command then names the
+instance. Deliberately **not** required: a bundle that no longer matches leaves
+the card pointing at the cloud origin, visibly wrong, rather than failing
+renderer preparation.
+
 `web-new-page-home-layout` turns on the New page's **home** layout — the compact
 greeting, the composer's controls docked below the card, the below-fold feed —
 which the Desktop build compiles out: the chunk that reads the new-page gate

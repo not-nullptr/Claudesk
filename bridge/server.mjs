@@ -16,6 +16,7 @@ import { createNotificationController } from "./notifications.mjs";
 import { createConnectorStore } from "./connectors.mjs";
 import { createProjectBackend } from "./projects.mjs";
 import { createRunnerBackend } from "./code-runners.mjs";
+import { createRoutineService, RoutineError } from "./routines.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { loadNotice, saveNotice } from "./notices.mjs";
@@ -209,7 +210,12 @@ const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
 // literal id.
 const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks",
   "yukon_silver_folders", "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553",
-  "amber_tributary_heron"];
+  "amber_tributary_heron",
+  // The cloud Routines page, backed by this instance's scheduled tasks (see
+  // bridge/routines.mjs). Its detail view is where the API-trigger card lives,
+  // and that card's fire URL is pointed at this deployment by the
+  // `routine-fire-origin` renderer patch.
+  "routines-chorus"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`
@@ -727,6 +733,23 @@ const configuredModelCatalogue = (() => {
   }
 })();
 const allowedModels = new Set(configuredModels);
+// The model a routine fire uses when the task itself names none. The operator's
+// JSON may mark one entry as the family default; otherwise the first configured
+// model is the deployment's default, exactly as the picker treats it.
+const defaultInferenceModel = (() => {
+  try {
+    const value = JSON.parse(process.env.CLAUDE_INFERENCE_MODELS_JSON || "[]");
+    const list = Array.isArray(value) ? value : [];
+    const named = (entry) => typeof entry === "string"
+      ? entry
+      : typeof entry?.name === "string" ? entry.name : "";
+    const flagged = list.find((entry) =>
+      entry && typeof entry === "object" && entry.isFamilyDefault === true && named(entry));
+    return named(flagged) || list.map(named).find(Boolean) || "";
+  } catch {
+    return "";
+  }
+})();
 const allowedDeveloperActions = new Set([
   "record-memory-trace",
   "reload-mcp-configuration",
@@ -1406,6 +1429,19 @@ class DesktopInternalClient {
 }
 
 const desktop = new DesktopInternalClient();
+
+// Routine triggers (see bridge/routines.mjs). Instantiated after the Desktop
+// client it calls; `wakeRunnerVm` is a hoisted function declaration.
+const routines = createRoutineService({
+  stateDir: bridgeStateDir,
+  desktop,
+  codeRunners,
+  configuredModels,
+  defaultModel: defaultInferenceModel,
+  authIdentityUrl,
+  wakeRunner: wakeRunnerVm,
+  log: console,
+});
 
 class ApiError extends Error {
   constructor(statusCode, message) {
@@ -3319,6 +3355,229 @@ async function handleInferencePassthrough(request, response, url) {
   if (!response.writableEnded) response.end();
 }
 
+// The routine API's error envelope is the one Anthropic's product surface uses:
+// a top-level `type` and a typed error object. The renderer's own trigger
+// client reads the same fields (`reason`, `subReason`, `error.type`), so one
+// shape serves the public fire endpoint and the in-app routines pages.
+function sendRoutineJson(response, statusCode, body, headers = {}) {
+  response.writeHead(statusCode, {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    ...headers,
+  });
+  response.end(JSON.stringify(body));
+}
+
+function sendRoutineError(response, error) {
+  const status = Number(error?.statusCode) || (error instanceof SyntaxError ? 400 : 500);
+  const type = error?.type || (status === 400 ? "invalid_request_error"
+    : status === 401 ? "authentication_error"
+      : status === 404 ? "not_found_error"
+        : status === 429 ? "rate_limit_error"
+          : status === 503 ? "overloaded_error"
+            : "api_error");
+  const message = error?.message || "unexpected error";
+  const headers = {};
+  if (error?.retryAfter !== undefined) headers["Retry-After"] = String(error.retryAfter);
+  sendRoutineJson(response, status, { type: "error", error: { type, message } }, headers);
+}
+
+function requestBearerToken(headers = {}) {
+  const raw = headers.authorization;
+  if (typeof raw !== "string") return "";
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match ? match[1].trim() : "";
+}
+
+function routinePublicOrigin(request, url) {
+  const proto = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim()
+    || (request.socket?.encrypted ? "https" : "http");
+  const host = String(request.headers["x-forwarded-host"] || request.headers.host || "")
+    .split(",")[0].trim() || url.host;
+  return host ? `${proto}://${host}` : "";
+}
+
+function routineSessionUrl(origin, kind, sessionId) {
+  const path = kind === "code"
+    ? `/code/${encodeURIComponent(sessionId)}`
+    : `/cowork/${encodeURIComponent(sessionId)}`;
+  return `${origin}${path}`;
+}
+
+async function handleRoutineApi(request, response, url) {
+  const method = String(request.method || "GET").toUpperCase();
+  const pathname = url.pathname;
+
+  // The login shell serves the sign-in page and nothing else; a routine fire is
+  // still an API call that starts a session, so it is refused like the rest.
+  if (loginShellEnabled) {
+    sendRoutineJson(response, 403, {
+      type: "error",
+      error: { type: "permission_error", message: "not signed in" },
+    });
+    return;
+  }
+
+  try {
+    const fire = /^\/v1\/claude_code\/routines\/([^/]+)\/fire\/?$/.exec(pathname);
+    if (fire) {
+      if (method !== "POST") {
+        throw new RoutineError(405, "invalid_request_error", "method not allowed");
+      }
+      if (request.headers["anthropic-version"] !== "2023-06-01") {
+        throw new RoutineError(400, "invalid_request_error",
+          "anthropic-version: 2023-06-01 is required");
+      }
+      const presented = requestBearerToken(request.headers);
+      if (!presented) {
+        throw new RoutineError(401, "authentication_error",
+          "a per-routine bearer token is required");
+      }
+      const verified = await routines.verifyToken(presented);
+      const routineId = decodeURIComponent(fire[1]);
+      if (!verified || verified.routineId !== routineId) {
+        throw new RoutineError(401, "authentication_error",
+          "the bearer token is not valid for this routine");
+      }
+      const body = await readJson(request, 1024 * 1024).catch((error) => {
+        if (error instanceof SyntaxError) {
+          throw new RoutineError(400, "invalid_request_error", "the request body is not valid JSON");
+        }
+        throw error;
+      });
+      if (body?.text !== undefined && typeof body.text !== "string") {
+        throw new RoutineError(400, "invalid_request_error", "text must be a string");
+      }
+      const fired = await routines.fireRoutine(routineId, { text: body?.text });
+      const origin = routinePublicOrigin(request, url);
+      sendRoutineJson(response, 200, {
+        type: "routine_fire",
+        claude_code_session_id: fired.sessionId,
+        claude_code_session_url: routineSessionUrl(origin, fired.kind, fired.sessionId),
+      });
+      return;
+    }
+
+    // The organization trigger list the routines sidebar asks for beside the
+    // account's own. Organisations are not a thing this deployment serves, so
+    // the honest answer is an empty page (not a 404, which errors the surface).
+    if (/^\/v1\/code\/organization\/triggers\/?$/.test(pathname) && method === "GET") {
+      sendRoutineJson(response, 200, { data: [], next_cursor: null, has_more: false });
+      return;
+    }
+    // The routines pages ask for the account's agents beside the routine list.
+    // This deployment has none; an empty page keeps the selector quiet.
+    if (/^\/v1\/code\/agents\/?$/.test(pathname) && method === "GET") {
+      sendRoutineJson(response, 200, { data: [], next_cursor: null, has_more: false });
+      return;
+    }
+
+    if (pathname === "/v1/code/triggers" || pathname === "/v1/code/triggers/") {
+      if (method === "GET") {
+        sendRoutineJson(response, 200, await routines.listTriggers());
+        return;
+      }
+      if (method === "POST") {
+        const body = await readJson(request, 1024 * 1024);
+        sendRoutineJson(response, 201, await routines.createTrigger(body));
+        return;
+      }
+      throw new RoutineError(405, "invalid_request_error", "method not allowed");
+    }
+
+    const triggerPath = /^\/v1\/code\/triggers\/([^/]+)\/?(.*)$/.exec(pathname);
+    if (triggerPath) {
+      const routineId = decodeURIComponent(triggerPath[1]);
+      const rest = triggerPath[2].replace(/\/+$/, "");
+      if (rest === "run" && method === "POST") {
+        const body = await readJson(request, 1024 * 1024).catch(() => ({}));
+        sendRoutineJson(response, 200, await routines.runTrigger(routineId, body?.text));
+        return;
+      }
+      if (rest === "runs" && method === "GET") {
+        sendRoutineJson(response, 200, await routines.listRuns(routineId));
+        return;
+      }
+      if (rest === "api-token") {
+        if (method === "POST") {
+          sendRoutineJson(response, 200,
+            await routines.mintToken(routineId, { cookie: request.headers.cookie }));
+          return;
+        }
+        if (method === "DELETE") {
+          sendRoutineJson(response, 200,
+            await routines.revokeToken(routineId, { cookie: request.headers.cookie }));
+          return;
+        }
+      }
+      if (!rest) {
+        if (method === "GET") {
+          sendRoutineJson(response, 200, await routines.getTrigger(routineId));
+          return;
+        }
+        if (method === "POST" || method === "PATCH") {
+          const body = await readJson(request, 1024 * 1024);
+          sendRoutineJson(response, 200, await routines.updateTrigger(routineId, body));
+          return;
+        }
+        if (method === "DELETE") {
+          sendRoutineJson(response, 200, await routines.deleteTrigger(routineId));
+          return;
+        }
+      }
+    }
+
+    throw new RoutineError(404, "not_found_error", "not found");
+  } catch (error) {
+    sendRoutineError(response, error);
+  }
+}
+
+/**
+ * The authenticated token administration route. It sits behind the deployment's
+ * proxy session gate like every other `/api/` leg, so the caller is the
+ * instance's own signed-in account; the token is scoped to one routine and its
+ * hash is all that is stored.
+ */
+async function handleRoutineAdminApi(request, response, url) {
+  const method = String(request.method || "GET").toUpperCase();
+  const pathname = url.pathname;
+  try {
+    if (pathname === "/api/routines" || pathname === "/api/routines/") {
+      if (method !== "GET") throw new RoutineError(405, "invalid_request_error", "method not allowed");
+      sendJson(response, 200, { ok: true, value: (await routines.listTriggers()).data });
+      return;
+    }
+    const tokenPath = /^\/api\/routines\/([^/]+)\/token\/?$/.exec(pathname);
+    if (tokenPath) {
+      const routineId = decodeURIComponent(tokenPath[1]);
+      const cookie = request.headers.cookie;
+      if (method === "POST") {
+        sendJson(response, 200, {
+          ok: true,
+          value: await routines.mintToken(routineId, { cookie }),
+        });
+        return;
+      }
+      if (method === "DELETE") {
+        sendJson(response, 200, {
+          ok: true,
+          value: await routines.revokeToken(routineId, { cookie }),
+        });
+        return;
+      }
+    }
+    throw new RoutineError(404, "not_found_error", "not found");
+  } catch (error) {
+    if (error instanceof RoutineError) {
+      sendJson(response, error.statusCode, { ok: false, error: error.message });
+      return;
+    }
+    sendJson(response, 500, { ok: false, error: error?.message || "unexpected error" });
+  }
+}
+
 // A placed session waits for the runner inside the account's Cowork VM, and
 // that runner lives only while the VM does — the VM idle-stops on its own, and
 // a Code session is not otherwise a thing that wakes it (the Cowork surfaces
@@ -3811,6 +4070,12 @@ async function handleApi(request, response, url) {
       return;
     }
     sendJson(response, 403, { ok: false, error: "not signed in" });
+    return;
+  }
+  // Routine token administration, behind the same session gate as the rest of
+  // the account's own API.
+  if (url.pathname === "/api/routines" || url.pathname.startsWith("/api/routines/")) {
+    await handleRoutineAdminApi(request, response, url);
     return;
   }
   // The web-shell account avatar, when CLAUDE_REMOTE_ACCOUNT_AVATAR is a local
@@ -4903,6 +5168,16 @@ const server = http.createServer(async (request, response) => {
       } else {
         sendJson(response, 200, await uploads.receiveFilestore(request, response));
       }
+    }
+    // Routine triggers: the public fire entry point (a bearer token, no session
+    // cookie), and the `/v1/code/triggers` family the routines pages read. The
+    // trigger collections are answered here for every deployment — the local
+    // scheduled-task store is the only routine store this fork has.
+    else if (url.pathname.startsWith("/v1/claude_code/routines/")
+      || url.pathname.startsWith("/v1/code/triggers")
+      || url.pathname === "/v1/code/organization/triggers"
+      || url.pathname === "/v1/code/agents") {
+      await handleRoutineApi(request, response, url);
     }
     // A tenant's Code runners, and the self-hosted pool API they speak — plus
     // the environment list that offers them as the only place a Code session can

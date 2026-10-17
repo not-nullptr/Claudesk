@@ -576,6 +576,16 @@ saw — the path Desktop answered, or the reason it answered none, how many link
 the file had, and what the app process reports about itself — so a routine stuck
 on a machine nobody logs into is diagnosable from the browser that hit it.
 
+### Firing a routine over HTTP
+
+The tasks above also back the routine fire endpoint: a per-routine bearer token
+and `POST /v1/claude_code/routines/{id}/fire` start the same session Run now
+would, with the body's optional `text` appended to the saved instructions. The
+Routines page's cloud data family (`/v1/code/triggers`) is served from the same
+store, and the `routine-fire-origin` renderer patch makes its API card print
+this deployment's URL. Token minting, edge routing and the exact contract are in
+[docs/routines.md](routines.md).
+
 ## Home greeting
 
 The home greeting is not local copy: ion-dist reads `personalized_greeting` out

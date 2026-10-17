@@ -842,6 +842,39 @@ assert.equal(inspectRenderer(
   `${desktopChecks.replace("DesktopChecks", "OtherLabel")}\n${scheduledTaskHosts}`, false, true).patches
   .filter(patch => patch.id === "web-scheduled-task-hosts").length, 0,
   "a slot that is not the Desktop-checks slot is not a mount point for the scheduled-task hosts");
+// The routine API card's fire origin: the conditional that answers
+// `https://api.anthropic.com` (staging for a staging host). In web-shell mode it
+// is replaced with the page's own origin, so the card's copied URL names this
+// deployment. Only a return whose two arms are exactly those literals matches.
+const routineOriginChunk = 'function apiOrigin(){let e=typeof window<"u"'
+  + '?window.location.hostname:"";return"".includes("staging")||e.includes("staging")'
+  + '?"https://api-staging.anthropic.com":"https://api.anthropic.com"}';
+const routineOriginDecoy = 'function apiOriginAlready(){return location.origin}';
+assert.equal(inspectRenderer(routineOriginChunk, false, false).patches.length, 0,
+  "the routine fire origin is left alone outside web-shell mode");
+assert.equal(inspectRenderer(routineOriginDecoy, false, true).patches.length, 0,
+  "a function that already returns the page origin is not a target");
+assert.equal(inspectRenderer(`${routineOriginChunk}\n${routineOriginDecoy}`, false, true).patches
+  .filter(patch => patch.id === "routine-fire-origin").length, 1,
+  "an unrelated origin function in the same chunk must not stop the splice");
+assert.equal(inspectRenderer(`${routineOriginChunk}\n`
+  + `${routineOriginChunk.replace("apiOrigin", "apiOriginB")}`, false, true).patches
+  .filter(patch => patch.id === "routine-fire-origin").length, 0,
+  "a second cloud-origin conditional must refuse rather than splice one of two");
+const routineOriginOut = patchRendererSources(
+  new Map([["routine-origin.js",
+    `${webShellFixtures}\n${accountMenuName}\n${routineOriginChunk}`]]), false, true)
+  .sources.get("routine-origin.js");
+assert.ok(routineOriginOut.includes("return window.location.origin"),
+  "the fire origin must become the page's own origin");
+assert.ok(!routineOriginOut.includes("https://api.anthropic.com"),
+  "the cloud origin must not survive the splice");
+const routineOriginCompiled = await minify(routineOriginChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(routineOriginCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-fire-origin").length, 1,
+  "a mangled cloud-origin conditional must still be spliced once");
 // The home-layout assignment: the chunk that reads the new-page gate returns
 // the assignment object the Desktop build compiles out — eligible, settled and
 // assignment hardcoded false — so the renderer always settles on the classic

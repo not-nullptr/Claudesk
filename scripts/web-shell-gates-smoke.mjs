@@ -47,8 +47,8 @@ const { granted, grant, grantComposer, grantProjects, hash, enabled } = load();
 assert.deepEqual(plain(granted),
   ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks", "yukon_silver_folders",
     "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553",
-    "amber_tributary_heron"],
-  "the web shell's gates are the Code, Cowork, folder, atrium, create and hub-writable entry points");
+    "amber_tributary_heron", "routines-chorus"],
+  "the web shell's gates are the Code, Cowork, folder, atrium, create, hub-writable and routines entry points");
 assert.equal(enabled, false, "the rewrite is off unless the web shell is asked for");
 assert.equal(load({ webShell: true }).enabled, true, "CLAUDE_REMOTE_WEB_SHELL turns it on");
 

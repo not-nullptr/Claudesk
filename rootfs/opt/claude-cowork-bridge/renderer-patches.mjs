@@ -121,6 +121,18 @@ const subscribeSsePatchId = "web-code-subscribe-sse";
 // object. Spliced only in web-shell mode, and deliberately not required: a
 // bundle that no longer matches leaves the classic home layout rather than
 // failing renderer preparation.
+// The routine detail page and its API-trigger card print a fire URL built on
+// the API origin `https://api.anthropic.com` (staging for a staging build).
+// This deployment serves the fire route itself, so the origin is the page's own
+// — the deployment's HTTPS entry. The expression is pinned behaviourally: the
+// only `${…}?api-staging.anthropic.com:api.anthropic.com` conditional in the
+// renderer graph, replaced by `window.location.origin`. Spliced only in
+// web-shell mode, and deliberately not required: a bundle that no longer
+// matches leaves the card pointing at Anthropic's cloud (and visibly not at
+// this deployment) rather than failing renderer preparation.
+const routineFireOriginPatchId = "routine-fire-origin";
+const routineFireCloudOrigin = "https://api.anthropic.com";
+const routineFireStagingOrigin = "https://api-staging.anthropic.com";
 const homeLayoutPatchId = "web-new-page-home-layout";
 const homeLayoutGate = "__gb__1085985672";
 const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
@@ -1953,6 +1965,7 @@ export const prefilterNeedles = [
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
   "chatProjectsError", // the projects page's list hook, which the report patch forces
   "onCaughtError", // the crash-log root option (two chunks: the entry and react-dom)
+  "api-staging.anthropic.com", // routine API card fire origin (routine-fire-origin)
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -1987,6 +2000,21 @@ export const rendererPrefilter = prefilter;
 // withheld: without it the browser client takes ion-dist's own cloud branch,
 // which is the surface this deployment backs with a runner pool. Everything
 // else the web shell adds is unchanged. See docs/code-in-cowork-vm.md.
+// The conditional that picks the cloud routine fire origin. Both arms are the
+// literal origins, and it is the only such conditional in the bundle — the
+// caller replaces the whole expression with this deployment's origin.
+function routineFireOriginTarget(node) {
+  if (node.type !== "ReturnStatement" || !node.argument) return null;
+  const argument = unwrap(node.argument);
+  if (!argument || argument.type !== "ConditionalExpression") return null;
+  const arms = [argument.consequent, argument.alternate]
+    .filter(arm => arm?.type === "Literal" && typeof arm.value === "string")
+    .map(arm => arm.value);
+  if (!arms.includes(routineFireCloudOrigin)) return null;
+  if (!arms.includes(routineFireStagingOrigin)) return null;
+  return argument;
+}
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   tenantEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
@@ -2378,6 +2406,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   // delegates, so the app's own reporting still runs. A throw from the log line
   // or from the original handler must not replace the crash the boundary is
   // already rendering, hence the two `try`s.
+  // The routine API card's fire origin (see routineFireOriginPatchId). Accepted
+  // only when exactly one such conditional is in the chunk, so a second
+  // candidate refuses rather than splice the wrong expression.
+  if (webShellEnabled) {
+    const origins = [];
+    walk(ast, [], (node) => {
+      const target = routineFireOriginTarget(node);
+      if (target) origins.push(target);
+    });
+    if (origins.length === 1) {
+      const target = origins[0];
+      patches.push({ id: routineFireOriginPatchId, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end),
+        // The original argument follows `return` with no space (`return"…"`);
+        // keep one so the keyword and the identifier stay separate tokens.
+        replacement: " window.location.origin" });
+    }
+  }
   if (webShellEnabled && crashLogOptions.length === 1) {
     const option = crashLogOptions[0];
     const original = source.slice(option.value.start, option.value.end);

@@ -8,6 +8,7 @@
 mod api_admin;
 mod api_auth;
 mod api_gateway;
+mod api_routines;
 mod crypto;
 mod error;
 mod store;
@@ -308,6 +309,21 @@ async fn main() {
         .route("/api/auth/avatar/:id", get(api_auth::avatar))
         .route("/api/auth/me/avatar", put(api_auth::set_my_avatar))
         .route("/api/auth/verify", any(api_auth::verify))
+        // The fire path's own forward_auth target: bearer-only, no cookie. The
+        // reverse proxy must be pointed at it for the routine fire route (see
+        // docs/routines.md); the ordinary verify stays cookie-only.
+        .route("/api/auth/verify-routine", any(api_routines::verify))
+        // Internal, reached only from an instance on the deployment network.
+        // The proxy never forwards `/internal/*`; the session cookie on the
+        // call is what names the account.
+        .route(
+            "/internal/routine-tokens",
+            post(api_routines::register),
+        )
+        .route(
+            "/internal/routine-tokens/revoke",
+            post(api_routines::revoke),
+        )
         // Read by an account's instance (no session), so it sits under /api/auth/
         // where the proxy routes to authd; it answers one key. See api_auth.rs.
         .route("/api/auth/deployment", get(api_auth::deployment))

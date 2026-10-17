@@ -1041,7 +1041,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      * refused rather than quietly run somewhere else. The answer is
      * `{session: …}` in the app's session shape (see `sessionDocument`).
      */
-    async createSession({ body } = {}) {
+    async createSession({ body, source } = {}) {
       const state = await load();
       const environmentId = typeof body?.environment_id === "string" ? body.environment_id : "";
       const requestedPoolId = typeof body?.self_hosted_runner_pool_id === "string"
@@ -1071,7 +1071,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // The create body may carry the session's first events (a schema init
       // control request, or an eager first message); they land in the same log
       // the runner reads and the stream replays.
-      if (Array.isArray(body?.events)) appendToSession(session, body.events);
+      if (Array.isArray(body?.events)) appendToSession(session, body.events, source);
       await save();
       // A runner already holding this pool's poll takes it on that same
       // request, not on its next tick.

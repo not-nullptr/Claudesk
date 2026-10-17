@@ -28,8 +28,9 @@ try {
   // patches (route alias, session Desktop gate, local session placement,
   // account chip avatar, account photo fallback, identity seed, permission
   // wiring, notification enable, the scheduled-task runner gate, the
-  // scheduled-task hosts, the new-page home-layout assignment and the forced
-  // unified-composer design predicates) — plus a **tenant** web shell, which is
+  // scheduled-task hosts, the new-page home-layout assignment, the forced
+  // unified-composer design predicates and the routine fire origin) — plus a
+  // **tenant** web shell, which is
   // the same generation with the Code route alias withheld so `/code` resolves
   // to the self-hosted surface. See docs/code-in-cowork-vm.md.
   // A selector that drifts against a new official bundle must fail here, not
@@ -49,7 +50,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 50 : 51) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 52 : 53) : gateway === "1" ? 8 : 6);
     // A tenant resolves `/code` to the self-hosted surface, so the route alias
     // that forces the local one is withheld — deliberately, which is also why it
     // is not a required patch on a tenant.
@@ -64,6 +65,10 @@ try {
       "the provider card must be removed in both Gateway modes");
     assert.ok(manifest.patches.some(patch => patch.id === "titlebar-mode-picker-without-code"),
       "the titlebar's mode picker must be hidden when Code is off");
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-fire-origin"),
+      webShell === "1",
+      "the routine API card's fire origin must be this deployment in the web shell");
+
     if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
     if (webShell === "1") webShellManifest = manifest;
     for (const file of manifest.files) {
