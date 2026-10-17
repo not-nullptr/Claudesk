@@ -2147,6 +2147,29 @@ function grantTenantCodeGates(value) {
   return changed;
 }
 
+// The live transcript transport. The Code page's subscription hook takes its
+// transport straight off this gate — `subscribeSse: z("ccr_v2_subscribe_sse_web")`
+// in the session view — and an off read does not mean "no live updates": it
+// means a WebSocket (`/v1/sessions/ws/{id}/subscribe`) holding the live leg
+// while a one-shot REST read hydrates history. This bridge serves the SSE
+// stream (frames, cursors, resume) and no WebSocket at all, so with the gate
+// off the page drew the transcript on a reload and never streamed a byte —
+// however correct the stream itself was. Forced outright rather than
+// added-if-absent: an evaluated false is what the desktop's custom-3p feature
+// table (and the upstream growthbook payload behind it) carries.
+const ccrSubscribeSseGate = "ccr_v2_subscribe_sse_web";
+function grantCcrSubscribeSse(value) {
+  if (!codeRunnersEnabled) return false;
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey(ccrSubscribeSseGate);
+  const entry = features[key];
+  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+  if (on) return false;
+  features[key] = { defaultValue: true };
+  return true;
+}
+
 // The renderer's whole remote-place machinery hangs on one flag that comes from
 // the page, not from any access document: `shared-50`'s `RM` turns
 // `appFeatures.selfHostedSessions.status === "supported"` into the module flag
@@ -2622,6 +2645,11 @@ async function forwardOfficialProtocol(request, response, url) {
     // the self-hosted section does not depend on whichever of the two the
     // build happens to read first.
     if (bootstrapResponsePath.test(url.pathname) && grantTenantCodeGates(parsed)) {
+      rewrote = true;
+    }
+    // The live transcript transport the Code surface picks between SSE and a
+    // WebSocket (see grantCcrSubscribeSse).
+    if (bootstrapResponsePath.test(url.pathname) && grantCcrSubscribeSse(parsed)) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {

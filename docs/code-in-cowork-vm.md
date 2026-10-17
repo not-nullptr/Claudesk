@@ -203,10 +203,20 @@ overridden.
 A session's events are served too: `GET …/sessions/{id}/events` (paged,
 `after_sequence_num` resumes), `POST` to append — `{events:[{payload}]}` from the
 renderer, a bare `{payload}` from a runner — and `GET …/events/stream`, which
-replays the history as `client_event` frames and then tails it. The envelopes are
-the store's to number (`event_id`, a positive digit-string `sequence_num`), and
-they are held to the app's own contract by `scripts/lib/code-wire-contract.mjs`
-in the smokes, not to a hand-written idea of the shape.
+replays the history as `client_event` frames (each frame's `id:` is its
+`sequence_num` — the cursor the reader resumes by, via `Last-Event-ID` or
+`from_sequence_num`) and then tails it with `session_update` frames carrying the
+connection state. The envelopes are the store's to number (`event_id`, a
+positive digit-string `sequence_num`), and they are held to the app's own
+contract by `scripts/lib/code-wire-contract.mjs` in the smokes, not to a
+hand-written idea of the shape. Whether the page *uses* that stream is itself
+gated: the session view reads `ccr_v2_subscribe_sse_web` and falls back to a
+WebSocket subscribe this bridge does not speak when it is off — drawing history
+from one-shot reads and never streaming — so the bridge grants the gate for a
+tenant (`grantCcrSubscribeSse`). A stream whose session does not exist yet opens
+empty rather than 404ing (that 404 is the "Connecting" loop), and a `result`
+message written back by the runner is the turn terminal the reader closes a
+turn on.
 
 `bridge/server.mjs` routes `/v1/code/runners/*`, both environments legs —
 `…/environment_providers/private/organizations/{org}/environments[/{id}]` (the

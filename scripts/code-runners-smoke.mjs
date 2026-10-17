@@ -396,6 +396,40 @@ assert.deepEqual(gated(true, { [key]: { defaultValue: false } }),
   { [key]: { defaultValue: false } },
   "an upstream verdict on the gate is left alone too");
 
+// Where the Code page's live transcript transport is decided: with
+// `ccr_v2_subscribe_sse_web` reading off the subscription hook holds the live
+// leg over a WebSocket this bridge does not speak — the page then draws
+// history on a reload and never streams. A tenant's deployment serves the SSE
+// stream, so the gate is forced on outright (the desktop's table carries it
+// evaluated false), and the operator's instance is left alone.
+const subscribeGrant = section(serverSource, "const ccrSubscribeSseGate",
+  "// The renderer's whole remote-place machinery hangs on one flag");
+function subscribed(codeRunners, initial = {}) {
+  const sandbox = { codeRunnersEnabled: codeRunners };
+  vm.runInNewContext(
+    `const codeRunnersEnabled = ${codeRunners};
+     ${gateKey}
+     ${subscribeGrant}
+     const document = { growthbook: { features: ${JSON.stringify(initial)} } };
+     grantCcrSubscribeSse(document);
+     result = document.growthbook.features;`,
+    sandbox,
+  );
+  return JSON.parse(JSON.stringify(sandbox.result));
+}
+let sseKey = null;
+{
+  const sandbox = {};
+  vm.runInNewContext(`${gateKey}\nresult = growthbookKey("ccr_v2_subscribe_sse_web")`, sandbox);
+  sseKey = sandbox.result;
+}
+assert.equal(subscribed(true)[sseKey]?.defaultValue, true,
+  "a tenant's Code page streams over SSE, the transport this bridge serves");
+assert.deepEqual(subscribed(false), {},
+  "the operator's instance keeps the upstream transport choice");
+assert.equal(subscribed(true, { [sseKey]: { value: false } })[sseKey]?.defaultValue, true,
+  "an evaluated false is replaced — off means a WebSocket the bridge does not answer");
+
 // The one flag the renderer's whole remote-place machinery reads from the page:
 // `shared-50`'s `RM` turns `appFeatures.selfHostedSessions.status` into the
 // `remoteSessionsAllowed` every session-target and the pools query start from,
