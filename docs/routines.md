@@ -86,7 +86,7 @@ catch-all workspace handler, next to the existing session gate:
 
 ```caddyfile
 	# Routine fire: bearer token only, no session cookie.
-	@routine_fire path_regexp routine_fire ^/v1/claude_code/routines/[^/]+/fire$
+	@routine_fire path_regexp routine_fire ^/v1/claude_code/routines/[^/]+/fire/?$
 	handle @routine_fire {
 		forward_auth 127.0.0.1:15832 {
 			uri /api/auth/verify-routine
