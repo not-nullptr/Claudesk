@@ -783,9 +783,15 @@ const crashLogSiblingOption = "onRecoverableError";
 // from a self-hosted place twice over:
 //
 //   * three identical "place kind" switches (folder-bearing, worktree-capable,
-//     draft-owning) answer true only for local/ssh/wsl, so a `byoc`/`pool`
+//     draft-owning) answer true only for local/ssh/wsl, so a self-hosted
 //     place renders no folder/branch/worktree strip at all;
 //   * the branch-read hook only reads git info for `envType === "local"`.
+//
+// A self-hosted place reaches the composer as `pool` (a pool worker), `byoc`
+// (the pool advertised as an environment) or — when the worker names an
+// environment id the list has not resolved — the renderer's `anthropic_cloud`
+// fallback. A tenant has no hosted cloud place, so all three are treated the
+// same by these patches.
 //
 // `web-code-selfhosted-place-kind` rewrites those three switches so `byoc` and
 // `pool` join the true arm (the false arm keeps bridge/cloud/project), and
@@ -805,7 +811,13 @@ const placeKindPatchId = "web-code-selfhosted-place-kind";
 const needsFolderPatchId = "web-code-selfhosted-needs-folder";
 const placeKindTrueCases = ["local", "ssh", "wsl"];
 const placeKindFalseCases = ["bridge", "anthropic_cloud", "byoc", "pool", "project"];
-const selfHostedKinds = ["byoc", "pool"];
+// The kinds a tenant's Code composer can see for its self-hosted runner. A pool
+// worker answers `pool`; the pool advertised as a `byoc` environment answers
+// `byoc`; and the renderer falls back to `anthropic_cloud` when the worker names
+// an environment id the env list has not resolved (its default `e?.kind==="byoc"
+// : "anthropic_cloud" tail). A tenant has no hosted cloud place at all, so all
+// three mean the same thing here.
+const selfHostedKinds = ["anthropic_cloud", "byoc", "pool"];
 const branchReadPatchId = "web-code-selfhosted-branch-read";
 // The start intent and the create body. `tV` already receives the composer's
 // selected folder, worktree toggle and selected branch, but the `byoc`/`pool`
@@ -2333,7 +2345,7 @@ function selfHostedIntentTarget(node) {
   for (const entry of switchStatement.cases) {
     const kind = typeof entry.test?.value === "string" ? entry.test.value : "";
     if (!selfHostedKinds.includes(kind)) continue;
-    const expected = kind === "byoc" ? "cloud" : "pool";
+    const expected = kind === "pool" ? "pool" : "cloud";
     const matches = [];
     for (const statement of entry.consequent) {
       walk(statement, [], (child) => {
@@ -2522,16 +2534,18 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       });
       if (needsFolders.length === 1) {
         const { clause, env, flag } = needsFolders[0];
+        const kinds = selfHostedKinds.map(kind => `${env}===${JSON.stringify(kind)}`);
         patches.push({ id: needsFolderPatchId, start: clause.start, end: clause.end,
           original: source.slice(clause.start, clause.end),
-          replacement: `(!${flag}||${env}==="byoc"||${env}==="pool")` });
+          replacement: `(!${flag}||${kinds.join("||")})` });
       }
     }
     if (branchReads.length === 1) {
       const test = branchReads[0];
       const env = test.left?.type === "Identifier" && !literal(test.left, "local")
         ? identifier(test.left) : identifier(test.right);
-      const replacement = `(${env}==="local"||${env}==="byoc"||${env}==="pool")`;
+      const kinds = selfHostedKinds.map(kind => `${env}===${JSON.stringify(kind)}`);
+      const replacement = `(${env}==="local"||${kinds.join("||")})`;
       patches.push({ id: branchReadPatchId, start: test.start, end: test.end,
         original: source.slice(test.start, test.end), replacement });
     }

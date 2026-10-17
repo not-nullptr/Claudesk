@@ -1777,6 +1777,7 @@ const selfHostedIntent = 'function startIntent({envType:r,selectedFolder:c,useWo
   + 'displayBranch:ne,sourceBranch:re}){switch(r){case"local":case"ssh":case"wsl":'
   + 'return{kind:"local"};case"bridge":return{kind:"bridge"};'
   + 'case"byoc":return{kind:"cloud",environmentId:"e"};'
+  + 'case"anthropic_cloud":return{kind:"cloud",environmentId:"e"};'
   + 'case"pool":return{kind:"pool",poolId:"p"};case"project":return null}}';
 const selfHostedCreate = 'async function createBody({title:e,gitRepoUrls:s,sourceBranch:c,worker:f}){'
   + 'return{title:e,events:[],...f.type==="environment"?{environment_id:f.id}'
@@ -1807,8 +1808,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-branch-read").length, 1,
   "the branch hook's local-only read must be widened exactly once");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-selfhosted-intent").length, 2,
-  "both self-hosted intent arms must carry the start options");
+  .filter(patch => patch.id === "web-code-selfhosted-intent").length, 3,
+  "all three self-hosted intent arms must carry the start options");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create").length, 3,
   "the create serializer binds and spreads the options and the wire mapper forwards them");
@@ -1818,13 +1819,13 @@ assert.equal(tenantStartOptions.patches
 const selfHostedOut = patchRendererSources(
   new Map([["tenant.js", `${webShellFixtures}\n${accountMenuName}\n${selfHostedFixtures}`]]),
   false, true, true).sources.get("tenant.js");
-assert.ok(selfHostedOut.includes('case"wsl":case"byoc":case"pool":return!0;'
-  + 'case"bridge":case"anthropic_cloud":case"project":return!1'),
+assert.ok(selfHostedOut.includes('case"wsl":case"anthropic_cloud":case"byoc":case"pool":return!0;'
+  + 'case"bridge":case"project":return!1'),
   "self-hosted places must join the folder/worktree-capable arm");
 assert.ok(selfHostedOut.includes('needsFolder(env, flag){return placeKindA(env)'
-  + '&&(!flag||env==="byoc"||env==="pool")}'),
+  + '&&(!flag||env==="anthropic_cloud"||env==="byoc"||env==="pool")}'),
   "self-hosted places must need a folder regardless of the this-device flag");
-assert.ok(selfHostedOut.includes('h=(e==="local"||e==="byoc"||e==="pool")?m:null'),
+assert.ok(selfHostedOut.includes('h=(e==="local"||e==="anthropic_cloud"||e==="byoc"||e==="pool")?m:null'),
   "branch state must be read for a self-hosted place's folder");
 assert.ok(selfHostedOut.includes('...(c&&{cwd:c}),...(c&&I&&{useWorktree:!0}),'
   + '...(c&&(I?ne:re)&&{sourceBranch:I?ne:re})'),

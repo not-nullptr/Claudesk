@@ -675,14 +675,18 @@ required — a bundle that stops matching leaves the options off rather than
 failing renderer preparation.
 
 `web-code-selfhosted-place-kind` rewrites the three identical place-kind
-switches (folder-bearing, worktree-capable and the draft helper) so `byoc` and
-`pool` join the true arm, keeping `bridge|anthropic_cloud|project` false. It is
+switches (folder-bearing, worktree-capable and the draft helper) so `byoc`,
+`pool` and the renderer's `anthropic_cloud` fallback join the true arm, keeping
+`bridge|project` false. (A self-hosted place reaches the composer as `pool`, as
+a `byoc` environment, or as `anthropic_cloud` when the worker's environment id
+has not resolved; a tenant has no hosted cloud place, so all three mean the
+same thing.) It is
 pinned by the switches' exact case set, which no other predicate in the chunk
 carries.
 
 `web-code-selfhosted-needs-folder` widens the composition
 `return folderKind(envType) && !noSessionRunsOnThisDevice` to
-`(!flag || envType === "byoc" || envType === "pool")`. The second term is the
+`(!flag || envType is one of anthropic_cloud/byoc/pool)`. The second term is the
 "this device cannot run sessions" policy, which a self-hosted session does not
 depend on (it runs in the VM), yet it hid the whole strip even after the
 place-kind switch turned true. Pinned by a two-parameter function whose return
