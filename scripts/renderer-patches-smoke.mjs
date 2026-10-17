@@ -1786,11 +1786,17 @@ const selfHostedWire = 'function wireBody(e){let t=e.session_context;return{titl
   + 'config:{sources:t.sources,outcomes:t.outcomes,cwd:t.cwd,model:t.model}}}';
 const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
   + 'let browse=fileSystem?.browseFolder;if(browse)return run(()=>browse(title,void 0,void 0,initialPath))}';
+const selfHostedStrip = 'function composer({envType:e}){'
+  + 'let needsFolder=draftNeedsFolder,rail=isRail,localKind=isLocal;'
+  + 'return needsFolder&&!(rail&&(localKind||e==="ssh"))&&render(Strip,'
+  + '{onWorktreeChange:onWorktreeChange,worktreeSupported:worktreeSupported,'
+  + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
-  selfHostedCreate, selfHostedWire, selfHostedFolderPicker].join("\n");
+  selfHostedCreate, selfHostedWire, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
-  "web-code-selfhosted-create", "web-code-selfhosted-folder-picker"];
+  "web-code-selfhosted-create", "web-code-selfhosted-folder-picker",
+  "web-code-selfhosted-strip"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -1816,6 +1822,9 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-folder-picker").length, 1,
   "the Code folder picker must prefer the VM-backed browse method");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-strip").length, 1,
+  "the strip's own mount gate must be widened at the mount site");
 const selfHostedOut = patchRendererSources(
   new Map([["tenant.js", `${webShellFixtures}\n${accountMenuName}\n${selfHostedFixtures}`]]),
   false, true, true).sources.get("tenant.js");
@@ -1840,5 +1849,8 @@ assert.ok(selfHostedOut.includes('...(t.source_branch&&{source_branch:t.source_b
   "the wire config must forward the branch and worktree flag");
 assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
   "the Code folder picker must prefer the guest-backed browse method");
+assert.ok(selfHostedOut.includes('(needsFolder||e==="anthropic_cloud"||e==="byoc"'
+  + '||e==="pool")&&!(rail&&(localKind||e==="ssh"))'),
+  "self-hosted places must mount the strip regardless of the draft's flag");
 
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

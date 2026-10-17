@@ -809,6 +809,15 @@ const placeKindPatchId = "web-code-selfhosted-place-kind";
 // stays hidden even with the first term patched. This splice keeps the flag's
 // effect for local/ssh/wsl and drops it for byoc/pool.
 const needsFolderPatchId = "web-code-selfhosted-needs-folder";
+// The strip's own gate in the composer:
+//   needsFolder && !(rail && (localKind || envType === "ssh")) && <FolderStrip/>
+// `needsFolder` is read from the *draft options* here, not from the core, and a
+// draft that never received the published options falls back to the static
+// defaults (`needsFolder: false`) — which is what kept the strip unmounted even
+// after the core's value was patched. Widen the flag at the mount site so a
+// self-hosted place always draws the strip; the strip's data props (folder,
+// branch, worktree) come from the core and are already wired.
+const stripPatchId = "web-code-selfhosted-strip";
 const placeKindTrueCases = ["local", "ssh", "wsl"];
 const placeKindFalseCases = ["bridge", "anthropic_cloud", "byoc", "pool", "project"];
 // The kinds a tenant's Code composer can see for its self-hosted runner. A pool
@@ -2429,6 +2438,38 @@ function selfHostedWireConfigTarget(node) {
   return { config, context };
 }
 
+// The strip's mount site: `<needsFolder> && !(rail && (localKind || envType ===
+// "ssh")) && <FolderStrip …/>`. The element call is pinned by the three props
+// only the strip takes (`onWorktreeChange`, `worktreeSupported`,
+// `onSelectBranch`), its parent `&&` chain by the negation beside it; the
+// returned flag is the draft's `needsFolder` operand, and `envType` is read
+// back from the composer's own destructured parameter.
+function selfHostedStripTarget(node, ancestors) {
+  if (node.type !== "CallExpression") return undefined;
+  const props = node.arguments?.find(argument => argument?.type === "ObjectExpression");
+  if (!props) return undefined;
+  for (const name of ["onWorktreeChange", "worktreeSupported", "onSelectBranch"]) {
+    if (!props.properties.some(entry => key(entry, name))) return undefined;
+  }
+  const parent = ancestors?.at(-1);
+  if (parent?.type !== "LogicalExpression" || parent.operator !== "&&"
+    || unwrap(parent.right) !== node) {
+    return undefined;
+  }
+  const condition = unwrap(parent.left);
+  if (condition?.type !== "LogicalExpression" || condition.operator !== "&&") {
+    return undefined;
+  }
+  const flag = unwrap(condition.left);
+  if (flag?.type !== "Identifier") return undefined;
+  const scope = [...(ancestors ?? [])].reverse()
+    .find(candidate => functionTypes.has(candidate.type));
+  const bindings = scope ? firstParamBindings(scope) : undefined;
+  const env = bindings?.bindings.get("envType");
+  if (!env) return undefined;
+  return { flag, env };
+}
+
 // The Code composer's folder-pick helper (`Sm` / `Cle`):
 // `let n = fileSystem?.browseFolder; if (n) return wrap(() => n(...))`.
 // Returns the initialiser and its receiver, so the caller can prefer
@@ -2506,7 +2547,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const creates = [];
     const wireConfigs = [];
     const folderPickers = [];
-    walk(ast, [], (node) => {
+    const strips = [];
+    walk(ast, [], (node, ancestors) => {
       const placeKind = placeKindSwitchTarget(node);
       if (placeKind) placeKinds.push(placeKind);
       const branchRead = selfHostedBranchReadTarget(node);
@@ -2519,6 +2561,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (wireConfig) wireConfigs.push(wireConfig);
       const folderPicker = selfHostedFolderPickerTarget(node);
       if (folderPicker) folderPickers.push(folderPicker);
+      const strip = selfHostedStripTarget(node, ancestors);
+      if (strip) strips.push(strip);
     });
     for (const { statement } of placeKinds) {
       const replacement = placeKindReplacement(source, statement);
@@ -2593,6 +2637,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       patches.push({ id: selfHostedFolderPickerPatchId, start: init.start, end: init.end,
         original: source.slice(init.start, init.end),
         replacement: `(${surface}?.browseCodeFolder??${source.slice(init.start, init.end)})` });
+    }
+    if (strips.length === 1) {
+      const { flag, env } = strips[0];
+      const kinds = selfHostedKinds.map(kind => `${env}===${JSON.stringify(kind)}`);
+      patches.push({ id: stripPatchId, start: flag.start, end: flag.end,
+        original: source.slice(flag.start, flag.end),
+        replacement: `(${flag.name}||${kinds.join("||")})` });
     }
   }
   if (webShellEnabled) {

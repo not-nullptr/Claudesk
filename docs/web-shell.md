@@ -494,7 +494,7 @@ including a `blocked_by_*` one. See [Code in the Cowork VM](code-in-cowork-vm.md
 A tenant's Code places sessions on its self-hosted runner, and that place now
 offers the three start options Desktop's local composer has: **folder**,
 **branch** and an isolated **worktree**. The renderer's folder/branch/worktree
-strip was gated to `local|ssh|wsl`, and the create body dropped the values; six
+strip was gated to `local|ssh|wsl`, and the create body dropped the values; seven
 tenant-only renderer patches (see `docs/frontend-patches.md`) turn the strip on
 for the kinds a self-hosted place can take — `pool`, `byoc`, and the
 `anthropic_cloud` fallback the renderer uses when the worker's environment id

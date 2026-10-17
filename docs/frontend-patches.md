@@ -666,7 +666,7 @@ in the chunk, spliced only in web-shell mode, and not required — a bundle that
 no longer matches keeps the merge rather than failing preparation.
 
 
-The self-hosted Code start options are six tenant-only splices. A tenant's Code
+The self-hosted Code start options are seven tenant-only splices. A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
 gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
@@ -692,6 +692,16 @@ depend on (it runs in the VM), yet it hid the whole strip even after the
 place-kind switch turned true. Pinned by a two-parameter function whose return
 calls one of the place-kind switches in the same chunk and negates its second
 parameter.
+
+`web-code-selfhosted-strip` widens the strip's own mount gate:
+`needsFolder && !(rail && (localKind || envType === "ssh")) && <FolderStrip/>`.
+That `needsFolder` is read from the **draft options**, not the core: a draft
+that never received the published options falls back to the static defaults
+(`needsFolder: false`), so patching the core's value alone left the strip
+unmounted. The element call is pinned by the three props only the strip takes
+(`onWorktreeChange`, `worktreeSupported`, `onSelectBranch`), its parent `&&`
+chain by the negation beside it, and `envType` is read back from the composer's
+own destructured parameter.
 
 `web-code-selfhosted-branch-read` widens the branch hook's
 `envType === "local" ? folder : null` test to the two self-hosted kinds, so the
