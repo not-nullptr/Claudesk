@@ -128,6 +128,26 @@ starts another session.
 | 429 | `rate_limit_error` | fire limit reached |
 | 503 | `overloaded_error` | no inference model or no runner pool configured |
 
+## Where the Routines entry comes from
+
+In the Code frame the nav entry is the `scheduled` entry, renamed **Routines**
+and pointed at `/code/routines`. Its visibility is not one gate but two, and both
+must read true before the route renders at all:
+
+- the **environment capabilities** document
+  (`/v1/environment_providers/private/organizations/{org}/capabilities`) must
+  carry `routines.enabled`; with the self-hosted-session flag on (see
+  `withSelfHostedSessions`), the renderer takes its `session_host` branch and
+  reads the routine capability from exactly there. The bridge answers
+  `routines: {enabled: true, delete_removes_runs: true, persist_session: false,
+  reviewed_save: false}`.
+- the **`chilling_sloth_clocks`** rollout gate must be on. The bridge forces it
+  on in a web-shell bootstrap (not only adding it when absent, because an
+  upstream false hides the entry too).
+
+Without either half, `/code/routines` is filtered out of the sidebar and the
+route renders nothing, however the fire endpoint itself is configured.
+
 ## The in-app API card
 
 The Routines page is the renderer's cloud-routines surface. The bridge serves

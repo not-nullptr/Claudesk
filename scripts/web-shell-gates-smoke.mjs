@@ -36,18 +36,19 @@ function load({ webShell = false, env = {} } = {}) {
   vm.runInNewContext(
     `${flags}${grantSection}
      result = { granted: webShellGrantedGates, grant: grantWebShellGates,
-       grantComposer: grantWebShellComposerDesign, hash: growthbookKey,
+       grantComposer: grantWebShellComposerDesign, grantRoutine: grantRoutineGate,
+       hash: growthbookKey,
        grantProjects: grantProjectsLimits, enabled: webShellEnabled };`,
     sandbox,
   );
   return sandbox.result;
 }
 
-const { granted, grant, grantComposer, grantProjects, hash, enabled } = load();
+const { granted, grant, grantComposer, grantRoutine, grantProjects, hash, enabled } = load();
 assert.deepEqual(plain(granted),
   ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks", "yukon_silver_folders",
     "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553",
-    "amber_tributary_heron", "routines-chorus"],
+    "amber_tributary_heron", "routines-chorus", "chilling_sloth_clocks"],
   "the web shell's gates are the Code, Cowork, folder, atrium, create, hub-writable and routines entry points");
 assert.equal(enabled, false, "the rewrite is off unless the web shell is asked for");
 assert.equal(load({ webShell: true }).enabled, true, "CLAUDE_REMOTE_WEB_SHELL turns it on");
@@ -88,6 +89,19 @@ assert.deepEqual(plain(composerTrue.growthbook.features[composerKey]), { value: 
 assert.match(serverSource,
   /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWebShellComposerDesign\(parsed\)\) \{\s*rewrote = true;\s*\}/,
   "the composer override is limited to web-shell bootstrap responses");
+
+// The routine availability gate is forced too: an explicit upstream false
+// would otherwise hide the Code frame's Routines entry even though the
+// capabilities document says the instance serves routines.
+const routineKey = hash("chilling_sloth_clocks");
+const routineFalse = { growthbook: { features: { [routineKey]: { defaultValue: false } } } };
+assert.equal(grantRoutine(routineFalse), true, "an explicit false routine gate must be overridden");
+assert.deepEqual(plain(routineFalse.growthbook.features[routineKey]), { defaultValue: true });
+const routineTrue = { growthbook: { features: { [routineKey]: { value: true } } } };
+assert.equal(grantRoutine(routineTrue), false, "an already-true routine gate must be preserved");
+assert.match(serverSource,
+  /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantRoutineGate\(parsed\)\) \{\s*rewrote = true;\s*\}/,
+  "the routine gate override is limited to web-shell bootstrap responses");
 
 // Projects: the free-plan allowance feature. It carries a *value*, not a
 // boolean, so the absence test the other gates use is not enough — an entry the

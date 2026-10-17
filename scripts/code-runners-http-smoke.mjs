@@ -417,6 +417,15 @@ try {
   assert.deepEqual(provider.unreadable, []);
   assert.deepEqual(provider.session_files, { upload: true, download: true });
   assert.equal(provider.vcs.push, false, "nothing here pushes the runner's checkout anywhere");
+  // With selfHostedSessions declared, the renderer's Code frame reads the
+  // Routines capability from this document; without it the nav entry and the
+  // `/code/routines` route are filtered out before any gate is consulted.
+  assert.equal(provider.routines.enabled, true,
+    "the instance declares the routine surface it serves");
+  assert.equal(provider.routines.delete_removes_runs, true,
+    "deleting a routine is also the end of its runs");
+  assert.equal(provider.routines.persist_session, false,
+    "a fire starts a fresh session rather than resuming one");
 
   // The session's edit legs — the calls the Code page makes once a session
   // exists. Rename/tags/metadata arrive through one PUT; archive, mark_read

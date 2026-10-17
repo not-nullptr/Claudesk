@@ -215,7 +215,13 @@ const webShellGrantedGates = ["bad_moon_rising", "yukon_silver_dramatic_shrimp_c
   // bridge/routines.mjs). Its detail view is where the API-trigger card lives,
   // and that card's fire URL is pointed at this deployment by the
   // `routine-fire-origin` renderer patch.
-  "routines-chorus"];
+  "routines-chorus",
+  // The routines availability read itself: `mh()` is
+  // `capabilities.routines.enabled && W("chilling_sloth_clocks", …)`, and the
+  // gate reader answers false for an absent feature, so the Code frame's
+  // Routines/Scheduled entry needs both halves. The capability comes from the
+  // environment-provider capabilities document; this is the rollout half.
+  "chilling_sloth_clocks"];
 // Cowork's "Skip all approvals" row is hidden twice over: the org's
 // `cowork_settings.skip_approvals_enabled` must be true (it defaults false, and
 // only an org admin can flip it) and the `cowork_bypass_permissions_mode`
@@ -2282,6 +2288,24 @@ function grantWebShellGates(value) {
   return changed;
 }
 
+// The routine feature's own rollout gate. The renderer's `mh()` is
+// `capabilities.routines.enabled && W("chilling_sloth_clocks", …)`, and `W`
+// answers false for a gate it carries as off — so an upstream false hides the
+// Code frame's Routines/Scheduled entry even when the capability document says
+// the instance serves routines. The bridge does serve them (the local scheduled
+// task store is the routine store), so in the web shell an off value is
+// replaced, the same way the SSE transport gate is forced on above.
+function grantRoutineGate(value) {
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey("chilling_sloth_clocks");
+  const entry = features[key];
+  const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+  if (on) return false;
+  features[key] = { defaultValue: true };
+  return true;
+}
+
 // The browser New page's Marlin composer redesign is a separate GrowthBook gate
 // from shell selection. Enable it for this deployment even when the upstream's
 // hardcoded custom3p feature table carries an explicit false value.
@@ -2689,6 +2713,9 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
+      rewrote = true;
+    }
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantRoutineGate(parsed)) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
@@ -3661,6 +3688,17 @@ async function handleCodeRunnerApi(request, response, url) {
       vcs: { push: false, create_pr: false },
       device_tools_enabled: false,
       device_tools: { file_tools_bound_to_connected_folders: false },
+      // The routine capability the renderer's Code frame reads before it will
+      // show the Routines/Scheduled entry and mount `/code/routines`. With the
+      // self-hosted-session flag true, the renderer takes its `session_host`
+      // branch and takes `routines.enabled` from exactly this document; absent,
+      // the entry is filtered out of the nav however the bridge grants gates.
+      routines: {
+        enabled: true,
+        delete_removes_runs: true,
+        persist_session: false,
+        reviewed_save: false,
+      },
       absent: [],
       unreadable: [],
     });
