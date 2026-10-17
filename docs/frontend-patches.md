@@ -666,6 +666,15 @@ in the chunk, spliced only in web-shell mode, and not required — a bundle that
 no longer matches keeps the merge rather than failing preparation.
 
 
+`web-shell-asset-base` rewrites the Vite chunk loader's URL builder —
+`function(dep){ return "/" + dep }` — to prefix the deployment's asset base
+(`globalThis.__CLAUDESK_ASSET_BASE__`, set by the remote preload from the
+bootstrap). Vite resolves lazy dependencies as absolute `/assets/…` paths, so
+without this the graph splits between the entry's release path and root-relative
+chunks, and the root-relative URLs are cached across releases. Pinned by that
+exact function body; the real helper is one chunk, and a web-shell deployment
+refuses preparation if no copy matches. Spliced only in web-shell mode.
+
 The self-hosted Code start options are seven tenant-only splices. A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is

@@ -5214,9 +5214,19 @@ async function serveOfficialIndex(request, response) {
   }
   const upstream = await desktop.fetchRaw(`${rendererBase}/index.html`);
   if (!upstream.ok) throw new ApiError(502, "official ion-dist entry is unavailable");
+  // The URL namespace for every module chunk. A login shell has no session, so
+  // its assets must stay under the proxy's unauthenticated `/renderer/*` route.
+  // Everyone else uses a release-versioned `/app-renderer/…` namespace this
+  // bridge serves from that instance's *own* prepared generation: the proxy's
+  // login matcher does not claim it, and the release in the path is what keeps
+  // a newly prepared chunk from being served out of the browser's cache.
+  const assetBase = loginShellEnabled
+    ? rendererBase
+    : `/app-renderer${rendererBase.slice("/renderer".length)}`;
   const config = {
     configuredModels,
     loginShell: loginShellEnabled,
+    assetBase,
     // The deployment's own auth service holds the session, so the account menu's
     // own "Sign out" — which ends a claude.ai session — is replaced by the
     // preload with one that ends that. Only meaningful where the identity seam
@@ -5284,18 +5294,11 @@ async function serveOfficialIndex(request, response) {
     html = shimOfficialIndex(html, {
       injection: bootstrapInjection,
       overrideStyles,
-      // On an account (and any deployment without the login shell) the
-      // browser's whole module graph must live under the same root-relative
-      // URLs (`/assets/…`): the Vite preload helper resolves lazy dependencies
-      // as absolute `/assets/…` paths regardless of the entry module's URL, so
-      // pointing the entry at `/renderer/<release>/` splits the graph into two
-      // copies of shared modules. `/assets/…` is served by this bridge from the
-      // *account's* prepared generation (see serveIon in the wrapper), so tenant
-      // patches apply, and the proxy's login matcher — which claims
-      // `/renderer/*` — never sees it. The login shell is the exception: its
-      // page is served without a session, so its assets must travel under the
-      // proxy's unauthenticated `/renderer/*` route.
-      rendererBase: loginShellEnabled ? rendererBase : "",
+      // Both the document's refs and the chunk loader (see the
+      // web-shell-asset-base renderer patch, which reads `assetBase` from the
+      // bootstrap) use this one base, so the entry, its static imports and
+      // every lazy chunk resolve into the same release-versioned namespace.
+      rendererBase: assetBase,
       bootstrapJson,
       webShell: webShellEnabled,
     });
@@ -5441,6 +5444,12 @@ const server = http.createServer(async (request, response) => {
       await serveStatic(response, "/manifest.webmanifest");
     } else if (localStaticFiles.has(url.pathname)) {
       await serveStatic(response, url.pathname);
+    } else if (url.pathname.startsWith("/app-renderer/")) {
+      // The browser's release-versioned module namespace. It follows the
+      // session gate (unlike `/renderer/*`, which a login-shell proxy leaves
+      // unauthenticated), so it reaches this account's own prepared renderer.
+      await servePreparedRendererAsset(response,
+        `/renderer/${url.pathname.slice("/app-renderer/".length)}`);
     } else if (url.pathname.startsWith("/renderer/")) {
       await servePreparedRendererAsset(response, url.pathname);
     } else if (

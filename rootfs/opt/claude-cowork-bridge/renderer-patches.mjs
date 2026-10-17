@@ -849,6 +849,17 @@ const selfHostedCreatePatchId = "web-code-selfhosted-create";
 // back to `browseFolder` otherwise. Pinned by the two-statement function whose
 // first declaration reads `?.browseFolder` and whose second returns through it.
 const selfHostedFolderPickerPatchId = "web-code-selfhosted-folder-picker";
+// The chunk loader's URL builder. Vite's preload helper joins dependency names
+// with `"/"` — an absolute `/assets/…` URL regardless of the entry module's own
+// path. That splits the browser's graph (the entry under a release path, lazy
+// chunks at the root), and at the root those URLs are cached immutably across
+// releases, so a newly prepared chunk is never re-fetched. The patch prefixes
+// the same base the entry document uses (`__CLAUDESK_ASSET_BASE__`, set by the
+// remote preload from the bootstrap), keeping one versioned namespace for every
+// module. In the Desktop frame the global is absent, so it answers "/"+dep
+// exactly as before. There are three copies of this helper in the graph
+// (preload-helper and two inlined copies), and every one is spliced.
+const assetBasePatchId = "web-shell-asset-base";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 // A minified component body may answer through a comma sequence
@@ -2117,6 +2128,7 @@ export const prefilterNeedles = [
   "gitRepoUrls:e.gitRepoUrls.slice()", // start intent + create args (self-hosted options)
   "session_context:{sources:w,outcomes:T", // create serializer + wire mapper
   "browseFolder;if(n)return", // the Code composer's folder-pick helper
+  'return"/"+', // the Vite chunk loader's URL builder (web-shell asset base)
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -2499,6 +2511,28 @@ function selfHostedFolderPickerTarget(node) {
   return { init, receiver: member.object };
 }
 
+// The Vite chunk loader's URL builder: `function (name) { return "/" + name }`.
+// The whole function is pinned by that exact body, so a like-named helper that
+// does anything else is not a target.
+function assetBaseTarget(node) {
+  if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier") {
+    return undefined;
+  }
+  const fn = node.init;
+  if (!functionTypes.has(fn?.type) || fn.params.length !== 1) return undefined;
+  const param = fn.params[0];
+  if (param.type !== "Identifier") return undefined;
+  const body = fn.body.type === "BlockStatement"
+    ? (fn.body.body.length === 1 && fn.body.body[0].type === "ReturnStatement"
+      ? fn.body.body[0].argument : undefined)
+    : fn.body;
+  if (body?.type !== "BinaryExpression" || body.operator !== "+") return undefined;
+  if (!literal(body.left, "/") || identifier(body.right) !== param.name) {
+    return undefined;
+  }
+  return { expression: body, param: param.name };
+}
+
 // The routine form's `availableCards` memo: `availableCards: useMemo(() =>
 // cards.filter(e => e.type === "github" ? … : …), […])`. The returned node is
 // the array the filter runs on; the caller appends the API card to it.
@@ -2651,6 +2685,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     }
   }
   if (webShellEnabled) {
+    // Every copy of the chunk loader gets the deployment's asset base, so lazy
+    // chunks resolve under the same release path as the entry document.
+    walk(ast, [], (node) => {
+      const target = assetBaseTarget(node);
+      if (!target) return;
+      patches.push({ id: assetBasePatchId, start: target.expression.start,
+        end: target.expression.end,
+        original: source.slice(target.expression.start, target.expression.end),
+        replacement: `(globalThis.__CLAUDESK_ASSET_BASE__||"")+"/"+${target.param}` });
+    });
     // The unified-composer design predicates are forced to their flag operand.
     for (const operand of composerDesignOperands(ast)) {
       patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
@@ -3154,6 +3198,13 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
   for (const id of required) {
     const count = matches.get(id)?.length || 0;
     if (count !== 1) throw new Error(`renderer patch ${id} expected once, found ${count}`);
+  }
+  // The chunk loader exists in several copies; at least one must carry the
+  // asset base, or the browser's module graph would split between release paths
+  // and root-relative ones (and the root-relative chunks are cached across
+  // releases). Not "exactly one": the number of copies is the bundle's business.
+  if (webShellEnabled && (matches.get(assetBasePatchId)?.length || 0) < 1) {
+    throw new Error(`renderer patch ${assetBasePatchId} expected at least once, found 0`);
   }
   for (const [id, found] of markers) {
     if (!found.length) throw new Error(`required renderer capability ${id} is missing`);

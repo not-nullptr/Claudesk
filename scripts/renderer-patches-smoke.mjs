@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import { inspectRenderer, patchEmbeddedSources, patchRendererSources } from "../rootfs/opt/claude-cowork-bridge/renderer-patches.mjs";
 const { minify } = createRequire(new URL("../rootfs/opt/claude-cowork-bridge/package.json", import.meta.url))("terser");
 
-const native = 'const error="rewindSession unavailable"; callbacks.rewindV2; globalThis.ime=event.keyCode===229; const actions={edit:"onEdit"};';
+const native = 'const error="rewindSession unavailable"; callbacks.rewindV2; globalThis.ime=event.keyCode===229; '
+  + 'const assetUrl=function(e){return"/"+e}; const actions={edit:"onEdit"};';
 // The file pane's trailing actions fragment, kept inside an uncalled function
 // so the gateway variants can execute the module without resolving its helpers.
 // The pane's fileView selector and a ghost icon-only Button are the otherwise
@@ -336,8 +337,13 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 20,
-    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  assert.equal(webResult.patches.length, 21,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts, the toast-manager global and the chunk loader's asset base");
+  assert.equal(webResult.patches.filter(p => p.id === "web-shell-asset-base").length, 1,
+    "the chunk loader must resolve through the deployment's asset base");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('(globalThis.__CLAUDESK_ASSET_BASE__||"")+"/"+e'),
+    "every lazy chunk must stay in the entry document's release namespace");
   assert.equal(webResult.patches.filter(p => p.id === "web-code-subscribe-sse").length, 1,
     "the Code session's live transport must be held to SSE exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("subscribeSse:!0"),
@@ -366,7 +372,7 @@ for (const [i, variant] of variants.entries()) {
   // why it must not be a required patch there either (the bundle still matches;
   // the splice is simply not made).
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 19,
+  assert.equal(tenantResult.patches.length, 20,
     "a tenant's web shell drops exactly the Code route alias");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 0,
     "a tenant must not have the local Code route alias spliced in");

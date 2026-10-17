@@ -518,28 +518,31 @@ enough for `validateInvocation`, never forwarded to the wrapper/Desktop. A
 crafted call cannot make the privileged container run git over agent-writable
 content.
 
-**The browser's module graph stays root-relative, and `/assets/…` is served
-from the account's own prepared generation.** A deployment that runs the login
-shell puts `/renderer/*` in the proxy's unauthenticated matcher, which sends
-those requests to the deployment's *own* instance — whose renderer is generated
-with `CLAUDESK_TENANT` false, so every tenant-only patch is missing even though
-the account's own `/api/health` reports them. Rewriting the entry document's
-`/assets/…` to `/renderer/<release>/…` avoids that matcher but splits the graph:
-the Vite preload helper resolves lazy dependencies as absolute `/assets/…`
-paths, so the entry's static modules and the lazy chunks would load from two
-different URL namespaces — two copies of React and the shared stores.
+**The browser's whole module graph uses a release-versioned asset base.** The
+Vite chunk loader joins lazy dependency names with `"/"` — an absolute
+`/assets/…` URL regardless of the entry module's path — so pointing only the
+entry at a release path would split the graph into two namespaces and two
+copies of React and the shared stores. And a plain `/assets/…` graph cannot be
+cache-busted: those URLs do not change between patch releases, and they were
+served `immutable`, so a browser kept executing a chunk from before the patch
+even though the account's generation contained the new one.
 
-So on an account the shim leaves the document root-relative (`/assets/…`).
-Those requests are not in the login matcher; they reach the account's bridge,
-which forwards them to its Desktop as `/ion/assets/…`. The wrapper's `serveIon`
-now serves any path listed in the prepared generation from the overlay there
-too, and the rest from the pristine ion-dist, so the whole graph shares one URL
-namespace and the account's patched chunks are the ones loaded. Cache-Control
-for those paths is `no-cache` rather than immutable: the URLs do not change
-between patch releases, but the bytes behind the patched ones do. The login
-shell is the exception — its page is served without a session, so its document
-is still rewritten under `/renderer/<release>/…`, the route the proxy leaves
-unauthenticated.
+The `web-shell-asset-base` renderer patch therefore makes the chunk loader
+prefix its deps with `globalThis.__CLAUDESK_ASSET_BASE__`, which the remote
+preload sets from the bootstrap's `assetBase`, and the entry shim rewrites the
+document's refs to the same value:
+
+- an account (and any deployment without the login shell) gets
+  `/app-renderer/<version>/<release>/…`. It is not claimed by the proxy's
+  `/renderer/*` login matcher, so it follows the session gate to the account's
+  own bridge, which maps it onto that Desktop's `/renderer/…` path — the
+  account's prepared generation, tenant patches included. The release in the
+  path is the cache key, so a new generation is always fetched.
+- a login shell gets `/renderer/<version>/<release>/…`, the route the proxy
+  leaves unauthenticated, because its page has no session.
+
+`/assets/…` still serves the non-module assets (images, wasm, JSON) from the
+pristine ion-dist; those are unpatched and unrelated to the graph.
 
 The prepared renderer sets `globalThis.__CLAUDESK_STRIP_MOUNTED__` as it mounts
 the strip. The remote preload (`config.tenantCodeReads`) waits for the composer

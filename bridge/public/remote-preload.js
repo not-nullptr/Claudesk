@@ -64,6 +64,12 @@
 
   const config = globalThis.__CLAUDE_REMOTE_BOOTSTRAP__;
   if (!config || config.transport !== "official-ion-dist-remote-ipc") return;
+  // The chunk loader prefixes every lazy dependency with this base (see the
+  // web-shell-asset-base renderer patch), so the whole module graph stays in
+  // the release-versioned namespace the entry document uses.
+  if (typeof config.assetBase === "string" && config.assetBase) {
+    globalThis.__CLAUDESK_ASSET_BASE__ = config.assetBase;
+  }
 
   const mobileClient = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
     || globalThis.navigator.userAgentData?.mobile === true
