@@ -84,6 +84,15 @@ const codeSubscriptionDecoy = 'function notTheSubscription(){let subscribeSse=!0
 // there would not even parse, so it must be left alone.
 const codeSubscriptionDefaults = 'function openSessionLive({orgUuid:e,fetch:t,intl:n,'
   + 'subscribeSse:o=!1,tailFirstTranscript:r}){return open(e,t,n,o,r)}';
+// The session list's Code gate: `activeMode === "code" || codeFoldedIntoHome ||
+// requested`, where `requested` is the product switcher's sticky intent. The
+// web shell forces that operand false, so Code sessions stop merging into the
+// Chat list while the Code surface itself is still admitted by activeMode. A
+// lookalike without the folded branch is not the gate.
+const chatListGate = 'function buildsCodeFeed({activeMode:e,codeFoldedIntoHome:t,requested:n})'
+  + '{return e==="code"||t||n}';
+const chatListGateDecoy = 'function otherFeed({activeMode:e,requested:n})'
+  + '{return e==="code"||n}';
 // The account chip: reads the account view — its src binding — and then returns
 // the deployment mark, the one shape that fetches the photo and drops it. The
 // chip takes extra placement props and answers through a comma sequence, like
@@ -307,7 +316,7 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
   assert.equal(result.patches.length, 7);
   const output = result.sources.get(`changed-chunk-${i}.js`);
@@ -327,8 +336,8 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 19,
-    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
+  assert.equal(webResult.patches.length, 20,
+    "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts and the toast-manager global");
   assert.equal(webResult.patches.filter(p => p.id === "web-code-subscribe-sse").length, 1,
     "the Code session's live transport must be held to SSE exactly once");
   assert.ok(webResult.sources.get(`changed-chunk-${i}.js`).includes("subscribeSse:!0"),
@@ -342,12 +351,22 @@ for (const [i, variant] of variants.entries()) {
     "the hook's destructuring default is a binding, not a transport read — splicing it would not parse");
   assert.equal(result.patches.filter(p => p.id === "web-code-subscribe-sse").length, 0,
     "the transport splice is a web-shell patch and must not appear in the Desktop shell");
+  assert.equal(webResult.patches.filter(p => p.id === "web-chat-session-list-no-code").length, 1,
+    "the session list's sticky Code intent must be spliced exactly once");
+  assert.ok(webResult.sources.get(`changed-chunk-${i}.js`)
+    .includes('return e==="code"||t||!1'),
+    "only the Code surface's own mode may open the Code feed");
+  assert.ok(result.sources.get(`changed-chunk-${i}.js`)
+    .includes('return e==="code"||t||n'),
+    "the Desktop shell must keep the product-switcher intent");
+  assert.equal(result.patches.filter(p => p.id === "web-chat-session-list-no-code").length, 0,
+    "the session-list Code exclusion is a web-shell splice");
   // A tenant resolves `/code` to the self-hosted surface, so the route alias
   // that forces the local one is withheld — and withheld deliberately, which is
   // why it must not be a required patch there either (the bundle still matches;
   // the splice is simply not made).
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 18,
+  assert.equal(tenantResult.patches.length, 19,
     "a tenant's web shell drops exactly the Code route alias");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 0,
     "a tenant must not have the local Code route alias spliced in");
@@ -544,6 +563,18 @@ const placementCompiled = await minify(sessionPlacement, {
 assert.equal(inspectRenderer(placementCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-local-session-placement").length, 1,
   "a mangled placement helper must still be spliced once");
+// The session list's Code gate is pinned by its destructured property names and
+// its single returned disjunction: a lookalike without the folded branch is not
+// a target, and the splice survives minification.
+assert.equal(inspectRenderer(chatListGateDecoy, false, true).patches
+  .filter(patch => patch.id === "web-chat-session-list-no-code").length, 0,
+  "a disjunction without the folded branch is not the session-list gate");
+const chatListCompiled = await minify(chatListGate, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(chatListCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-chat-session-list-no-code").length, 1,
+  "a mangled session-list gate must still be spliced once");
 // The download target must be unique: a second file pane fragment, or a
 // duplicated file pane, is refused rather than double-spliced.
 assert.throws(() => patchRendererSources(new Map([["a.js", filePane], ["b.js", filePane]]), false),

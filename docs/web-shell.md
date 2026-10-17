@@ -127,6 +127,24 @@ app's current-account context reads — so the composer takes the local path thi
 bridge backs over the Desktop IPC. Spliced and required only when
 `CLAUDE_REMOTE_WEB_SHELL=1`.
 
+### Code sessions stay out of the Chat list
+
+Chat/Cowork and Code are separate stores — `LocalAgentModeSessions` and the
+Desktop `LocalSessions` — and the bridge keeps them separate: Code sessions are
+served over `/v1/code/sessions` and the Desktop IPC and never enter
+`LocalAgentModeSessions.getAll`. The renderer, however, merges Code rows into
+its shared recents list behind a gate reading `activeMode === "code" ||
+codeFoldedIntoHome || requested`. The last operand is the product switcher's
+own store: it is set when the switcher lands on Code and never cleared when the
+user returns to Chat, so in the web shell's single-page session a Code session
+made in the Code surface stayed in the Chat list afterwards. The
+`web-chat-session-list-no-code` renderer patch forces that operand false — the
+Code surface itself is still admitted by `activeMode === "code"` — and leaves
+the build's folded branch untouched. It is pinned by the gate function's
+destructured parameter names and its single returned disjunction, spliced only
+in web-shell mode, and deliberately not required: a bundle that no longer
+matches keeps the merge rather than failing renderer preparation.
+
 ## Chat and Cowork attachments
 
 The composer's attachment pipeline is claude.ai's, not the Code composer's

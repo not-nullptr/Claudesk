@@ -90,6 +90,24 @@ const sessionViewerReason = "not_desktop_app";
 // declarator directly following the one reading the shrimp gate. Spliced only
 // in web-shell mode, like the other chrome patches.
 const localSessionPlacementPatchId = "web-local-session-placement";
+// Code sessions and chat sessions are separate stores — Code lives in the local
+// Code session store (`LocalSessions`), chat and Cowork in the local-agent-mode
+// store (`LocalAgentModeSessions`) — but the renderer merges them into one
+// recents list behind a gate that reads
+// `activeMode === "code" || codeFoldedIntoHome || requested`. `requested` is the
+// product switcher's own store: it is set when the switcher lands on Code and
+// nothing clears it when the user goes back to Chat, so in a single-page web
+// shell the Code sessions made (or seen) in the Code surface stay in the chat
+// list afterwards. (`codeFoldedIntoHome`, the Desktop build's own folded
+// branch, is compiled false in this bundle.) The patch forces that operand
+// false, leaving the Code surface itself intact — `activeMode === "code"` still
+// opens the feed — and the folded branch in place. Pinned by the gate
+// function's destructured parameter names, which the minifier leaves alone
+// because they are property keys, and by the shape of its single returned
+// disjunction; applied only when exactly one such function is in the chunk.
+// Spliced only in web-shell mode, and deliberately not required: a bundle that
+// no longer matches keeps the merge rather than failing renderer preparation.
+const chatListNoCodePatchId = "web-chat-session-list-no-code";
 // The Code session view's live transcript transport is a feature read: the
 // session-subscription hook receives `subscribeSse: z("ccr_v2_subscribe_sse_web")`
 // and, when that reads off, holds the live leg over a WebSocket
@@ -1012,6 +1030,50 @@ function localSessionPlacementTarget(node) {
     }
   });
   return platformCall;
+}
+
+// The session list's Code gate: the function the recents builder calls with
+// `{activeMode, codeFoldedIntoHome, requested}` and whose whole body returns
+// the disjunction `activeMode === "code" || codeFoldedIntoHome || requested`.
+// The identifier bound to `requested` is returned for the caller to force false
+// (see chatListNoCodePatchId). Any other name set, a different operand count,
+// or a body that is not that single return refuses rather than splice over the
+// closest-looking function.
+function chatListNoCodeTarget(node) {
+  if (!functionTypes.has(node.type) || node.params.length !== 1) return undefined;
+  const pattern = node.params[0];
+  if (pattern?.type !== "ObjectPattern") return undefined;
+  const bindings = new Map();
+  for (const entry of pattern.properties) {
+    if (entry.type !== "Property" || entry.computed === true) return undefined;
+    const name = entry.key?.type === "Identifier" ? entry.key.name
+      : entry.key?.type === "Literal" ? entry.key.value : undefined;
+    if (typeof name !== "string" || entry.value?.type !== "Identifier") return undefined;
+    bindings.set(name, entry.value.name);
+  }
+  if (bindings.size !== 3) return undefined;
+  const activeMode = bindings.get("activeMode");
+  const codeFoldedIntoHome = bindings.get("codeFoldedIntoHome");
+  const requested = bindings.get("requested");
+  if (!activeMode || !codeFoldedIntoHome || !requested) return undefined;
+  const body = node.body;
+  if (body?.type !== "BlockStatement" || body.body.length !== 1) return undefined;
+  const [statement] = body.body;
+  if (statement.type !== "ReturnStatement") return undefined;
+  const operands = flattenLogical(statement.argument, "||");
+  if (operands.length !== 3) return undefined;
+  const identifiers = operands.flatMap(operand => {
+    const name = identifier(operand);
+    return name ? [name] : [];
+  });
+  if (identifiers.length !== 2 || !identifiers.includes(codeFoldedIntoHome)
+    || !identifiers.includes(requested)) return undefined;
+  const modeClauses = operands.filter(operand => operand.type === "BinaryExpression"
+    && ["===", "=="].includes(operand.operator)
+    && (identifier(operand.left) === activeMode && literal(operand.right, "code")
+      || identifier(operand.right) === activeMode && literal(operand.left, "code")));
+  if (modeClauses.length !== 1) return undefined;
+  return operands.find(operand => identifier(operand) === requested);
 }
 
 // The home-layout assignment object: an object literal carrying exactly the six
@@ -1960,6 +2022,7 @@ export const prefilterNeedles = [
   "Local scheduled tasks can only run", // scheduled task runner
   "stringsVouched", // home layout assignment
   "subscribeSse", // Code session live transport (web-code-subscribe-sse)
+  "codeFoldedIntoHome", // the session list's Code gate (web-chat-session-list-no-code)
   "voyage_composer_marlin", // unified-composer design predicates
   "claude_ai_projects_limits", // projects-allowed predicate
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
@@ -2217,6 +2280,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const target = assignments[0];
       patches.push({ id: homeLayoutPatchId, start: target.start, end: target.end,
         original: source.slice(target.start, target.end), replacement: homeLayoutReplacement });
+    }
+    // The session list's Code gate: the product switcher's sticky intent is
+    // forced false so only the Code surface merges Code sessions (see
+    // chatListNoCodePatchId). Exactly one gate function per chunk, or nothing.
+    const chatGates = [];
+    walk(ast, [], (node) => {
+      const target = chatListNoCodeTarget(node);
+      if (target) chatGates.push(target);
+    });
+    if (chatGates.length === 1) {
+      const [target] = chatGates;
+      patches.push({ id: chatListNoCodePatchId, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end), replacement: "!1" });
     }
   }
   walk(ast, [], (node, ancestors) => {
