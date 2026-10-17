@@ -1753,4 +1753,83 @@ const crashLogCompiled = await minify(crashLogRoot, {
 assert.equal(inspectRenderer(crashLogCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-crash-log").length, 1,
   "a mangled root option must still be wrapped exactly once");
+// The self-hosted Code start options a tenant's web shell adds. The three
+// place-kind switches decide whether a place is folder-bearing, worktree-capable
+// and draft-owning; the branch hook reads git state only for `local`; the intent
+// builder drops the folder/branch/worktree of a `byoc`/`pool` place; and the
+// create serializer + wire mapper carry them to the runner. Each splice is a
+// tenant-and-web-shell patch, so nothing changes for the Desktop shell, the
+// operator's own web shell, or a tenant without the web shell.
+const placeKindSwitch = name => `function ${name}(e){switch(e){case"local":case"ssh":case"wsl":`
+  + 'return!0;case"bridge":case"anthropic_cloud":case"byoc":case"pool":case"project":return!1}}';
+const selfHostedPlaceKinds = placeKindSwitch("placeKindA") + placeKindSwitch("placeKindB")
+  + placeKindSwitch("placeKindC")
+  + 'function placeKindDecoy(e){switch(e){case"local":return!0;case"byoc":return!1}}';
+const selfHostedBranchHook = 'function branchHook({envType:e,needsFolder:t,selectedFolder:n}){'
+  + 'let p="local",m=t&&p?n:null,h=e==="local"?m:null;'
+  + 'return{worktree:!1,setWorktree:noop,worktreeSupported:!1,isGitRepo:!0,'
+  + 'isGitRepoSettled:!0,useWorktree:!1,displayBranch:"main",headBranch:"main",'
+  + 'defaultBranch:"main",branches:[],branchPickerDisabled:!1,sourceBranch:"main",'
+  + 'handleSelectSourceBranch:noop}}';
+const selfHostedIntent = 'function startIntent({envType:r,selectedFolder:c,useWorktree:I,'
+  + 'displayBranch:ne,sourceBranch:re}){switch(r){case"local":case"ssh":case"wsl":'
+  + 'return{kind:"local"};case"bridge":return{kind:"bridge"};'
+  + 'case"byoc":return{kind:"cloud",environmentId:"e"};'
+  + 'case"pool":return{kind:"pool",poolId:"p"};case"project":return null}}';
+const selfHostedCreate = 'async function createBody({title:e,gitRepoUrls:s,sourceBranch:c,worker:f}){'
+  + 'return{title:e,events:[],...f.type==="environment"?{environment_id:f.id}'
+  + ':{self_hosted_runner_pool_id:f.id},session_context:{sources:[],outcomes:[]}}}';
+const selfHostedWire = 'function wireBody(e){let t=e.session_context;return{title:e.title,'
+  + 'config:{sources:t.sources,outcomes:t.outcomes,cwd:t.cwd,model:t.model}}}';
+const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
+  + 'let browse=fileSystem?.browseFolder;if(browse)return run(()=>browse(title,void 0,void 0,initialPath))}';
+const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
+  selfHostedCreate, selfHostedWire, selfHostedFolderPicker].join("\n");
+const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-branch-read",
+  "web-code-selfhosted-intent", "web-code-selfhosted-create",
+  "web-code-selfhosted-folder-picker"];
+assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
+  .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
+  "the self-hosted start options are a tenant patch, not a web-shell one");
+assert.equal(inspectRenderer(selfHostedFixtures, false, false, true).patches
+  .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
+  "the self-hosted start options require the web shell");
+const tenantStartOptions = inspectRenderer(selfHostedFixtures, false, true, true);
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-place-kind").length, 3,
+  "all three place-kind switches must be rewritten, and the lookalike left alone");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-branch-read").length, 1,
+  "the branch hook's local-only read must be widened exactly once");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-intent").length, 2,
+  "both self-hosted intent arms must carry the start options");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-create").length, 3,
+  "the create serializer binds and spreads the options and the wire mapper forwards them");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-folder-picker").length, 1,
+  "the Code folder picker must prefer the VM-backed browse method");
+const selfHostedOut = patchRendererSources(
+  new Map([["tenant.js", `${webShellFixtures}\n${accountMenuName}\n${selfHostedFixtures}`]]),
+  false, true, true).sources.get("tenant.js");
+assert.ok(selfHostedOut.includes('case"wsl":case"byoc":case"pool":return!0;'
+  + 'case"bridge":case"anthropic_cloud":case"project":return!1'),
+  "self-hosted places must join the folder/worktree-capable arm");
+assert.ok(selfHostedOut.includes('h=(e==="local"||e==="byoc"||e==="pool")?m:null'),
+  "branch state must be read for a self-hosted place's folder");
+assert.ok(selfHostedOut.includes('...(c&&{cwd:c}),...(c&&I&&{useWorktree:!0}),'
+  + '...(c&&(I?ne:re)&&{sourceBranch:I?ne:re})'),
+  "the intent must carry the folder, worktree flag and source branch");
+assert.ok(selfHostedOut.includes('cwd:__claudeskCwd,useWorktree:__claudeskWorktree'),
+  "the create serializer must bind the two new values");
+assert.ok(selfHostedOut.includes('...(__claudeskCwd&&{cwd:__claudeskCwd}),'
+  + '...(c&&{source_branch:c}),...(__claudeskWorktree&&{use_worktree:!0})'),
+  "the create body's session context must carry all three options");
+assert.ok(selfHostedOut.includes('...(t.source_branch&&{source_branch:t.source_branch}),'
+  + '...(t.use_worktree&&{use_worktree:t.use_worktree})'),
+  "the wire config must forward the branch and worktree flag");
+assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
+  "the Code folder picker must prefer the guest-backed browse method");
+
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

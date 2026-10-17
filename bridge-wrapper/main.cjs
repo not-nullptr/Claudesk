@@ -667,6 +667,7 @@ const allowedMethods = new Map([
   ])],
   ["FileSystem", new Set([
     "appInfoForExtension",
+    "browseCodeFolder",
     "browseFiles",
     "browseFolder",
     "browseFolders",

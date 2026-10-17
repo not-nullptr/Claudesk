@@ -98,7 +98,8 @@ export function poolEnvironment(pool, { online = true } = {}) {
 // renderer's own create serializer builds exactly this set from the session
 // context, so the document the session page renders its sources, model and
 // permission mode from is the same one the create body held.
-const sessionConfigKeys = ["sources", "outcomes", "model", "cwd", "effort_level",
+const sessionConfigKeys = ["sources", "outcomes", "model", "cwd", "source_branch",
+  "use_worktree", "effort_level",
   "permission_mode", "custom_system_prompt", "append_system_prompt",
   "allowed_tools", "disallowed_tools", "reuse_outcome_branches", "mcp_servers"];
 
@@ -353,6 +354,84 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
 
   function wakePool(poolId) {
     for (const finish of [...(pollWaiters.get(poolId) ?? [])]) finish();
+  }
+
+  // Requests the guest runner answers for the web UI. A tenant's Code UI needs
+  // a folder listing and git metadata *before* a session exists, and those must
+  // come from inside the Cowork VM — the agent's sandbox — rather than from
+  // this container, which is privileged (docs/code-in-cowork-vm.md). The
+  // request rides the runner's own held poll (see pollSpawnHints) and resolves
+  // when the runner posts its result back (respondRunnerRequest). Nothing is
+  // persisted: a runner still polling is the only thing that can answer, and a
+  // request that dies with the process is simply re-asked by the UI.
+  const runnerRequests = new Map();
+  const runnerRequestTimeoutMs = (() => {
+    const raw = Number(process.env.CLAUDESK_RUNNER_REQUEST_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 15000;
+  })();
+  const runnerRequestsPerPool = 32;
+  // A registered runner that has not polled within this window is treated as
+  // offline: queueing for it would only burn the request's timeout.
+  const runnerOnlineWindowMs = 120000;
+
+  // A request stays in the map until the runner answers (or it times out): the
+  // entry holds the promise's resolver. `handed` only keeps the same request
+  // from being offered to a second poll while the first runner works on it.
+  function pendingRequestsFor(poolId) {
+    return [...runnerRequests.entries()]
+      .filter(([, request]) => request.pool_id === poolId && !request.handed);
+  }
+
+  function takeRunnerRequests(poolId) {
+    const taken = [];
+    for (const [requestId, request] of pendingRequestsFor(poolId)) {
+      request.handed = true;
+      taken.push({ request_id: requestId, method: request.method, params: request.params });
+    }
+    if (taken.length) {
+      log.log(`[code-runners] handed ${taken.length} UI request(s) to a runner on pool ${poolId}`);
+    }
+    return taken;
+  }
+
+  function runnerUnavailable(message, statusCode) {
+    return Object.assign(new Error(message), { statusCode });
+  }
+
+  async function askRunner(method, params) {
+    const state = await load();
+    const pool = state.pools[0];
+    if (!pool) {
+      throw runnerUnavailable("no self-hosted runner pool is configured", 503);
+    }
+    const now = Date.now();
+    const online = state.runners.some((runner) => runner.pool_id === pool.pool_id
+      && typeof runner.last_poll_at === "string"
+      && now - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
+    if (!online) {
+      throw runnerUnavailable("no guest runner is online", 503);
+    }
+    const outstanding = [...runnerRequests.values()]
+      .filter((request) => request.pool_id === pool.pool_id).length;
+    if (outstanding >= runnerRequestsPerPool) {
+      throw runnerUnavailable("too many runner requests are pending", 429);
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        runnerRequests.delete(requestId);
+        reject(runnerUnavailable("the guest runner did not answer", 504));
+      }, runnerRequestTimeoutMs);
+      runnerRequests.set(requestId, {
+        pool_id: pool.pool_id,
+        method,
+        params,
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      log.log(`[code-runners] UI request ${method} queued on pool ${pool.pool_id}`);
+      wakePool(pool.pool_id);
+    });
   }
 
   async function load() {
@@ -626,11 +705,15 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // A session is handed out once; the runner's nack puts it back.
       for (const session of mine) session.state = "offered";
       if (mine.length) await save();
+      // UI requests queued for the guest (folder and git lookups) ride this
+      // same poll: the runner answers them from inside the VM and posts the
+      // result back. They wake a held poll just like a placement does.
+      let requests = takeRunnerRequests(pool.pool_id);
       // Nothing to hand out: a runner that said how long it can wait gets its
-      // poll held until a placement or a requeue wakes the pool (see
-      // wakePool) — the difference between "picked up on the next tick" and
-      // "picked up now".
-      const holdMs = mine.length ? 0 : pollWait(headers);
+      // poll held until a placement, a requeue or a UI request wakes the pool
+      // (see wakePool) — the difference between "picked up on the next tick"
+      // and "picked up now".
+      const holdMs = mine.length || requests.length ? 0 : pollWait(headers);
       if (holdMs > 0) {
         await waitForPool(pool.pool_id, holdMs);
         const refreshed = await load();
@@ -639,8 +722,10 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
         );
         for (const session of later) session.state = "offered";
         if (later.length) await save();
+        requests = takeRunnerRequests(pool.pool_id);
         return {
           hints: later.map(hintFor),
+          requests,
           warm_hints: [],
           pending_count: later.length,
           backing_off_count: 0,
@@ -653,6 +738,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       }
       return {
         hints: mine.map(hintFor),
+        requests,
         warm_hints: [],
         pending_count: mine.length,
         backing_off_count: 0,
@@ -1347,6 +1433,40 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       const pool = state.pools[0];
       return pool ? { pool_id: pool.pool_id, name: pool.name, secret: pool.secret } : null;
     },
+
+    /**
+     * POST /v1/code/runners/self-hosted/requests/result — the guest runner's
+     * answer to a UI request it was handed on its poll (see askRunner). The
+     * pool secret is the pass, like every other runner leg.
+     */
+    async respondRunnerRequest({ headers, body } = {}) {
+      const state = await load();
+      const pool = poolForSecret(state, headers);
+      if (!pool) return { unauthorized: true };
+      const entry = runnerRequests.get(body?.request_id);
+      if (!entry || entry.pool_id !== pool.pool_id) return {};
+      runnerRequests.delete(body.request_id);
+      if (typeof body?.error === "string" && body.error) {
+        entry.reject(runnerUnavailable(body.error, 502));
+      } else {
+        entry.resolve(body?.result ?? null);
+      }
+      return {};
+    },
+
+    // UI lookups answered from inside the guest (see askRunner). Read-only
+    // except `createRunnerFolder`, which the runner confines to the shared
+    // workspace and validates as a single path segment.
+    listRunnerFolders: ({ root, path }) => askRunner("list_folders", { root, path }),
+    createRunnerFolder: ({ root, path, name }) => askRunner("create_folder", {
+      root, path, name,
+    }),
+    runnerGitInfo: ({ root, path }) => askRunner("git_info", { root, path }),
+    runnerBranches: ({ root, path }) => askRunner("list_branches", { root, path }),
+    runnerWorktreeState: ({ root, path }) => askRunner("worktree_state", { root, path }),
+    runnerBranchConflict: ({ root, path, branch }) => askRunner("branch_switch_conflict", {
+      root, path, branch,
+    }),
   };
 }
 

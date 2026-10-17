@@ -666,10 +666,14 @@
       if (method === "browseFiles") {
         return async () => (await browseBrowserFiles(false))?.paths ?? null;
       }
-      if (method === "browseFolder") {
+      if (method === "browseFolder" || method === "browseCodeFolder") {
+        // A tenant's Code folder picker asks the guest runner (source "code");
+        // every other folder flow keeps browsing the workspace the bridge
+        // mounts. See bridge/server.mjs, /api/remote/code-folders.
         return async (title, allowCreate, _trust, initialPath) => {
           const paths = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__({
             title, initialPath, allowCreate: allowCreate !== false,
+            ...(method === "browseCodeFolder" ? { source: "code" } : {}),
           });
           return paths?.[0] ?? null;
         };

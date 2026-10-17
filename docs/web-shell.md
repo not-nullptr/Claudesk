@@ -489,6 +489,32 @@ mobile facade declares for the phone — while leaving the operator's own instan
 to whatever upstream said. An entry that is already there is never overridden,
 including a `blocked_by_*` one. See [Code in the Cowork VM](code-in-cowork-vm.md).
 
+## Self-hosted Code start options
+
+A tenant's Code places sessions on its self-hosted runner, and that place now
+offers the three start options Desktop's local composer has: **folder**,
+**branch** and an isolated **worktree**. The renderer's folder/branch/worktree
+strip was gated to `local|ssh|wsl`, and the create body dropped the values; five
+tenant-only renderer patches (see `docs/frontend-patches.md`) turn the strip on
+for `byoc`/`pool`, read git state for the chosen folder, and carry `cwd`,
+`source_branch` and `use_worktree` through the start intent into the create
+body.
+
+Everything that touches the workspace runs **inside the Cowork VM** — the agent,
+the branch checkout and the worktree. The UI's *lookups* do too: the folder
+picker (through `/api/remote/code-folders`) and the renderer's git hooks
+(`getGitInfo`, `getLocalBranches`, the dirty-tree and branch-conflict reads) are
+answered by the guest runner over its poll, not by Desktop and not by this
+container. The bridge queues the request, the runner's held poll picks it up,
+and the runner posts the result back with the pool secret; the request channel
+and the host→guest path mapping are in
+[docs/code-in-cowork-vm.md](code-in-cowork-vm.md#start-options-folder-branch-and-worktree).
+
+The tenant `LocalSessions` allowlist is exactly those five read-only names —
+enough for `validateInvocation`, never forwarded to the wrapper/Desktop. A
+crafted call cannot make the privileged container run git over agent-writable
+content.
+
 ## Cowork scheduled tasks
 
 The Cowork scheduled-task list has one route in — the hub sidebar's **Scheduled**

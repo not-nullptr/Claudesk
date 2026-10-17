@@ -1,13 +1,19 @@
 (() => {
   "use strict";
   let active;
-  async function listing(path, signal) {
-    const response = await fetch(`/api/remote/folders${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal });
+  // The web Code composer's picker must list the folder from inside the
+  // tenant's Cowork VM, so it has its own route (answered by the guest runner).
+  // Every other folder flow keeps the bridge's workspace listing.
+  function folderApi(source) {
+    return source === "code" ? "/api/remote/code-folders" : "/api/remote/folders";
+  }
+  async function listing(path, signal, source) {
+    const response = await fetch(`${folderApi(source)}${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal });
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || "Could not browse server folders");
     return result.value;
   }
-  globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ = function ({ title, multiple = false, initialPath, allowCreate = true } = {}) {
+  globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ = function ({ title, multiple = false, initialPath, allowCreate = true, source = "" } = {}) {
     if (active) return active;
     active = new Promise(resolve => {
       const previousFocus = document.activeElement;
@@ -119,7 +125,7 @@
           // Revalidate selections on the server immediately before returning
           // paths to Desktop (folders can disappear while the dialog is open).
           const confirmed = [];
-          for (const path of paths) confirmed.push((await listing(path, controller.signal)).path);
+          for (const path of paths) confirmed.push((await listing(path, controller.signal, source)).path);
           finish([...new Set(confirmed)]);
         } catch (error) {
           if (!finished) status.textContent = error.message;
@@ -152,7 +158,7 @@
         updateSelection();
         status.textContent = "Loading server folders…";
         try {
-          const value = await listing(path, controller.signal);
+          const value = await listing(path, controller.signal, source);
           if (finished || request !== generation) return false;
           current = value;
           pathLabel.textContent = value.path;
@@ -203,7 +209,7 @@
         choose.disabled = true;
         status.textContent = "Creating folder…";
         try {
-          const response = await fetch("/api/remote/folders", {
+          const response = await fetch(folderApi(source), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: current.path, name }),

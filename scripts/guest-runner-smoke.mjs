@@ -44,7 +44,7 @@ const request = async (path, init) => {
   return { status: response.status, body: await response.text() };
 };
 
-function runRunner({ secret, once = true }) {
+function runRunner({ secret, once = true, env = {} }) {
   return spawnSync("python3", ["-I", `${root}guest/runner.py`, ...(once ? ["--once"] : [])], {
     encoding: "utf8",
     env: {
@@ -54,6 +54,7 @@ function runRunner({ secret, once = true }) {
       CLAUDESK_RUNNER_CLAUDE_BIN: stub_dir,
       CLAUDESK_RUNNER_CHECKOUT: work,
       CLAUDESK_RUNNER_HOME: join(work, "home"),
+      ...env,
     },
   });
 }
@@ -174,6 +175,149 @@ print(json.dumps(module.content_of(events)))
     { type: "text", text: "look" },
     { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
   ], "the guest runner forwards image blocks beside the text");
+
+  // ---- Self-hosted start options and VM-side lookups ----------------------
+  // The guest shares the host root at SHARED_ROOT, so a host path
+  // `/workspace/<name>/repo` is `<shared>/workspace/<name>/repo` in the VM. The
+  // bridge validates host paths under its own workspace mount, so a matching
+  // directory is created there too; the runner answers from its shared copy.
+  const smokeName = `.guest-runner-smoke-${process.pid}`;
+  const hostRoot = join("/workspace", smokeName);
+  const sharedRoot = join(work, "share");
+  const sharedRepo = join(sharedRoot, "workspace", smokeName, "repo");
+  mkdirSync(join(sharedRepo, "sub"), { recursive: true });
+  mkdirSync(join(hostRoot, "repo"), { recursive: true });
+  const runGit = (...args) => {
+    const result = spawnSync("git", ["-C", sharedRepo, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  };
+  writeFileSync(join(sharedRepo, "README.md"), "smoke\n");
+  runGit("init", "-q", "-b", "main");
+  runGit("config", "user.email", "smoke@example.invalid");
+  runGit("config", "user.name", "Smoke");
+  runGit("add", ".");
+  runGit("commit", "-q", "-m", "init");
+  runGit("branch", "feature");
+  const hostRepo = `/workspace/${smokeName}/repo`;
+
+  // The agent reports where it actually ran, so the test reads the working
+  // directory and branch off the transcript.
+  const pwdStub = join(work, "pwd-stub");
+  writeFileSync(pwdStub, `#!/bin/sh
+prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+branch=$(git branch --show-current 2>/dev/null)
+printf '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}\\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"cwd: %s | branch: %s | prompt: %s"}]},"session_id":"22222222-2222-4222-8222-222222222222"}\\n' "$PWD" "$branch" "$prompt"
+printf '{"type":"result","subtype":"success","session_id":"22222222-2222-4222-8222-222222222222","is_error":false,"result":"done"}\\n'
+`);
+  chmodSync(pwdStub, 0o755);
+  const startEnv = {
+    CLAUDESK_RUNNER_CLAUDE_BIN: pwdStub,
+    CLAUDESK_RUNNER_SHARED_ROOT: sharedRoot,
+  };
+
+  // The Code composer's folder listing is queued on the bridge and answered by
+  // the guest runner's poll — no host filesystem read.
+  const listingPromise = request(
+    `/api/remote/code-folders?path=${encodeURIComponent(hostRepo)}`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const listingRun = runRunner({ secret, env: startEnv });
+  assert.equal(listingRun.status, 0, listingRun.stderr);
+  const listing = JSON.parse((await listingPromise).body);
+  assert.equal(listing.ok, true, JSON.stringify(listing));
+  assert.equal(listing.value.path, hostRepo);
+  assert.ok(listing.value.folders.some((folder) => folder.name === "sub"),
+    "the folder listing must come from the guest's shared copy");
+
+  // Git metadata rides the same request channel.
+  const gitPromise = request("/api/remote/ipc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ surface: "LocalSessions", method: "getGitInfo",
+      args: [hostRepo], argsEncoding: "json-undefined-v1" }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const gitRun = runRunner({ secret, env: startEnv });
+  assert.equal(gitRun.status, 0, gitRun.stderr);
+  const gitInfo = JSON.parse((await gitPromise).body);
+  assert.equal(gitInfo.ok, true, JSON.stringify(gitInfo));
+  assert.equal(gitInfo.value.branch, "main");
+  assert.equal(gitInfo.value.defaultBranch, "main",
+    "the guest reports the repo's default branch for the picker");
+
+  // The branch-switch check answers "conflict?" as its caller reads it: a real
+  // branch is not a conflict, a missing one is.
+  const conflictFor = async (branch) => {
+    const pending = request("/api/remote/ipc", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ surface: "LocalSessions", method: "checkBranchSwitchConflict",
+        args: [hostRepo, branch], argsEncoding: "json-undefined-v1" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const run = runRunner({ secret, env: startEnv });
+    assert.equal(run.status, 0, run.stderr);
+    const answer = JSON.parse((await pending).body);
+    assert.equal(answer.ok, true, JSON.stringify(answer));
+    return answer.value;
+  };
+  assert.equal(await conflictFor("feature"), false, "an existing, unheld branch is safe");
+  assert.equal(await conflictFor("no-such-branch"), true,
+    "a missing branch is reported as a conflict");
+
+  // A session placed with a folder and branch runs there, on that branch.
+  const placedBranch = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "branch smoke", environment_id: poolId,
+      config: { cwd: hostRepo, source_branch: "feature" } }),
+  });
+  const branchSession = JSON.parse(placedBranch.body).session;
+  assert.equal(branchSession.config.cwd, hostRepo,
+    "the create document echoes the chosen folder");
+  assert.equal(branchSession.config.source_branch, "feature");
+  await request(`/v1/code/sessions/${branchSession.id}/events`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "where am I" } } }] }),
+  });
+  const branchRun = runRunner({ secret, env: startEnv });
+  assert.equal(branchRun.status, 0, branchRun.stderr);
+  const branchHistory = JSON.parse((await request(
+    `/v1/code/sessions/${branchSession.id}/events`)).body);
+  const branchText = decodeClientEventsResponse(branchHistory)
+    .find((entry) => entry.message.type === "assistant")
+    .message.message.content[0].text;
+  assert.equal(branchText,
+    `cwd: ${sharedRepo} | branch: feature | prompt: where am I`,
+    "the agent must run in the chosen folder on the chosen branch, in the VM");
+
+  // A worktree session runs in an isolated copy on its own branch.
+  const placedWorktree = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "worktree smoke", environment_id: poolId,
+      config: { cwd: hostRepo, source_branch: "feature", use_worktree: true } }),
+  });
+  const worktreeSession = JSON.parse(placedWorktree.body).session;
+  await request(`/v1/code/sessions/${worktreeSession.id}/events`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "isolated" } } }] }),
+  });
+  const worktreeRun = runRunner({ secret, env: startEnv });
+  assert.equal(worktreeRun.status, 0, worktreeRun.stderr);
+  const worktreeHistory = JSON.parse((await request(
+    `/v1/code/sessions/${worktreeSession.id}/events`)).body);
+  const worktreeText = decodeClientEventsResponse(worktreeHistory)
+    .find((entry) => entry.message.type === "assistant")
+    .message.message.content[0].text;
+  const suffix = worktreeSession.id.replace(/[^A-Za-z0-9_-]/g, "").slice(-12);
+  assert.equal(worktreeText,
+    `cwd: ${join(sharedRepo, ".claude", "worktrees", suffix)}`
+    + ` | branch: claude/${suffix} | prompt: isolated`,
+    "a worktree session runs in its own copy on its own branch, in the VM");
+  rmSync(hostRoot, { recursive: true, force: true });
 
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {

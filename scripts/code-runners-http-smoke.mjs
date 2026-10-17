@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +32,7 @@ if (createdRelease) writeFileSync(releaseFile, readFileSync(`${root}config/relea
 const stateDir = mkdtempSync(join(tmpdir(), "code-runners-http-"));
 const children = [];
 let gateway = null;
+let tenantWorkspace = null;
 
 // Read an SSE stream until it has carried `frames` client events (or it goes
 // quiet), then drop the connection — the stream tails forever by design.
@@ -107,6 +115,10 @@ try {
   await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
   const gatewayPort = gateway.address().port;
 
+  // The account workspace the create validation confines a session's folder to.
+  tenantWorkspace = mkdtempSync(join(tmpdir(), "code-runners-workspace-"));
+  mkdirSync(join(tenantWorkspace, "repo"), { recursive: true });
+
   const tenantPort = 8156;
   const tenantRequest = await boot({
     port: tenantPort,
@@ -114,6 +126,7 @@ try {
       CLAUDESK_TENANT: "1", CLAUDESK_CODE_RUNNERS: "1", CLAUDESK_CODE_RUNNER_POOL: "smoke-pool",
       CLAUDE_GATEWAY_BASE_URL: `http://127.0.0.1:${gatewayPort}`,
       CLAUDE_GATEWAY_API_KEY: "smoke-gateway-key",
+      COWORK_REMOTE_WORKSPACE_ROOT: tenantWorkspace,
     },
   });
 
@@ -534,6 +547,41 @@ try {
   assert.equal((await tenantRequest(`/v1/code/sessions/${placedSession.id}`)).status, 404,
     "a deleted session is gone");
 
+  // Start options: a self-hosted session can name the folder, branch and
+  // worktree the guest runner must honour. The create document echoes them, and
+  // a folder outside the account workspace is refused before it reaches the
+  // runner.
+  const withOptions = await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "with start options", environment_id: poolId,
+      config: { cwd: join(tenantWorkspace, "repo"), source_branch: "feature",
+        use_worktree: true } }),
+  });
+  assert.equal(withOptions.status, 201, withOptions.body);
+  const startOptionsDoc = JSON.parse(withOptions.body).session;
+  assert.equal(startOptionsDoc.config.cwd, join(tenantWorkspace, "repo"),
+    "the session echoes the chosen folder");
+  assert.equal(startOptionsDoc.config.source_branch, "feature",
+    "the session echoes the chosen branch");
+  assert.equal(startOptionsDoc.config.use_worktree, true,
+    "the session echoes the worktree flag");
+
+  const outside = await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "outside", environment_id: poolId,
+      config: { cwd: "/etc" } }),
+  });
+  assert.equal(outside.status, 400, outside.body);
+  const missing = await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "missing", environment_id: poolId,
+      config: { cwd: join(tenantWorkspace, "missing") } }),
+  });
+  assert.equal(missing.status, 400, "a folder that does not exist is refused");
+
   // --- the deployment's own instance --------------------------------------
   const ownerPort = 8157;
   const ownerRequest = await boot({ port: ownerPort, env: { CLAUDESK_TENANT: "0" } });
@@ -561,6 +609,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 500));
   if (createdRelease) rmSync(releaseFile, { force: true });
   rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (tenantWorkspace) rmSync(tenantWorkspace, { recursive: true, force: true });
 }
 
 process.stdout.write("code-runners-http-smoke: the pool API is routed for a tenant and nobody else\n");

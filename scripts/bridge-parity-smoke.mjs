@@ -46,22 +46,56 @@ const wrapperMethods = section(
   "const allowedSettingsMethods",
 );
 
+const tenantGitReads = ["checkBranchSwitchConflict", "getGitInfo", "getLocalBranches",
+  "getWorkingTreeDirtyState", "isWorkingTreeDirty"];
+const tenantContext = { tenantGitReadMethods: tenantGitReads };
+
 for (let mask = 0; mask < 16; mask += 1) {
   const flags = {
     infrastructureActionsEnabled: Boolean(mask & 1),
     developerActionsEnabled: Boolean(mask & 2),
     codeActionsEnabled: Boolean(mask & 4),
     connectorsEnabled: Boolean(mask & 8),
+    // The tenant-only read set is answered by the bridge itself and is never
+    // forwarded to Desktop, so it is deliberately absent from the wrapper's
+    // allowlist (see the explicit assertion below).
+    tenantCodeReadsEnabled: false,
   };
   const prelude = Object.entries(flags)
     .map(([name, value]) => `const ${name} = ${value};`)
     .join("\n");
   assert.deepEqual(
-    evaluate(`${prelude}\n${serverMethods}`, normalizedMap("allowedMethods")),
-    evaluate(`${prelude}\n${wrapperMethods}`, normalizedMap("allowedMethods")),
+    evaluate(`${prelude}\n${serverMethods}`, normalizedMap("allowedMethods"), tenantContext),
+    evaluate(`${prelude}\n${wrapperMethods}`, normalizedMap("allowedMethods"), tenantContext),
     `IPC method allowlists differ for capability mask ${mask}`,
   );
 }
+
+// A tenant's Code composer asks its folder/branch questions over
+// `LocalSessions` IPC method names, but the bridge answers them from inside the
+// Cowork VM instead of forwarding them to Desktop: neither the workspace
+// listing nor git metadata may be interpreted by the privileged tenant
+// container. The bridge's allowlist is exactly the read-only git set so
+// `validateInvocation` lets the calls reach that shim; the wrapper must not
+// carry them at all, or a future forwarding path could run host git over
+// agent-writable content.
+const tenantPrelude = `const infrastructureActionsEnabled = false;
+  const developerActionsEnabled = false;
+  const codeActionsEnabled = false;
+  const connectorsEnabled = false;
+  const tenantCodeReadsEnabled = true;`;
+const tenantBridge = evaluate(`${tenantPrelude}\n${serverMethods}`,
+  normalizedMap("allowedMethods"), tenantContext);
+assert.deepEqual([...tenantBridge.LocalSessions].sort(), [...tenantGitReads].sort(),
+  "the bridge tenant allowlist must be exactly the read-only git methods");
+for (const method of ["start", "sendMessage", "readFileAtCwd", "writeSessionFile"]) {
+  assert.ok(!tenantBridge.LocalSessions.includes(method),
+    `the bridge tenant allowlist must not carry ${method}`);
+}
+const tenantWrapper = evaluate(`${tenantPrelude}\n${wrapperMethods}`,
+  normalizedMap("allowedMethods"), tenantContext);
+assert.equal(tenantWrapper.LocalSessions, undefined,
+  "the wrapper must not expose LocalSessions on a tenant: the bridge answers those reads from the VM");
 
 // A Cowork scheduled task's run history is read off
 // `claude.web.LocalAgentModeSessions.getSessionsForScheduledTask` — the session
@@ -74,9 +108,11 @@ for (let mask = 0; mask < 16; mask += 1) {
 const allCapabilities = `const infrastructureActionsEnabled = true;
   const developerActionsEnabled = true;
   const codeActionsEnabled = true;
-  const connectorsEnabled = true;`;
+  const connectorsEnabled = true;
+  const tenantCodeReadsEnabled = false;`;
 for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMethods]]) {
-  const methods = evaluate(`${allCapabilities}\n${source}`, normalizedMap("allowedMethods"));
+  const methods = evaluate(`${allCapabilities}\n${source}`, normalizedMap("allowedMethods"),
+    tenantContext);
   assert.ok(methods.LocalAgentModeSessions.includes("getSessionsForScheduledTask"),
     `the ${policy} allowlist must serve the scheduled-task runs lookup on LocalAgentModeSessions`);
   assert.ok(methods.LocalSessions.includes("getSessionsForScheduledTask"),
@@ -106,9 +142,11 @@ for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMe
 const noOperatorSurfaces = `const infrastructureActionsEnabled = false;
   const developerActionsEnabled = false;
   const codeActionsEnabled = false;
-  const connectorsEnabled = false;`;
+  const connectorsEnabled = false;
+  const tenantCodeReadsEnabled = false;`;
 for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMethods]]) {
-  const methods = evaluate(`${noOperatorSurfaces}\n${source}`, normalizedMap("allowedMethods"));
+  const methods = evaluate(`${noOperatorSurfaces}\n${source}`, normalizedMap("allowedMethods"),
+    tenantContext);
   for (const method of ["createScheduledTask", "updateScheduledTask",
     "updateScheduledTaskFileContent", "updateScheduledTaskStatus", "ackEvent",
     "markListenerReady", "releaseDispatchClaim", "setEventAckSupported",

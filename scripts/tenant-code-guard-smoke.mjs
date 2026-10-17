@@ -38,16 +38,25 @@ const listenerMethods = section(
   "const allowedStores",
 );
 
+// The five read-only git method names a tenant's web composer calls; the
+// bridge answers them from the guest runner inside the VM.
+const tenantGitReads = ["checkBranchSwitchConflict", "getGitInfo", "getLocalBranches",
+  "getWorkingTreeDirtyState", "isWorkingTreeDirty"];
+
 function evaluate(env, code) {
   const sandbox = { process: { env }, console: { warn() {} } };
   vm.runInNewContext(
     `const infrastructureActionsEnabled = true;
      const developerActionsEnabled = true;
      const connectorsEnabled = true;
+     const tenantCodeReadsEnabled = process.env.CLAUDESK_TENANT === "1"
+       && process.env.CLAUDESK_CODE_RUNNERS === "1";
+     const tenantGitReadMethods = new Set(${JSON.stringify(tenantGitReads)});
      ${code}
      result = {
        codeActionsEnabled,
        requests: [...allowedMethods.keys()],
+       localSessions: [...(allowedMethods.get("LocalSessions") ?? [])],
        listeners: [...remoteListenerMethods.keys()],
      };`,
     sandbox,
@@ -56,24 +65,44 @@ function evaluate(env, code) {
 }
 
 const cases = [
-  { tenant: "0", code: "1", allowed: true, why: "the deployment's own instance keeps Code" },
-  { tenant: "", code: "1", allowed: true, why: "an unset tenant flag is the deployment's own" },
-  { tenant: "0", code: "0", allowed: false, why: "the flag alone can still withhold Code" },
-  { tenant: "1", code: "0", allowed: false, why: "a tenant has no local Code by default" },
-  { tenant: "1", code: "1", allowed: false, why: "a tenant cannot turn the local executor on" },
+  { tenant: "0", runners: "0", code: "1", allowed: true,
+    why: "the deployment's own instance keeps Code" },
+  { tenant: "", runners: "0", code: "1", allowed: true,
+    why: "an unset tenant flag is the deployment's own" },
+  { tenant: "0", runners: "0", code: "0", allowed: false,
+    why: "the flag alone can still withhold Code" },
+  { tenant: "1", runners: "1", code: "0", allowed: false,
+    why: "a tenant has no local Code by default" },
+  { tenant: "1", runners: "1", code: "1", allowed: false,
+    why: "a tenant cannot turn the local executor on" },
 ];
 
 for (const testCase of cases) {
   const result = evaluate(
-    { CLAUDESK_TENANT: testCase.tenant, CLAUDE_REMOTE_CODE_ACTIONS: testCase.code },
+    {
+      CLAUDESK_TENANT: testCase.tenant,
+      CLAUDESK_CODE_RUNNERS: testCase.runners,
+      CLAUDE_REMOTE_CODE_ACTIONS: testCase.code,
+    },
     `${guard}\n${requestMethods}\n${listenerMethods}`,
   );
   assert.equal(result.codeActionsEnabled, testCase.allowed,
     `codeActionsEnabled for tenant=${JSON.stringify(testCase.tenant)} `
     + `code=${testCase.code}: ${testCase.why}`);
-  assert.equal(result.requests.includes("LocalSessions"), testCase.allowed,
-    `the LocalSessions IPC surface for tenant=${JSON.stringify(testCase.tenant)} `
-    + `code=${testCase.code}: ${testCase.why}`);
+  if (testCase.tenant === "1") {
+    // The renderer calls these names, but the bridge answers them from the
+    // guest runner; no executor method may ride along.
+    assert.deepEqual([...result.localSessions].sort(), [...tenantGitReads].sort(),
+      `a tenant's LocalSessions allowlist must be exactly the VM-answered reads: ${testCase.why}`);
+    for (const method of ["start", "sendMessage", "readFileAtCwd", "writeSessionFile"]) {
+      assert.ok(!result.localSessions.includes(method),
+        `a tenant must not gain ${method} through the read shim`);
+    }
+  } else {
+    assert.equal(result.requests.includes("LocalSessions"), testCase.allowed,
+      `the LocalSessions IPC surface for tenant=${JSON.stringify(testCase.tenant)} `
+      + `code=${testCase.code}: ${testCase.why}`);
+  }
   assert.equal(result.listeners.includes("LocalSessions"), testCase.allowed,
     `the LocalSessions listeners for tenant=${JSON.stringify(testCase.tenant)} `
     + `code=${testCase.code}: ${testCase.why}`);

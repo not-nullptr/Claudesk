@@ -666,6 +666,42 @@ in the chunk, spliced only in web-shell mode, and not required — a bundle that
 no longer matches keeps the merge rather than failing preparation.
 
 
+The self-hosted Code start options are five tenant-only splices. A tenant's Code
+runs in its Cowork VM, and the renderer offers a self-hosted place as
+`byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
+gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
+applied only when both the web shell and `CLAUDESK_TENANT` are set, and none is
+required — a bundle that stops matching leaves the options off rather than
+failing renderer preparation.
+
+`web-code-selfhosted-place-kind` rewrites the three identical place-kind
+switches (folder-bearing, worktree-capable and the draft helper) so `byoc` and
+`pool` join the true arm, keeping `bridge|anthropic_cloud|project` false. It is
+pinned by the switches' exact case set, which no other predicate in the chunk
+carries.
+
+`web-code-selfhosted-branch-read` widens the branch hook's
+`envType === "local" ? folder : null` test to the two self-hosted kinds, so the
+composer reads git state for the folder it is about to run in. Pinned by the
+hook's returned branch/worktree object keys and the single matching conditional.
+
+`web-code-selfhosted-intent` adds the composer's selected folder, worktree flag
+and source branch to the `byoc` and `pool` arms of the start-intent builder
+(`...(c&&{cwd:c}),...(c&&I&&{useWorktree:!0}),...`), pinned by the two case
+labels and the returned objects' `kind` literals.
+
+`web-code-selfhosted-create` extends the create serializer (`VA`) and the wire
+mapper (`tO`) in `shared-100`: the serializer binds `cwd`/`useWorktree` from the
+caller and spreads `cwd`, `source_branch` and `use_worktree` into
+`session_context`; the mapper forwards the last two into the request `config`
+(`cwd` was already forwarded). Pinned by the `session_context` return and the
+`config:{sources, cwd}` return.
+
+`web-code-selfhosted-folder-picker` makes the composer's folder-pick helper
+prefer `FileSystem.browseCodeFolder` over `browseFolder`, so the in-page picker
+asks the bridge's VM-backed route instead of the workspace listing. Pinned by
+the two-statement helper whose first declaration reads `?.browseFolder`.
+
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature
 checks inspect syntax too, so `event.keyCode === 229` and

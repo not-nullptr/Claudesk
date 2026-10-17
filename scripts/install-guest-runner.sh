@@ -361,7 +361,9 @@ umask 077
 cat > "$mount_dir/etc/claudesk/runner.env" <<ENV
 # Written by scripts/install-guest-runner.sh — the pool this guest serves, the
 # bridge it serves it to, the agent it runs and the account's model endpoint.
-# Regenerated on each install; root-only.
+# Regenerated on each install; root-only. A session placed with a folder names a
+# host path (/workspace/...); the runner maps it onto the guest's shared root,
+# /mnt/.virtiofs-root unless CLAUDESK_RUNNER_SHARED_ROOT says otherwise.
 CLAUDESK_RUNNER_BASE=$runner_base
 CLAUDESK_RUNNER_SECRET=$secret
 CLAUDESK_RUNNER_CLAUDE_BIN=$claude_bin

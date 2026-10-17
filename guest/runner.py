@@ -73,6 +73,12 @@ def resolve_claude_bin(configured):
 
 CLAUDE_BIN = resolve_claude_bin(env("CLAUDESK_RUNNER_CLAUDE_BIN", "/opt/claudesk/claude"))
 CHECKOUT = env("CLAUDESK_RUNNER_CHECKOUT", "/sessions")
+# The host filesystem root shared into the guest as one virtiofs mount
+# (`claudeshared`, mounted by the guest's own coworkd). A session placed with a
+# folder names a host path — the account's `/workspace/...` — so its guest path
+# is that path joined onto this root. Overridable for a deployment whose guest
+# mounts the share elsewhere.
+SHARED_ROOT = env("CLAUDESK_RUNNER_SHARED_ROOT", "/mnt/.virtiofs-root")
 POLL_SECONDS = float(env("CLAUDESK_RUNNER_POLL_SECONDS", "5") or 5)
 # How the agent is asked — flag for flag what the product's own runner passes
 # its child (from the shipped binary's spawn: `--print`, stream-json both ways,
@@ -242,6 +248,343 @@ def resume_id(events):
     return ""
 
 
+def run_git(directory, *arguments):
+    """Run git in `directory`; returns (ok, output). Never raises.
+
+    Every invocation disables `core.fsmonitor`: the workspace is writable by the
+    agent, and a repo config that names a program must not get one executed
+    even here, in the guest (the host never runs git over workspace content at
+    all).
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", directory, "-c", "core.fsmonitor=false"] + list(arguments),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=120, check=False)
+    except FileNotFoundError:
+        return False, "git is not installed in the guest"
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, "git could not run: %s" % error
+    return completed.returncode == 0, (completed.stdout or "").strip()
+
+
+def guest_folder(host_path):
+    """Map a host path the composer chose onto the guest's shared mount.
+
+    The guest sees the host's filesystem at SHARED_ROOT, so `/workspace/x` is
+    `<SHARED_ROOT>/workspace/x`. A path already expressed in guest terms is
+    accepted as-is; anything that is not a directory here is None.
+    """
+    if not isinstance(host_path, str) or not host_path.startswith("/"):
+        return None
+    if host_path == SHARED_ROOT or host_path.startswith(SHARED_ROOT + "/"):
+        return host_path if os.path.isdir(host_path) else None
+    candidate = os.path.join(SHARED_ROOT, host_path.lstrip("/"))
+    return candidate if os.path.isdir(candidate) else None
+
+
+def session_workdir(session, config):
+    """The directory the agent runs in, from the session's start options.
+
+    The composer may place a session with a folder (`cwd`), a branch
+    (`source_branch`) and an isolated worktree (`use_worktree`). Returns
+    `(cwd, error)`: an option the guest cannot honour is an error the caller
+    reports as the session's failure, never a silent fallback — the person
+    picked that folder and branch. With no folder the runner keeps its own
+    checkout, exactly as before.
+    """
+    folder = config.get("cwd")
+    branch = config.get("source_branch")
+    branch = branch.strip() if isinstance(branch, str) else ""
+    worktree = config.get("use_worktree") is True
+
+    if not isinstance(folder, str) or not folder:
+        return (CHECKOUT if os.path.isdir(CHECKOUT) else "/"), None
+
+    directory = guest_folder(folder)
+    if directory is None:
+        return None, ("the session's folder %s is not visible in the guest "
+                      "(expected under %s)" % (folder, SHARED_ROOT))
+
+    ok, top = run_git(directory, "rev-parse", "--show-toplevel")
+    repo = top if ok and top and os.path.isdir(top) else None
+    if (branch or worktree) and not repo:
+        return None, ("the session's folder is not a git repository, so its "
+                      "branch/worktree options cannot be honoured")
+
+    def inside_worktree(worktree_path):
+        # Run where the person pointed: a folder below the repository root
+        # keeps its relative place inside the isolated copy when it exists.
+        if directory == repo:
+            return worktree_path
+        relative = os.path.relpath(directory, repo)
+        candidate = os.path.join(worktree_path, relative)
+        return candidate if os.path.isdir(candidate) else worktree_path
+
+    if not worktree:
+        if branch:
+            ok, output = run_git(repo, "checkout", branch)
+            if not ok:
+                return None, ("could not check out branch %s: %s"
+                              % (branch, output[-400:] or "git failed"))
+            log("session checkout %s on branch %s" % (repo, branch))
+        return directory, None
+
+    # Worktree sessions are deterministic per session, so a later turn resumes
+    # in the same copy. The branch starts from the selected branch (or HEAD)
+    # and is named after the session; a collision gets a suffix.
+    suffix = re.sub(r"[^A-Za-z0-9_-]", "", session)[-12:] or "session"
+    worktree_path = os.path.join(repo, ".claude", "worktrees", suffix)
+    if os.path.isdir(worktree_path):
+        log("session reusing worktree %s" % worktree_path)
+        return inside_worktree(worktree_path), None
+    start = branch or "HEAD"
+    branch_name = "claude/" + suffix
+    output = ""
+    for attempt in range(1, 20):
+        ok, output = run_git(repo, "worktree", "add", "-b", branch_name,
+                             worktree_path, start)
+        if ok:
+            log("session worktree %s (branch %s from %s)"
+                % (worktree_path, branch_name, start))
+            return inside_worktree(worktree_path), None
+        if "already exists" not in output.lower():
+            break
+        branch_name = "claude/%s-%d" % (suffix, attempt + 1)
+    return None, ("could not create a worktree in %s: %s"
+                  % (repo, output[-400:] or "git failed"))
+
+
+# --- UI requests -----------------------------------------------------------
+#
+# The web Code composer asks the guest — not the host — for its folder listing
+# and git metadata, so nothing in the privileged tenant container reads the
+# workspace. A request rides the runner's poll (`requests` beside `hints`) and
+# is answered by posting to the pool's result leg.
+
+def respond_to_request(request_id, result=None, error=None):
+    body = {"request_id": request_id}
+    if error is not None:
+        body["error"] = str(error)[:500]
+    else:
+        body["result"] = result
+    try:
+        expect(request("/v1/code/runners/self-hosted/requests/result", body),
+               "request result")
+    except Exception as failure:  # noqa: BLE001 - the UI request is best-effort
+        log("could not answer request %s: %s" % (request_id, failure))
+
+
+def host_path_of(guest_path):
+    """The host path a guest path under the shared root stands for."""
+    root = os.path.realpath(SHARED_ROOT)
+    guest = os.path.realpath(guest_path)
+    if guest == root:
+        return "/"
+    return "/" + os.path.relpath(guest, root)
+
+
+def contained_path(host_path, root=None):
+    """Map a host path onto the shared mount, confined to `root` if given.
+
+    Returns (guest_path, guest_root). Raises ValueError for anything that is
+    not under the shared mount or escapes the given workspace root — including
+    through a symlink.
+    """
+    if not isinstance(host_path, str) or not host_path.startswith("/"):
+        raise ValueError("a host path is required")
+    mounted = os.path.realpath(SHARED_ROOT)
+    guest = os.path.realpath(os.path.join(mounted, host_path.lstrip("/")))
+    if guest != mounted and not guest.startswith(mounted + os.sep):
+        raise ValueError("the path is outside the shared workspace")
+    if root is None:
+        return guest, mounted
+    if not isinstance(root, str) or not root.startswith("/"):
+        raise ValueError("a workspace root is required")
+    guest_root = os.path.realpath(os.path.join(mounted, root.lstrip("/")))
+    if guest_root != mounted and not guest_root.startswith(mounted + os.sep):
+        raise ValueError("the workspace root is outside the shared workspace")
+    if guest != guest_root and not guest.startswith(guest_root + os.sep):
+        raise ValueError("the path is outside the workspace")
+    return guest, guest_root
+
+
+def list_folders(params):
+    root = params.get("root") or "/workspace"
+    guest, guest_root = contained_path(params.get("path") or root, root)
+    if not os.path.isdir(guest):
+        raise ValueError("workspace path is not a folder")
+    folders = []
+    truncated = False
+    try:
+        entries = sorted(os.scandir(guest), key=lambda entry: entry.name.casefold())
+    except OSError as error:
+        raise ValueError("could not read the folder: %s" % error)
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            real = os.path.realpath(entry.path)
+            if real != guest_root and not real.startswith(guest_root + os.sep):
+                continue
+            folders.append({"name": entry.name, "path": host_path_of(real)})
+            if len(folders) == 1000:
+                truncated = True
+                break
+        except OSError:
+            continue
+    return {
+        "root": host_path_of(guest_root),
+        "path": host_path_of(guest),
+        "parent": None if guest == guest_root else host_path_of(os.path.dirname(guest)),
+        "folders": folders,
+        "truncated": truncated,
+    }
+
+
+def create_folder(params):
+    root = params.get("root") or "/workspace"
+    name = params.get("name")
+    if (not isinstance(name, str) or not name or name in (".", "..")
+            or "/" in name or "\\" in name or len(name) > 255
+            or any(ord(character) < 32 or ord(character) == 127 for character in name)):
+        raise ValueError("folder name is invalid")
+    parent, guest_root = contained_path(params.get("path") or root, root)
+    target = os.path.join(parent, name)
+    try:
+        os.mkdir(target)
+    except FileExistsError:
+        raise ValueError("a folder with that name already exists")
+    except OSError as error:
+        raise ValueError("could not create the folder: %s" % error)
+    real = os.path.realpath(target)
+    if real != guest_root and not real.startswith(guest_root + os.sep):
+        raise ValueError("could not create the folder")
+    return {"path": host_path_of(real), "name": name}
+
+
+def remote_slug(url):
+    """`owner/name` from the remote URL forms git accepts, or None."""
+    for pattern in (
+        r"^[^@]+@[^:]+:([^/]+/[^/]+?)(?:\.git)?$",
+        r"^[a-z][a-z0-9+.-]*://[^/]+/([^/]+/[^/]+?)(?:\.git)?$",
+    ):
+        match = re.match(pattern, url.strip())
+        if match:
+            return match.group(1)
+    return None
+
+
+def git_info(params):
+    guest, _ = contained_path(params.get("path"))
+    ok, _ = run_git(guest, "rev-parse", "--is-inside-work-tree")
+    if not ok:
+        return None
+    ok, top = run_git(guest, "rev-parse", "--show-toplevel")
+    repo = top if ok and top else guest
+    ok, branch = run_git(repo, "symbolic-ref", "--short", "HEAD")
+    branch = branch if ok and branch else None
+    default = None
+    ok, head = run_git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if ok and head:
+        default = head.split("/", 1)[1] if head.startswith("origin/") else head
+    if not default:
+        for candidate in ("main", "master"):
+            ok, _ = run_git(repo, "rev-parse", "--verify", "--quiet", candidate)
+            if ok:
+                default = candidate
+                break
+    ok, remote = run_git(repo, "remote", "get-url", "origin")
+    return {
+        "repo": remote_slug(remote) if ok else None,
+        "branch": branch,
+        "defaultBranch": default,
+    }
+
+
+def list_branches(params):
+    guest, _ = contained_path(params.get("path"))
+    ok, top = run_git(guest, "rev-parse", "--show-toplevel")
+    if not ok or not top:
+        return []
+    ok, output = run_git(top, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    if not ok:
+        return []
+    return sorted({line.strip() for line in output.splitlines() if line.strip()})
+
+
+def worktree_state(params):
+    guest, _ = contained_path(params.get("path"))
+    ok, top = run_git(guest, "rev-parse", "--show-toplevel")
+    if not ok or not top:
+        return "unknown"
+    ok, output = run_git(top, "status", "--porcelain")
+    if not ok:
+        return "unknown"
+    return "dirty" if output.strip() else "clean"
+
+
+def branch_switch_conflict(params):
+    """True when switching to `branch` is blocked, matching the renderer.
+
+    The hook's name is read literally by its caller: a true answer opens the
+    dirty-tree/conflict dialog instead of applying the switch, and its fallback
+    is `isWorkingTreeDirty` (true = blocked). So this answers "conflict?", not
+    "safe?": a missing branch or one already checked out in another worktree is
+    a conflict; anything else is not.
+    """
+    guest, _ = contained_path(params.get("path"), params.get("root"))
+    ok, top = run_git(guest, "rev-parse", "--show-toplevel")
+    if not ok or not top:
+        return False
+    branch = params.get("branch")
+    if not isinstance(branch, str) or not branch:
+        return False
+    ok, _ = run_git(top, "rev-parse", "--verify", "--quiet", branch)
+    if not ok:
+        return True
+    ok, output = run_git(top, "worktree", "list", "--porcelain")
+    if not ok:
+        return False
+    current = None
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line.startswith("branch ") and current is not None:
+            ref = line[len("branch "):]
+            if ref == "refs/heads/" + branch and os.path.realpath(current) != os.path.realpath(top):
+                return True
+    return False
+
+
+REQUEST_HANDLERS = {
+    "branch_switch_conflict": branch_switch_conflict,
+    "create_folder": create_folder,
+    "git_info": git_info,
+    "list_branches": list_branches,
+    "list_folders": list_folders,
+    "worktree_state": worktree_state,
+}
+
+
+def handle_runner_request(item):
+    request_id = item.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    handler = REQUEST_HANDLERS.get(item.get("method"))
+    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+    if handler is None:
+        respond_to_request(request_id, error="unknown request method")
+        return
+    try:
+        result = handler(params)
+    except Exception as error:  # noqa: BLE001 - reported to the UI
+        log("request %s failed: %s" % (request_id, error))
+        respond_to_request(request_id, error=str(error))
+    else:
+        respond_to_request(request_id, result=result)
+
+
 def run_agent(argv, cwd, content, write):
     """One headless turn of the agent: the prompt in, the event stream out.
 
@@ -373,8 +716,14 @@ def run_session(hint):
 
     # The session's own settings — the composer's model choice among them —
     # ride the session document; the agent must be asked with them or it
-    # answers as whatever its default is.
-    model, permission_mode = session_settings(session)
+    # answers as whatever its default is. The same config carries the start
+    # options (folder, branch, worktree).
+    config = session_settings(session)
+    model = config.get("model")
+    model = model if isinstance(model, str) and model else None
+    permission_mode = config.get("permission_mode")
+    permission_mode = (permission_mode if isinstance(permission_mode, str)
+                       and permission_mode else None)
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
@@ -396,10 +745,16 @@ def run_session(hint):
         argv += ["--model", model]
     if permission_mode is not None:
         argv += ["--permission-mode", permission_mode]
-    # The checkout is where the session's work happens; a guest without it (a
-    # fresh image, a stopped VM) still runs, from /, rather than failing the
-    # session on a directory.
-    cwd = CHECKOUT if os.path.isdir(CHECKOUT) else "/"
+    # The working directory comes from the session's start options. With none,
+    # the checkout is where the work happens; a guest without it (a fresh
+    # image, a stopped VM) still runs, from /, rather than failing the session
+    # on a directory.
+    cwd, workdir_error = session_workdir(session, config)
+    if workdir_error is not None:
+        finish("report-failure", {"reason": workdir_error,
+                                  "failure_kind": "setup_failed"})
+        log("session %s: %s" % (session, workdir_error))
+        return session, 2
     started = time.time()
     log("session %s: turn with %s (model %s, resume %s)" % (
         session, " ".join(AGENT_ARGS), model or "default", resume or "none"))
@@ -459,21 +814,17 @@ def run_session(hint):
 
 
 def session_settings(session_id):
-    """The model and permission mode the session was placed with.
+    """The config the session was placed with.
 
-    They live on the session document's `config` (the create body's own
-    shape); absent, the agent's defaults stand.
+    The create body's own shape: `model`, `permission_mode`, and the start
+    options `cwd`, `source_branch` and `use_worktree`. Absent, the agent's
+    defaults stand and the runner keeps its checkout.
     """
     status, document = request("/v1/code/sessions/%s" % quoted_id(session_id))
     if status != 200 or not isinstance(document, dict):
-        return None, None
-    config = (document.get("session") or {}).get("config") or {}
-    model = config.get("model")
-    permission_mode = config.get("permission_mode")
-    return (
-        model if isinstance(model, str) and model else None,
-        permission_mode if isinstance(permission_mode, str) and permission_mode else None,
-    )
+        return {}
+    config = (document.get("session") or {}).get("config")
+    return config if isinstance(config, dict) else {}
 
 
 def quoted_id(session_id):
@@ -507,6 +858,10 @@ def main():
                 return 1
             time.sleep(POLL_SECONDS)
             continue
+        # The web Code composer's folder/git lookups ride the same poll. They
+        # are answered from inside the VM, before any session is started.
+        for item in polled.get("requests") or []:
+            handle_runner_request(item)
         hints = polled.get("hints") or []
         if not hints:
             if ONCE:

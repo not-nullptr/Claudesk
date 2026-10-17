@@ -777,6 +777,46 @@ const toastGlobalName = "__CLAUDESK_TOAST__";
 const crashLogPatchId = "web-crash-log";
 const crashLogOption = "onCaughtError";
 const crashLogSiblingOption = "onRecoverableError";
+// A tenant's Code runs on its self-hosted runner, but it is still work on a
+// *folder*, a branch and (optionally) an isolated worktree — the same three
+// start options Desktop's local composer offers. The renderer withholds them
+// from a self-hosted place twice over:
+//
+//   * three identical "place kind" switches (folder-bearing, worktree-capable,
+//     draft-owning) answer true only for local/ssh/wsl, so a `byoc`/`pool`
+//     place renders no folder/branch/worktree strip at all;
+//   * the branch-read hook only reads git info for `envType === "local"`.
+//
+// `web-code-selfhosted-place-kind` rewrites those three switches so `byoc` and
+// `pool` join the true arm (the false arm keeps bridge/cloud/project), and
+// `web-code-selfhosted-branch-read` widens the `"local"` test to the two
+// self-hosted kinds. Both are pinned by the switches' exact case set and the
+// branch hook's returned object keys, and spliced only for a tenant generation:
+// on the operator's own instance a self-hosted place is never offered, and on a
+// non-web-shell client these paths are not used.
+const placeKindPatchId = "web-code-selfhosted-place-kind";
+const placeKindTrueCases = ["local", "ssh", "wsl"];
+const placeKindFalseCases = ["bridge", "anthropic_cloud", "byoc", "pool", "project"];
+const selfHostedKinds = ["byoc", "pool"];
+const branchReadPatchId = "web-code-selfhosted-branch-read";
+// The start intent and the create body. `tV` already receives the composer's
+// selected folder, worktree toggle and selected branch, but the `byoc`/`pool`
+// arms drop them; `VA` builds the create body's `session_context`, which `tO`
+// turns into the wire `config` — `tO` forwards `cwd` today, so only
+// `source_branch` and `use_worktree` are missing there. The two patches carry
+// the three values from the draft through to the wire; the bridge and the guest
+// runner do the rest. Pinned by the intent builder's own byoc/pool cases, the
+// create serializer's `session_context` return, and the config mapper's
+// `cwd: ctx.cwd` return.
+const selfHostedIntentPatchId = "web-code-selfhosted-intent";
+const selfHostedCreatePatchId = "web-code-selfhosted-create";
+// The Code composer's folder picker. `browseFolder` opens the in-page picker,
+// which lists the bridge's workspace mount on the host. For a tenant's Code the
+// listing must come from inside the Cowork VM (the guest runner answers it), so
+// the wrapper prefers `browseCodeFolder` when the preload publishes it and falls
+// back to `browseFolder` otherwise. Pinned by the two-statement function whose
+// first declaration reads `?.browseFolder` and whose second returns through it.
+const selfHostedFolderPickerPatchId = "web-code-selfhosted-folder-picker";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const unwrap = node => node?.type === "ChainExpression" ? unwrap(node.expression) : node;
 // A minified component body may answer through a comma sequence
@@ -2041,6 +2081,10 @@ export const prefilterNeedles = [
   "chatProjectsError", // the projects page's list hook, which the report patch forces
   "onCaughtError", // the crash-log root option (two chunks: the entry and react-dom)
   "api-staging.anthropic.com", // routine API card fire origin (routine-fire-origin)
+  'case"local":case"ssh":case"wsl":return!0', // the three place-kind switches
+  "gitRepoUrls:e.gitRepoUrls.slice()", // start intent + create args (self-hosted options)
+  "session_context:{sources:w,outcomes:T", // create serializer + wire mapper
+  "browseFolder;if(n)return", // the Code composer's folder-pick helper
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -2090,6 +2134,277 @@ function routineFireOriginTarget(node) {
   return argument;
 }
 
+// --- Self-hosted Code start options (tenant web shell) -----------------------
+//
+// The three selectors below find the pieces the `web-code-selfhosted-*` patches
+// splice. They are structural: the minifier's names are read back from the same
+// graph, so only the shipping shapes match.
+
+// The first parameter's destructured bindings: property name -> local name.
+function firstParamBindings(node) {
+  const param = node?.params?.[0];
+  if (param?.type !== "ObjectPattern") return undefined;
+  const bindings = new Map();
+  for (const entry of param.properties) {
+    if (entry.type !== "Property") continue;
+    const name = entry.key.name ?? entry.key.value;
+    if (typeof name === "string" && entry.value?.type === "Identifier") {
+      bindings.set(name, entry.value.name);
+    }
+  }
+  return { param, bindings };
+}
+
+function objectMember(node, name) {
+  return node?.type === "ObjectExpression"
+    ? node.properties.find(entry => key(entry, name)) : undefined;
+}
+
+// The minifier writes booleans as `!0` / `!1`; both that and a plain literal
+// answer the same value.
+function booleanLiteral(node) {
+  node = unwrap(node);
+  if (node?.type === "Literal" && typeof node.value === "boolean") return node.value;
+  if (node?.type === "UnaryExpression" && node.operator === "!") {
+    const argument = unwrap(node.argument);
+    if (literal(argument, 0)) return true;
+    if (literal(argument, 1)) return false;
+  }
+  return undefined;
+}
+
+// Group a switch's cases back into one entry per returned arm: the minifier
+// emits `case"local":case"ssh":case"wsl":return!0` as three SwitchCases, only
+// the last of which carries the consequent.
+function switchArms(statement) {
+  const arms = [];
+  let tests = [];
+  for (const entry of statement.cases) {
+    if (entry.test !== null) tests.push(entry.test.value);
+    if (entry.consequent.length) {
+      arms.push({ tests, consequent: entry.consequent });
+      tests = [];
+    }
+  }
+  if (tests.length) arms.push({ tests, consequent: [] });
+  return arms;
+}
+
+// The three "place kind" switches. Each is a one-parameter function whose whole
+// body is `switch (param)`, true for local/ssh/wsl and false for
+// bridge/anthropic_cloud/byoc/pool/project. Pinned by that exact case set, so
+// the lookalike predicates in the same chunk (which answer different sets, or
+// carry a default) cannot match.
+function placeKindSwitchTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1 || node.params[0].type !== "Identifier") return undefined;
+  const statements = node.body.body;
+  if (statements.length !== 1 || statements[0].type !== "SwitchStatement") return undefined;
+  const statement = statements[0];
+  if (identifier(statement.discriminant) !== node.params[0].name) return undefined;
+  if (statement.cases.some(entry => entry.test === null)) return undefined;
+  const arms = switchArms(statement);
+  if (arms.length !== 2) return undefined;
+  const same = (left, right) => left.length === right.length
+    && [...left].sort().every((value, index) => value === [...right].sort()[index]);
+  const [truthy, falsy] = arms;
+  if (!same(truthy.tests, placeKindTrueCases) || !same(falsy.tests, placeKindFalseCases)) {
+    return undefined;
+  }
+  const returns = (arm, expected) => {
+    const [statement] = arm.consequent;
+    return arm.consequent.length === 1 && statement.type === "ReturnStatement"
+      && booleanLiteral(statement.argument) === expected;
+  };
+  if (!returns(truthy, true) || !returns(falsy, false)) return undefined;
+  return statement;
+}
+
+function placeKindReplacement(source, statement) {
+  const labels = tests => tests.map(value => `case${JSON.stringify(value)}:`).join("");
+  const consequent = (arm) => {
+    const text = source.slice(arm.consequent[0].start, arm.consequent.at(-1).end);
+    return text.endsWith(";") ? text : `${text};`;
+  };
+  const [truthy, falsy] = switchArms(statement);
+  const discriminant = source.slice(statement.discriminant.start,
+    statement.discriminant.end);
+  const truthyCases = [...placeKindTrueCases, ...selfHostedKinds];
+  const falsyCases = falsy.tests.filter(value => !selfHostedKinds.includes(value));
+  return `switch(${discriminant}){${labels(truthyCases)}${consequent(truthy)}`
+    + `${labels(falsyCases)}${consequent(falsy)}}`;
+}
+
+// The branch-read hook (`xK`): its returned object carries the branch/worktree
+// API, and it picks the folder whose git state it reads with one conditional
+// `envType === "local" ? folder : null`. Returns that test, so the caller can
+// widen it to the self-hosted kinds.
+function selfHostedBranchReadTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1 || node.params[0].type !== "ObjectPattern") {
+    return undefined;
+  }
+  const last = node.body.body.at(-1);
+  if (last?.type !== "ReturnStatement") return undefined;
+  const returned = unwrap(last.argument);
+  if (returned?.type !== "ObjectExpression") return undefined;
+  const required = ["worktree", "worktreeSupported", "isGitRepo", "displayBranch",
+    "sourceBranch", "handleSelectSourceBranch"];
+  if (!required.every(name => objectMember(returned, name))) return undefined;
+  const params = firstParamBindings(node);
+  const env = params?.bindings.get("envType");
+  if (!env) return undefined;
+  // The only `envType === "local" ? folder : null` in the hook selects the
+  // folder whose git state is read.
+  const tests = [];
+  walk(node.body, [], (child) => {
+    if (child.type !== "ConditionalExpression") return;
+    if (!literal(child.alternate, null) || !comparesTo(child.test, "local")) return;
+    if (!contains(child.test, term => identifier(term) === env)) return;
+    tests.push(child.test);
+  });
+  return tests.length === 1 ? tests[0] : undefined;
+}
+
+// The start-intent builder (`tV`): its byoc and pool arms return an object with
+// `kind: "cloud"` / `kind: "pool"` (the blocked answer is `kind: "blocked"`),
+// and the function already receives selectedFolder/useWorktree/displayBranch/
+// sourceBranch. Returns those two objects plus the bindings to splice.
+function selfHostedIntentTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  const params = firstParamBindings(node);
+  if (!params) return undefined;
+  const env = params.bindings.get("envType");
+  const required = ["selectedFolder", "useWorktree", "displayBranch", "sourceBranch"];
+  if (!env || required.some(name => !params.bindings.has(name))) return undefined;
+  let switchStatement;
+  walk(node, [], (child) => {
+    if (!switchStatement && child.type === "SwitchStatement"
+      && identifier(child.discriminant) === env) {
+      switchStatement = child;
+    }
+  });
+  if (!switchStatement) return undefined;
+  const objects = [];
+  for (const entry of switchStatement.cases) {
+    const kind = typeof entry.test?.value === "string" ? entry.test.value : "";
+    if (!selfHostedKinds.includes(kind)) continue;
+    const expected = kind === "byoc" ? "cloud" : "pool";
+    const matches = [];
+    for (const statement of entry.consequent) {
+      walk(statement, [], (child) => {
+        if (child.type !== "ObjectExpression") return;
+        const member = objectMember(child, "kind");
+        if (member && literal(member.value, expected)) matches.push(child);
+      });
+    }
+    if (matches.length !== 1) return undefined;
+    objects.push(matches[0]);
+  }
+  return objects.length === selfHostedKinds.length
+    ? { objects, bindings: params.bindings } : undefined;
+}
+
+function selfHostedIntentReplacement(source, target) {
+  const { bindings } = target;
+  const folder = bindings.get("selectedFolder");
+  const worktree = bindings.get("useWorktree");
+  const display = bindings.get("displayBranch");
+  const sourceBranch = bindings.get("sourceBranch");
+  const selected = `${worktree}?${display}:${sourceBranch}`;
+  return `,...(${folder}&&{cwd:${folder}})`
+    + `,...(${folder}&&${worktree}&&{useWorktree:!0})`
+    + `,...(${folder}&&(${selected})&&{sourceBranch:${selected}})`;
+}
+
+// The create serializer (`VA` in shared-100): the function whose first
+// parameter destructures `worker`/`gitRepoUrls`/`sourceBranch` and whose return
+// carries a `session_context` object with `sources` and `outcomes`. The return
+// value is the `session_context` body plus the param pattern, so the caller can
+// bind the two new values and spread them in.
+function selfHostedCreateTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  const params = firstParamBindings(node);
+  if (!params) return undefined;
+  const required = ["worker", "gitRepoUrls", "sourceBranch"];
+  if (required.some(name => !params.bindings.has(name))) return undefined;
+  let context;
+  walk(node, [], (child) => {
+    if (child.type !== "ReturnStatement") return;
+    const returned = unwrap(child.argument);
+    const member = objectMember(returned, "session_context");
+    if (member?.value?.type === "ObjectExpression") context = member.value;
+  });
+  if (!context) return undefined;
+  if (!objectMember(context, "sources") || !objectMember(context, "outcomes")) {
+    return undefined;
+  }
+  return { param: params.param, context, bindings: params.bindings };
+}
+
+// The wire mapper (`tO` in shared-100): its body reads `session_context` off
+// the argument and returns `config` with `sources` and `cwd`. Pinned by the
+// `cwd` member, which is the one this patch extends.
+function selfHostedWireConfigTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1) return undefined;
+  const param = identifier(node.params[0]);
+  if (!param) return undefined;
+  let context;
+  walk(node.body, [], (child) => {
+    if (child.type !== "VariableDeclarator" || child.id?.type !== "Identifier") return;
+    if (!property(child.init, "session_context")) return;
+    if (identifier(child.init.object) === param) context = child.id.name;
+  });
+  if (!context) return undefined;
+  let config;
+  walk(node, [], (child) => {
+    if (child.type !== "ReturnStatement") return;
+    const returned = unwrap(child.argument);
+    const member = objectMember(returned, "config");
+    if (member?.value?.type === "ObjectExpression") config = member.value;
+  });
+  if (!config) return undefined;
+  if (!objectMember(config, "sources") || !objectMember(config, "cwd")) return undefined;
+  return { config, context };
+}
+
+// The Code composer's folder-pick helper (`Sm` / `Cle`):
+// `let n = fileSystem?.browseFolder; if (n) return wrap(() => n(...))`.
+// Returns the initialiser and its receiver, so the caller can prefer
+// `browseCodeFolder` on that same surface.
+function selfHostedFolderPickerTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 2) return undefined;
+  const [first, second] = node.body.body;
+  if (first?.type !== "VariableDeclaration" || first.declarations.length !== 1) {
+    return undefined;
+  }
+  const init = first.declarations[0].init;
+  const member = unwrap(init);
+  if (!member || member.type !== "MemberExpression" || !property(member, "browseFolder")) {
+    return undefined;
+  }
+  if (member.object?.type !== "Identifier") return undefined;
+  if (second?.type !== "IfStatement"
+    || !contains(second, (child) => child.type === "ReturnStatement")) {
+    return undefined;
+  }
+  return { init, receiver: member.object };
+}
+
 // The routine form's `availableCards` memo: `availableCards: useMemo(() =>
 // cards.filter(e => e.type === "github" ? … : …), […])`. The returned node is
 // the array the filter runs on; the caller appends the API card to it.
@@ -2128,6 +2443,92 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   let toastBinding;
   let toastPublished = false;
   const crashLogOptions = [];
+  // A tenant's web Code places sessions on its self-hosted runner, so the
+  // folder/branch/worktree start options Desktop's local composer has must be
+  // offered for a `byoc`/`pool` place too. Each splice is accepted only when
+  // its own shape is unambiguous in the chunk, and none is required: a bundle
+  // that no longer matches leaves the options off rather than failing renderer
+  // preparation.
+  if (webShellEnabled && tenantEnabled) {
+    const placeKinds = [];
+    const branchReads = [];
+    const intents = [];
+    const creates = [];
+    const wireConfigs = [];
+    const folderPickers = [];
+    walk(ast, [], (node) => {
+      const placeKind = placeKindSwitchTarget(node);
+      if (placeKind) placeKinds.push(placeKind);
+      const branchRead = selfHostedBranchReadTarget(node);
+      if (branchRead) branchReads.push(branchRead);
+      const intent = selfHostedIntentTarget(node);
+      if (intent) intents.push(intent);
+      const create = selfHostedCreateTarget(node);
+      if (create) creates.push(create);
+      const wireConfig = selfHostedWireConfigTarget(node);
+      if (wireConfig) wireConfigs.push(wireConfig);
+      const folderPicker = selfHostedFolderPickerTarget(node);
+      if (folderPicker) folderPickers.push(folderPicker);
+    });
+    for (const statement of placeKinds) {
+      const replacement = placeKindReplacement(source, statement);
+      patches.push({ id: placeKindPatchId, start: statement.start, end: statement.end,
+        original: source.slice(statement.start, statement.end), replacement });
+    }
+    if (branchReads.length === 1) {
+      const test = branchReads[0];
+      const env = test.left?.type === "Identifier" && !literal(test.left, "local")
+        ? identifier(test.left) : identifier(test.right);
+      const replacement = `(${env}==="local"||${env}==="byoc"||${env}==="pool")`;
+      patches.push({ id: branchReadPatchId, start: test.start, end: test.end,
+        original: source.slice(test.start, test.end), replacement });
+    }
+    if (intents.length === 1) {
+      for (const object of intents[0].objects) {
+        if (!object.properties.length) continue;
+        const at = object.end - 1;
+        patches.push({ id: selfHostedIntentPatchId, start: at, end: at, original: "",
+          replacement: selfHostedIntentReplacement(source, intents[0]) });
+      }
+    }
+    if (creates.length === 1) {
+      const { param, context, bindings } = creates[0];
+      const cwd = bindings.get("cwd") || "__claudeskCwd";
+      const worktree = bindings.get("useWorktree") || "__claudeskWorktree";
+      const additions = [];
+      if (!bindings.has("cwd")) additions.push(`cwd:${cwd}`);
+      if (!bindings.has("useWorktree")) additions.push(`useWorktree:${worktree}`);
+      if (additions.length && param.properties.length) {
+        const at = param.end - 1;
+        patches.push({ id: selfHostedCreatePatchId, start: at, end: at, original: "",
+          replacement: `,${additions.join(",")}` });
+      }
+      if (context.properties.length) {
+        const at = context.end - 1;
+        const sourceBranch = bindings.get("sourceBranch");
+        patches.push({ id: selfHostedCreatePatchId, start: at, end: at, original: "",
+          replacement: `,...(${cwd}&&{cwd:${cwd}})`
+            + `,...(${sourceBranch}&&{source_branch:${sourceBranch}})`
+            + `,...(${worktree}&&{use_worktree:!0})` });
+      }
+    }
+    if (wireConfigs.length === 1) {
+      const { config, context } = wireConfigs[0];
+      if (config.properties.length) {
+        const at = config.end - 1;
+        patches.push({ id: selfHostedCreatePatchId, start: at, end: at, original: "",
+          replacement: `,...(${context}.source_branch&&{source_branch:${context}.source_branch})`
+            + `,...(${context}.use_worktree&&{use_worktree:${context}.use_worktree})` });
+      }
+    }
+    if (folderPickers.length === 1) {
+      const { init, receiver } = folderPickers[0];
+      const surface = source.slice(receiver.start, receiver.end);
+      patches.push({ id: selfHostedFolderPickerPatchId, start: init.start, end: init.end,
+        original: source.slice(init.start, init.end),
+        replacement: `(${surface}?.browseCodeFolder??${source.slice(init.start, init.end)})` });
+    }
+  }
   if (webShellEnabled) {
     // The unified-composer design predicates are forced to their flag operand.
     for (const operand of composerDesignOperands(ast)) {

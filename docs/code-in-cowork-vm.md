@@ -619,6 +619,55 @@ does not run — triggers, agents, channels, spaces, project templates,
 `agent-proxy`, PR-steward, approvals and org memory. None is on a session's
 normal path; each is its own feature.
 
+### Start options: folder, branch and worktree
+
+A self-hosted session can be placed with the same three start choices Desktop's
+local composer offers. They ride the create body's `config` and the session
+document echoes them:
+
+- `cwd` — a folder under the account's workspace, as a **host** path
+  (`/workspace/…`);
+- `source_branch` — the git branch the session starts from;
+- `use_worktree` — run in an isolated `git worktree` instead of the checkout.
+
+The **guest** honours them. `guest/runner.py` maps a host path onto its shared
+virtiofs root (`/mnt/.virtiofs-root` by default,
+`CLAUDESK_RUNNER_SHARED_ROOT`): `/workspace/x` is
+`/mnt/.virtiofs-root/workspace/x` in the VM, so the agent works on the same
+files the account sees. A plain session checks the branch out in that folder;
+a worktree session runs in `<repo>/.claude/worktrees/<session-suffix>` on a
+`claude/<session-suffix>` branch created from the selected branch (or `HEAD`),
+and reuses that copy on later turns. With no `cwd` the runner keeps its own
+checkout, exactly as before. A folder the guest cannot see, or a branch it
+cannot check out, fails the session with the reason — never a silent fallback.
+
+The bridge validates the create body before storing it (folder confirmed as a
+real directory under `COWORK_REMOTE_WORKSPACE_ROOT`; branch a bounded string; the
+worktree flag a boolean).
+
+**The UI's lookups also run in the guest.** The web composer needs a folder
+listing and git metadata *before* a session exists, and neither the folder
+picker nor the branch/status hooks may read the workspace in the tenant's
+privileged container. So the bridge answers those requests from the runner:
+
+- `/api/remote/code-folders` (the in-page picker's Code route) queues
+  `list_folders` / `create_folder`;
+- the `LocalSessions` IPC method names the renderer already calls —
+  `getGitInfo`, `getLocalBranches`, `isWorkingTreeDirty`,
+  `getWorkingTreeDirtyState`, `checkBranchSwitchConflict` — are intercepted on a
+  tenant and answered from `git_info`, `list_branches`, `worktree_state` and
+  `branch_switch_conflict`. The wrapper's allowlist deliberately does not carry
+  them: nothing forwards them to Desktop.
+
+A request rides the runner's held `spawn-hints/poll` (`requests` beside
+`hints`, which also wakes the poll) and the runner posts the answer to
+`POST /v1/code/runners/self-hosted/requests/result` with the pool secret. The
+bridge's IPC allowlist carries the five read-only names so the call reaches the
+shim, but they are the only `LocalSessions` methods a tenant gets. Requests are
+bounded (32 outstanding, a 15 s timeout, and no runner polling recently answers
+as unavailable). Guest-side git runs with `-c core.fsmonitor=false`, so a
+repo config written by the agent cannot make it execute a program.
+
 One rule holds those 404s together, and it is worth stating on its own: **an
 API-shaped path (`/v1/…`) this bridge does not answer is answered with the
 API's own JSON envelope, never the app's HTML.** The catch-all that serves

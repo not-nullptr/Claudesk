@@ -5,7 +5,7 @@ import { resolveContainedRealPath } from "./downloads.mjs";
 // A folder name the picker offers to create must be a single path segment: no
 // separators (which would let it escape the browsed directory), no traversal
 // names, and nothing a filesystem call reads as a control character.
-function validFolderName(name) {
+export function validFolderName(name) {
   if (typeof name !== "string") return false;
   if (!name || name === "." || name === "..") return false;
   if (name.length > 255) return false;

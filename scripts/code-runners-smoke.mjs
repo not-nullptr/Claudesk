@@ -483,8 +483,9 @@ assert.ok(
 
 const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
 assert.equal(
-  (compose.match(/CLAUDESK_CODE_RUNNERS: "\$\{CLAUDESK_CODE_RUNNERS:-0\}"/g) || []).length, 1,
-  "the bridge service must pass CLAUDESK_CODE_RUNNERS through",
+  (compose.match(/CLAUDESK_CODE_RUNNERS: "\$\{CLAUDESK_CODE_RUNNERS:-0\}"/g) || []).length, 2,
+  "both the Desktop (for the wrapper's VM-side git reads) and the bridge must pass "
+  + "CLAUDESK_CODE_RUNNERS through",
 );
 
 process.stdout.write("code-runners-smoke: pools, runner polling and byoc environments hold\n");

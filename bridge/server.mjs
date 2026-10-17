@@ -8,6 +8,7 @@ import {
   createDownloadHandler,
   readContainedFile,
   resolveContainedPath,
+  resolveContainedRealPath,
   sessionFileReadLimit,
 } from "./downloads.mjs";
 import { createPreviewHandler } from "./preview.mjs";
@@ -20,7 +21,11 @@ import { createRoutineService, RoutineError } from "./routines.mjs";
 import { createUploadHandler, parseUploadLimit } from "./uploads.mjs";
 import { createRealtimeController } from "./realtime.mjs";
 import { loadNotice, saveNotice } from "./notices.mjs";
-import { createWorkspaceFolder, listWorkspaceFolders } from "./workspace-folders.mjs";
+import {
+  createWorkspaceFolder,
+  listWorkspaceFolders,
+  validFolderName,
+} from "./workspace-folders.mjs";
 
 const host = process.env.BRIDGE_HOST || "0.0.0.0";
 const port = Number(process.env.BRIDGE_PORT || 8080);
@@ -87,6 +92,23 @@ const bridgeStateDir = process.env.COWORK_BRIDGE_STATE_DIR || "/data";
 const codeRunnersEnabled =
   tenantInstance
   && process.env.CLAUDESK_CODE_RUNNERS === "1";
+// The read-only git IPC a tenant's web Code composer calls. The renderer uses
+// these method names for a session's folder/branch controls, but on a tenant
+// they are answered by the guest runner (`tenantGitAnswer`) — never forwarded
+// to Desktop, whose main process would otherwise run git over content the
+// agent can write. The bridge's allowlist carries them only so
+// `validateInvocation` lets the call reach that shim; the wrapper deliberately
+// has no such set, so a forwarding bug cannot make them work on the host.
+const tenantCodeReadsEnabled =
+  process.env.CLAUDESK_TENANT === "1"
+  && process.env.CLAUDESK_CODE_RUNNERS === "1";
+const tenantGitReadMethods = new Set([
+  "checkBranchSwitchConflict",
+  "getGitInfo",
+  "getLocalBranches",
+  "getWorkingTreeDirtyState",
+  "isWorkingTreeDirty",
+]);
 // Whether the Code *surface* exists on this instance — a different question from
 // `codeActionsEnabled`, which is about this container's executor. A tenant's
 // surface is real (its sessions run on the self-hosted runner) even though the
@@ -887,6 +909,7 @@ const allowedMethods = new Map([
   ])],
   ["FileSystem", new Set([
     "appInfoForExtension",
+    "browseCodeFolder",
     "browseFiles",
     "browseFolder",
     "browseFolders",
@@ -1131,6 +1154,10 @@ if (codeActionsEnabled) {
     "writeShellPty",
   ]));
   allowedMethods.set("LocalSessionEnvironment", new Set(["get", "save"]));
+}
+
+if (tenantCodeReadsEnabled && !codeActionsEnabled) {
+  allowedMethods.set("LocalSessions", new Set(tenantGitReadMethods));
 }
 
 const allowedSettingsMethods = gatewaySettingsEnabled
@@ -2781,6 +2808,50 @@ function validateInvocation(surface, method, args) {
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
 }
 
+// A tenant's read-only git IPC, answered by the guest runner instead of being
+// forwarded to Desktop. The renderer's folder/branch hooks call the same
+// methods they call for a local session; the answers must describe the account
+// workspace as the VM sees it, and no git command may interpret workspace
+// content in this privileged container. The path crossing the wire is the host
+// path (`/workspace/…`) the composer picked; the runner maps it onto the shared
+// mount and re-checks containment there.
+async function tenantGitAnswer(body) {
+  const args = body.args ?? [];
+  const target = args[0];
+  if (typeof target !== "string" || !target) {
+    throw new ApiError(400, "workspace path is required");
+  }
+  // Canonicalise here so a `..`, symlink or missing folder never reaches the
+  // guest; the runner validates the mapped path again.
+  const path = await resolveContainedRealPath(workspaceRoot, target).catch(() => {
+    throw new ApiError(403, "git reads are confined to the workspace");
+  });
+  const ask = (task) => task().catch((error) => {
+    throw new ApiError(Number(error?.statusCode) || 503,
+      error?.message || "the guest runner did not answer");
+  });
+  switch (body.method) {
+    case "getGitInfo":
+      return ask(() => codeRunners.runnerGitInfo({ root: workspaceRoot, path }));
+    case "getLocalBranches":
+      return ask(() => codeRunners.runnerBranches({ root: workspaceRoot, path }));
+    case "isWorkingTreeDirty":
+      return (await ask(() => codeRunners.runnerWorktreeState({
+        root: workspaceRoot, path,
+      }))) === "dirty";
+    case "getWorkingTreeDirtyState":
+      return ask(() => codeRunners.runnerWorktreeState({ root: workspaceRoot, path }));
+    case "checkBranchSwitchConflict":
+      return ask(() => codeRunners.runnerBranchConflict({
+        root: workspaceRoot,
+        path,
+        branch: typeof args[1] === "string" ? args[1] : "",
+      }));
+    default:
+      throw new ApiError(400, "Desktop IPC method is not allowed");
+  }
+}
+
 // Desktop's session-file reader returns null (never a status) when a path is
 // outside the session's granted directories or over 10 MiB, and the official
 // file pane then shows a generic "Couldn't read this file". When that happens,
@@ -3733,6 +3804,29 @@ async function handleCodeRunnerApi(request, response, url) {
     return sendJson(response, 200, await codeRunners.listSessions({ searchParams: url.searchParams }));
   }
   if (pathname === "/v1/code/sessions" && method === "POST") {
+    // The start options a tenant's guest runner honours. `cwd` names a folder
+    // the guest maps into its shared root, so it must be a real directory the
+    // account can already browse; the branch and worktree flag are the runner's
+    // to act on, but a malformed value is refused here rather than stored.
+    if (body?.config && typeof body.config === "object" && !Array.isArray(body.config)) {
+      const { cwd, source_branch: sourceBranch, use_worktree: useWorktree } = body.config;
+      if (cwd !== undefined) {
+        if (typeof cwd !== "string" || !cwd) throw new ApiError(400, "session folder is invalid");
+        try {
+          await resolveContainedRealPath(workspaceRoot, cwd);
+        } catch {
+          throw new ApiError(400, "session folder is outside the workspace");
+        }
+      }
+      if (sourceBranch !== undefined && (typeof sourceBranch !== "string"
+        || !sourceBranch || sourceBranch.length > 255
+        || /[\u0000-\u001f\u007f]/.test(sourceBranch))) {
+        throw new ApiError(400, "session branch is invalid");
+      }
+      if (useWorktree !== undefined && typeof useWorktree !== "boolean") {
+        throw new ApiError(400, "session worktree flag is invalid");
+      }
+    }
     const created = await codeRunners.createSession({ body });
     if (created?.unsupported) {
       throw new ApiError(400, "only a self-hosted environment of this instance can run a session");
@@ -3898,6 +3992,8 @@ async function handleCodeRunnerApi(request, response, url) {
       return answer(await codeRunners.pollSpawnHints({ headers }));
     case "POST /v1/code/runners/self-hosted/spawn-hints/nack":
       return answer(await codeRunners.nackSpawnHint({ headers, body }));
+    case "POST /v1/code/runners/self-hosted/requests/result":
+      return answer(await codeRunners.respondRunnerRequest({ headers, body }));
     case `GET ${selfHostedPoolsBase.slice(0, -1)}`:
       return answer(await codeRunners.listPools());
     case `POST ${selfHostedPoolsBase.slice(0, -1)}`:
@@ -4174,6 +4270,45 @@ async function handleApi(request, response, url) {
   if (request.method === "POST" && url.pathname === "/api/remote/folders") {
     const body = await readJson(request);
     const value = await createWorkspaceFolder(workspaceRoot, body.path, body.name);
+    sendJson(response, 200, { ok: true, value });
+    return;
+  }
+  // The web Code composer's folder picker. A tenant's Code runs in its Cowork
+  // VM, and the person asked for the *listing* to come from there too, so this
+  // route never reads the container's filesystem: it hands the request to the
+  // guest runner's poll and answers the runner's reply (`list_folders` /
+  // `create_folder` in guest/runner.py). The paths crossing this route are host
+  // paths — `/workspace/...` — because that is what the guest maps onto its
+  // shared mount; the bridge still confines them to the workspace before
+  // queueing.
+  if (tenantCodeReadsEnabled && request.method === "GET"
+    && url.pathname === "/api/remote/code-folders") {
+    const requested = url.searchParams.get("path") || workspaceRoot;
+    const path = await resolveContainedRealPath(workspaceRoot, requested).catch(() => {
+      throw new ApiError(403, "code folders are confined to the workspace");
+    });
+    const value = await codeRunners.listRunnerFolders({ root: workspaceRoot, path })
+      .catch((error) => {
+        throw new ApiError(Number(error?.statusCode) || 503,
+          error?.message || "the guest runner did not answer");
+      });
+    sendJson(response, 200, { ok: true, value });
+    return;
+  }
+  if (tenantCodeReadsEnabled && request.method === "POST"
+    && url.pathname === "/api/remote/code-folders") {
+    const body = await readJson(request);
+    const path = await resolveContainedRealPath(workspaceRoot, body.path || workspaceRoot)
+      .catch(() => {
+        throw new ApiError(403, "code folders are confined to the workspace");
+      });
+    if (!validFolderName(body.name)) throw new ApiError(400, "folder name is invalid");
+    const value = await codeRunners.createRunnerFolder({
+      root: workspaceRoot, path, name: body.name,
+    }).catch((error) => {
+      throw new ApiError(Number(error?.statusCode) || 503,
+        error?.message || "the guest runner did not answer");
+    });
     sendJson(response, 200, { ok: true, value });
     return;
   }
@@ -4541,6 +4676,11 @@ async function handleApi(request, response, url) {
     // Files go through the streaming upload route instead.
     const body = await readJson(request, 72 * 1024 * 1024);
     validateInvocation(body.surface, body.method, body.args ?? []);
+    // A tenant's read-only git IPC is answered from inside the Cowork VM, not
+    // forwarded to Desktop: the folder and branch controls must describe the
+    // workspace the guest actually works in, and neither path listing nor git
+    // metadata should be read by this privileged container (see
+    // tenantGitAnswer and docs/code-in-cowork-vm.md).
     // A new Code session's first turn must carry the picker's permission mode or
     // it runs Manual (see fillStoredStartPermissionMode). The browser UI's
     // failsafe "default" is read as "no choice" only when the call came from the
@@ -4561,7 +4701,10 @@ async function handleApi(request, response, url) {
     const startedAt = Date.now();
     try {
       let value;
-      if (
+      if (tenantCodeReadsEnabled
+        && body.surface === "LocalSessions" && tenantGitReadMethods.has(body.method)) {
+        value = await tenantGitAnswer(body);
+      } else if (
         body.surface === "LocalSessions"
         && body.method === "readSessionFileWithStatus"
       ) {
