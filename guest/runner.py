@@ -103,13 +103,15 @@ def log(message):
     sys.stdout.flush()
 
 
-def request(path, body=None, token=None, method=None):
+def request(path, body=None, token=None, method=None, headers=None):
     """One call to the bridge. Returns (status, parsed-body-or-text)."""
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(BASE + path, data=data,
                                  method=method or ("POST" if body is not None else "GET"))
     req.add_header("content-type", "application/json")
     req.add_header("authorization", "Bearer %s" % (token or SECRET))
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             text = response.read().decode("utf-8", "replace")
@@ -141,7 +143,25 @@ def register():
 
 
 def poll():
-    return expect(request("/v1/code/runners/self-hosted/spawn-hints/poll", {}), "poll")
+    """An empty poll is held open by the bridge until there is work.
+
+    The runner cannot be dialled (the guest sits behind QEMU's user-mode
+    networking, with nothing forwarded in), so it is the side that opens the
+    connection — and it keeps that one request open. The bridge answers it the
+    instant a session is placed or requeued, which makes pickup immediate
+    rather than "on the next tick". The value below is a ceiling, not a delay.
+    """
+    headers = {}
+    try:
+        wait = float(env("CLAUDESK_RUNNER_POLL_WAIT", "20") or 0)
+    except ValueError:
+        wait = 0
+    # `--once` is a one-shot probe (smokes, `--status` runs): it wants the
+    # immediate answer, not the held one.
+    if wait > 0 and not ONCE:
+        headers["x-claudesk-poll-wait"] = str(wait)
+    return expect(request("/v1/code/runners/self-hosted/spawn-hints/poll", {},
+                          headers=headers), "poll")
 
 
 def prompt_of(events):
@@ -433,6 +453,7 @@ def main():
     log("polling %s (agent %s, checkout %s)" % (BASE, CLAUDE_BIN, CHECKOUT))
     register()
     while True:
+        started = time.time()
         try:
             polled = poll()
         except Exception as error:  # noqa: BLE001 - the bridge may not be up yet
@@ -446,7 +467,11 @@ def main():
             if ONCE:
                 log("no work (pending=%s)" % polled.get("pending_count", 0))
                 return 0
-            time.sleep(POLL_SECONDS)
+            # A held poll already answered as soon as there was work — or
+            # paced the wait when there was none — so it needs no extra sleep.
+            # Only an immediate answer (an older bridge without the hold) does.
+            if time.time() - started < 1.0:
+                time.sleep(POLL_SECONDS)
             continue
         for hint in hints:
             try:

@@ -224,6 +224,25 @@ try {
   assert.ok(hints.some((hint) => hint.session_uuid === placedSession.id),
     "the pool's runner is offered the session just placed");
 
+  // A runner that says how long it is willing to wait gets an empty poll held
+  // open until work appears: the placement wakes it on that same request, so
+  // pickup is immediate instead of "on the next tick". Opt-in by header — a
+  // caller that asks nothing still gets the prompt answer above.
+  const holdStartedAt = Date.now();
+  const heldPoll = tenantRequest("/v1/code/runners/self-hosted/spawn-hints/poll",
+    { method: "POST", headers: { ...auth, "x-claudesk-poll-wait": "5" }, body: "{}" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const latePlaced = JSON.parse((await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "woken by the hold", environment_id: poolId }),
+  })).body).session;
+  const woken = JSON.parse((await heldPoll).body);
+  assert.ok(Date.now() - holdStartedAt < 2000,
+    "the held poll answered as soon as the session was placed");
+  assert.ok(woken.hints.some((hint) => hint.session_uuid === latePlaced.id),
+    "and carried the new session on the same request");
+
   // The session's events over HTTP, in the app's own contract (checked with the
   // in-tree model), and the SSE stream the Desktop main process reads.
   const appended = await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`, {

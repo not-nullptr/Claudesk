@@ -315,6 +315,46 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
   const statePath = join(stateDir, stateFileName);
   let cache = null;
 
+  // Long polls. A runner that says how long it is willing to wait
+  // (`x-claudesk-poll-wait: <seconds>`) has an empty poll held open until a
+  // placement, a requeue or a retry wakes its pool — the runner then draws the
+  // work on the same request instead of on its next timed tick. Opt-in by
+  // header, so the product's own runner (and every caller that expects an
+  // immediate answer) keeps the prompt-response contract.
+  const pollWaiters = new Map();
+  const pollHoldCapMs = (() => {
+    const raw = Number(process.env.COWORK_BRIDGE_POLL_HOLD_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 20000;
+  })();
+
+  function pollWait(headers) {
+    const asked = Number(headers?.["x-claudesk-poll-wait"]);
+    if (!Number.isFinite(asked) || asked <= 0) return 0;
+    return Math.min(asked * 1000, pollHoldCapMs);
+  }
+
+  function waitForPool(poolId, holdMs) {
+    return new Promise((resolve) => {
+      let set = pollWaiters.get(poolId);
+      if (!set) {
+        set = new Set();
+        pollWaiters.set(poolId, set);
+      }
+      const finish = () => {
+        clearTimeout(timer);
+        set.delete(finish);
+        if (!set.size) pollWaiters.delete(poolId);
+        resolve();
+      };
+      const timer = setTimeout(finish, holdMs);
+      set.add(finish);
+    });
+  }
+
+  function wakePool(poolId) {
+    for (const finish of [...(pollWaiters.get(poolId) ?? [])]) finish();
+  }
+
   async function load() {
     if (cache) return cache;
     try {
@@ -585,6 +625,31 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // A session is handed out once; the runner's nack puts it back.
       for (const session of mine) session.state = "offered";
       if (mine.length) await save();
+      // Nothing to hand out: a runner that said how long it can wait gets its
+      // poll held until a placement or a requeue wakes the pool (see
+      // wakePool) — the difference between "picked up on the next tick" and
+      // "picked up now".
+      const holdMs = mine.length ? 0 : pollWait(headers);
+      if (holdMs > 0) {
+        await waitForPool(pool.pool_id, holdMs);
+        const refreshed = await load();
+        const later = refreshed.sessions.filter(
+          (session) => session.pool_id === pool.pool_id && session.state === "pending",
+        );
+        for (const session of later) session.state = "offered";
+        if (later.length) await save();
+        return {
+          hints: later.map(hintFor),
+          warm_hints: [],
+          pending_count: later.length,
+          backing_off_count: 0,
+          circuit_broken_count: 0,
+          pool_pending_session_count: later.length,
+          pool_active_session_count: refreshed.sessions.filter(
+            (session) => session.pool_id === pool.pool_id && session.state === "active",
+          ).length,
+        };
+      }
       return {
         hints: mine.map(hintFor),
         warm_hints: [],
@@ -623,24 +688,36 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // disappearance from `assignment_ids` as a server-side deassignment and
       // aborts the child on the spot. Fresh pending sessions are claimed for
       // whichever runner is asking.
-      const mine = state.sessions.filter(
-        (session) => session.pool_id === pool.pool_id
-          && session.state !== "released" && session.state !== "failed",
-      );
-      const held = [];
-      for (const session of mine) {
-        if (runner && session.assigned_runner_id === runner.runner_id) {
-          if (session.state === "pending") session.state = "offered";
-          held.push(session.session_uuid);
-          continue;
+      const assignmentsFor = (current) => {
+        const mine = current.sessions.filter(
+          (session) => session.pool_id === pool.pool_id
+            && session.state !== "released" && session.state !== "failed",
+        );
+        const held = [];
+        for (const session of mine) {
+          if (runner && session.assigned_runner_id === runner.runner_id) {
+            if (session.state === "pending") session.state = "offered";
+            held.push(session.session_uuid);
+            continue;
+          }
+          if (session.assigned_runner_id === undefined && session.state === "pending") {
+            session.state = "offered";
+            if (runner) session.assigned_runner_id = runner.runner_id;
+            held.push(session.session_uuid);
+          }
         }
-        if (session.assigned_runner_id === undefined && session.state === "pending") {
-          session.state = "offered";
-          if (runner) session.assigned_runner_id = runner.runner_id;
-          held.push(session.session_uuid);
-        }
-      }
+        return held;
+      };
+      let held = assignmentsFor(state);
       await save();
+      // Nothing to hand out: hold the poll until a placement or requeue wakes
+      // the pool (see wakePool), for runners that asked (see pollWait).
+      const holdMs = held.length ? 0 : pollWait(headers);
+      if (holdMs > 0) {
+        await waitForPool(pool.pool_id, holdMs);
+        held = assignmentsFor(await load());
+        await save();
+      }
       return {
         assignment_ids: held,
         session_assignments: [],
@@ -947,6 +1024,7 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       session.session_token = undefined;
       session.assigned_runner_id = undefined;
       await save();
+      wakePool(session.pool_id);
       return {};
     },
 
@@ -994,6 +1072,9 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // the runner reads and the stream replays.
       if (Array.isArray(body?.events)) appendToSession(session, body.events);
       await save();
+      // A runner already holding this pool's poll takes it on that same
+      // request, not on its next tick.
+      wakePool(pool.pool_id);
       log.log(`[code-runners] session ${session.session_uuid} placed on pool ${pool.pool_id}`);
       return { session: sessionDocument(session) };
     },
@@ -1026,15 +1107,20 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       // own `--resume`). Only the client leg requeues — the runner's writes
       // come through the worker leg, where a `user` payload is a tool result,
       // not a new turn.
+      let requeued = false;
       if (appended.length && (session.state === "released" || session.state === "failed")
           && incoming.some(isUserMessage)) {
         session.state = "pending";
         session.attempt += 1;
         session.assigned_runner_id = undefined;
         session.failure = undefined;
+        requeued = true;
         log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
       }
       if (appended.length) await save();
+      // The runner holding the pool hears about it on its held poll, not on a
+      // later tick.
+      if (requeued) wakePool(session.pool_id);
       return { data: appended };
     },
 

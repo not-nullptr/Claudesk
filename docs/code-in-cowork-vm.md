@@ -489,7 +489,12 @@ What is left is the **deployment** half, and it needs the box:
    `--resume` for later turns — minus `--sdk-url`, which the compiled binary
    reserves for Anthropic's own hosts. The prompt is a stream-json user message
    on the agent's stdin, never an argument (so the agent is never started
-   "without a prompt"); every assistant message, tool result, partial update
+   "without a prompt"); the runner's idle poll of the pool is held open
+   (`x-claudesk-poll-wait`), and a placement or a requeue wakes it on that same
+   request — the guest cannot be dialled (nothing is forwarded into the VM), so
+   event-driven delivery is a held request rather than a push socket, and
+   pickup is immediate (tens of milliseconds) instead of on a tick; every
+   assistant message, tool result, partial update
    and the turn's own `result` message — the terminal the reader closes a turn
    on, so a turn never stays pending — lands in the transcript as its own event
    the moment the agent emits it (text streams, and tool calls render as the
