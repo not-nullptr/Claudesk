@@ -50,7 +50,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 52 : 53) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 53 : 54) : gateway === "1" ? 8 : 6);
     // A tenant resolves `/code` to the self-hosted surface, so the route alias
     // that forces the local one is withheld — deliberately, which is also why it
     // is not a required patch on a tenant.
