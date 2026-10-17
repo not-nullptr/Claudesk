@@ -30,6 +30,13 @@ const firesPerRoutine = 30;
 const apiFiresPerInstance = 100;
 const maxTextChars = 65_536;
 const triggerPrefix = "trig_";
+// Claudesk extension: images attached to a fire. Upstream's body is `text`
+// only; this deployment accepts an `images` array as well, with Anthropic's
+// own image constraints (types and 5 MiB per image). The images ride the
+// session's opening user turn, which both executors already carry.
+const maxImages = 20;
+const maxImageBytes = 5 * 1024 * 1024;
+const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 export class RoutineError extends Error {
   constructor(statusCode, type, message, { retryAfter } = {}) {
@@ -290,18 +297,58 @@ export function createRoutineService({
     return `${prompt}\n\n---\nAdditional context for this run:\n${text}`;
   }
 
-  function userEvent(message) {
+  /**
+   * The fire body's images, normalized to the Desktop's own shape
+   * (`{name, mimeType, base64}`). A Claude API-style `{media_type, data}` pair
+   * is accepted too, so a caller can paste a content block's source directly.
+   */
+  function normalizeImages(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw badRequest("images must be an array");
+    if (raw.length > maxImages) {
+      throw badRequest(`at most ${maxImages} images are allowed`);
+    }
+    return raw.map((entry, index) => {
+      const record = isRecord(entry) ? entry : {};
+      const mimeType = textOf(record.media_type ?? record.mimeType ?? record.mime_type)
+        .toLowerCase();
+      const rawData = textOf(record.data ?? record.base64 ?? record.data_base64)
+        .replace(/\s+/g, "");
+      const name = textOf(record.name) || `image-${index + 1}`;
+      if (!imageTypes.has(mimeType)) {
+        throw badRequest(`image ${index + 1} must be png, jpeg, gif or webp`);
+      }
+      if (!rawData || !/^[A-Za-z0-9+/]*={0,2}$/.test(rawData)) {
+        throw badRequest(`image ${index + 1} has no valid base64 data`);
+      }
+      const bytes = Buffer.from(rawData, "base64");
+      if (!bytes.length) throw badRequest(`image ${index + 1} has no data`);
+      if (bytes.length > maxImageBytes) {
+        throw badRequest(`image ${index + 1} is larger than 5 MiB`);
+      }
+      return { name, mimeType, base64: bytes.toString("base64") };
+    });
+  }
+
+  function userEvent(message, images = []) {
+    const content = [{ type: "text", text: message }];
+    for (const image of images) {
+      content.push({
+        type: "image",
+        source: { type: "base64", media_type: image.mimeType, data: image.base64 },
+      });
+    }
     return {
       payload: {
         type: "user",
         uuid: randomUUID(),
         timestamp: new Date().toISOString(),
-        message: { role: "user", content: [{ type: "text", text: message }] },
+        message: { role: "user", content },
       },
     };
   }
 
-  async function startCodeSession(task, message, model) {
+  async function startCodeSession(task, message, model, images = []) {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -319,7 +366,7 @@ export function createRoutineService({
           model,
           ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
         },
-        events: [userEvent(message)],
+        events: [userEvent(message, images)],
       },
     });
     if (created?.unsupported) {
@@ -331,7 +378,7 @@ export function createRoutineService({
     return sessionId;
   }
 
-  async function startCoworkSession(task, taskId, message, model) {
+  async function startCoworkSession(task, taskId, message, model, images = []) {
     const sessionId = `local_${randomUUID()}`;
     const files = Array.isArray(task.userSelectedFiles) ? [...task.userSelectedFiles] : [];
     if (textOf(task.filePath) && !files.includes(task.filePath)) files.push(task.filePath);
@@ -342,7 +389,7 @@ export function createRoutineService({
       model,
       title: task.displayName || task.name || "Routine",
       sessionType: "cowork",
-      images: [],
+      images,
       userSelectedFiles: files,
       userSelectedFolders: Array.isArray(task.userSelectedFolders) ? task.userSelectedFolders : [],
       userSelectedProjectUuids: Array.isArray(task.userSelectedProjectUuids)
@@ -357,13 +404,14 @@ export function createRoutineService({
     return result?.sessionId || result?.session?.sessionId || sessionId;
   }
 
-  async function fire({ routineId, text, via = "api" }) {
+  async function fire({ routineId, text, images, via = "api" }) {
     if (text !== undefined && typeof text !== "string") {
       throw badRequest("text must be a string");
     }
     if (typeof text === "string" && text.length > maxTextChars) {
       throw badRequest(`text must be at most ${maxTextChars} characters`);
     }
+    const attached = normalizeImages(images);
     const { task, taskId } = await taskRecord(routineId);
     if (!taskEnabled(task)) throw badRequest("this routine is paused");
     const prompt = await promptFor(task, taskId);
@@ -381,8 +429,8 @@ export function createRoutineService({
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
     const sessionId = kind === "code"
-      ? await startCodeSession(task, message, model)
-      : await startCoworkSession(task, taskId, message, model);
+      ? await startCodeSession(task, message, model, attached)
+      : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
     // into an error the caller would retry (and so start a second session).
@@ -552,9 +600,9 @@ export function createRoutineService({
     },
 
     /** POST /v1/code/triggers/:id/run — Run now, over the same path as a fire. */
-    async runTrigger(routineId, text) {
+    async runTrigger(routineId, text, images) {
       const { task, taskId } = await taskRecord(routineId);
-      const fired = await fire({ routineId, text, via: "run" });
+      const fired = await fire({ routineId, text, images, via: "run" });
       return {
         trigger: triggerDocument(await load(), task, taskId),
         session_id: fired.sessionId,
@@ -607,8 +655,8 @@ export function createRoutineService({
     },
 
     /** POST /v1/claude_code/routines/:id/fire */
-    async fireRoutine(routineId, { text } = {}) {
-      return fire({ routineId, text, via: "api" });
+    async fireRoutine(routineId, { text, images } = {}) {
+      return fire({ routineId, text, images, via: "api" });
     },
 
     /** Whether a routine id names a task this instance can fire. */

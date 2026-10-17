@@ -155,6 +155,26 @@ try {
     + " | prompt: and tighten the summary",
     "the runner resumed the conversation the agent's own events named");
 
+  // The opening turn can carry image blocks (a routine fire with images); the
+  // runner reads the whole content list, not just its text, and forwards it to
+  // the agent unchanged.
+  const contentProbe = spawnSync("python3", ["-I", "-c", `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("guest_runner", ${JSON.stringify(join(root, "guest/runner.py"))})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+events = [{"payload": {"type": "user", "message": {"role": "user", "content": [
+    {"type": "text", "text": "look"},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+]}}}]
+print(json.dumps(module.content_of(events)))
+`], { encoding: "utf8" });
+  assert.equal(contentProbe.status, 0, contentProbe.stderr);
+  assert.deepEqual(JSON.parse(contentProbe.stdout), [
+    { type: "text", text: "look" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
+  ], "the guest runner forwards image blocks beside the text");
+
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {
     encoding: "utf8",

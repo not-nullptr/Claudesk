@@ -3425,6 +3425,11 @@ function routinePublicOrigin(request, url) {
   return host ? `${proto}://${host}` : "";
 }
 
+// A fire may carry images (a Claudesk extension), so its body is larger than
+// the trigger metadata routes'. Twenty images at 5 MiB each, base64-expanded,
+// fits comfortably; the service enforces the per-image limits.
+const routineFireBodyLimit = 32 * 1024 * 1024;
+
 function routineSessionUrl(origin, kind, sessionId) {
   const path = kind === "code"
     ? `/code/${encodeURIComponent(sessionId)}`
@@ -3467,7 +3472,7 @@ async function handleRoutineApi(request, response, url) {
         throw new RoutineError(401, "authentication_error",
           "the bearer token is not valid for this routine");
       }
-      const body = await readJson(request, 1024 * 1024).catch((error) => {
+      const body = await readJson(request, routineFireBodyLimit).catch((error) => {
         if (error instanceof SyntaxError) {
           throw new RoutineError(400, "invalid_request_error", "the request body is not valid JSON");
         }
@@ -3476,7 +3481,8 @@ async function handleRoutineApi(request, response, url) {
       if (body?.text !== undefined && typeof body.text !== "string") {
         throw new RoutineError(400, "invalid_request_error", "text must be a string");
       }
-      const fired = await routines.fireRoutine(routineId, { text: body?.text });
+      const fired = await routines.fireRoutine(routineId,
+        { text: body?.text, images: body?.images });
       const origin = routinePublicOrigin(request, url);
       sendRoutineJson(response, 200, {
         type: "routine_fire",
@@ -3518,8 +3524,9 @@ async function handleRoutineApi(request, response, url) {
       const routineId = decodeURIComponent(triggerPath[1]);
       const rest = triggerPath[2].replace(/\/+$/, "");
       if (rest === "run" && method === "POST") {
-        const body = await readJson(request, 1024 * 1024).catch(() => ({}));
-        sendRoutineJson(response, 200, await routines.runTrigger(routineId, body?.text));
+        const body = await readJson(request, routineFireBodyLimit).catch(() => ({}));
+        sendRoutineJson(response, 200,
+          await routines.runTrigger(routineId, body?.text, body?.images));
         return;
       }
       if (rest === "runs" && method === "GET") {

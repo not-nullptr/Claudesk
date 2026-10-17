@@ -15,8 +15,9 @@ Content-Type: application/json
 {"text": "Sentry alert SEN-4521 fired in prod. Stack trace attached."}
 ```
 
-The body is optional and carries only `text` (≤ 65,536 characters), exactly as
-upstream. Everything else — model, folder, permission mode, schedule, the saved
+The body is optional and carries `text` (≤ 65,536 characters), exactly as
+upstream, plus an optional `images` array (a Claudesk extension — see below).
+Everything else — model, folder, permission mode, schedule, the saved
 instructions — is the task's own configuration. Each successful call starts one
 new session and returns:
 
@@ -47,11 +48,51 @@ Routine ids are opaque `trig_…` strings, like upstream's. This bridge encodes
 the scheduled task's id into the suffix (base64url), so the id round-trips and
 there is no second mapping store. A raw scheduled-task id is accepted too.
 
+## Images
+
+Upstream's fire body has no image field. This deployment accepts one anyway,
+because both executors already carry images on a session's opening turn:
+
+```json
+{
+  "text": "Sentry alert SEN-4521 fired in prod.",
+  "images": [
+    {"media_type": "image/png", "data": "<base64>"}
+  ]
+}
+```
+
+- Up to 20 images, 5 MiB each (decoded), `image/png`, `image/jpeg`,
+  `image/gif` or `image/webp`. `{ "mimeType": …, "base64": … }` and a `name`
+  are accepted too; a Claude API image block's `source` object can be pasted
+  directly. The request body may be up to 32 MiB with images.
+- They ride the routine's opening user turn:
+  - a **Cowork** routine passes them to `LocalAgentModeSessions.start`, which
+    attaches them to the new session;
+  - a **Code** routine puts them in the first user event as base64 image
+    blocks, and the guest runner forwards the whole content list to the agent
+    (text and images together).
+- No separate token or endpoint: the same per-routine bearer token covers it.
+  A caller that sends only `text` is unaffected, and upstream would ignore the
+  unknown `images` field.
+
 ## Tokens
 
 One bearer token per routine, returned once and stored only as a SHA-256 hash
 (on the instance, and mirrored into authd for edge routing). `text` cannot leak
 through a token, and a token only fires the routine it was minted for.
+
+Routine ids are the `trig_…` values the instance's own list returns:
+
+```bash
+curl -s https://claude.example.com/api/routines \
+  -H "Cookie: sessionKey=<session cookie>" | jq '.value[] | {id, name, kind}'
+```
+
+The session cookie is the one the browser holds after signing in (devtools →
+Application → Cookies; it is HttpOnly and Secure). The mint/revoke routes sit
+behind the same gate, so a `curl` needs it; the in-app API card does the same
+call with the page's session.
 
 Mint or rotate:
 
@@ -176,6 +217,7 @@ project it into the cloud detail view.
 - The literal `api.anthropic.com` URL and its claude.ai-issued tokens: upstream
   routines, tokens and cloud sessions live in a backend this deployment does not
   have.
-- Per-fire overrides: `text` is the only body field; unknown fields are ignored,
-  as upstream.
+- Per-fire overrides: `text` and `images` are the only body fields; model,
+  folder, permission mode and the rest stay the task's. Other unknown fields are
+  ignored, as upstream (which itself has no `images`).
 - Notifications, repositories and connector configuration on the cloud form.

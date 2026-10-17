@@ -181,6 +181,48 @@ def prompt_of(events):
     return ""
 
 
+def content_of(events):
+    """The last user message's content blocks — text and images.
+
+    The bridge's opening turn may carry image blocks beside the text (a fire
+    with images). The agent's stream-json input takes the same block list, so
+    the turn is forwarded as it arrived rather than flattened to text.
+    """
+    for event in reversed(events or []):
+        payload = event.get("payload") or {}
+        if payload.get("type") != "user":
+            continue
+        content = (payload.get("message") or {}).get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return [{"type": "text", "text": content}]
+            continue
+        if not isinstance(content, list):
+            continue
+        blocks = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    blocks.append({"type": "text", "text": text})
+            elif part.get("type") == "image":
+                source = part.get("source")
+                if (isinstance(source, dict)
+                        and source.get("type") == "base64"
+                        and isinstance(source.get("data"), str)
+                        and source.get("data")):
+                    blocks.append({"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": source.get("media_type") or "image/png",
+                        "data": source["data"],
+                    }})
+        if blocks:
+            return blocks
+    return []
+
+
 def resume_id(events):
     """The conversation to `--resume`, read off the agent's own events.
 
@@ -200,15 +242,16 @@ def resume_id(events):
     return ""
 
 
-def run_agent(argv, cwd, prompt, write):
+def run_agent(argv, cwd, content, write):
     """One headless turn of the agent: the prompt in, the event stream out.
 
-    The prompt is a stream-json user message on stdin — the channel the SDK
-    uses — and stdin ends there, which is what tells the agent the turn's input
-    is complete. Every assistant message, tool result and partial update is
-    queued to a writer thread so a slow bridge never stalls the agent's own
-    output pipe. Returns (exit code, result event or None, timed out, forwarded
-    count, write failures, stderr lines).
+    `content` is the user message's content — a string, or the block list the
+    transcript carries (text and images) — written as a stream-json user
+    message on stdin, the channel the SDK uses. Stdin ends there, which is what
+    tells the agent the turn's input is complete. Every assistant message, tool
+    result and partial update is queued to a writer thread so a slow bridge
+    never stalls the agent's own output pipe. Returns (exit code, result event
+    or None, timed out, forwarded count, write failures, stderr lines).
     """
     environment = dict(os.environ)
     if os.path.isdir(RUNNER_HOME):
@@ -265,8 +308,10 @@ def run_agent(argv, cwd, prompt, write):
     forwarded = 0
     result = None
     try:
+        blocks = ([{"type": "text", "text": content}]
+                  if isinstance(content, str) else content)
         message = {"type": "user",
-                   "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+                   "message": {"role": "user", "content": blocks},
                    "parent_tool_use_id": None,
                    "session_id": ""}
         try:
@@ -323,7 +368,7 @@ def run_session(hint):
 
     status, history = request("/v1/code/sessions/%s/events" % quoted, token=token)
     events = (history or {}).get("data") if isinstance(history, dict) else []
-    prompt = prompt_of(events)
+    content = content_of(events)
     resume = resume_id(events)
 
     # The session's own settings — the composer's model choice among them —
@@ -340,7 +385,7 @@ def run_session(hint):
         log("session %s: %s" % (session, reason))
         return session, 127
 
-    if not prompt.strip():
+    if not content:
         reason = "the session's transcript carries no user message to answer"
         finish("report-failure", {"reason": reason, "failure_kind": "bad_input"})
         log("session %s: %s" % (session, reason))
@@ -360,7 +405,7 @@ def run_session(hint):
         session, " ".join(AGENT_ARGS), model or "default", resume or "none"))
 
     def turn(extra):
-        return run_agent(argv + extra, cwd, prompt, write)
+        return run_agent(argv + extra, cwd, content, write)
 
     code, result, timed_out, forwarded, failures, errors = turn(
         ["--resume", resume] if resume else [])

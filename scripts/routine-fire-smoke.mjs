@@ -24,6 +24,8 @@ import {
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const home = await mkdtemp(join(tmpdir(), "routine-fire-"));
+// A 1×1 PNG; the bytes are never decoded here, only carried.
+const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
 // --- the service, with a fake Desktop and runner ---------------------------
 
@@ -150,6 +152,24 @@ assert.equal(coworkStart.model, "model-a");
 assert.equal(coworkStart.spaceId, "space-1");
 assert.deepEqual(coworkStart.userSelectedFolders, ["/workspace"]);
 
+// Images (a Claudesk extension) ride the same start call in the Desktop's own
+// shape, so the Cowork session opens with them attached.
+await service.fireRoutine(coworkId, {
+  text: "see screenshot",
+  images: [{ media_type: "image/png", data: tinyPng }],
+});
+const imageStart = desktop.calls.filter((call) =>
+  call.surface === "LocalAgentModeSessions" && call.method === "start").at(-1).args[0];
+assert.deepEqual(imageStart.images,
+  [{ name: "image-1", mimeType: "image/png", base64: tinyPng }],
+  "a fire's images reach Cowork's start call in the Desktop's shape");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, {
+    images: [{ media_type: "text/plain", data: "aGk=" }],
+  }),
+  (error) => error.statusCode === 400 && /png, jpeg, gif or webp/.test(error.message),
+  "an unsupported image type is refused");
+
 // Firing a Code task places a session on the runner with the prompt as the
 // client's first user event — the shape the runner reads and the transcript
 // releases when the runner stamps it.
@@ -165,6 +185,18 @@ assert.equal(created[0].body.config.cwd, "/workspace/repo");
 assert.equal(created[0].body.events[0].payload.type, "user");
 assert.equal(created[0].body.events[0].payload.message.content[0].text,
   "Fix the failing test.\n\n---\nAdditional context for this run:\nCI failed");
+
+// A Code fire's images become image blocks in the opening user event — the
+// content list the guest runner forwards to the agent unchanged.
+await service.fireRoutine(codeId, {
+  text: "see screenshot",
+  images: [{ mimeType: "image/png", base64: tinyPng }],
+});
+assert.equal(created.length, 2);
+assert.deepEqual(created[1].body.events[0].payload.message.content[1], {
+  type: "image",
+  source: { type: "base64", media_type: "image/png", data: tinyPng },
+});
 
 // Paused routines do not start a session, and a fire carries no per-run config.
 currentTasks = [{ ...coworkTask, enabled: false }, codeTask];
@@ -236,6 +268,7 @@ try {
 
 // --- the HTTP routes --------------------------------------------------------
 
+const httpStarts = [];
 const stub = createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
@@ -263,6 +296,7 @@ const stub = createServer(async (request, response) => {
     return;
   }
   if (body.surface === "LocalAgentModeSessions" && body.method === "start") {
+    httpStarts.push(body.args[0]);
     send({ ok: true, value: { sessionId: body.args[0].sessionId } });
     return;
   }
@@ -318,13 +352,19 @@ try {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ text: "Sentry SEN-2" }),
+      body: JSON.stringify({
+        text: "Sentry SEN-2",
+        images: [{ media_type: "image/png", data: tinyPng }],
+      }),
     });
   assert.equal(fire.status, 200, await fire.clone().text());
   const fired = await fire.json();
   assert.equal(fired.type, "routine_fire");
   assert.match(fired.claude_code_session_id, /^local_/);
   assert.match(fired.claude_code_session_url, /\/cowork\/local_/);
+  assert.deepEqual(httpStarts.at(-1).images,
+    [{ name: "image-1", mimeType: "image/png", base64: tinyPng }],
+    "images in the HTTP body reach the started session");
 
   const noVersion = await fetch(
     `${base}/v1/claude_code/routines/${encodeURIComponent(coworkId)}/fire`, {
