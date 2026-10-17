@@ -130,3 +130,24 @@ sudo docker compose -f compose.yaml up -d \
 # yet is pending, not provisioned, so refresh alone would skip it.
 sudo "$project_dir/scripts/refresh-users.sh"
 sudo "$project_dir/scripts/converge-users.sh"
+
+# The guest-side payload — the runner, its environment and its unit — lives in
+# each account's VM image, not in a container image, so a change to it needs a
+# re-stamp per account. Skipping this is a silent half-deploy: the containers
+# are current while every VM still runs the previous runner (and, for example,
+# misses the held poll that makes work pickup immediate). The installer is
+# stamped and idempotent — it stops a running VM for the write, and the next
+# placed session wakes it again — so running it for every provisioned account
+# costs a VM stop when nothing changed, and correctness when something did.
+if command -v authd >/dev/null 2>&1; then
+    authd --provisioned 2>/dev/null | while IFS= read -r account_email; do
+        [ -n "$account_email" ] || continue
+        printf 'deploy: refreshing the guest runner for %s\n' "$account_email" >&2
+        if sudo "$project_dir/scripts/install-guest-runner.sh" "$account_email" >&2; then
+            printf 'deploy: guest runner for %s is current\n' "$account_email" >&2
+        else
+            printf 'deploy: guest runner for %s NOT refreshed (deploy continues)\n' \
+                "$account_email" >&2
+        fi
+    done
+fi

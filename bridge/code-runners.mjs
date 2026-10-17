@@ -592,7 +592,8 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       };
       state.runners.push(runner);
       await save();
-      log.log(`[code-runners] runner ${runner.runner_id} registered on pool ${pool.pool_id}`);
+      log.log(`[code-runners] runner ${runner.runner_id} registered on pool ${pool.pool_id}`
+        + ` (version ${runner.runner_version || "unknown"})`);
       return { runner_id: runner.runner_id, runner_token: runner.runner_token };
     },
 

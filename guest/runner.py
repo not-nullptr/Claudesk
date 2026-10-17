@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 
 
 def env(name, default=""):

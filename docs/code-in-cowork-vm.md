@@ -447,7 +447,10 @@ root), and writes `/opt/claudesk/runner.py`, `/etc/claudesk/runner.env` and a
 `claudesk-code-runner.service` that starts it. Run it with the VM stopped; the
 image is rebuilt every Desktop release, so it is re-derived on an update exactly
 like the vsock-port patch, and it is stamped so a re-run with the same payload
-and pool is a no-op.
+and pool is a no-op. `deploy.sh` runs it for every provisioned account after
+the images are current, so a runner change cannot be half-deployed — the
+containers current while every VM keeps the previous runner — which is a
+mistake this payload has already seen.
 
 This bakes the payload in rather than reading it from the `claudeshared` share,
 because it does not depend on the still-open question of whether the host can
