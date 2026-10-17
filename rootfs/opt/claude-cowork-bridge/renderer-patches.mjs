@@ -1947,6 +1947,7 @@ export const prefilterNeedles = [
   "data-compact-mode-switcher", // titlebar mode picker
   "Local scheduled tasks can only run", // scheduled task runner
   "stringsVouched", // home layout assignment
+  "subscribeSse", // Code session live transport (web-code-subscribe-sse)
   "voyage_composer_marlin", // unified-composer design predicates
   "claude_ai_projects_limits", // projects-allowed predicate
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
