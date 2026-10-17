@@ -5236,6 +5236,10 @@ async function serveOfficialIndex(request, response) {
     developerActionsEnabled,
     gatewaySettingsEnabled,
     webShell: webShellEnabled,
+    // A tenant's Code start options are normally drawn by the prepared
+    // renderer; the preload keeps a fallback for a bundle that does not render
+    // them (see remote-preload.js, "code start options").
+    tenantCodeReads: tenantCodeReadsEnabled,
     initialStores: loginShellEnabled ? {} : await initialRemoteStores(request),
     listeners: Object.fromEntries(
       [...remoteListenerMethods].map(([surface, methods]) => [surface, [...methods]]),

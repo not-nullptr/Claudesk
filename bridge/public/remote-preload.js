@@ -1919,4 +1919,230 @@
     document.addEventListener("DOMContentLoaded", applyComposerClasses, { once: true });
     globalThis.requestAnimationFrame?.(applyComposerClasses);
   }
+
+  // BEGIN code start options (tenant)
+  //
+  // A tenant's self-hosted Code sessions take a folder, a branch and an
+  // isolated worktree. The prepared renderer normally draws that strip itself
+  // and sets `__CLAUDESK_STRIP_MOUNTED__` as it does; this block is the
+  // fallback for a bundle that does not render it: it injects the same three
+  // controls beside the environment pill, gets its answers from the guest
+  // runner (the same `LocalSessions` names the bridge answers from the VM), and
+  // merges the choices into the create request. It never touches the host.
+  if (config.tenantCodeReads) {
+    const codeOptionsKey = "claudesk.code-start-options";
+    const codeOptions = {
+      cwd: null, branch: "", worktree: false, branches: [], isGitRepo: false,
+    };
+    try {
+      const stored = JSON.parse(globalThis.localStorage?.getItem(codeOptionsKey) || "{}");
+      if (stored && typeof stored === "object") {
+        if (typeof stored.cwd === "string") codeOptions.cwd = stored.cwd;
+        if (typeof stored.branch === "string") codeOptions.branch = stored.branch;
+        codeOptions.worktree = stored.worktree === true;
+      }
+    } catch { /* a storage that refuses reads is not fatal */ }
+    const persistCodeOptions = () => {
+      try {
+        globalThis.localStorage?.setItem(codeOptionsKey, JSON.stringify({
+          cwd: codeOptions.cwd, branch: codeOptions.branch, worktree: codeOptions.worktree,
+        }));
+      } catch { /* ignore */ }
+    };
+    const baseName = (path) => String(path || "").replace(/\/+$/, "").split("/").pop() || path;
+    let container = null;
+    let reinjectTimer = null;
+
+    function renderCodeOptions() {
+      if (!container) return;
+      const folder = container.querySelector('[data-role="folder"]');
+      const branch = container.querySelector('[data-role="branch"]');
+      const worktree = container.querySelector('[data-role="worktree"] input');
+      const label = container.querySelector('[data-role="worktree"]');
+      if (folder) {
+        folder.textContent = codeOptions.cwd
+          ? `\u{1F4C1} ${baseName(codeOptions.cwd)}` : "\u{1F4C1} Select folder…";
+        folder.title = codeOptions.cwd || "Choose the folder this session starts in";
+      }
+      if (branch) {
+        branch.replaceChildren();
+        const empty = document.createElement("option");
+        empty.value = "";
+        empty.textContent = codeOptions.cwd
+          ? (codeOptions.isGitRepo ? "branch…" : "not a git repo")
+          : "branch…";
+        branch.append(empty);
+        for (const name of codeOptions.branches) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          branch.append(option);
+        }
+        branch.value = codeOptions.branch || "";
+        branch.disabled = !codeOptions.isGitRepo || codeOptions.branches.length === 0;
+      }
+      if (worktree) {
+        worktree.checked = codeOptions.worktree && codeOptions.isGitRepo;
+        worktree.disabled = !codeOptions.isGitRepo;
+      }
+      if (label) {
+        label.style.opacity = codeOptions.isGitRepo ? "1" : "0.55";
+      }
+    }
+
+    async function refreshCodeGit() {
+      codeOptions.branches = [];
+      codeOptions.isGitRepo = false;
+      if (codeOptions.cwd) {
+        try {
+          const info = await invoke("LocalSessions", "getGitInfo", [codeOptions.cwd]);
+          codeOptions.isGitRepo = Boolean(info);
+          if (info) {
+            const list = await invoke("LocalSessions", "getLocalBranches", [codeOptions.cwd]);
+            codeOptions.branches = Array.isArray(list) ? list : [];
+            if (!codeOptions.branch || !codeOptions.branches.includes(codeOptions.branch)) {
+              codeOptions.branch = info.branch || info.defaultBranch
+                || codeOptions.branches[0] || "";
+            }
+          } else {
+            codeOptions.branch = "";
+            codeOptions.worktree = false;
+          }
+        } catch {
+          // No guest runner online yet: the controls stay present but disabled.
+        }
+      } else {
+        codeOptions.branch = "";
+        codeOptions.worktree = false;
+      }
+      persistCodeOptions();
+      renderCodeOptions();
+    }
+
+    function buildCodeOptions(pillClass) {
+      container = document.createElement("span");
+      container.setAttribute("data-claudesk-code-options", "");
+      container.style.cssText = "display:inline-flex;align-items:center;gap:6px;min-width:0;";
+      const folder = document.createElement("button");
+      folder.type = "button";
+      folder.dataset.role = "folder";
+      folder.className = pillClass;
+      folder.addEventListener("click", async () => {
+        const picked = await globalThis.__CLAUDE_PICK_SERVER_FOLDERS__?.({
+          title: "Choose a folder", source: "code", allowCreate: true,
+        });
+        const path = picked?.[0];
+        if (!path) return;
+        codeOptions.cwd = path;
+        codeOptions.branch = "";
+        codeOptions.worktree = false;
+        persistCodeOptions();
+        await refreshCodeGit();
+      });
+      const branch = document.createElement("select");
+      branch.dataset.role = "branch";
+      branch.setAttribute("aria-label", "Session branch");
+      branch.style.cssText = "height:var(--pill-h,24px);max-width:180px;border-radius:8px;"
+        + "background:var(--cds-surface-2,#2b2b2b);color:var(--cds-text-primary,#eee);"
+        + "border:1px solid var(--cds-border-300,#444);font:inherit;font-size:12px;padding:0 6px;";
+      branch.addEventListener("change", () => {
+        codeOptions.branch = branch.value;
+        persistCodeOptions();
+      });
+      const worktree = document.createElement("label");
+      worktree.dataset.role = "worktree";
+      worktree.className = pillClass;
+      worktree.style.cursor = "pointer";
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.style.margin = "0";
+      toggle.addEventListener("change", () => {
+        codeOptions.worktree = toggle.checked;
+        persistCodeOptions();
+      });
+      worktree.append(toggle, document.createTextNode(" worktree"));
+      container.append(folder, branch, worktree);
+    }
+
+    function ensureCodeOptions() {
+      if (globalThis.__CLAUDESK_STRIP_MOUNTED__ === true) {
+        container?.remove();
+        container = null;
+        return;
+      }
+      const anchor = document.querySelector(
+        '[data-testid="epitaxy-env-pill"],[data-testid="environment-bar-trigger"],'
+        + '[data-testid="draft-rail-place"]',
+      );
+      const row = anchor?.parentElement;
+      if (!row) return;
+      if (!container) buildCodeOptions(anchor.className);
+      if (!container.isConnected) row.append(container);
+      renderCodeOptions();
+    }
+
+    const scheduleCodeOptions = () => {
+      clearTimeout(reinjectTimer);
+      reinjectTimer = setTimeout(ensureCodeOptions, 60);
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", ensureCodeOptions, { once: true });
+    } else {
+      ensureCodeOptions();
+    }
+    globalThis.requestAnimationFrame?.(ensureCodeOptions);
+    setTimeout(ensureCodeOptions, 1200);
+    new MutationObserver(scheduleCodeOptions).observe(document.documentElement, {
+      childList: true, subtree: true,
+    });
+
+    // The choices reach the session through its create request; the draft's
+    // own start intent has no folder for a self-hosted place.
+    const originalFetch = globalThis.fetch;
+    const patchCreateBody = (text) => {
+      try {
+        const data = JSON.parse(text);
+        if (!data || typeof data !== "object") return null;
+        if (typeof data.self_hosted_runner_pool_id !== "string"
+          && typeof data.environment_id !== "string") return null;
+        const target = data.config && typeof data.config === "object" ? data.config : {};
+        if (codeOptions.cwd && !target.cwd) target.cwd = codeOptions.cwd;
+        if (codeOptions.branch && !target.source_branch) {
+          target.source_branch = codeOptions.branch;
+        }
+        if (codeOptions.worktree === true) target.use_worktree = true;
+        data.config = target;
+        return JSON.stringify(data);
+      } catch {
+        return null;
+      }
+    };
+    if (typeof originalFetch === "function" && !globalThis.__CLAUDESK_CODE_CREATE__) {
+      globalThis.__CLAUDESK_CODE_CREATE__ = true;
+      globalThis.fetch = function (input, init) {
+        try {
+          const isRequest = typeof Request !== "undefined" && input instanceof Request;
+          const url = new URL(isRequest ? input.url : String(input), globalThis.location.href);
+          const method = String((isRequest ? input.method : init?.method) || "GET").toUpperCase();
+          if (method === "POST" && url.pathname === "/v1/code/sessions"
+            && (codeOptions.cwd || codeOptions.branch || codeOptions.worktree)) {
+            if (isRequest) {
+              return input.clone().text().then((text) => {
+                const patched = patchCreateBody(text);
+                if (patched === null) return originalFetch.call(this, input, init);
+                return originalFetch.call(this, new Request(input, { body: patched }));
+              });
+            }
+            if (typeof init?.body === "string") {
+              const patched = patchCreateBody(init.body);
+              if (patched !== null) init = { ...init, body: patched };
+            }
+          }
+        } catch { /* not a create; pass it through */ }
+        return originalFetch.call(this, input, init);
+      };
+    }
+    refreshCodeGit();
+  }
+  // END code start options (tenant)
 })();

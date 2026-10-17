@@ -518,6 +518,16 @@ enough for `validateInvocation`, never forwarded to the wrapper/Desktop. A
 crafted call cannot make the privileged container run git over agent-writable
 content.
 
+The prepared renderer sets `globalThis.__CLAUDESK_STRIP_MOUNTED__` as it mounts
+the strip. The remote preload (`config.tenantCodeReads`) waits for the composer
+row; if that flag never appears — a bundle that does not render the strip — it
+injects the same three controls beside the environment pill itself: the folder
+chip opens the VM-backed picker (`source: "code"`), the branch list and the
+worktree toggle come from the same `LocalSessions` reads answered by the guest,
+and a `fetch` interceptor merges `cwd` / `source_branch` / `use_worktree` into
+the session create request. The choices persist in `claudesk.code-start-options`
+in localStorage (per account origin). Nothing here touches the host either.
+
 ## Cowork scheduled tasks
 
 The Cowork scheduled-task list has one route in — the hub sidebar's **Scheduled**

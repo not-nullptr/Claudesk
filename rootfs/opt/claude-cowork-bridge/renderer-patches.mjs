@@ -2645,7 +2645,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const { condition } = strips[0];
       patches.push({ id: stripPatchId, start: condition.start, end: condition.end,
         original: source.slice(condition.start, condition.end),
-        replacement: "!0" });
+        // The assignment is the preload fallback's cue that the renderer drew
+        // the strip, so it does not inject a second copy.
+        replacement: "(globalThis.__CLAUDESK_STRIP_MOUNTED__=!0)" });
     }
   }
   if (webShellEnabled) {
