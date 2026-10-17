@@ -1764,7 +1764,9 @@ const placeKindSwitch = name => `function ${name}(e){switch(e){case"local":case"
   + 'return!0;case"bridge":case"anthropic_cloud":case"byoc":case"pool":case"project":return!1}}';
 const selfHostedPlaceKinds = placeKindSwitch("placeKindA") + placeKindSwitch("placeKindB")
   + placeKindSwitch("placeKindC")
-  + 'function placeKindDecoy(e){switch(e){case"local":return!0;case"byoc":return!1}}';
+  + 'function placeKindDecoy(e){switch(e){case"local":return!0;case"byoc":return!1}}'
+  + 'function needsFolder(env, flag){return placeKindA(env)&&!flag}'
+  + 'function needsFolderDecoy(env, flag){return otherKind(env)&&!flag}';
 const selfHostedBranchHook = 'function branchHook({envType:e,needsFolder:t,selectedFolder:n}){'
   + 'let p="local",m=t&&p?n:null,h=e==="local"?m:null;'
   + 'return{worktree:!1,setWorktree:noop,worktreeSupported:!1,isGitRepo:!0,'
@@ -1785,9 +1787,9 @@ const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
   + 'let browse=fileSystem?.browseFolder;if(browse)return run(()=>browse(title,void 0,void 0,initialPath))}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedWire, selfHostedFolderPicker].join("\n");
-const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-branch-read",
-  "web-code-selfhosted-intent", "web-code-selfhosted-create",
-  "web-code-selfhosted-folder-picker"];
+const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
+  "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
+  "web-code-selfhosted-create", "web-code-selfhosted-folder-picker"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -1798,6 +1800,9 @@ const tenantStartOptions = inspectRenderer(selfHostedFixtures, false, true, true
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-place-kind").length, 3,
   "all three place-kind switches must be rewritten, and the lookalike left alone");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-needs-folder").length, 1,
+  "the folder-kind flag must stop gating self-hosted places on this-device policy");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-branch-read").length, 1,
   "the branch hook's local-only read must be widened exactly once");
@@ -1816,6 +1821,9 @@ const selfHostedOut = patchRendererSources(
 assert.ok(selfHostedOut.includes('case"wsl":case"byoc":case"pool":return!0;'
   + 'case"bridge":case"anthropic_cloud":case"project":return!1'),
   "self-hosted places must join the folder/worktree-capable arm");
+assert.ok(selfHostedOut.includes('needsFolder(env, flag){return placeKindA(env)'
+  + '&&(!flag||env==="byoc"||env==="pool")}'),
+  "self-hosted places must need a folder regardless of the this-device flag");
 assert.ok(selfHostedOut.includes('h=(e==="local"||e==="byoc"||e==="pool")?m:null'),
   "branch state must be read for a self-hosted place's folder");
 assert.ok(selfHostedOut.includes('...(c&&{cwd:c}),...(c&&I&&{useWorktree:!0}),'

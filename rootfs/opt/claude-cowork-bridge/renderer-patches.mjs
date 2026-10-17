@@ -795,6 +795,14 @@ const crashLogSiblingOption = "onRecoverableError";
 // on the operator's own instance a self-hosted place is never offered, and on a
 // non-web-shell client these paths are not used.
 const placeKindPatchId = "web-code-selfhosted-place-kind";
+// `needsFolder` is `folderKind(envType) && !noSessionRunsOnThisDevice`: the
+// second term is the "this device cannot run sessions" policy, true whenever
+// the managed config answers `noSessionRunsOnThisDevice`. For a self-hosted
+// place that term is irrelevant — the session does not run on this device at
+// all — but the renderer still ANDs it, so the folder/branch/worktree strip
+// stays hidden even with the first term patched. This splice keeps the flag's
+// effect for local/ssh/wsl and drops it for byoc/pool.
+const needsFolderPatchId = "web-code-selfhosted-needs-folder";
 const placeKindTrueCases = ["local", "ssh", "wsl"];
 const placeKindFalseCases = ["bridge", "anthropic_cloud", "byoc", "pool", "project"];
 const selfHostedKinds = ["byoc", "pool"];
@@ -2219,7 +2227,37 @@ function placeKindSwitchTarget(node) {
       && booleanLiteral(statement.argument) === expected;
   };
   if (!returns(truthy, true) || !returns(falsy, false)) return undefined;
-  return statement;
+  return { statement, name: node.id?.name };
+}
+
+// The `needsFolder` composition beside those switches:
+// `return folderKind(envType) && !noSessionRunsOnThisDevice`. The callee must
+// resolve to one of the place-kind switches found in this chunk, so an
+// unrelated `a && !b` cannot match; the returned clause is the flag negation
+// the caller widens.
+function needsFolderClauseTarget(node, switchNames) {
+  if (node.type !== "FunctionDeclaration" || !node.id) return undefined;
+  if (node.params.length !== 2) return undefined;
+  const [env, flag] = node.params;
+  if (env?.type !== "Identifier" || flag?.type !== "Identifier") return undefined;
+  const statements = node.body?.body;
+  if (statements?.length !== 1 || statements[0].type !== "ReturnStatement") {
+    return undefined;
+  }
+  const expression = unwrap(statements[0].argument);
+  if (expression?.type !== "LogicalExpression" || expression.operator !== "&&") {
+    return undefined;
+  }
+  const call = unwrap(expression.left);
+  if (call?.type !== "CallExpression" || call.arguments.length !== 1) return undefined;
+  if (!switchNames.includes(identifier(call.callee))) return undefined;
+  if (identifier(call.arguments[0]) !== env.name) return undefined;
+  const clause = unwrap(expression.right);
+  if (clause?.type !== "UnaryExpression" || clause.operator !== "!"
+    || identifier(clause.argument) !== flag.name) {
+    return undefined;
+  }
+  return { clause, env: env.name, flag: flag.name };
 }
 
 function placeKindReplacement(source, statement) {
@@ -2470,10 +2508,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const folderPicker = selfHostedFolderPickerTarget(node);
       if (folderPicker) folderPickers.push(folderPicker);
     });
-    for (const statement of placeKinds) {
+    for (const { statement } of placeKinds) {
       const replacement = placeKindReplacement(source, statement);
       patches.push({ id: placeKindPatchId, start: statement.start, end: statement.end,
         original: source.slice(statement.start, statement.end), replacement });
+    }
+    const switchNames = placeKinds.map((entry) => entry.name).filter(Boolean);
+    if (switchNames.length) {
+      const needsFolders = [];
+      walk(ast, [], (node) => {
+        const target = needsFolderClauseTarget(node, switchNames);
+        if (target) needsFolders.push(target);
+      });
+      if (needsFolders.length === 1) {
+        const { clause, env, flag } = needsFolders[0];
+        patches.push({ id: needsFolderPatchId, start: clause.start, end: clause.end,
+          original: source.slice(clause.start, clause.end),
+          replacement: `(!${flag}||${env}==="byoc"||${env}==="pool")` });
+      }
     }
     if (branchReads.length === 1) {
       const test = branchReads[0];

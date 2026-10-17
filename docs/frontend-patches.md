@@ -666,7 +666,7 @@ in the chunk, spliced only in web-shell mode, and not required — a bundle that
 no longer matches keeps the merge rather than failing preparation.
 
 
-The self-hosted Code start options are five tenant-only splices. A tenant's Code
+The self-hosted Code start options are six tenant-only splices. A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
 gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
@@ -679,6 +679,15 @@ switches (folder-bearing, worktree-capable and the draft helper) so `byoc` and
 `pool` join the true arm, keeping `bridge|anthropic_cloud|project` false. It is
 pinned by the switches' exact case set, which no other predicate in the chunk
 carries.
+
+`web-code-selfhosted-needs-folder` widens the composition
+`return folderKind(envType) && !noSessionRunsOnThisDevice` to
+`(!flag || envType === "byoc" || envType === "pool")`. The second term is the
+"this device cannot run sessions" policy, which a self-hosted session does not
+depend on (it runs in the VM), yet it hid the whole strip even after the
+place-kind switch turned true. Pinned by a two-parameter function whose return
+calls one of the place-kind switches in the same chunk and negates its second
+parameter.
 
 `web-code-selfhosted-branch-read` widens the branch hook's
 `envType === "local" ? folder : null` test to the two self-hosted kinds, so the

@@ -494,11 +494,11 @@ including a `blocked_by_*` one. See [Code in the Cowork VM](code-in-cowork-vm.md
 A tenant's Code places sessions on its self-hosted runner, and that place now
 offers the three start options Desktop's local composer has: **folder**,
 **branch** and an isolated **worktree**. The renderer's folder/branch/worktree
-strip was gated to `local|ssh|wsl`, and the create body dropped the values; five
+strip was gated to `local|ssh|wsl`, and the create body dropped the values; six
 tenant-only renderer patches (see `docs/frontend-patches.md`) turn the strip on
-for `byoc`/`pool`, read git state for the chosen folder, and carry `cwd`,
-`source_branch` and `use_worktree` through the start intent into the create
-body.
+for `byoc`/`pool` — including past the `noSessionRunsOnThisDevice` policy term —
+read git state for the chosen folder, and carry `cwd`, `source_branch` and
+`use_worktree` through the start intent into the create body.
 
 Everything that touches the workspace runs **inside the Cowork VM** — the agent,
 the branch checkout and the worktree. The UI's *lookups* do too: the folder
