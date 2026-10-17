@@ -127,6 +127,24 @@ app's current-account context reads — so the composer takes the local path thi
 bridge backs over the Desktop IPC. Spliced and required only when
 `CLAUDE_REMOTE_WEB_SHELL=1`.
 
+## Chat and Cowork attachments
+
+The composer's attachment pipeline is claude.ai's, not the Code composer's
+`@"path"` mention. With code execution available it uploads each file to
+`POST /api/organizations/<org>/conversations/<conversation>/wiggle/upload-file`
+(and, for the other routes, `/api/<org>/upload` and
+`/api/organizations/<org>/cowork/attachments`), then puts the returned file's
+`path` in the message's `<uploaded_files>` block. In the desktop app those
+requests are served by the app's own protocol; a browser's go to this bridge.
+When the bridge had no such route the upload 404'd, so every attachment showed
+"Upload failed" and a send was refused with "N attachments couldn't be
+uploaded" — before the message ever reached a session. `bridge/uploads.mjs`
+answers the multipart form (streaming the file part to disk), returns the file
+document unwrapped, and points `path` at the stored absolute path under
+`RemoteUploads`, which the local session can open. `files/prepare-upload` and
+`/v1/filestore/fs/createFile` are the same store's >30 MiB lane. No local path
+is available to a browser, so there is nothing else for the document to name.
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission

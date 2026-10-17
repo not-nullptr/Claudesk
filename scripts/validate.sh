@@ -43,6 +43,7 @@ node scripts/file-consent-smoke.mjs
 node scripts/preload-file-open-smoke.mjs
 node scripts/attachment-mentions-smoke.mjs
 node scripts/upload-stream-smoke.mjs
+node scripts/chat-attachment-upload-smoke.mjs
 node scripts/totp-smoke.mjs
 node scripts/desktop-translators-smoke.mjs
 node scripts/code-events-smoke.mjs

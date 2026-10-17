@@ -4183,6 +4183,30 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, value });
     return;
   }
+  // The official chat/Cowork composer uploads attachments to claude.ai's file
+  // endpoints, not the raw-binary route above, and parses the reply as the file
+  // document itself (no bridge envelope). Its own protocol handler answers
+  // these inside the desktop app; in the browser they land here. A missing
+  // route is what made every chat attachment fail with "Upload failed" before
+  // the message could be sent.
+  const attachmentUploadPath =
+    /^\/api\/(?:organizations\/[0-9a-f-]{36}\/(?:conversations\/[^/]+\/wiggle\/upload-file|cowork\/attachments)|[0-9a-f-]{36}\/upload)$/i;
+  if (request.method === "POST" && attachmentUploadPath.test(url.pathname)) {
+    sendJson(response, 200, await uploads.receiveAttachment(request, response));
+    return;
+  }
+  const prepareUploadPath =
+    /^\/api\/organizations\/[0-9a-f-]{36}\/conversations\/[^/]+\/files\/prepare-upload$/i;
+  if (request.method === "POST" && prepareUploadPath.test(url.pathname)) {
+    sendJson(response, 200, uploads.prepare(await readJson(request)));
+    return;
+  }
+  const deleteUploadPath =
+    /^\/api\/organizations\/[0-9a-f-]{36}\/conversations\/[^/]+\/wiggle\/delete-file$/i;
+  if (request.method === "POST" && deleteUploadPath.test(url.pathname)) {
+    sendJson(response, 200, await uploads.removeAttachment(await readJson(request)));
+    return;
+  }
   if (await handleDownload(request, response, url)) return;
   if (await handleFilePreview(request, response, url)) return;
 
@@ -4867,6 +4891,18 @@ const server = http.createServer(async (request, response) => {
       await handleDustApi(request, response, dustMatch[1]);
     } else if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
+    }
+    // The >30 MiB lane of the browser chat/Cowork composer: prepare-upload
+    // names a path under this bridge's file store, then the file itself is
+    // posted here with the file's metadata. The renderer parses the bare
+    // document, so this does not use the bridge envelope. The login shell
+    // refuses it like every other API path.
+    else if (request.method === "POST" && url.pathname === "/v1/filestore/fs/createFile") {
+      if (loginShellEnabled) {
+        sendJson(response, 403, { ok: false, error: "not signed in" });
+      } else {
+        sendJson(response, 200, await uploads.receiveFilestore(request, response));
+      }
     }
     // A tenant's Code runners, and the self-hosted pool API they speak — plus
     // the environment list that offers them as the only place a Code session can
