@@ -1849,8 +1849,7 @@ assert.ok(selfHostedOut.includes('...(t.source_branch&&{source_branch:t.source_b
   "the wire config must forward the branch and worktree flag");
 assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
   "the Code folder picker must prefer the guest-backed browse method");
-assert.ok(selfHostedOut.includes('(needsFolder||e==="anthropic_cloud"||e==="byoc"'
-  + '||e==="pool")&&!(rail&&(localKind||e==="ssh"))'),
+assert.ok(selfHostedOut.includes('return !0&&render(Strip,'),
   "self-hosted places must mount the strip regardless of the draft's flag");
 
 console.log("renderer-patches-smoke: syntax variations, behavior and unrelated-code preservation passed");

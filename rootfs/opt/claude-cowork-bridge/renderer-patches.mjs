@@ -813,10 +813,13 @@ const needsFolderPatchId = "web-code-selfhosted-needs-folder";
 //   needsFolder && !(rail && (localKind || envType === "ssh")) && <FolderStrip/>
 // `needsFolder` is read from the *draft options* here, not from the core, and a
 // draft that never received the published options falls back to the static
-// defaults (`needsFolder: false`) — which is what kept the strip unmounted even
-// after the core's value was patched. Widen the flag at the mount site so a
-// self-hosted place always draws the strip; the strip's data props (folder,
-// branch, worktree) come from the core and are already wired.
+// defaults (`needsFolder: false`) — which kept the strip unmounted even after
+// the core's value was patched. The flag is also sensitive to the env kind,
+// and a self-hosted place can arrive under three spellings. The patch is
+// tenant-only, where every Code place is the self-hosted runner and no local
+// session exists, so the whole condition is forced `!0`: the strip always
+// draws. Its data props (folder, branch, worktree) come from the core, which
+// the other splices already cover.
 const stripPatchId = "web-code-selfhosted-strip";
 const placeKindTrueCases = ["local", "ssh", "wsl"];
 const placeKindFalseCases = ["bridge", "anthropic_cloud", "byoc", "pool", "project"];
@@ -2467,7 +2470,7 @@ function selfHostedStripTarget(node, ancestors) {
   const bindings = scope ? firstParamBindings(scope) : undefined;
   const env = bindings?.bindings.get("envType");
   if (!env) return undefined;
-  return { flag, env };
+  return { condition, env };
 }
 
 // The Code composer's folder-pick helper (`Sm` / `Cle`):
@@ -2639,11 +2642,10 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         replacement: `(${surface}?.browseCodeFolder??${source.slice(init.start, init.end)})` });
     }
     if (strips.length === 1) {
-      const { flag, env } = strips[0];
-      const kinds = selfHostedKinds.map(kind => `${env}===${JSON.stringify(kind)}`);
-      patches.push({ id: stripPatchId, start: flag.start, end: flag.end,
-        original: source.slice(flag.start, flag.end),
-        replacement: `(${flag.name}||${kinds.join("||")})` });
+      const { condition } = strips[0];
+      patches.push({ id: stripPatchId, start: condition.start, end: condition.end,
+        original: source.slice(condition.start, condition.end),
+        replacement: "!0" });
     }
   }
   if (webShellEnabled) {

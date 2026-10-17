@@ -693,15 +693,18 @@ place-kind switch turned true. Pinned by a two-parameter function whose return
 calls one of the place-kind switches in the same chunk and negates its second
 parameter.
 
-`web-code-selfhosted-strip` widens the strip's own mount gate:
+`web-code-selfhosted-strip` forces the strip's own mount gate:
 `needsFolder && !(rail && (localKind || envType === "ssh")) && <FolderStrip/>`.
 That `needsFolder` is read from the **draft options**, not the core: a draft
 that never received the published options falls back to the static defaults
 (`needsFolder: false`), so patching the core's value alone left the strip
-unmounted. The element call is pinned by the three props only the strip takes
-(`onWorktreeChange`, `worktreeSupported`, `onSelectBranch`), its parent `&&`
-chain by the negation beside it, and `envType` is read back from the composer's
-own destructured parameter.
+unmounted. It is also sensitive to the env kind, which a self-hosted place can
+spell three ways. The patch is tenant-only — every Code place there is the
+self-hosted runner — so the whole condition is replaced with `!0`. The element
+call is pinned by the three props only the strip takes (`onWorktreeChange`,
+`worktreeSupported`, `onSelectBranch`), its parent `&&` chain by the negation
+beside it, and `envType` is read back from the composer's own destructured
+parameter as a second pin.
 
 `web-code-selfhosted-branch-read` widens the branch hook's
 `envType === "local" ? folder : null` test to the two self-hosted kinds, so the
