@@ -518,6 +518,17 @@ enough for `validateInvocation`, never forwarded to the wrapper/Desktop. A
 crafted call cannot make the privileged container run git over agent-writable
 content.
 
+**The browser's renderer graph is served under `/remote-renderer/`.** A
+deployment that runs the login shell puts `/renderer/*` in the proxy's
+unauthenticated matcher, which sends those requests to the deployment's *own*
+instance — whose renderer is generated with `CLAUDESK_TENANT` false, so every
+tenant-only patch is missing even though the account's own `/api/health`
+reports them. The bridge's entry shim therefore rewrites the document's asset
+URLs to `/remote-renderer/<version>/<release>/…`, which is not in that matcher
+and travels behind the session gate to the account's own bridge; the bridge
+maps it back onto the Desktop's `/renderer/…` path. The Desktop frame keeps
+using `/renderer/…` locally.
+
 The prepared renderer sets `globalThis.__CLAUDESK_STRIP_MOUNTED__` as it mounts
 the strip. The remote preload (`config.tenantCodeReads`) waits for the composer
 row; if that flag never appears — a bundle that does not render the strip — it

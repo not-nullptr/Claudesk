@@ -5141,6 +5141,23 @@ async function serveStatic(response, pathname) {
   response.end(body);
 }
 
+// The browser's renderer graph is served under this prefix instead of
+// `/renderer/`. A deployment with the login shell puts `/renderer/*` in the
+// proxy's unauthenticated login matcher, which routes those requests to the
+// deployment's *own* instance — so an account's page would execute the owner
+// generation, where `CLAUDESK_TENANT` is false and every tenant-only patch is
+// absent. The account's document is served by its own bridge, so this prefix is
+// not claimed by that matcher and travels behind the session gate with the rest
+// of the account's assets. The bridge maps it back onto the Desktop's
+// `/renderer/…` path; the Desktop frame itself keeps using `/renderer/…`.
+const publicRendererPrefix = "/remote-renderer";
+
+function rendererPublicBase(internalBase) {
+  return typeof internalBase === "string" && internalBase.startsWith("/renderer/")
+    ? `${publicRendererPrefix}${internalBase.slice("/renderer".length)}`
+    : internalBase;
+}
+
 async function servePreparedRendererAsset(response, pathname) {
   const upstream = await desktop.fetchRaw(pathname);
   if (!upstream.ok) throw new ApiError(upstream.status, "prepared renderer asset not found");
@@ -5284,7 +5301,7 @@ async function serveOfficialIndex(request, response) {
     html = shimOfficialIndex(html, {
       injection: bootstrapInjection,
       overrideStyles,
-      rendererBase,
+      rendererBase: rendererPublicBase(rendererBase),
       bootstrapJson,
       webShell: webShellEnabled,
     });
@@ -5430,6 +5447,9 @@ const server = http.createServer(async (request, response) => {
       await serveStatic(response, "/manifest.webmanifest");
     } else if (localStaticFiles.has(url.pathname)) {
       await serveStatic(response, url.pathname);
+    } else if (url.pathname.startsWith(`${publicRendererPrefix}/`)) {
+      await servePreparedRendererAsset(response,
+        `/renderer/${url.pathname.slice(publicRendererPrefix.length + 1)}`);
     } else if (url.pathname.startsWith("/renderer/")) {
       await servePreparedRendererAsset(response, url.pathname);
     } else if (
