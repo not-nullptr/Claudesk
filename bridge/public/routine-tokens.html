@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Routine tokens · Claudesk</title>
+<style>
+  :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { max-width: 60rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  p.lead { opacity: .75; margin: 0 0 1.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid
+    color-mix(in srgb, CanvasText 14%, transparent); vertical-align: top; }
+  th { font-weight: 600; opacity: .7; font-size: .78rem; text-transform: uppercase;
+    letter-spacing: .04em; }
+  code, pre, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .id { word-break: break-all; font-size: .8rem; opacity: .8; }
+  .kind { font-size: .78rem; opacity: .7; }
+  button { font: inherit; font-size: .85rem; padding: .35rem .7rem; cursor: pointer;
+    border-radius: .45rem; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: transparent; color: inherit; }
+  button:hover { background: color-mix(in srgb, CanvasText 8%, transparent); }
+  button.primary { background: CanvasText; color: Canvas; border-color: CanvasText; }
+  .row-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+  #result { margin-top: 1.75rem; }
+  #result[hidden] { display: none; }
+  .panel { padding: 1rem 1.1rem; border-radius: .6rem;
+    border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); }
+  .panel h2 { font-size: 1rem; margin: 0 0 .4rem; }
+  .panel p { margin: .25rem 0; font-size: .85rem; opacity: .8; }
+  .token { display: flex; gap: .5rem; align-items: stretch; margin: .6rem 0; }
+  .token textarea { flex: 1; resize: none; height: 3.4rem; padding: .5rem;
+    border-radius: .45rem; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+    background: color-mix(in srgb, CanvasText 4%, transparent); color: inherit; }
+  .muted { opacity: .6; font-size: .8rem; }
+  .error { color: #c0392b; }
+  @media (prefers-color-scheme: dark) { .error { color: #ff8a7a; } }
+</style>
+</head>
+<body>
+<h1>Routine tokens</h1>
+<p class="lead">
+  Tokens for this instance's routines. A token fires one routine through
+  <code>POST /v1/claude_code/routines/&lt;id&gt;/fire</code>; it is shown once and only
+  its SHA-256 is stored. Minting again rotates it.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Routine</th><th>Kind</th><th>Fire URL</th><th></th></tr>
+  </thead>
+  <tbody id="rows"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+</table>
+
+<section id="result" hidden>
+  <div class="panel">
+    <h2 id="result-title"></h2>
+    <div id="result-body"></div>
+  </div>
+</section>
+
+<script>
+const rows = document.getElementById("rows");
+const result = document.getElementById("result");
+const resultTitle = document.getElementById("result-title");
+const resultBody = document.getElementById("result-body");
+
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+
+function show(title, children) {
+  result.hidden = false;
+  resultTitle.textContent = title;
+  resultBody.replaceChildren(...children);
+  result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function errorText(error) {
+  return error?.message || String(error || "unexpected error");
+}
+
+function fireUrl(id) {
+  return `${location.origin}/v1/claude_code/routines/${encodeURIComponent(id)}/fire`;
+}
+
+async function request(path, options) {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    ...options,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error?.message || body?.error || `${response.status} ${response.statusText}`);
+  }
+  return body;
+}
+
+async function mint(id, name) {
+  try {
+    const body = await request(`/api/routines/${encodeURIComponent(id)}/token`, { method: "POST" });
+    const token = body?.value?.token;
+    if (!token) throw new Error("the instance returned no token");
+    const field = element("textarea");
+    field.readOnly = true;
+    field.value = token;
+    const copy = element("button", "Copy token", "primary");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(token); copy.textContent = "Copied"; }
+      catch { field.select(); }
+    });
+    const line = element("div", null, "token");
+    line.append(field, copy);
+    show(`Token for ${name}`, [
+      element("p", "Copy it now; it is not shown again."),
+      line,
+      element("p", "Fire URL:", "muted"),
+      element("code", fireUrl(id)),
+      element("p", `curl -X POST '${fireUrl(id)}' -H 'Authorization: Bearer ${token}' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' -d '{"text":"manual test"}'`, "muted"),
+    ]);
+    await refresh();
+  } catch (error) {
+    show(`Could not mint a token for ${name}`, [element("p", errorText(error), "error")]);
+  }
+}
+
+async function revoke(id, name) {
+  if (!confirm(`Revoke the token for “${name}”? A caller using it will get 401.`)) return;
+  try {
+    await request(`/api/routines/${encodeURIComponent(id)}/token`, { method: "DELETE" });
+    show(`Revoked the token for ${name}`, [element("p", "Any caller using the old token now gets 401.")]);
+    await refresh();
+  } catch (error) {
+    show(`Could not revoke the token for ${name}`, [element("p", errorText(error), "error")]);
+  }
+}
+
+async function refresh() {
+  try {
+    const body = await request("/api/routines");
+    const routines = Array.isArray(body?.value) ? body.value : [];
+    if (!routines.length) {
+      const tr = document.createElement("tr");
+      const td = element("td", "No routines on this instance yet.", "muted");
+      td.colSpan = 4;
+      tr.append(td);
+      rows.replaceChildren(tr);
+      return;
+    }
+    rows.replaceChildren(...routines.map((routine) => {
+      const id = routine.id;
+      const name = routine.name || id;
+      const tr = document.createElement("tr");
+      const first = document.createElement("td");
+      first.append(element("div", name));
+      first.append(element("div", id, "id"));
+      const second = document.createElement("td");
+      second.append(element("span", `${routine.kind || "routine"}${routine.enabled === false ? " · paused" : ""}`, "kind"));
+      const third = document.createElement("td");
+      third.append(element("code", fireUrl(id), "id"));
+      const fourth = document.createElement("td");
+      const actions = element("div", null, "row-actions");
+      const mintButton = element("button", routine.api_token_hint ? "Rotate token" : "Generate token", "primary");
+      mintButton.addEventListener("click", () => mint(id, name));
+      actions.append(mintButton);
+      if (routine.api_token_hint) {
+        const revokeButton = element("button", "Revoke");
+        revokeButton.addEventListener("click", () => revoke(id, name));
+        actions.append(revokeButton);
+        first.append(element("div", `token ${routine.api_token_hint}`, "muted"));
+      }
+      fourth.append(actions);
+      tr.append(first, second, third, fourth);
+      return tr;
+    }));
+  } catch (error) {
+    const tr = document.createElement("tr");
+    const td = element("td", errorText(error), "error");
+    td.colSpan = 4;
+    tr.append(td);
+    rows.replaceChildren(tr);
+  }
+}
+
+refresh();
+</script>
+</body>
+</html>

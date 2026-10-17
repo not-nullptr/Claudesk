@@ -338,6 +338,13 @@ try {
   assert.equal(triggers.data[0].id, coworkId);
   assert.equal(triggers.data[0].kind, "cowork");
 
+  // The token console: the UI route for a local task's token. It is a static
+  // page on the same origin, so its fetches carry the instance's session.
+  const consolePage = await fetch(`${base}/routine-tokens`);
+  assert.equal(consolePage.status, 200);
+  assert.match(await consolePage.text(), /Routine tokens/,
+    "the token console is served by the instance");
+
   const tokenResponse = await fetch(
     `${base}/v1/code/triggers/${encodeURIComponent(coworkId)}/api-token`, { method: "POST" });
   assert.equal(tokenResponse.status, 200);

@@ -113,6 +113,16 @@ The in-app card (**Routines → a routine → API**) uses the same code path thr
 `POST|DELETE /v1/code/triggers/{id}/api-token`, so a token minted there is the
 same token.
 
+### Token console
+
+The instance serves a small UI for this at **`/routine-tokens`** (same session
+gate). It lists the routines with their fire URLs, mints/rotates a token per
+routine, shows the token once with a copy button and a ready-to-run `curl`, and
+revokes it. It exists because the native API card is only on the cloud routine
+detail; the Code/Cowork list opens the *local* task detail, which carries no
+token UI, and the separate `routines-chorus` entry is compiled out of this
+build.
+
 Tokens are also removed when the routine is deleted or the account is deleted
 (authd's `routine_tokens` rows cascade).
 

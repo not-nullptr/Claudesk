@@ -3425,6 +3425,21 @@ function routinePublicOrigin(request, url) {
   return host ? `${proto}://${host}` : "";
 }
 
+// The token console: a small same-origin page for the routines this instance
+// serves. The native API card lives on the cloud routine detail, which this
+// build's local scheduled-task list does not open; this page is the UI route
+// for minting a token for any local task. It is served behind the same proxy
+// session gate as `/api/routines`, and its fetches carry the session cookie.
+async function serveRoutineTokensPage(response) {
+  const body = await readFile(new URL("./public/routine-tokens.html", import.meta.url));
+  response.writeHead(200, {
+    "Cache-Control": "no-store",
+    "Content-Type": "text/html; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(body);
+}
+
 // A fire may carry images (a Claudesk extension), so its body is larger than
 // the trigger metadata routes'. Twenty images at 5 MiB each, base64-expanded,
 // fits comfortably; the service enforces the per-image limits.
@@ -5207,6 +5222,15 @@ const server = http.createServer(async (request, response) => {
     // posted here with the file's metadata. The renderer parses the bare
     // document, so this does not use the bridge envelope. The login shell
     // refuses it like every other API path.
+    else if ((request.method === "GET" || request.method === "HEAD")
+      && (url.pathname === "/routine-tokens" || url.pathname === "/routine-tokens/")) {
+      // The login shell serves the sign-in page and nothing else.
+      if (loginShellEnabled) {
+        sendJson(response, 403, { ok: false, error: "not signed in" });
+      } else {
+        await serveRoutineTokensPage(response);
+      }
+    }
     else if (request.method === "POST" && url.pathname === "/v1/filestore/fs/createFile") {
       if (loginShellEnabled) {
         sendJson(response, 403, { ok: false, error: "not signed in" });
