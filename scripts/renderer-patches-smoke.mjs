@@ -906,6 +906,42 @@ const routineOriginCompiled = await minify(routineOriginChunk, {
 assert.equal(inspectRenderer(routineOriginCompiled.code, false, true).patches
   .filter(patch => patch.id === "routine-fire-origin").length, 1,
   "a mangled cloud-origin conditional must still be spliced once");
+// The routine form's trigger cards: the Desktop build ships the schedule-only
+// subset, so the form cannot create an API-only routine (or add an API trigger).
+// The patch appends the API card to the array the `availableCards` memo filters.
+const routineTriggerCards = 'function routineForm(){return{availableCards:'
+  + 'useMemo(()=>scheduleCards.filter(e=>e.type==="github"?routinesFeature'
+  + '&&(oneCard||!added.has("github")):!added.has(e.type)),'
+  + '[routinesFeature,oneCard,added])};}';
+const routineTriggerDecoy = 'function other(){return{availableCards:'
+  + 'useMemo(()=>cards.filter(e=>e.type==="github"),[])};}';
+assert.equal(inspectRenderer(routineTriggerCards, false, false).patches
+  .filter(patch => patch.id === "routine-api-trigger").length, 0,
+  "the API trigger card is left alone outside web-shell mode");
+assert.equal(inspectRenderer(routineTriggerDecoy, false, true).patches
+  .filter(patch => patch.id === "routine-api-trigger").length, 0,
+  "an availableCards memo without the routine card filter is not a target");
+assert.equal(inspectRenderer(`${routineTriggerCards}\n${routineTriggerDecoy}`, false, true).patches
+  .filter(patch => patch.id === "routine-api-trigger").length, 1,
+  "a lookalike in the same chunk must not stop the splice");
+assert.equal(inspectRenderer(`${routineTriggerCards}\n`
+  + `${routineTriggerCards.replace("routineForm", "routineFormB")}`, false, true).patches
+  .filter(patch => patch.id === "routine-api-trigger").length, 0,
+  "a second availableCards target must refuse rather than splice one of two");
+const routineTriggerOut = patchRendererSources(
+  new Map([["routine-cards.js",
+    `${webShellFixtures}\n${accountMenuName}\n${routineTriggerCards}`]]), false, true)
+  .sources.get("routine-cards.js");
+assert.ok(routineTriggerOut.includes('[...scheduleCards,{type:"api",icon:"Code"'),
+  "the API card must be appended to the trigger cards");
+assert.ok(routineTriggerOut.includes('filter(e=>e.type==="github"'),
+  "the existing filter must be left in place");
+const routineTriggerCompiled = await minify(routineTriggerCards, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(routineTriggerCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-api-trigger").length, 1,
+  "a mangled availableCards memo must still be spliced once");
 // The home-layout assignment: the chunk that reads the new-page gate returns
 // the assignment object the Desktop build compiles out — eligible, settled and
 // assignment hardcoded false — so the renderer always settles on the classic

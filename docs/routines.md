@@ -199,6 +199,23 @@ must read true before the route renders at all:
 Without either half, `/code/routines` is filtered out of the sidebar and the
 route renders nothing, however the fire endpoint itself is configured.
 
+## The API trigger and its card
+
+The **API token card is on the routine detail page**, in the Triggers section,
+inside an **API** trigger row. It carries the fire URL, the token state, the
+Generate/Regenerate/Delete token buttons and the curl example. It is not part of
+the create form: the create form only picks *trigger types*, and mints the token
+on save when an API trigger is among them.
+
+That is why a fresh create form offers only Schedule in this Desktop build: its
+`availableCards` list is the schedule-only subset, and the form refuses to
+submit without at least one trigger. The `routine-api-trigger` renderer patch
+appends the API card to that list (web-shell mode), so **Generate token is now
+reachable from Create**: pick API as the trigger, save, and the token is
+generated and shown once; the detail page then renders the API row and card.
+The same patch lets an existing routine add an API trigger from its edit form.
+`/routine-tokens` remains the account-wide console for any routine.
+
 ## The in-app API card
 
 The Routines page is the renderer's cloud-routines surface. The bridge serves

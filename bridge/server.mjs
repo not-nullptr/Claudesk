@@ -3431,7 +3431,7 @@ function routinePublicOrigin(request, url) {
 // for minting a token for any local task. It is served behind the same proxy
 // session gate as `/api/routines`, and its fetches carry the session cookie.
 async function serveRoutineTokensPage(response) {
-  const body = await readFile(new URL("./public/routine-tokens.html", import.meta.url));
+  const body = await readFile(join(publicDir, "routine-tokens.html"));
   response.writeHead(200, {
     "Cache-Control": "no-store",
     "Content-Type": "text/html; charset=utf-8",

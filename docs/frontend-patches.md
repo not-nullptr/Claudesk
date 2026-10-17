@@ -358,6 +358,19 @@ web-shell mode. Both patches are **required**, like the rest of the web-shell
 set: without them the Routines list still offers creation and the failure is
 silent, which is exactly the shape a required patch exists to refuse.
 
+`routine-api-trigger` adds the API trigger card to the routine form. The
+Desktop build's `availableCards` memo is fed the schedule-only subset
+(`cards.filter(type === "schedule")`), so the create form — which refuses to
+submit without at least one trigger — can only ever offer Schedule, and an
+existing routine cannot gain an API trigger. The patch finds the
+`availableCards` memo by its property name and its filter callback's
+`e.type === "github" ? … : …` shape, and appends the API card descriptor to the
+array the filter runs on; the filter is left in place, so an added card drops
+out of the picker and GitHub (not in the array) stays unavailable. Applies only
+in web-shell mode and is not required: a bundle that no longer matches leaves
+the form schedule-only rather than failing renderer preparation. The bridge
+serves the API trigger itself, so an API-only routine really is fireable.
+
 `routine-fire-origin` points the API-trigger card's copied URL at this
 deployment. The card builds
 `https://api.anthropic.com/v1/claude_code/routines/{id}/fire` (staging for a

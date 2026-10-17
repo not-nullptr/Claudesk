@@ -151,6 +151,18 @@ const subscribeSsePatchId = "web-code-subscribe-sse";
 const routineFireOriginPatchId = "routine-fire-origin";
 const routineFireCloudOrigin = "https://api.anthropic.com";
 const routineFireStagingOrigin = "https://api-staging.anthropic.com";
+// The routine form's trigger cards. The Desktop build ships its `availableCards`
+// as the schedule-only subset (`O.filter(type === "schedule")`), so a routine
+// cannot be created — or edited to add — an API trigger: the form requires at
+// least one trigger, and Schedule is the only card. This deployment serves the
+// API trigger itself (the bridge's fire endpoint and token store), so the card
+// is appended to that list. The existing filter is left in place, so an added
+// card disappears from the picker and GitHub stays out (it is not in the list).
+const routineApiTriggerPatchId = "routine-api-trigger";
+const routineApiTriggerCard = "{type:\"api\",icon:\"Code\","
+  + "title:{defaultMessage:\"API\",id:\"xwEc8KM8zK\"},"
+  + "desc:{defaultMessage:\"Trigger from your own code by sending a POST request\","
+  + "id:\"2eHmKFyJSw\"}}";
 const homeLayoutPatchId = "web-new-page-home-layout";
 const homeLayoutGate = "__gb__1085985672";
 const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
@@ -2078,6 +2090,31 @@ function routineFireOriginTarget(node) {
   return argument;
 }
 
+// The routine form's `availableCards` memo: `availableCards: useMemo(() =>
+// cards.filter(e => e.type === "github" ? … : …), […])`. The returned node is
+// the array the filter runs on; the caller appends the API card to it.
+function routineApiTriggerTarget(node) {
+  if (!key(node, "availableCards")) return undefined;
+  const value = node.value;
+  if (value?.type !== "CallExpression" || !value.arguments.length) return undefined;
+  const arrow = unwrap(value.arguments[0]);
+  if (arrow?.type !== "ArrowFunctionExpression") return undefined;
+  const body = unwrap(arrow.body);
+  if (body?.type !== "CallExpression") return undefined;
+  if (!property(body.callee, "filter")) return undefined;
+  const cards = body.callee.object;
+  if (cards?.type !== "Identifier") return undefined;
+  // Pin by the filter callback's own shape: a conditional whose test compares
+  // to `"github"` (the routine card filter). A different `availableCards` memo
+  // with a plain predicate is not a target.
+  const callback = unwrap(body.arguments[0]);
+  if (callback?.type !== "ArrowFunctionExpression") return undefined;
+  const conditional = unwrap(callback.body);
+  if (conditional?.type !== "ConditionalExpression") return undefined;
+  if (!contains(conditional.test, child => literal(child, "github"))) return undefined;
+  return cards;
+}
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   tenantEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
@@ -2482,14 +2519,17 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   // delegates, so the app's own reporting still runs. A throw from the log line
   // or from the original handler must not replace the crash the boundary is
   // already rendering, hence the two `try`s.
-  // The routine API card's fire origin (see routineFireOriginPatchId). Accepted
-  // only when exactly one such conditional is in the chunk, so a second
-  // candidate refuses rather than splice the wrong expression.
+  // The routine surface's two web-shell patches (see their ids). Each target is
+  // accepted only when exactly one candidate is in the chunk, so a second
+  // refuses rather than splice the wrong expression.
   if (webShellEnabled) {
     const origins = [];
+    const apiCards = [];
     walk(ast, [], (node) => {
-      const target = routineFireOriginTarget(node);
-      if (target) origins.push(target);
+      const origin = routineFireOriginTarget(node);
+      if (origin) origins.push(origin);
+      const cards = routineApiTriggerTarget(node);
+      if (cards) apiCards.push(cards);
     });
     if (origins.length === 1) {
       const target = origins[0];
@@ -2498,6 +2538,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         // The original argument follows `return` with no space (`return"…"`);
         // keep one so the keyword and the identifier stay separate tokens.
         replacement: " window.location.origin" });
+    }
+    if (apiCards.length === 1) {
+      const target = apiCards[0];
+      const original = source.slice(target.start, target.end);
+      patches.push({ id: routineApiTriggerPatchId, start: target.start, end: target.end,
+        original, replacement: `[...${original},${routineApiTriggerCard}]` });
     }
   }
   if (webShellEnabled && crashLogOptions.length === 1) {
