@@ -633,20 +633,24 @@ value carries as itself. Each is identified as the one-argument function that
 opens on `"auto"` and then tests either a call (writer) or `"acceptEdits"`
 (reader). All twelve are spliced only in web-shell mode, and none is required.
 
-`web-chat-session-list-no-code` keeps Code sessions out of the chat list. Chat
-and Code are separate stores — `LocalAgentModeSessions` and the Desktop
-`LocalSessions` — but the renderer's recents builder merges them behind a gate
-answering `activeMode === "code" || codeFoldedIntoHome || requested`.
-`codeFoldedIntoHome` is compiled false in this build; `requested` is the product
-switcher's own store, set when the switcher lands on Code and never cleared when
-it returns to Chat, so in the web shell's single-page session the Code sessions
-made there stayed in the Chat list. The patch forces only that operand false,
-read back from the gate function's destructured parameter names (property keys,
-so the minifier leaves them alone) and its single returned disjunction; the Code
-surface itself is still admitted by `activeMode === "code"`. It is applied only
-when exactly one such function is in the chunk, spliced only in web-shell mode,
-and not required — a bundle that no longer matches keeps the merge rather than
-failing preparation.
+`web-chat-session-list-no-code` is a second guard against Code rows in the chat
+list. The actual leak is upstream of this gate: the renderer's remote-cowork
+recents read asks `/v1/code/sessions?tags=cowork-remote` and the bridge used to
+ignore `tags`, so every Code row came back and was merged into Chat (see
+[docs/web-shell.md](web-shell.md), “Code sessions stay out of the Chat list”).
+This patch covers the other path the recents builder has: Chat and Code are
+separate stores — `LocalAgentModeSessions` and the Desktop `LocalSessions` — but
+the sidebar's Code-data merge is admitted by `activeMode === "code" ||
+codeFoldedIntoHome || requested`. `codeFoldedIntoHome` is compiled false in this
+build; `requested` is the product switcher's own store, set when the switcher
+lands on Code and never cleared when it returns to Chat, so in the web shell's
+single-page session Code data could stay admitted after a visit to Code. The
+patch forces only that operand false, read back from the gate function's
+destructured parameter names (property keys, so the minifier leaves them alone)
+and its single returned disjunction; the Code surface itself is still admitted
+by `activeMode === "code"`. It is applied only when exactly one such function is
+in the chunk, spliced only in web-shell mode, and not required — a bundle that
+no longer matches keeps the merge rather than failing preparation.
 
 
 The code generator splices only the selected node. It does not regenerate

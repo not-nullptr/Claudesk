@@ -214,6 +214,15 @@ try {
   assert.equal(listBody.has_more, false);
   assert.equal(listBody.last_id, placedSession.id, "the pager resumes from last_id");
 
+  // The chat recents' own list request (shared-2's remote-cowork read): the
+  // tag must narrow the page, or the Code row it just placed is painted as a
+  // Chat row. This is the exact URL the renderer composes.
+  const remoteCoworkList = await tenantRequest(
+    "/v1/code/sessions?tags=cowork-remote&include_trigger_sessions=true&limit=100");
+  assert.equal(remoteCoworkList.status, 200, remoteCoworkList.body);
+  assert.deepEqual(JSON.parse(remoteCoworkList.body).data, [],
+    "the remote-cowork list carries no untagged Code row");
+
   const detail = await tenantRequest(`/v1/code/sessions/${placedSession.id}`);
   assert.equal(detail.status, 200, detail.body);
   assert.equal(JSON.parse(detail.body).session.title, "from the smoke");

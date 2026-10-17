@@ -278,6 +278,19 @@ try {
   assert.equal(renamed.session.title, "renamed by the reader");
   assert.deepEqual(renamed.session.tags, ["pinned"]);
   assert.equal(renamed.session.client_metadata.last_seen_cwd, "/workspace");
+  // The renderer's chat recents ask this same list for its remote-cowork tag.
+  // The list has always answered by status; tags must narrow it too, or every
+  // Code row comes back as a Chat row (see docs/web-shell.md).
+  const tagged = await backend.listSessions({
+    searchParams: new URLSearchParams("tags=pinned"),
+  });
+  assert.equal(tagged.data.some((row) => row.id === placed.session.id), true,
+    "a row carrying the requested tag is listed");
+  const remoteCowork = await backend.listSessions({
+    searchParams: new URLSearchParams("include_trigger_sessions=true&tags=cowork-remote"),
+  });
+  assert.equal(remoteCowork.data.some((row) => row.id === placed.session.id), false,
+    "a Code session without the tag is not a remote-cowork row");
   assert.equal((await backend.updateSession({ sessionId: "no-such-session", body: {} })), null);
   assert.equal((await backend.setSessionMcpServers({
     sessionId: placed.session.id, body: { mcp_servers: [{ name: "docs", type: "http", url: "https://example.invalid/mcp" }] },

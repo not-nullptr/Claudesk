@@ -132,15 +132,27 @@ bridge backs over the Desktop IPC. Spliced and required only when
 Chat/Cowork and Code are separate stores — `LocalAgentModeSessions` and the
 Desktop `LocalSessions` — and the bridge keeps them separate: Code sessions are
 served over `/v1/code/sessions` and the Desktop IPC and never enter
-`LocalAgentModeSessions.getAll`. The renderer, however, merges Code rows into
-its shared recents list behind a gate reading `activeMode === "code" ||
-codeFoldedIntoHome || requested`. The last operand is the product switcher's
-own store: it is set when the switcher lands on Code and never cleared when the
-user returns to Chat, so in the web shell's single-page session a Code session
-made in the Code surface stayed in the Chat list afterwards. The
-`web-chat-session-list-no-code` renderer patch forces that operand false — the
-Code surface itself is still admitted by `activeMode === "code"` — and leaves
-the build's folded branch untouched. It is pinned by the gate function's
+`LocalAgentModeSessions.getAll`. The Chat list still showed them because the
+renderer's recents read is a request to the *same* `/v1/code/sessions` endpoint:
+its remote-cowork leg asks for `tags=cowork-remote&include_trigger_sessions=true`
+and folds whatever rows come back into the shared recents list (shared-2's
+`SF`/`CF`, which feeds the home task list as well as several dialogs). The
+bridge's list honoured `statuses` but ignored `tags`, so every Code session was
+returned as a remote-cowork row and the renderer mapped it into Chat; the Code
+surface, which calls the list without that tag, kept showing it too. The list
+now filters on `tags` — a row must carry every tag the request names — so the
+remote-cowork read is empty on an instance whose sessions are all plain Code
+sessions. `scripts/code-runners-smoke.mjs` and `code-runners-http-smoke.mjs`
+pin both directions: a tagged row is listed for its tag, and the renderer's
+exact remote-cowork URL returns none of the untagged Code rows.
+
+The `web-chat-session-list-no-code` renderer patch is a second, narrower guard
+for the Code-data merge: the recents builder admits Code rows behind
+`activeMode === "code" || codeFoldedIntoHome || requested`, and `requested` is
+the product switcher's own store — set when the switcher lands on Code and
+never cleared when the user returns to Chat. The patch forces only that operand
+false (the Code surface is still admitted by `activeMode === "code"`; this build
+compiles `codeFoldedIntoHome` false). It is pinned by the gate function's
 destructured parameter names and its single returned disjunction, spliced only
 in web-shell mode, and deliberately not required: a bundle that no longer
 matches keeps the merge rather than failing renderer preparation.

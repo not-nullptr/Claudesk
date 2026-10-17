@@ -1165,16 +1165,27 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      * how an archived session leaves the list the moment it is archived. The
      * whole store is the page — it is one JSON file per deployment — so `limit`
      * is accepted and not enforced.
+     *
+     * `tags` is not decoration: the renderer's chat recents ask for
+     * `tags=cowork-remote` on this same path (the app's remote-cowork list),
+     * then merge whatever comes back into the Chat task list. Serving them the
+     * whole Code store put every Code session in Chat while leaving the Code
+     * surface still showing it; a session has to carry every requested tag to
+     * be a row of that list.
      */
     async listSessions({ searchParams } = {}) {
       const state = await load();
       const statuses = (searchParams?.getAll?.("statuses") ?? []).filter(Boolean);
+      const tags = (searchParams?.getAll?.("tags") ?? []).filter(Boolean);
       let rows = state.sessions
         .slice()
         .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))
         .map((session) => sessionDocument(session));
       if (statuses.length) {
         rows = rows.filter((row) => statuses.includes(row.status));
+      }
+      if (tags.length) {
+        rows = rows.filter((row) => tags.every((tag) => row.tags.includes(tag)));
       }
       return {
         data: rows,
