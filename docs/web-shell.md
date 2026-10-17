@@ -518,16 +518,28 @@ enough for `validateInvocation`, never forwarded to the wrapper/Desktop. A
 crafted call cannot make the privileged container run git over agent-writable
 content.
 
-**The browser's renderer graph is served under `/remote-renderer/`.** A
-deployment that runs the login shell puts `/renderer/*` in the proxy's
-unauthenticated matcher, which sends those requests to the deployment's *own*
-instance — whose renderer is generated with `CLAUDESK_TENANT` false, so every
-tenant-only patch is missing even though the account's own `/api/health`
-reports them. The bridge's entry shim therefore rewrites the document's asset
-URLs to `/remote-renderer/<version>/<release>/…`, which is not in that matcher
-and travels behind the session gate to the account's own bridge; the bridge
-maps it back onto the Desktop's `/renderer/…` path. The Desktop frame keeps
-using `/renderer/…` locally.
+**The browser's module graph stays root-relative, and `/assets/…` is served
+from the account's own prepared generation.** A deployment that runs the login
+shell puts `/renderer/*` in the proxy's unauthenticated matcher, which sends
+those requests to the deployment's *own* instance — whose renderer is generated
+with `CLAUDESK_TENANT` false, so every tenant-only patch is missing even though
+the account's own `/api/health` reports them. Rewriting the entry document's
+`/assets/…` to `/renderer/<release>/…` avoids that matcher but splits the graph:
+the Vite preload helper resolves lazy dependencies as absolute `/assets/…`
+paths, so the entry's static modules and the lazy chunks would load from two
+different URL namespaces — two copies of React and the shared stores.
+
+So on an account the shim leaves the document root-relative (`/assets/…`).
+Those requests are not in the login matcher; they reach the account's bridge,
+which forwards them to its Desktop as `/ion/assets/…`. The wrapper's `serveIon`
+now serves any path listed in the prepared generation from the overlay there
+too, and the rest from the pristine ion-dist, so the whole graph shares one URL
+namespace and the account's patched chunks are the ones loaded. Cache-Control
+for those paths is `no-cache` rather than immutable: the URLs do not change
+between patch releases, but the bytes behind the patched ones do. The login
+shell is the exception — its page is served without a session, so its document
+is still rewritten under `/renderer/<release>/…`, the route the proxy leaves
+unauthenticated.
 
 The prepared renderer sets `globalThis.__CLAUDESK_STRIP_MOUNTED__` as it mounts
 the strip. The remote preload (`config.tenantCodeReads`) waits for the composer

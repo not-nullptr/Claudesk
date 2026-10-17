@@ -5141,23 +5141,6 @@ async function serveStatic(response, pathname) {
   response.end(body);
 }
 
-// The browser's renderer graph is served under this prefix instead of
-// `/renderer/`. A deployment with the login shell puts `/renderer/*` in the
-// proxy's unauthenticated login matcher, which routes those requests to the
-// deployment's *own* instance — so an account's page would execute the owner
-// generation, where `CLAUDESK_TENANT` is false and every tenant-only patch is
-// absent. The account's document is served by its own bridge, so this prefix is
-// not claimed by that matcher and travels behind the session gate with the rest
-// of the account's assets. The bridge maps it back onto the Desktop's
-// `/renderer/…` path; the Desktop frame itself keeps using `/renderer/…`.
-const publicRendererPrefix = "/remote-renderer";
-
-function rendererPublicBase(internalBase) {
-  return typeof internalBase === "string" && internalBase.startsWith("/renderer/")
-    ? `${publicRendererPrefix}${internalBase.slice("/renderer".length)}`
-    : internalBase;
-}
-
 async function servePreparedRendererAsset(response, pathname) {
   const upstream = await desktop.fetchRaw(pathname);
   if (!upstream.ok) throw new ApiError(upstream.status, "prepared renderer asset not found");
@@ -5301,7 +5284,18 @@ async function serveOfficialIndex(request, response) {
     html = shimOfficialIndex(html, {
       injection: bootstrapInjection,
       overrideStyles,
-      rendererBase: rendererPublicBase(rendererBase),
+      // On an account (and any deployment without the login shell) the
+      // browser's whole module graph must live under the same root-relative
+      // URLs (`/assets/…`): the Vite preload helper resolves lazy dependencies
+      // as absolute `/assets/…` paths regardless of the entry module's URL, so
+      // pointing the entry at `/renderer/<release>/` splits the graph into two
+      // copies of shared modules. `/assets/…` is served by this bridge from the
+      // *account's* prepared generation (see serveIon in the wrapper), so tenant
+      // patches apply, and the proxy's login matcher — which claims
+      // `/renderer/*` — never sees it. The login shell is the exception: its
+      // page is served without a session, so its assets must travel under the
+      // proxy's unauthenticated `/renderer/*` route.
+      rendererBase: loginShellEnabled ? rendererBase : "",
       bootstrapJson,
       webShell: webShellEnabled,
     });
@@ -5447,9 +5441,6 @@ const server = http.createServer(async (request, response) => {
       await serveStatic(response, "/manifest.webmanifest");
     } else if (localStaticFiles.has(url.pathname)) {
       await serveStatic(response, url.pathname);
-    } else if (url.pathname.startsWith(`${publicRendererPrefix}/`)) {
-      await servePreparedRendererAsset(response,
-        `/renderer/${url.pathname.slice(publicRendererPrefix.length + 1)}`);
     } else if (url.pathname.startsWith("/renderer/")) {
       await servePreparedRendererAsset(response, url.pathname);
     } else if (
@@ -5462,7 +5453,11 @@ const server = http.createServer(async (request, response) => {
       if (!upstream.ok) throw new ApiError(upstream.status, "official ion-dist asset not found");
       const body = Buffer.from(await upstream.arrayBuffer());
       response.writeHead(200, {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        // `/assets/…` is the browser's whole module graph, and its URLs do not
+        // change between patch releases. The bytes behind them do (the account
+        // generation's patched chunks), so it must revalidate rather than be
+        // cached immutably.
+        "Cache-Control": "no-cache",
         "Content-Length": body.length,
         "Content-Type": upstream.headers.get("content-type") || "application/octet-stream",
         "X-Content-Type-Options": "nosniff",

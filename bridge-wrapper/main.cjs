@@ -2807,12 +2807,20 @@ async function serveIon(response, pathname) {
   );
   // A declared patch must be served or fail visibly. Falling back when the
   // overlay is unreadable silently restores the upstream redirect guard.
-  const patched = prepared && rendererManifest.files.some(file => file.path === safePath);
+  //
+  // The browser's graph lives under root-relative `/assets/…` URLs (the Vite
+  // preload helper resolves lazy dependencies that way), which the bridge
+  // forwards here as `/ion/assets/…`. A path in the prepared generation is
+  // served from the overlay for those requests too, so the account's patched
+  // chunks and their unpatched neighbours share one URL namespace — and the
+  // owner generation the login matcher would have served is never part of it.
+  const listed = rendererManifest.files.some(file => file.path === safePath);
+  const patched = listed && (prepared || pathname.startsWith("/ion/"));
   const filePath = patched
     ? overlayPath
     : resolve(ION_ROOT, safePath);
   if (filePath !== ION_ROOT && !filePath.startsWith(`${ION_ROOT}/`)) {
-    if (!prepared || !filePath.startsWith(`${RENDERER_STATE_ROOT}/`)) {
+    if (!patched || !filePath.startsWith(`${RENDERER_STATE_ROOT}/`)) {
       throw new Error("not found");
     }
   }
