@@ -3462,7 +3462,7 @@ async function handleCodeRunnerApi(request, response, url) {
       return sendJson(response, 200, document);
     }
     if (method === "POST") {
-      const appended = await codeRunners.appendEvents({ sessionId, body });
+      const appended = await codeRunners.appendEvents({ sessionId, body, headers: request.headers });
       if (!appended) missingSession();
       return sendJson(response, 200, appended);
     }
@@ -3639,6 +3639,7 @@ async function sendCodeEventStream(request, response, sessionId, url) {
   let sequence = fromSequence;
   let connectionStatus;
   let frames = 0;
+  let deliveryUpdates = 0;
   const openedAt = Date.now();
   console.log(`[cowork-bridge] session ${sessionId}: events stream opened `
     + `(from_sequence_num=${fromSequence}, last-event-id=${request.headers["last-event-id"] ?? "none"}, `
@@ -3649,6 +3650,16 @@ async function sendCodeEventStream(request, response, sessionId, url) {
     frames += 1;
     sequence = Math.max(sequence, Number(event.sequence_num) || 0);
   };
+  // "This client event was processed" — a control frame (no id/sequence) that
+  // names the event. The page holds its own unacknowledged echo out of the
+  // transcript and shows "Sending…" until one names it (see issueSessionToken).
+  const flushDeliveries = async () => {
+    const updates = await codeRunners.deliveryUpdates({ sessionId, after: deliveryUpdates });
+    for (const update of updates ?? []) {
+      response.write(`event: delivery_update\ndata: ${JSON.stringify(update)}\n\n`);
+      deliveryUpdates += 1;
+    }
+  };
   const writeConnection = (status) => {
     if (!status || status === connectionStatus) return;
     connectionStatus = status;
@@ -3658,12 +3669,14 @@ async function sendCodeEventStream(request, response, sessionId, url) {
   // facade settled the same way): the first message is what creates it.
   writeConnection((await codeRunners.connectionState({ sessionId })) ?? "connected");
   for (const event of backlog) write(event);
+  await flushDeliveries();
   const timer = setInterval(async () => {
     try {
       const next = await codeRunners.eventsAfter(sessionId, sequence);
       if (next) {
         for (const event of next) write(event);
       }
+      await flushDeliveries();
       writeConnection(await codeRunners.connectionState({ sessionId }));
     } catch {
       // Keep the stream up; the next tick retries and the reader resumes from

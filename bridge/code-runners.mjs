@@ -263,7 +263,7 @@ function sessionById(state, sessionId) {
  * and a non-string — so a caller-supplied one is ignored rather than trusted.
  * Returns the appended envelopes.
  */
-function appendToSession(session, incoming) {
+function appendToSession(session, incoming, source) {
   session.events = Array.isArray(session.events) ? session.events : [];
   let sequence = session.events.reduce(
     (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
@@ -275,6 +275,13 @@ function appendToSession(session, incoming) {
     const envelope = {
       event_id: randomUUID(),
       sequence_num: String(sequence),
+      // Who wrote it: the renderer's own messages are `client`, the runner's
+      // are `worker`. The readers route on this — a user-shaped frame is
+      // dropped unless its source is `worker` (so tool results are not read as
+      // human messages), and a `client` echo is held from the transcript until
+      // the server says it was processed (see deliveryUpdates and
+      // issueSessionToken).
+      ...(source ? { source } : {}),
       payload,
       ...(typeof entry?.event_type === "string" && entry.event_type
         ? { event_type: entry.event_type } : {}),
@@ -675,6 +682,25 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       }
       if (session.state === "pending" || session.state === "offered") session.state = "active";
       session.started_at = session.started_at ?? new Date().toISOString();
+      // The runner taking the session is what "processed" means on the wire:
+      // every client message the turn is about to answer is stamped and a
+      // `delivery_update` frame goes down the session stream — the frame the
+      // page clears its "Sending…" state on, and the one that releases the
+      // held echo of the user's own message into the transcript.
+      const processedAt = new Date().toISOString();
+      session.delivery_updates = Array.isArray(session.delivery_updates)
+        ? session.delivery_updates : [];
+      for (const envelope of session.events ?? []) {
+        if (envelope.source !== "client") continue;
+        if ((envelope.payload ?? {}).type !== "user") continue;
+        if (envelope.processing_at !== undefined) continue;
+        envelope.processing_at = processedAt;
+        session.delivery_updates.push({
+          event_id: envelope.event_id,
+          status: "PROCESSING",
+          timestamp: processedAt,
+        });
+      }
       // Which runner got it, for the label the app shows once the wait is over
       // (`self_hosted_runner_state.assigned_runner_label` — the page's pool
       // wait card clears on it). Polls authenticate by the pool secret, so the
@@ -757,9 +783,23 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
       if (session.unauthorized) return session;
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
-      const appended = appendToSession(session, incoming);
+      const appended = appendToSession(session, incoming, "worker");
       if (appended.length) await save();
       return { data: appended };
+    },
+
+    /**
+     * The session's delivery acknowledgements, paged by position. The session
+     * stream carries each as an `event: delivery_update` frame — the wire's
+     * "this client event was processed" signal (see issueSessionToken). The
+     * frame has no sequence of its own: it names an event by `event_id`.
+     */
+    async deliveryUpdates({ sessionId, after } = {}) {
+      const state = await load();
+      const session = sessionById(state, sessionId);
+      if (!session) return null;
+      const updates = Array.isArray(session.delivery_updates) ? session.delivery_updates : [];
+      return updates.slice(Number(after) || 0);
     },
 
     /**
@@ -970,13 +1010,16 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
      * reader rejects zero and a non-string — so a caller-supplied one is
      * ignored rather than trusted.
      */
-    async appendEvents({ sessionId, body } = {}) {
+    async appendEvents({ sessionId, body, headers } = {}) {
       const state = await load();
       const session = sessionById(state, sessionId);
       if (!session) return null;
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
-      const appended = appendToSession(session, incoming);
+      // The runner writes through this same path with its session token; the
+      // renderer writes without one (its auth is the deployment's proxy).
+      const appended = appendToSession(session, incoming,
+        bearerToken(headers) ? "worker" : "client");
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,
       // and the runner that claims it replays the conversation (the agent's

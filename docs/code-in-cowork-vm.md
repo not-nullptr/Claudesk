@@ -216,7 +216,13 @@ from one-shot reads and never streaming — so the bridge grants the gate for a
 tenant (`grantCcrSubscribeSse`). A stream whose session does not exist yet opens
 empty rather than 404ing (that 404 is the "Connecting" loop), and a `result`
 message written back by the runner is the turn terminal the reader closes a
-turn on.
+turn on. Envelopes carry `source` — `client` for the renderer's own writes,
+`worker` for the runner's (a user-shaped frame is dropped downstream unless it
+is `worker`, so tool results never read as human messages) — and a client
+message is stamped `processing_at` when a runner takes the session, at which
+point the stream carries the `delivery_update {event_id, status, timestamp}`
+frame the page clears its "Sending…" state on (the same frame releases the held
+echo of the message into the transcript).
 
 `bridge/server.mjs` routes `/v1/code/runners/*`, both environments legs —
 `…/environment_providers/private/organizations/{org}/environments[/{id}]` (the

@@ -276,6 +276,36 @@ try {
   assert.ok(unknownStream.startsWith("event: session_update\ndata: {\"connection_status\":\"connected\"}\n\n"),
     "an unknown session's stream opens empty, not 404");
 
+  // Who wrote an event rides the envelope: the renderer's `client`, the
+  // runner's `worker`. The readers route on it — a user-shaped frame is
+  // dropped unless its source is `worker` (a tool result must not read as a
+  // human message), and a client echo is held out of the transcript until the
+  // server reports it processed.
+  assert.deepEqual(JSON.parse(history.body).data.map((event) => event.source),
+    ["client", "client"], "the renderer's writes are marked as client events");
+
+  // The send acknowledgement: a runner taking the session is what "processed"
+  // means on the wire. The client message the turn answers is stamped
+  // `processing_at`, and the stream carries a `delivery_update` naming it —
+  // the frame the page clears its "Sending…" state on, and the one that
+  // releases the held echo of the user's own message into the transcript.
+  const taken = await tenantRequest(
+    `/v1/code/runners/self-hosted/sessions/${placedSession.id}/token`,
+    { method: "POST", headers: auth, body: "{}" });
+  assert.equal(taken.status, 200, taken.body);
+  const afterTake = JSON.parse((await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events`)).body).data;
+  const userEvent = afterTake.find((event) => event.payload.type === "user");
+  assert.equal(typeof userEvent.processing_at, "string",
+    "the message the turn answers is stamped as processed");
+  assert.equal(afterTake.find((event) => event.payload.type === "assistant").processing_at,
+    undefined, "the assistant's own rows are not client messages");
+  const deliveryFrames = await readStream(tenantPort,
+    `/v1/code/sessions/${placedSession.id}/events/stream`, 0, 1500);
+  assert.match(deliveryFrames,
+    /event: delivery_update\ndata: \{"event_id":"[0-9a-f-]{36}","status":"PROCESSING","timestamp":"[^"]+"\}\n\n/,
+    "the stream acknowledges the client event, which clears the composer's Sending state");
+
   // A session for an environment this instance does not run is refused, not
   // quietly run locally.
   const elsewhere = await tenantRequest("/v1/code/sessions", {
