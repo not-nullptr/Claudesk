@@ -721,12 +721,18 @@ answered `unknown`, and a folder with git showed no branch picker or worktree
 toggle. The service's own HOME is read-only under `ProtectHome=read-only`, so
 the runner points git at its own directory explicitly.
 
-**The sidebar groups by folder.** Its group key comes from the session row's
-`repoInfo`, which the renderer derives from `session_context.sources` /
-`outcomes`; a folder-placed self-hosted session has neither, so every row fell
-under "Other". The session document now carries `repo_info` (`name` is the
-folder name, `branch` the placed branch) and `web-code-selfhosted-repo-info`
-makes the row builder take it before either git path. Old sessions created
+**The sidebar groups by folder.** There are two paths in this build. The
+environment-grouped Code sidebar keys on the row's `repoInfo`; the unified
+sidebar groups Code rows by `sessionGroupingId` (an epitaxy-project id from
+claude.ai's catalog). A folder-placed self-hosted session has neither a git
+source nor a hosted project, so every row fell under "Other".
+
+The session document now carries `repo_info` (`name` is the folder name,
+`branch` the placed branch). `web-code-selfhosted-repo-info` makes the row
+builder take it before either git path and keeps it in the session-list
+sanitizer's allowlist; `web-code-folder-groups` makes the unified sidebar fall
+back to `repoInfo.name` for the group id and accept an id the project catalog
+does not contain, so the bucket label is the folder name. Old sessions created
 before the folder start option existed still have no folder and stay in
 "Other".
 

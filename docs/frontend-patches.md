@@ -727,9 +727,9 @@ chunks, and the root-relative URLs are cached across releases. Pinned by that
 exact function body; the real helper is one chunk, and a web-shell deployment
 refuses preparation if no copy matches. Spliced only in web-shell mode.
 
-The self-hosted Code surface is ten tenant-only patch ids (eleven splices: the
-create-params patch lands on both the intent mapper and the pool arm; the
-surface and repo-info splices are described below). A tenant's Code
+The self-hosted Code surface is eleven tenant-only patch ids (several land in
+more than one place: the intent, serializer, create-params, repo-info and
+folder-group patches each rewrite more than one call site). A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
 gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
@@ -813,6 +813,16 @@ object; a folder-placed self-hosted session has no git source, so without this
 every row landed under "Other". Pinned by the one-parameter function whose
 first declaration reads both `session_context` members and tests for
 `git_repository`.
+
+`web-code-folder-groups` makes the unified sidebar's folder grouping work for
+a self-hosted session. That sidebar groups Code rows by `sessionGroupingId`,
+an id naming an epitaxy project in claude.ai's catalog — a tenant has neither.
+The code branch falls back to the row's `repoInfo.name` when no id is present,
+and the catalog check (`epitaxy-project ? catalog.has(id) : …`) accepts an id
+it does not know, so the label falls back to the id (the folder name). Pinned
+by the `source.kind === "code"` branch and the project conditional; the
+session-list sanitizer's field allowlist also gained `repo_info`, or the
+serialization path dropped it before the row builder saw it.
 
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes

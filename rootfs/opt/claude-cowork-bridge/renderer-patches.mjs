@@ -2599,6 +2599,105 @@ function selfHostedRepoInfoTarget(node) {
   return { statement: first, param };
 }
 
+// The unified sidebar groups Code rows by `sessionGroupingId`, an id that
+// names an epitaxy project in the catalog served by claude.ai. A tenant has no
+// hosted projects, so every folder-placed session had no id (or an id the
+// catalog does not contain) and landed under "Other". Two splices make the
+// folder the group: the code branch falls back to the row's `repoInfo.name`
+// when no grouping id is present, and the catalog check accepts an id it does
+// not know (its label then falls back to the id, which is the folder name).
+const codeFolderGroupPatchId = "web-code-folder-groups";
+
+// The session-list sanitizer's top-level field allowlist (`FP` in
+// shared-25). The browser serializes the `sessions_api_list_sessions` query
+// through it; a field not named here is dropped before the sidebar's row
+// builder sees it, which silently undid `repo_info` on that path. Pinned by
+// the array carrying the session-list-only keys beside `permission_mode`.
+function sessionListFieldsTarget(node) {
+  if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier") {
+    return undefined;
+  }
+  const array = unwrap(node.init);
+  if (array?.type !== "ArrayExpression") return undefined;
+  const values = new Set(array.elements
+    .filter(entry => entry?.type === "Literal" && typeof entry.value === "string")
+    .map(entry => entry.value));
+  for (const required of ["session_status", "self_hosted_runner_pool_id",
+    "session_grouping_id", "permission_mode"]) {
+    if (!values.has(required)) return undefined;
+  }
+  return { array };
+}
+
+// The unified sidebar's code-session branch: `if (session.source.kind ===
+// "code") { let group = session.source.data.sessionGroupingId; … }`. Returns
+// the declarator so the caller can add the folder fallback to the
+// initializer. Pinned by the `source.kind === "code"` test and the
+// `source.data.sessionGroupingId` read on the same binding.
+function codeSessionGroupTarget(node) {
+  if (node.type !== "IfStatement") return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "BinaryExpression" || test.operator !== "===") return undefined;
+  const right = unwrap(test.right);
+  if (!(right?.type === "Literal" && right.value === "code")) return undefined;
+  const left = unwrap(test.left);
+  if (left?.type !== "MemberExpression" || left.property?.name !== "kind") {
+    return undefined;
+  }
+  const source = unwrap(left.object);
+  if (source?.type !== "MemberExpression" || source.property?.name !== "source") {
+    return undefined;
+  }
+  const session = identifier(source.object);
+  if (!session) return undefined;
+  let declarator;
+  walk(node.consequent, [], (child) => {
+    if (declarator || child.type !== "VariableDeclarator"
+      || child.id?.type !== "Identifier") return;
+    const init = unwrap(child.init);
+    if (init?.type !== "MemberExpression" || init.property?.name !== "sessionGroupingId") {
+      return;
+    }
+    const data = unwrap(init.object);
+    if (data?.type !== "MemberExpression" || data.property?.name !== "data") return;
+    const receiver = unwrap(data.object);
+    if (receiver?.type !== "MemberExpression" || receiver.property?.name !== "source"
+      || identifier(receiver.object) !== session) return;
+    declarator = child;
+  });
+  return declarator ? { declarator, session } : undefined;
+}
+
+// The epitaxy-project acceptance test in the grouping bucket resolver:
+// `kind === "epitaxy-project" ? catalog.has(id) : projects.has(id)`. Returns
+// the `catalog.has(id)` call so the caller can treat an unknown id as a group
+// (its label is the id, i.e. the folder name).
+function codeProjectGateTarget(node) {
+  if (node.type !== "ConditionalExpression") return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "BinaryExpression" || test.operator !== "===") return undefined;
+  const right = unwrap(test.right);
+  if (!(right?.type === "Literal" && right.value === "epitaxy-project")) {
+    return undefined;
+  }
+  const left = unwrap(test.left);
+  if (left?.type !== "MemberExpression" || left.property?.name !== "kind") {
+    return undefined;
+  }
+  const session = identifier(left.object);
+  if (!session) return undefined;
+  const consequent = unwrap(node.consequent);
+  if (consequent?.type !== "CallExpression") return undefined;
+  const callee = unwrap(consequent.callee);
+  if (callee?.type !== "MemberExpression" || callee.property?.name !== "has") {
+    return undefined;
+  }
+  const argument = unwrap(consequent.arguments?.[0]);
+  if (argument?.type !== "MemberExpression" || argument.property?.name !== "id"
+    || identifier(argument.object) !== session) return undefined;
+  return { consequent };
+}
+
 // The model-selector surface resolver: a three-or-more-parameter function whose
 // body tests the first parameter against the three Code path prefixes. The
 // prefix calls (`startsWith("/code")`, `"/epitaxy"`, `"/artifact/"`) are the
@@ -3290,6 +3389,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const createParams = [];
     const poolCreates = [];
     const repoInfos = [];
+    const sessionListFields = [];
+    const codeGroups = [];
+    const projectGates = [];
     const codeSurfaces = [];
     const wireConfigs = [];
     const folderPickers = [];
@@ -3309,6 +3411,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (poolCreate) poolCreates.push(poolCreate);
       const repoInfo = selfHostedRepoInfoTarget(node);
       if (repoInfo) repoInfos.push(repoInfo);
+      const listFields = sessionListFieldsTarget(node);
+      if (listFields) sessionListFields.push(listFields);
+      const codeGroup = codeSessionGroupTarget(node);
+      if (codeGroup) codeGroups.push(codeGroup);
+      const projectGate = codeProjectGateTarget(node);
+      if (projectGate) projectGates.push(projectGate);
       const codeSurface = codeSurfaceResolverTarget(node);
       if (codeSurface) codeSurfaces.push(codeSurface);
       const wireConfig = selfHostedWireConfigTarget(node);
@@ -3388,6 +3496,26 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       patches.push({ id: selfHostedRepoInfoPatchId, start: statement.start,
         end: statement.start, original: "",
         replacement: `if(${param}.repo_info!==void 0)return ${param}.repo_info;` });
+    }
+    if (sessionListFields.length === 1) {
+      const { array } = sessionListFields[0];
+      const at = array.end - 1;
+      patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
+        original: "", replacement: ',"repo_info"' });
+    }
+    if (codeGroups.length === 1) {
+      const { declarator, session } = codeGroups[0];
+      patches.push({ id: codeFolderGroupPatchId, start: declarator.init.end,
+        end: declarator.init.end, original: "",
+        replacement: `||(${session}.source.data.repoInfo`
+          + `&&${session}.source.data.repoInfo.name)||void 0` });
+    }
+    if (projectGates.length === 1) {
+      const { consequent } = projectGates[0];
+      patches.push({ id: codeFolderGroupPatchId, start: consequent.start,
+        end: consequent.end,
+        original: source.slice(consequent.start, consequent.end),
+        replacement: "!0" });
     }
     if (codeSurfaces.length === 1) {
       const { statement, path } = codeSurfaces[0];

@@ -1801,6 +1801,13 @@ const selfHostedRepoInfo = 'function repoInfo(e){'
   + 'if(n?.type==="git_repository"&&n.git_info){let e=n.git_info.branches??[],r=n.git_info.repo;'
   + 'if(e.length>0&&r)return{name:r,branch:e[0]}}'
   + 'let r=t?.find(e=>e.type==="git_repository");if(r&&r.url)return{name:r.url}}';
+const selfHostedListFields = 'var listFields=["id","title","session_status",'
+  + '"self_hosted_runner_pool_id","session_grouping_id","permission_mode"];'
+  + 'function pickSession(e){return pickFields(e,listFields)}';
+const selfHostedFolderGroups = 'function group(e){if(e.source.kind==="code"){'
+  + 'let t=e.source.data.sessionGroupingId;f(t?p({kind:"epitaxy-project",id:t}):jD,e);return}}'
+  + 'function bucket(e){if(!(e.kind==="cowork-space"?n.has(e.id):'
+  + 'e.kind==="epitaxy-project"?catalog.has(e.id):projects.has(e.id)))return jD;return e}';
 const selfHostedSurface = 'function resolveSurface(e,t,n,r=null){'
   + 'if(t?t.isLocalAgentModeContext:r==="cowork")return"cowork";'
   + 'let i=e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/");'
@@ -1814,12 +1821,12 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
-  selfHostedRepoInfo, selfHostedSurface, selfHostedFolderPicker,
-  selfHostedStrip].join("\n");
+  selfHostedRepoInfo, selfHostedListFields, selfHostedFolderGroups,
+  selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
   "web-code-selfhosted-create", "web-code-selfhosted-create-params",
-  "web-code-selfhosted-repo-info", "web-code-surface",
+  "web-code-selfhosted-repo-info", "web-code-folder-groups", "web-code-surface",
   "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
@@ -1847,8 +1854,11 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create-params").length, 2,
   "both the intent mapper and the pool create argument must carry the start options");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 1,
-  "the session row must take the bridge's folder group before deriving one from git");
+  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 2,
+  "the row builder and the session-list field allowlist must both keep repo_info");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-folder-groups").length, 2,
+  "the sidebar must fall back to the folder and accept its group id");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -1891,6 +1901,13 @@ assert.ok(selfHostedOut.includes('effort:e.effort,'
 assert.ok(selfHostedOut.includes('function repoInfo(e){if(e.repo_info!==void 0)'
   + 'return e.repo_info;let t=e.session_context?.sources'),
   "the session row must return the bridge's repo_info before reading git sources");
+assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info"]'),
+  "the session-list sanitizer must keep repo_info across serialization");
+assert.ok(selfHostedOut.includes('let t=e.source.data.sessionGroupingId'
+  + '||(e.source.data.repoInfo&&e.source.data.repoInfo.name)||void 0;'),
+  "a code row with no project id must group by its folder");
+assert.ok(selfHostedOut.includes('e.kind==="epitaxy-project"?!0:projects.has(e.id)'),
+  "an unknown project id (the folder name) must still form a group");
 assert.ok(selfHostedOut.includes('function resolveSurface(e,t,n,r=null){'
   + 'if(e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/"))'
   + 'return"code";if(t?t.isLocalAgentModeContext'),
