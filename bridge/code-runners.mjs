@@ -154,6 +154,10 @@ function sessionDocument(session) {
     },
     created_at: session.created_at,
     last_event_at: session.last_event_at ?? session.created_at,
+    ...(typeof session.trigger_id === "string" && session.trigger_id
+      ? { trigger_id: session.trigger_id } : {}),
+    ...(typeof session.origin === "string" && session.origin
+      ? { origin: session.origin } : {}),
     config: sessionConfigOf(session),
     tags: Array.isArray(session.tags) ? session.tags : [],
     ...(session.client_metadata ? { client_metadata: session.client_metadata } : {}),
@@ -1197,6 +1201,13 @@ export function createRunnerBackend({
         work_order_jwt: `${randomUUID()}.${randomBytes(16).toString("base64url")}`,
         title: typeof body?.title === "string" ? body.title : "",
         session_config: sessionConfig,
+        // A routine fire names the routine it ran and the origin that started
+        // it. The routine page lists its runs by `trigger_id`; without these
+        // the session is an ordinary one and never appears under the routine.
+        ...(typeof body?.trigger_id === "string" && body.trigger_id
+          ? { trigger_id: body.trigger_id } : {}),
+        ...(typeof body?.origin === "string" && body.origin
+          ? { origin: body.origin } : {}),
         ...(Array.isArray(body?.tags) && body.tags.length
           ? { tags: body.tags.filter((tag) => typeof tag === "string") } : {}),
         created_at: new Date().toISOString(),
@@ -1311,6 +1322,10 @@ export function createRunnerBackend({
       const state = await load();
       const statuses = (searchParams?.getAll?.("statuses") ?? []).filter(Boolean);
       const tags = (searchParams?.getAll?.("tags") ?? []).filter(Boolean);
+      const triggerId = (searchParams?.get?.("trigger_id") ?? "").trim();
+      const includeTriggerSessions = searchParams?.get?.("include_trigger_sessions") === "true";
+      const onlyTriggerSessions = searchParams?.get?.("only_trigger_sessions") === "true";
+      const hasTrigger = (row) => typeof row.trigger_id === "string" && row.trigger_id !== "";
       let rows = state.sessions
         .slice()
         .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))
@@ -1320,6 +1335,18 @@ export function createRunnerBackend({
       }
       if (tags.length) {
         rows = rows.filter((row) => tags.every((tag) => row.tags.includes(tag)));
+      }
+      // The Code routine page reads its run history as
+      // `/v1/code/sessions?trigger_id=<routine>`, and the routines list's
+      // rollup asks for `only_trigger_sessions`. Without these filters every
+      // session was history of every routine. Ordinary Code lists leave
+      // trigger runs out unless they ask for them, exactly as upstream.
+      if (triggerId) {
+        rows = rows.filter((row) => row.trigger_id === triggerId);
+      } else if (onlyTriggerSessions) {
+        rows = rows.filter(hasTrigger);
+      } else if (!includeTriggerSessions) {
+        rows = rows.filter((row) => !hasTrigger(row));
       }
       return {
         data: rows,

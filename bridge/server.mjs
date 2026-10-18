@@ -1467,6 +1467,21 @@ class DesktopInternalClient {
 
 const desktop = new DesktopInternalClient();
 
+// A routine fire has no composer to name a model, so it takes the first model
+// this instance offers. The operator's env list is the static answer; a
+// deployment in gateway-discovery mode leaves that empty, and the picker's
+// models — recorded from a served bootstrap, or read from the Desktop when no
+// page has loaded yet — are the list the account can actually use.
+async function routineModels() {
+  if (!pickerModelsSeen.models.length) await refreshPickerModels();
+  const seen = pickerModelsSeen.models.map((model) => model.id).filter(Boolean);
+  if (seen.length) return seen;
+  if (configuredModels.length) return configuredModels;
+  // A page has not been served and the Desktop read failed; the admin page's
+  // main-model list is still a set of ids this gateway serves.
+  return resolveMainModels();
+}
+
 // Routine triggers (see bridge/routines.mjs). Instantiated after the Desktop
 // client it calls; `wakeRunnerVm` is a hoisted function declaration.
 const routines = createRoutineService({
@@ -1475,6 +1490,7 @@ const routines = createRoutineService({
   codeRunners,
   configuredModels,
   defaultModel: defaultInferenceModel,
+  resolveModels: routineModels,
   authIdentityUrl,
   wakeRunner: wakeRunnerVm,
   log: console,

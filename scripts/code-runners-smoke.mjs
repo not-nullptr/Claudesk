@@ -268,6 +268,42 @@ try {
   assert.equal(await backend.session(withEvents.session.id), null, "a deleted session is gone");
   assert.equal(await backend.deleteSession({ sessionId: "no-such-session" }), null);
 
+  // A routine fire's session names the routine it ran. The Code routine page
+  // reads its history as `?trigger_id=`, the routines rollup as
+  // `?only_trigger_sessions=true`; ordinary lists leave those runs out and
+  // `include_trigger_sessions=true` brings them back. Without the filters
+  // every session was history of every routine.
+  const routineRun = await backend.createSession({
+    body: {
+      self_hosted_runner_pool_id: primary.pool_id,
+      title: "routine run",
+      trigger_id: "trig_smoke",
+      origin: "fire_routine",
+    },
+  });
+  assert.equal(routineRun.session.trigger_id, "trig_smoke");
+  assert.equal(routineRun.session.origin, "fire_routine");
+  const triggerRuns = await backend.listSessions({
+    searchParams: new URLSearchParams("trigger_id=trig_smoke"),
+  });
+  assert.deepEqual(triggerRuns.data.map((row) => row.id), [routineRun.session.id],
+    "trigger_id narrows the list to one routine's runs");
+  const ordinary = await backend.listSessions({ searchParams: new URLSearchParams() });
+  assert.equal(ordinary.data.some((row) => row.id === routineRun.session.id), false,
+    "a routine run stays out of the ordinary Code list");
+  assert.equal(ordinary.data.some((row) => row.id === placed.session.id), true,
+    "an ordinary session is still listed");
+  const included = await backend.listSessions({
+    searchParams: new URLSearchParams("include_trigger_sessions=true"),
+  });
+  assert.equal(included.data.some((row) => row.id === routineRun.session.id), true,
+    "include_trigger_sessions brings routine runs back");
+  const onlyTrigger = await backend.listSessions({
+    searchParams: new URLSearchParams("only_trigger_sessions=true"),
+  });
+  assert.deepEqual(onlyTrigger.data.map((row) => row.id), [routineRun.session.id],
+    "only_trigger_sessions is the rollup's read");
+
   // The edit legs the Code page uses once a session exists: one PUT for
   // rename/tags/metadata, archive, mark_read, the MCP editor's save.
   const renamed = await backend.updateSession({

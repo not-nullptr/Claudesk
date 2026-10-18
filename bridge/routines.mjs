@@ -169,6 +169,11 @@ export function createRoutineService({
   codeRunners = null,
   configuredModels = [],
   defaultModel = "",
+  // A deployment whose models come from the gateway's discovery (an empty
+  // `CLAUDE_INFERENCE_MODELS_JSON`) has no static list here. This reads the
+  // list the instance actually offers, when it has one — see the routine's
+  // model choice below.
+  resolveModels = null,
   authIdentityUrl = "",
   wakeRunner = null,
   log = console,
@@ -248,11 +253,19 @@ export function createRoutineService({
     return "";
   }
 
-  function modelFor(task) {
-    const configured = new Set(configuredModels);
+  async function modelFor(task) {
+    let discovered = null;
+    if (typeof resolveModels === "function") {
+      try {
+        const value = await resolveModels();
+        if (Array.isArray(value) && value.length) discovered = value;
+      } catch { /* fall back to the operator's static list */ }
+    }
+    const available = discovered ?? configuredModels;
+    const configured = new Set(available);
     const chosen = textOf(task?.model);
     if (chosen && (configured.size === 0 || configured.has(chosen))) return chosen;
-    return textOf(defaultModel) || configuredModels[0] || "";
+    return textOf(defaultModel) || available[0] || "";
   }
 
   function tokenFor(state, routineId) {
@@ -373,7 +386,7 @@ export function createRoutineService({
     };
   }
 
-  async function startCodeSession(task, message, model, images = []) {
+  async function startCodeSession(task, message, model, images = [], routineId = "") {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -385,6 +398,10 @@ export function createRoutineService({
       body: {
         environment_id: pool.pool_id,
         title: task.displayName || task.name || "Routine",
+        // Attribution the Code routine page reads its run history from. It
+        // asks the session list for `trigger_id=<this routine>`; a session
+        // without the id is not a run of that routine.
+        ...(routineId ? { trigger_id: routineId, origin: "fire_routine" } : {}),
         config: {
           sources: [],
           ...(textOf(task.cwd) ? { cwd: task.cwd } : {}),
@@ -438,14 +455,18 @@ export function createRoutineService({
     }
     const attached = normalizeImages(images);
     const { task, taskId } = await taskRecord(routineId);
+    // A caller may address the task by its raw id; everything the record keys
+    // on — the fire budget, the run attribution — uses the routine id the
+    // page reads.
+    const canonicalId = routineIdForTaskId(taskId);
     if (!taskEnabled(task)) throw badRequest("this routine is paused");
     const prompt = await promptFor(task, taskId);
     if (!prompt) throw badRequest("this routine has no instructions");
-    const model = modelFor(task);
+    const model = await modelFor(task);
     if (!model) throw unavailable("this instance has no inference model configured");
 
     const state = await load();
-    const retryAfter = fireBudget(state, routineId, Date.now());
+    const retryAfter = fireBudget(state, canonicalId, Date.now());
     if (retryAfter > 0) {
       throw new RoutineError(429, "rate_limit_error",
         "the routine fire limit has been reached", { retryAfter });
@@ -454,15 +475,15 @@ export function createRoutineService({
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
     const sessionId = kind === "code"
-      ? await startCodeSession(task, message, model, attached)
+      ? await startCodeSession(task, message, model, attached, canonicalId)
       : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
     // into an error the caller would retry (and so start a second session).
-    await mutate((current) => recordFire(current, routineId, via)).catch((error) => {
-      log.warn(`[routines] could not record the fire of ${routineId}: ${error?.message || error}`);
+    await mutate((current) => recordFire(current, canonicalId, via)).catch((error) => {
+      log.warn(`[routines] could not record the fire of ${canonicalId}: ${error?.message || error}`);
     });
-    log.log(`[routines] fired ${routineId} (${kind}) as ${sessionId}`);
+    log.log(`[routines] fired ${canonicalId} (${kind}) as ${sessionId}`);
     return { sessionId, kind };
   }
 
@@ -547,7 +568,11 @@ export function createRoutineService({
       };
       if (textOf(body.cron_expression)) args.cronExpression = body.cron_expression;
       if (textOf(body.run_once_at)) args.fireAt = body.run_once_at;
-      if (textOf(body.model)) args.model = body.model;
+      // The Code form carries its model in the runner job, not at the top
+      // level; the Cowork form sends the flat field.
+      const chosenModel = textOf(body.model)
+        || textOf(body?.job_config?.ccr?.session_context?.model);
+      if (chosenModel) args.model = chosenModel;
       if (textOf(body.permission_mode)) args.permissionMode = body.permission_mode;
       if (textOf(body.cwd)) args.cwd = body.cwd;
       const existing = await tasks();
@@ -586,7 +611,11 @@ export function createRoutineService({
       if (body.description !== undefined) patch.description = textOf(body.description);
       if (body.cron_expression !== undefined) patch.cronExpression = textOf(body.cron_expression) || undefined;
       if (body.run_once_at !== undefined) patch.fireAt = textOf(body.run_once_at) || undefined;
-      if (body.model !== undefined) patch.model = textOf(body.model) || undefined;
+      if (body.model !== undefined) {
+        patch.model = textOf(body.model) || undefined;
+      } else if (isRecord(body?.job_config?.ccr?.session_context)) {
+        patch.model = textOf(body.job_config.ccr.session_context.model) || undefined;
+      }
       if (body.permission_mode !== undefined) patch.permissionMode = textOf(body.permission_mode) || undefined;
       if (body.cwd !== undefined) patch.cwd = textOf(body.cwd) || undefined;
       if (Object.keys(patch).length) {

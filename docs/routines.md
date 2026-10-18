@@ -42,7 +42,19 @@ stores apart by the task's `filePath`:
 
 A fire reads the task's `SKILL.md` body (frontmatter stripped), appends the
 caller's `text`, and starts the session with `scheduledTaskId` and
-`scheduledTaskManualStart`, so the run is attributed to the routine.
+`scheduledTaskManualStart`, so the run is attributed to the routine. A **Code**
+fire also stamps the session with `trigger_id` (the routine id) and
+`origin: "fire_routine"`; the Code session list honours `trigger_id`,
+`only_trigger_sessions` and `include_trigger_sessions`, which is how the
+routine detail page reads its run history. It asks
+`/v1/code/sessions?trigger_id=<routine>` — without that filter every Code
+session was returned as a run of every routine.
+
+An instance whose routes are discovered from the gateway has no static model
+list in `CLAUDE_INFERENCE_MODELS_JSON`. A fire in that mode takes the first
+model the instance's picker offers (the same list the composer shows, read from
+the bootstrap or fetched from the Desktop when no page has loaded), rather than
+refusing the run for having no configured model.
 
 Routine ids are opaque `trig_…` strings, like upstream's. This bridge encodes
 the scheduled task's id into the suffix (base64url), so the id round-trips and

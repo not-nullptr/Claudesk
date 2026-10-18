@@ -285,6 +285,9 @@ assert.equal(woke, 1, "placing a Code session wakes the Cowork VM");
 assert.equal(created.length, 1);
 assert.equal(created[0].source, "client");
 assert.equal(created[0].body.environment_id, "ccpool_test");
+assert.equal(created[0].body.trigger_id, codeId,
+  "a Code run names the routine it belongs to");
+assert.equal(created[0].body.origin, "fire_routine");
 assert.equal(created[0].body.config.model, "model-a");
 assert.equal(created[0].body.config.cwd, "/workspace/repo");
 assert.equal(created[0].body.events[0].payload.type, "user");
@@ -302,6 +305,22 @@ assert.deepEqual(created[1].body.events[0].payload.message.content[1], {
   type: "image",
   source: { type: "base64", media_type: "image/png", data: tinyPng },
 });
+
+// A deployment whose models come from gateway discovery leaves the env list
+// empty; the fire asks the instance for the models it offers rather than
+// refusing every run.
+const discovered = createRoutineService({
+  stateDir: join(home, "discovered"),
+  desktop,
+  codeRunners,
+  configuredModels: [],
+  defaultModel: "",
+  resolveModels: async () => ["model-b"],
+  log: { log() {}, warn() {} },
+});
+await discovered.fireRoutine(codeId, {});
+assert.equal(created.at(-1).body.config.model, "model-b",
+  "a discovered model is used when no env list names one");
 
 // Paused routines do not start a session, and a fire carries no per-run config.
 currentTasks = [{ ...coworkTask, enabled: false }, codeTask];
