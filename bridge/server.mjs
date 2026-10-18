@@ -4271,6 +4271,33 @@ async function handleDustApi(request, response, kind) {
   sendJson(response, 200, { title, ...(branch ? { branch_name: branch } : {}) });
 }
 
+// The prepared-renderer manifest, reduced to what tells a stale instance from a
+// missing feature at a glance. `/api/health` carries the whole manifest for a
+// peer that needs it, but its patch records hold entire source splices — too
+// much to read in a browser. These two booleans are the features most often
+// reported missing after a deploy, so the answer is one line, and the release
+// beside it says whether the instance is serving the generation that should
+// carry them.
+function rendererSummary(renderer) {
+  if (!renderer || typeof renderer !== "object") return null;
+  const ids = new Set((Array.isArray(renderer.patches) ? renderer.patches : [])
+    .map((patch) => patch?.id).filter((id) => typeof id === "string"));
+  return {
+    basePath: renderer.basePath ?? null,
+    desktopVersion: renderer.desktopVersion ?? null,
+    patchRelease: renderer.patchRelease ?? null,
+    patchCount: ids.size,
+    // A tenant's routine form and the operator's own: model+effort picker,
+    // cwd/permission state and the two rows.
+    routineStartOptions: ["routine-model-effort-picker", "routine-form-start-options",
+      "routine-form-start-option-rows"].every((id) => ids.has(id)),
+    // The Code surface's bypass mode: the mode list and the availability
+    // predicate.
+    codeBypass: ["code-bypass-permission-list", "code-bypass-availability"]
+      .every((id) => ids.has(id)),
+  };
+}
+
 async function handleApi(request, response, url) {
   // The login shell refuses the entire API surface, with or without a session.
   // It exists to serve the sign-in page and nothing else, so there is no route
@@ -4986,6 +5013,7 @@ async function handleApi(request, response, url) {
         ok: true,
         release,
         renderer: desktopRuntime.renderer,
+        rendererSummary: rendererSummary(desktopRuntime.renderer),
         transport: "official-renderer-ipc",
         // This container's instance, for a peer checking that the Desktop it
         // reached is the one it meant to. A single-instance host answers "",
