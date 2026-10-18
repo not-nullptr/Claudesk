@@ -747,6 +747,13 @@ parser reads only those; a document that carries the settings solely under
 `config` (the guest runner's spelling) makes a reopened session show the
 built-in model and Accept edits again.
 
+A tenant has no local Code executor, but it does have a real Code surface on
+its runner, and the surface keeps its draft permission mode, model and effort
+picks in `epitaxyPrefs` behind `AppPreferences`. That settings surface is
+therefore enabled when `CLAUDESK_CODE_RUNNERS=1` as well as when the local
+executor is on; refusing it left every pick unable to be read or written, so a
+reload looked like the pick had not saved.
+
 The transcript is not part of the metadata store. Each session has an
 append-only NDJSON file under the state directory's `events/`, and
 `code-runners.json` holds metadata only. The guest runner uploads a turn's

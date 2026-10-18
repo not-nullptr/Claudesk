@@ -69,6 +69,10 @@ for (const path of ["../bridge/server.mjs", "../bridge-wrapper/main.cjs"]) {
   assert.throws(() => settings("AppPreferences", "setPreference", ["unrelatedPreference", true]));
   sandbox.codeActionsEnabled = false;
   assert.throws(() => settings("AppPreferences", "getPreferences", []));
+  // A tenant has no local Code executor but does have a Code surface on its
+  // self-hosted runner; its draft picks live in the same preferences.
+  sandbox.codeSurfaceEnabled = true;
+  settings("AppPreferences", "getPreferences", []);
 }
 const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
 const invocation = wrapper.slice(wrapper.indexOf("async function invokeSettings("), wrapper.indexOf("async function readStore("));

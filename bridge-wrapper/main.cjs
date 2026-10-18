@@ -126,6 +126,10 @@ const developerActionsEnabled = process.env.CLAUDE_REMOTE_DEVELOPER_ACTIONS === 
 const infrastructureActionsEnabled =
   process.env.CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS === "1";
 const codeActionsEnabled = process.env.CLAUDE_REMOTE_CODE_ACTIONS === "1";
+// A tenant's Code runs on its self-hosted runner, so the local executor stays
+// off — but the Code surface's own preferences (draft permission mode, model
+// and effort picks) are real and must be readable/writable.
+const codeSurfaceEnabled = process.env.CLAUDESK_CODE_RUNNERS === "1";
 // Connectors (remote MCP servers) need the Desktop MCP IPC even for an ordinary
 // account, so they ride their own flag rather than the Developer-menu gate. Kept
 // in lockstep with bridge/server.mjs — same expression, since
@@ -1927,7 +1931,7 @@ function validateSettingsInvocation(surface, method, args) {
   }
   if (!Array.isArray(args)) throw new Error("args must be an array");
   if (surface === "AppPreferences") {
-    if (!codeActionsEnabled) throw new Error("Code settings are disabled");
+    if (!codeActionsEnabled && !codeSurfaceEnabled) throw new Error("Code settings are disabled");
     validateCodePreference(method, args);
   }
   if (method === "getLoginDesktop3pStatus" && args.length !== 0) {

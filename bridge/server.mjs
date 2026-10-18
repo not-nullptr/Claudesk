@@ -3081,7 +3081,13 @@ function validateSettingsInvocation(surface, method, args) {
   }
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
   if (surface === "AppPreferences") {
-    if (!codeActionsEnabled) throw new ApiError(404, "Code settings are disabled");
+    // A tenant has no local Code executor (`codeActionsEnabled` is false by
+    // construction) but does have a real Code surface on its self-hosted
+    // runner. Its draft permission mode, model/effort pick and branch prefix
+    // live in `epitaxyPrefs` behind this surface; refusing it made every pick
+    // look like it did not save (the renderer could not read or write the
+    // preference at all).
+    if (!codeActionsEnabled && !codeSurfaceEnabled) throw new ApiError(404, "Code settings are disabled");
     validateCodePreference(method, args);
   }
   if (method === "getLoginDesktop3pStatus" && args.length !== 0) {
