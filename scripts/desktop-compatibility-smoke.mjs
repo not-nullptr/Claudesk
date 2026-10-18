@@ -53,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 84 : 71) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 85 : 72) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
@@ -91,6 +91,8 @@ try {
       webShell === "1", "the web shell's Code permission modes include bypass");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-availability"),
       webShell === "1", "bypass permissions is available in the web shell");
+    assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-self-hosted-modes"),
+      webShell === "1", "a self-hosted place's mode list carries bypass");
 
     if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
     if (webShell === "1" && tenant === "0") webShellManifest = manifest;

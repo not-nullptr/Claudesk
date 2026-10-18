@@ -413,13 +413,21 @@ scheduled task on the deployment's own VM in both cases:
   because that page imports the wrapper's chunk for side effects only and has
   no binding to call.
 
-`code-bypass-permission-list` and `code-bypass-availability` make bypass
-permissions selectable in the Code surface, in web-shell mode (a tenant's
-surface included). The session-host permission list is a hardcoded literal
-without `bypassPermissions` (the cloud service disallowed it), and the
-availability predicate refuses to offer it when the rollout gate is off. The
-deployment's Code runs in its own container or VM, and the operator asked for
-bypass there, so the list gains the mode and the predicate answers available.
+`code-bypass-permission-list`, `code-bypass-availability` and
+`code-bypass-self-hosted-modes` make bypass permissions selectable in the Code
+surface, in web-shell mode (a tenant's surface included). The session-host
+permission list is a hardcoded literal without `bypassPermissions` (the cloud
+service disallowed it), and the availability predicate refuses to offer it when
+the rollout gate is off. The deployment's Code runs in its own container or VM,
+and the operator asked for bypass there, so the list gains the mode and the
+predicate answers available. The composer's own per-environment mode builder
+needs a third splice: its `byoc`/`pool` arm builds the list without ever
+passing the bypass flag, and falls back to the remote list when the backend
+publishes no modes — so bypass stayed unreachable there however the predicate
+answered. The splice appends it to that arm's result for `byoc`/`pool` (not for
+a cloud or project place), and does not consult the Desktop's "running as root"
+availability gate: the guest agent is root by design and the runner sets
+`IS_SANDBOX=1`, which is what makes bypass work there.
 The entitlement grant in `bridge/server.mjs` is the other half. On a tenant the
 guest runner also sets `IS_SANDBOX=1` for the agent, which is what lets Claude
 Code run with bypass permissions as root inside the VM.

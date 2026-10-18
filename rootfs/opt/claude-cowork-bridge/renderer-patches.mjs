@@ -200,6 +200,13 @@ const routineModelPickerPublishPatchId = "routine-model-picker-publish";
 // what the mode picker can actually choose from.
 const codeBypassPermissionListPatchId = "code-bypass-permission-list";
 const codeBypassAvailabilityPatchId = "code-bypass-availability";
+// The Code composer's mode list is built per environment kind. A self-hosted
+// place arrives as `byoc`/`pool`, and that branch builds its list without ever
+// passing the bypass flag (and falls back to the remote list when the backend
+// publishes no modes), so bypass is unreachable there however the availability
+// predicate answers. This splice appends it to that branch's result when the
+// predicate says available.
+const codeBypassSelfHostedModesPatchId = "code-bypass-self-hosted-modes";
 const homeLayoutPatchId = "web-new-page-home-layout";
 const homeLayoutGate = "__gb__1085985672";
 const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
@@ -3007,6 +3014,63 @@ function epitaxyRoutineReplacement(source, target) {
   ];
 }
 
+// The composer's per-environment mode-list builder: `switch (envType)` with a
+// `byoc`/`pool` arm that consults `backendModes` and otherwise falls back to
+// the remote list. Pinned by those case literals plus the `backendModes`
+// property; the bypass append goes on that arm's own result.
+function codeBypassSelfHostedModesTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 2) return undefined;
+  const body = node.body;
+  if (body?.type !== "BlockStatement") return undefined;
+  const statement = body.body.find(entry => entry.type === "SwitchStatement");
+  if (!statement) return undefined;
+  const tests = statement.cases
+    .map(entry => entry.test).filter(entry => entry?.type === "Literal")
+    .map(entry => entry.value);
+  if (!["byoc", "pool", "anthropic_cloud", "project"].every(name => tests.includes(name))) {
+    return undefined;
+  }
+  const group = statement.cases.filter(entry => entry.test?.type === "Literal"
+    && ["anthropic_cloud", "byoc", "pool", "project"].includes(entry.test.value));
+  const consequent = group.map(entry => entry.consequent).find(entries => entries.length > 0);
+  if (!consequent) return undefined;
+  let helper;
+  let backendModes = false;
+  for (const entry of consequent) {
+    walk(entry, [], (child) => {
+      if (child.type === "CallExpression" && literal(child.arguments[0], "local")) {
+        helper = helper ?? identifier(child.callee);
+      }
+      if ((child.type === "Property" && key(child, "backendModes"))
+        || property(child, "backendModes")) backendModes = true;
+    });
+  }
+  if (!helper || !backendModes) return undefined;
+  return { node, consequent, helper };
+}
+
+function codeBypassSelfHostedModesReplacement(target) {
+  const { consequent, helper } = target;
+  const start = consequent[0].start;
+  const end = consequent.at(-1).end;
+  // The locals are the builder's own: `n` auto availability, `r` auto-first,
+  // `t` the options object. The nested `e` shadows the environment parameter
+  // exactly as the original arm does.
+  // The availability predicate is deliberately not consulted here: the
+  // Desktop's "running as root" gate reads the agent's user, and this
+  // deployment's agent is root inside its own VM by design (the guest runner
+  // sets IS_SANDBOX=1, which is what lets bypass work there). Only the
+  // self-hosted place kinds get the append — a cloud or project place does not.
+  const replacement = `{let __claudeskModes;`
+    + `if(t.backendModes!==void 0){let e=t.backendModes;`
+    + `__claudeskModes=${helper}("local",{auto:n,autoFirst:r}).filter(t=>e.includes(t))}`
+    + `else{__claudeskModes=t.remotePlanModeEnabled?`
+    + `${helper}("remote",{auto:n,autoFirst:r}):["acceptEdits"]}`
+    + `if((e==="byoc"||e==="pool")&&!__claudeskModes.includes("bypassPermissions"))`
+    + `__claudeskModes=[...__claudeskModes,"bypassPermissions"];return __claudeskModes}`;
+  return { start, end, replacement };
+}
+
 // The session-host mode list. It is a literal in the renderer's surface
 // capabilities (`["default","acceptEdits","plan","auto"]`), and the composer's
 // mode picker filters against it, so bypass is unreachable however the
@@ -3709,6 +3773,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const at = availability[0].start + 1;
       patches.push({ id: codeBypassAvailabilityPatchId, start: at, end: at,
         original: "", replacement: "return!0;" });
+    }
+    const selfHostedModes = [];
+    walk(ast, [], (node) => {
+      const target = codeBypassSelfHostedModesTarget(node);
+      if (target) selfHostedModes.push(target);
+    });
+    if (selfHostedModes.length === 1) {
+      const splice = codeBypassSelfHostedModesReplacement(selfHostedModes[0]);
+      patches.push({ id: codeBypassSelfHostedModesPatchId, ...splice,
+        original: source.slice(splice.start, splice.end) });
     }
   }
   if (webShellEnabled && crashLogOptions.length === 1) {
