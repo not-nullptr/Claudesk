@@ -280,11 +280,12 @@ keeps it in `routine-triggers.json` keyed by routine id and puts
 `effort_level` on the sessions **it** starts — an API fire or **Run now**. A
 scheduled run started by the Desktop's own scheduler cannot carry it.
 
-The routine form in a tenant's web shell carries the Code composer's model and
-effort pickers (the same `ModelSelector`/`EffortControl` components), a
-working-directory picker backed by the same in-page folder browser as the
-composer, and a permission-mode dropdown (`default`, `acceptEdits`, `plan`,
-`auto`, `bypassPermissions`). See `docs/frontend-patches.md`.
+The routine form in the web shell — the operator's own instance and a tenant's
+alike — carries the Code composer's model and effort pickers (the same
+`ModelSelector`/`EffortControl` components), a working-directory picker backed
+by the same in-page folder browser as the composer, and a permission-mode
+dropdown (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`). See
+`docs/frontend-patches.md`.
 
 ## Not supported
 

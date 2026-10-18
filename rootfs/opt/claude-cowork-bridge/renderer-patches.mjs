@@ -3486,13 +3486,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     }
   }
   // The routine form's create page and edit dialog share one unified form. A
-  // tenant's routines are the Code scheduled tasks this deployment runs, so the
-  // form gains the model+effort picker (the composer's own two dropdowns), a
-  // working-directory picker and a permission-mode picker. Each splice is
-  // accepted only when exactly one candidate is in the chunk; none is required,
-  // so a bundle that no longer matches leaves the old form rather than failing
-  // renderer preparation.
-  if (tenantEnabled) {
+  // routine here is a Code scheduled task — on the operator's own instance as
+  // much as on a tenant's — so the form gains the model+effort picker (the
+  // composer's own two dropdowns), a working-directory picker and a
+  // permission-mode picker. This is gated on the web shell (which includes a
+  // tenant's), not on tenant alone: the operator's instance runs the same Code
+  // routines and must get the same form. Each splice is accepted only when
+  // exactly one candidate is in the chunk; none is required, so a bundle that
+  // no longer matches leaves the old form rather than failing renderer
+  // preparation.
+  if (webShellEnabled || tenantEnabled) {
     const modelPickers = [];
     const formStates = [];
     const jobConfigs = [];

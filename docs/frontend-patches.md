@@ -383,8 +383,9 @@ itself (see `docs/routines.md`), so the copied curl command then names the
 instance. Deliberately **not** required: a bundle that no longer matches leaves
 the card pointing at the cloud origin, visibly wrong, rather than failing
 
-The routine form's start options are tenant additions (`CLAUDE_TENANT`), because
-a tenant's routine is a Code scheduled task on its own VM:
+The routine form's start options apply wherever the web shell is served — the
+operator's own instance as well as a tenant's — because a routine here is a Code
+scheduled task on the deployment's own VM in both cases:
 
 - `routine-model-effort-picker` extends the form's model dropdown — the
   renderer's own `ModelSelector` wrapper — so it carries every model's
@@ -400,7 +401,7 @@ a tenant's routine is a Code scheduled task on its own VM:
   field and lives in the bridge's routine state (see `docs/routines.md`).
 - `routine-form-start-option-rows` adds the two rows to the unified form: a
   working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
-  the in-page picker lists the tenant's workspace) and a permission-mode
+  the in-page picker lists the instance's workspace) and a permission-mode
   combobox. Both the create page and the edit dialog render this same form.
 
 `code-bypass-permission-list` and `code-bypass-availability` make bypass
