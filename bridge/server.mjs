@@ -5697,6 +5697,9 @@ function shutdown(signal) {
   } catch (error) {
     console.error(`[cowork-bridge] could not send the restart notice: ${error.message}`);
   }
+  // A turn's last stream events are written to the store on a short debounce;
+  // do not let the restart drop them.
+  void codeRunners?.flush?.();
   setTimeout(() => process.exit(0), shutdownNoticeMs);
 }
 for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => shutdown(signal));

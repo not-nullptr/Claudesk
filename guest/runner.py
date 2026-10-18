@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 
 def env(name, default=""):
@@ -99,6 +99,12 @@ RUNNER_HOME = env("CLAUDESK_RUNNER_HOME", "/var/lib/claudesk-runner/home")
 # One turn's wall clock. Long enough for real work, short enough that a wedged
 # agent does not hold the session forever.
 TURN_TIMEOUT = float(env("CLAUDESK_RUNNER_TIMEOUT_SECONDS", "1800") or 1800)
+# The bridge persists the session store on every append, so posting each
+# stream event on its own round trip capped a fast model at the store's write
+# rate. The writer coalesces what the agent has ready for up to this window (or
+# count) into one request.
+WRITE_BATCH_MAX = 128
+WRITE_BATCH_WINDOW = 0.05
 ONCE = "--once" in sys.argv[1:]
 
 RE_SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -623,6 +629,16 @@ def handle_runner_request(item):
 
 
 def run_agent(argv, cwd, content, write):
+    """Run one turn, streaming its events back to the bridge.
+
+    `write` takes a list of event payloads and posts them in one request. The
+    bridge appends events to the session store and persists it, and the agent
+    emits one event per token on a fast stream; posting each event on its own
+    round trip capped the whole transcript at the store's write rate (tens of
+    tokens a second). The writer thread therefore batches whatever the stream
+    has ready, bounded by a short window so a slow stream still starts
+    promptly.
+    """
     """One headless turn of the agent: the prompt in, the event stream out.
 
     `content` is the user message's content — a string, or the block list the
@@ -661,15 +677,31 @@ def run_agent(argv, cwd, content, write):
 
     def writer():
         while True:
-            payload = pending.get()
-            if payload is None:
+            first = pending.get()
+            if first is None:
                 return
-            if failures:
-                continue
-            try:
-                write(payload)
-            except Exception as error:  # noqa: BLE001 - the run cannot land without this
-                failures.append(str(error))
+            batch = [first]
+            stopped = False
+            deadline = time.monotonic() + WRITE_BATCH_WINDOW
+            while len(batch) < WRITE_BATCH_MAX:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                try:
+                    payload = pending.get(timeout=timeout)
+                except queue.Empty:
+                    break
+                if payload is None:
+                    stopped = True
+                    break
+                batch.append(payload)
+            if not failures:
+                try:
+                    write(batch)
+                except Exception as error:  # noqa: BLE001 - the run cannot land without this
+                    failures.append(str(error))
+            if stopped:
+                return
 
     writer_thread = threading.Thread(target=writer, daemon=True)
     writer_thread.start()
@@ -744,9 +776,10 @@ def run_session(hint):
     token = expect(request("/v1/code/runners/self-hosted/sessions/%s/token" % quoted,
                            {}), "token")["session_token"]
 
-    def write(payload):
-        expect(request("/v1/code/sessions/%s/events" % quoted, {"payload": payload}, token),
-               "events")
+    def write(payloads):
+        expect(request("/v1/code/sessions/%s/events" % quoted, {
+            "events": [{"payload": payload} for payload in payloads],
+        }, token), "events")
 
     def finish(path, body):
         expect(request("/v1/code/runners/self-hosted/sessions/%s/%s" % (quoted, path),
@@ -848,7 +881,7 @@ def run_session(hint):
     # nothing behind.
     if result is not None and not failures:
         try:
-            write(result)
+            write([result])
         except Exception as error:  # noqa: BLE001 - recorded with the run
             failures.append(str(error))
 

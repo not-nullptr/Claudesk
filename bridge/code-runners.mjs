@@ -624,11 +624,66 @@ export function createRunnerBackend({
     return cache;
   }
 
-  async function save() {
+  // The store is one JSON document, and a runner appends a *batch* of stream
+  // events several times a second while a turn is answering. Rewriting the
+  // whole document on each append (and making the runner wait for it) bounded
+  // a fast model at the store's write rate. Event appends therefore update the
+  // in-memory state and schedule a write; the debounce coalesces the burst.
+  // Every other mutation keeps the synchronous `save`, so a session creation
+  // or a runner registration is still durable before its response.
+  const saveDebounceMs = Math.max(0,
+    Number(process.env.CLAUDESK_RUNNER_STATE_DEBOUNCE_MS ?? 100) || 0);
+  let saveTimer = null;
+  let savePending = false;
+  let saveChain = Promise.resolve();
+
+  async function persist(state) {
     await mkdir(stateDir, { recursive: true });
     const tmp = `${statePath}.${randomUUID()}`;
-    await writeFile(tmp, `${JSON.stringify(cache, null, 2)}\n`);
+    await writeFile(tmp, `${JSON.stringify(state)}\n`);
     await rename(tmp, statePath);
+  }
+
+  function persistCurrent() {
+    saveChain = saveChain.then(() => persist(cache)).catch((error) => {
+      log.warn(`[code-runners] could not persist state: ${error?.message || error}`);
+    });
+    return saveChain;
+  }
+
+  async function save() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    savePending = false;
+    await persistCurrent();
+  }
+
+  function saveSoon() {
+    savePending = true;
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      if (!savePending) return;
+      savePending = false;
+      void persistCurrent();
+    }, saveDebounceMs);
+    saveTimer.unref?.();
+  }
+
+  // Flush a debounced write before the process leaves (deploy, restart).
+  async function flush() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (savePending) {
+      savePending = false;
+      await persistCurrent();
+    } else {
+      await saveChain;
+    }
   }
 
   function poolById(state, poolId) {
@@ -708,6 +763,9 @@ export function createRunnerBackend({
   }
 
   return {
+    // Flush a debounced event write before the process leaves (see saveSoon).
+    flush,
+
     /**
      * Does this Authorization header name one of this instance's pool
      * secrets? The runner's model calls come through the bridge carrying the
@@ -1394,7 +1452,7 @@ export function createRunnerBackend({
         requeued = true;
         log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
       }
-      if (appended.length || configChanged) await save();
+      if (appended.length || configChanged) saveSoon();
       // The runner holding the pool hears about it on its held poll, not on a
       // later tick.
       if (requeued) wakePool(session.pool_id);
