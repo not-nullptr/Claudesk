@@ -30,6 +30,16 @@ env_value() {
 # quietly on a running host.
 git pull --ff-only
 
+# The pull may have changed this script. A running shell keeps executing the
+# inode it started with, so a deploy that pulls a new deploy.sh would otherwise
+# finish the rest of the run on the old logic — exactly how a whole block (the
+# guest-runner refresh) can be skipped on the one deploy that was supposed to
+# install it. Re-exec once after the pull; the guard makes a second pass a no-op.
+if [ "${CLAUDESK_DEPLOY_REEXEC:-0}" != "1" ]; then
+    export CLAUDESK_DEPLOY_REEXEC=1
+    exec /bin/sh "$project_dir/deploy.sh" "$@"
+fi
+
 # The gateway chain (shitproxy + its Caddy front door) is box-level and shared by
 # every deployment on the host, so its image is built and the stack restarted only
 # when the shitproxy checkout is actually here. A second deployment that must not
