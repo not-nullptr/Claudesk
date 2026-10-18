@@ -43,10 +43,12 @@ if (!outputRoot.startsWith(`${stateRoot}${sep}`)) throw new Error("renderer outp
 
 const gatewayEnabled = process.env.CLAUDE_REMOTE_GATEWAY_SETTINGS === "1";
 const webShellEnabled = process.env.CLAUDE_REMOTE_WEB_SHELL === "1";
-// A tenant instance resolves `/code` to the self-hosted surface rather than the
-// local one, so it needs a generation of its own (the route alias withheld).
-// It is a third input to the key below, so a tenant and the operator's own
-// instance never adopt each other's renderer. docs/code-in-cowork-vm.md.
+// A tenant instance carries the start-option patches (folder, branch and
+// worktree for a self-hosted place) that the operator's own instance does not
+// need, so it keeps a generation of its own. It is a third input to the key
+// below, so a tenant and the operator's own instance never adopt each other's
+// renderer, and an account never adopts one prepared before those patches.
+// docs/code-in-cowork-vm.md.
 const tenantEnabled = process.env.CLAUDESK_TENANT === "1";
 
 async function listJavaScriptFiles(directory) {

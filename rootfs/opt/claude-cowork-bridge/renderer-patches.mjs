@@ -2156,13 +2156,16 @@ const prefilter = new RegExp(
 // handed a different candidate set than the preparer itself would choose.
 export const rendererPrefilter = prefilter;
 
-// `tenantEnabled` marks one account's own instance (CLAUDESK_TENANT). Its Code
-// never runs in its container — it belongs on a self-hosted runner in the
-// Cowork guest — so it must resolve `/code` to the *self-hosted* surface rather
-// than the local one. That is exactly the `desktop-code-route-alias` patch
-// withheld: without it the browser client takes ion-dist's own cloud branch,
-// which is the surface this deployment backs with a runner pool. Everything
-// else the web shell adds is unchanged. See docs/code-in-cowork-vm.md.
+// `tenantEnabled` marks one account's own instance (CLAUDESK_TENANT). It takes
+// the same renderer as the deployment's own instance: the browser must resolve
+// `/code` to the surface this bridge drives, so the route alias is spliced
+// there too. What keeps an account's Code off its container is not the route
+// name but the environment list (only the self-hosted pool is advertised) and
+// the LocalSessions guard. Withholding the alias sent the browser to ion-dist's
+// cloud branch, a second Code implementation whose loading state the bridge
+// does not fill — the page sat on its skeleton. The tenant flag remains a
+// generation input so an account never adopts a generation prepared before the
+// start-option patches. See docs/code-in-cowork-vm.md.
 // The conditional that picks the cloud routine fire origin. Both arms are the
 // literal origins, and it is the only such conditional in the bundle — the
 // caller replaces the whole expression with this deployment's origin.
@@ -2969,7 +2972,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           original, replacement: `(${original}||${accountPhoto.account}?.avatar_image_url)` });
       }
       const routeFlag = desktopRouteFlagName(node);
-      if (routeFlag && !tenantEnabled) {
+      if (routeFlag) {
         patches.push({ id: routeAliasPatchId, start: node.body.start + 1, end: node.body.start + 1,
           original: "", replacement: `${routeFlag}=!0;` });
       }
@@ -3191,13 +3194,14 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
       if (evidence.length) markers.get(id).push({ path, count: evidence.length, evidence });
     }
   }
-  // A tenant deliberately does not get the route alias (see the note on
-  // `inspectRenderer`), so it must not be a required patch there either — the
-  // withheld patch is the point, not a bundle that stopped matching.
+  // The route alias is required on a tenant too: `/code` must resolve to the
+  // surface this bridge drives, exactly as on the deployment's own instance.
+  // What keeps a tenant's Code off its container is the environment list and
+  // the IPC guard, not the route name.
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
     ...(webShellEnabled
-      ? [...(tenantEnabled ? [] : [routeAliasPatchId]),
+      ? [routeAliasPatchId,
           sessionViewerPatchId, localSessionPlacementPatchId,
           accountChipPatchId, accountPhotoPatchId,
           coworkPermissionWiringPatchId, notificationEnablePatchId, accountMenuNamePatchId,

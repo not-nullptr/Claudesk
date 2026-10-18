@@ -249,14 +249,17 @@ empty and gains the place when a runner arrives, and this is what makes turning
 
 **Phase 2 — the tenant renderer generation (landed).** `tenantEnabled` is a third
 input to `patchRendererSources` alongside gateway and web shell: when set, the
-`desktop-code-route-alias` patch is withheld (and dropped from the required set,
-because withholding it is the intent) so `/code` resolves to the self-hosted
-surface instead of the local one. It reaches `prepare-renderer.mjs` (the
-generation key includes it, so a tenant and the operator's instance never adopt
-each other's renderer), the inspection worker, and `scripts/seed-renderer.sh`'s
-combinations (the deployment's own instance plus each account role, as a tenant).
-`config/release.json`'s `patchRelease` is bumped per the rule that a patcher
-change ships with it, so a `claude-desktop` rebuild is needed to roll it out.
+generation carries the self-hosted start-option patches and does **not** withhold
+`desktop-code-route-alias` — `/code` resolves to the same surface the bridge
+drives, exactly as on the deployment's own instance. (An earlier revision
+withheld that alias, which sent a tenant's browser to ion-dist's cloud Code
+branch and left the page on its skeleton.) It reaches `prepare-renderer.mjs`
+(the generation key includes it, so a tenant and the operator's instance never
+adopt each other's renderer), the inspection worker, and
+`scripts/seed-renderer.sh`'s combinations (the deployment's own instance plus
+each account role, as a tenant). `config/release.json`'s `patchRelease` is bumped
+per the rule that a patcher change ships with it, so a `claude-desktop` rebuild
+is needed to roll it out.
 
 ## How anything reaches into the guest
 

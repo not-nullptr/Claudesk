@@ -465,13 +465,16 @@ renderer; on a desktop-identified client the flag is already true, so the splice
 is a no-op. The flag must be set on the `claude-desktop` service as well as the
 bridge, because the renderer preparer (cont-init) reads it.
 
-**A tenant withholds this patch.** An account's instance is marked
-`CLAUDESK_TENANT=1` and never runs Code in its own container, so its `/code` must
-resolve to the *self-hosted* surface — which is the cloud branch the alias
-replaces — rather than the local one. That makes the tenant flag a third input to
-the renderer generation alongside gateway and web shell, and it is why the alias
-is not a *required* patch there: the withheld splice is the intent, not a bundle
-that stopped matching. See [Code in the Cowork VM](code-in-cowork-vm.md).
+**A tenant keeps it too.** An account's instance is marked
+`CLAUDESK_TENANT=1`, and the browser must resolve `/code` to the same surface
+the bridge drives. Withholding the alias sent an account's browser to
+ion-dist's *cloud* Code branch — a different Code implementation whose loading
+state this bridge does not fill — and the page stayed on its skeleton. What
+keeps an account's Code off its own container is the environment list (only its
+self-hosted pool is offered) and the `LocalSessions` guard, not the route name.
+The tenant flag remains a generation input so an account's generation carries
+the start-option patches and is never shared with the operator's instance. See
+[Code in the Cowork VM](code-in-cowork-vm.md).
 
 The Code *pill* is a second, independent gate. On a non-desktop client, clicking
 it raises the "download the desktop app" upsell instead of navigating, unless

@@ -57,11 +57,12 @@ unchanged, the fast path returns the previous generation, and the edit silently
 never runs.
 
 There are three flags, not two: the Gateway setting, the web shell, and
-**`CLAUDESK_TENANT`** — one account's own instance, which does not get the local
-Code route alias (`desktop-code-route-alias`) because its Code runs on a
-self-hosted runner instead. A tenant therefore prepares a generation of its own,
-and `scripts/seed-renderer.sh` builds the tenant combinations alongside the
-deployment's own. See [Code in the Cowork VM](code-in-cowork-vm.md).
+**`CLAUDESK_TENANT`** — one account's own instance, whose generation carries the
+self-hosted start-option patches (folder, branch and worktree) that the
+operator's own instance does not need. A tenant therefore prepares a generation
+of its own, and `scripts/seed-renderer.sh` builds the tenant combinations
+alongside the deployment's own. See
+[Code in the Cowork VM](code-in-cowork-vm.md).
 
 ## Current selectors
 

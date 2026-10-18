@@ -367,15 +367,14 @@ for (const [i, variant] of variants.entries()) {
     "the Desktop shell must keep the product-switcher intent");
   assert.equal(result.patches.filter(p => p.id === "web-chat-session-list-no-code").length, 0,
     "the session-list Code exclusion is a web-shell splice");
-  // A tenant resolves `/code` to the self-hosted surface, so the route alias
-  // that forces the local one is withheld — and withheld deliberately, which is
-  // why it must not be a required patch there either (the bundle still matches;
-  // the splice is simply not made).
+  // A tenant takes the same renderer as the deployment's own instance: `/code`
+  // must resolve to the surface the bridge drives. The isolation guarantee is
+  // the environment list and the LocalSessions guard, not the route name.
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 20,
-    "a tenant's web shell drops exactly the Code route alias");
-  assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 0,
-    "a tenant must not have the local Code route alias spliced in");
+  assert.equal(tenantResult.patches.length, 21,
+    "a tenant's web shell keeps every web-shell patch, the route alias included");
+  assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1,
+    "a tenant's `/code` must resolve to the surface this bridge drives");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-session-viewer-gate").length, 1,
     "the rest of the web shell is unchanged for a tenant");
   assert.equal(tenantResult.patches.filter(p => p.id === "web-code-subscribe-sse").length, 1,

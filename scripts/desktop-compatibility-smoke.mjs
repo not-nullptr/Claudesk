@@ -23,6 +23,7 @@ function run(script, args, env = {}) {
 try {
   let gatewayManifest;
   let webShellManifest;
+  let tenantManifest;
   // Both Gateway modes without the web shell (the plain Desktop client), plus
   // the web shell itself — the deployment's actual mode, which adds the chrome
   // patches (route alias, session Desktop gate, local session placement,
@@ -31,8 +32,8 @@ try {
   // scheduled-task hosts, the new-page home-layout assignment, the forced
   // unified-composer design predicates and the routine fire origin) — plus a
   // **tenant** web shell, which is
-  // the same generation with the Code route alias withheld so `/code` resolves
-  // to the self-hosted surface. See docs/code-in-cowork-vm.md.
+  // the same generation plus the self-hosted start-option patches (folder,
+  // branch and worktree). See docs/code-in-cowork-vm.md.
   // A selector that drifts against a new official bundle must fail here, not
   // in production.
   for (const [gateway, webShell, tenant] of [["0", "0", "0"], ["1", "0", "0"],
@@ -50,14 +51,13 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 54 : 55) : gateway === "1" ? 8 : 6);
-    // A tenant resolves `/code` to the self-hosted surface, so the route alias
-    // that forces the local one is withheld — deliberately, which is also why it
-    // is not a required patch on a tenant.
+      webShell === "1" ? (tenant === "1" ? 73 : 60) : gateway === "1" ? 8 : 6);
+    // A tenant keeps the route alias: `/code` must resolve to the surface this
+    // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
       manifest.patches.some(patch => patch.id === "desktop-code-route-alias"),
-      webShell === "1" && tenant !== "1",
-      "only a non-tenant's web shell keeps the local Code route alias");
+      webShell === "1",
+      "the web shell's Code route alias is spliced for a tenant too");
     assert.equal(manifest.markers.length, 4);
     assert.ok(manifest.patches.some(patch => patch.id === "file-pane-download"),
       "the file pane's streaming download button must be present");
@@ -73,7 +73,8 @@ try {
       "the routine form must offer the API trigger in the web shell");
 
     if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
-    if (webShell === "1") webShellManifest = manifest;
+    if (webShell === "1" && tenant === "0") webShellManifest = manifest;
+    if (tenant === "1") tenantManifest = manifest;
     for (const file of manifest.files) {
       const generated = await readFile(join(state,
         release.desktopVersion, release.patchRelease, file.path), "utf8");
@@ -97,11 +98,16 @@ try {
   for (const [i, path] of orderedPaths.entries()) {
     const gatewayPrepared = gatewayManifest.files.some(file => file.path === path);
     const webShellPrepared = webShellManifest.files.some(file => file.path === path);
+    // A tenant generation carries start-option patches on chunks the owner's
+    // generation leaves untouched, so its files live in their own directory.
+    const tenantPrepared = tenantManifest.files.some(file => file.path === path);
     const sourcePath = gatewayPrepared
       ? join(temporary, "renderer-1", release.desktopVersion, release.patchRelease, path)
       : webShellPrepared
         ? join(temporary, "renderer-1-web", release.desktopVersion, release.patchRelease, path)
-        : join(ionRoot, path);
+        : tenantPrepared
+          ? join(temporary, "renderer-1-web-tenant", release.desktopVersion, release.patchRelease, path)
+          : join(ionRoot, path);
     await writeFile(join(temporary, `renderer-${i + 1}.js`), await readFile(sourcePath, "utf8"));
   }
   assert.equal(run("scripts/verify-renderer-markers.mjs", [temporary]).status, 0);
