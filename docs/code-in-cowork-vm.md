@@ -641,9 +641,16 @@ virtiofs root (`/mnt/.virtiofs-root` by default,
 files the account sees. A plain session checks the branch out in that folder;
 a worktree session runs in `<repo>/.claude/worktrees/<session-suffix>` on a
 `claude/<session-suffix>` branch created from the selected branch (or `HEAD`),
-and reuses that copy on later turns. With no `cwd` the runner keeps its own
-checkout, exactly as before. A folder the guest cannot see, or a branch it
+and reuses that copy on later turns. With no `cwd` the session starts in the
+account's shared workspace. A folder the guest cannot see, or a branch it
 cannot check out, fails the session with the reason — never a silent fallback.
+
+The guest also binds the shared workspace back at `/workspace` (a bind mount,
+or a symlink when it cannot mount): the host root is at `SHARED_ROOT`, so
+without it `/workspace` inside the VM was an empty directory on the guest's own
+disk while the real files sat under `/mnt/.virtiofs-root/workspace`. The
+container, the folder picker and the agent now all agree on `/workspace`, and a
+host path under it is presented at the same path inside the guest.
 
 The bridge validates the create body before storing it (folder confirmed as a
 real directory under `COWORK_REMOTE_WORKSPACE_ROOT`; branch a bounded string; the

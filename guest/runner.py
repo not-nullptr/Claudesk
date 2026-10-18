@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 
 def env(name, default=""):
@@ -80,6 +80,13 @@ CHECKOUT = env("CLAUDESK_RUNNER_CHECKOUT", "/sessions")
 # is that path joined onto this root. Overridable for a deployment whose guest
 # mounts the share elsewhere.
 SHARED_ROOT = env("CLAUDESK_RUNNER_SHARED_ROOT", "/mnt/.virtiofs-root")
+# The account's workspace, as the container and the folder picker spell it.
+# Inside the guest the host root is at SHARED_ROOT, so the workspace would only
+# be reachable at `<SHARED_ROOT>/workspace`; the runner bind-mounts it back at
+# this same path, so a shell (and the agent's own cwd) sees `/workspace` and
+# the files are the shared ones, not an empty directory in the guest image.
+HOST_WORKSPACE = "/workspace"
+WORKSPACE_ALIAS = env("CLAUDESK_RUNNER_WORKSPACE_ALIAS", HOST_WORKSPACE)
 POLL_SECONDS = float(env("CLAUDESK_RUNNER_POLL_SECONDS", "5") or 5)
 # How the agent is asked — flag for flag what the product's own runner passes
 # its child (from the shipped binary's spawn: `--print`, stream-json both ways,
@@ -378,6 +385,64 @@ def run_git(directory, *arguments):
     return completed.returncode == 0, (completed.stdout or "").strip()
 
 
+def shared_workspace():
+    return os.path.join(SHARED_ROOT, "workspace")
+
+
+def same_directory(left, right):
+    try:
+        a = os.stat(left)
+        b = os.stat(right)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def ensure_workspace_alias():
+    """Make the account's shared workspace visible at `/workspace` in the guest.
+
+    The guest mounts the host's whole filesystem at SHARED_ROOT; `/workspace`
+    itself is an empty directory on the guest's own disk. The container, the
+    folder picker and the people using them all spell the workspace
+    `/workspace`, so a shell command that cd's there landed in that empty
+    directory. A bind mount over it (only when it is empty, so nothing local is
+    hidden) makes the two the same path. Runs as the runner's root; harmless
+    when it cannot mount.
+    """
+    shared = shared_workspace()
+    if not os.path.isdir(shared):
+        return False
+    if same_directory(WORKSPACE_ALIAS, shared):
+        return True
+    try:
+        os.makedirs(WORKSPACE_ALIAS, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        if os.listdir(WORKSPACE_ALIAS):
+            return False
+    except OSError:
+        return False
+    try:
+        completed = subprocess.run(["mount", "--bind", shared, WORKSPACE_ALIAS],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        log("workspace alias: %s is the shared workspace (bind mount)" % WORKSPACE_ALIAS)
+        return True
+    # A guest that cannot mount (no CAP_SYS_ADMIN, a restricted unit) still
+    # gets the same path with a symlink over the empty directory. It survives a
+    # reboot, and dangles harmlessly until the virtiofs mount is ready.
+    try:
+        os.rmdir(WORKSPACE_ALIAS)
+        os.symlink(shared, WORKSPACE_ALIAS)
+    except OSError:
+        return False
+    log("workspace alias: %s is the shared workspace (symlink)" % WORKSPACE_ALIAS)
+    return True
+
+
 def guest_folder(host_path):
     """Map a host path the composer chose onto the guest's shared mount.
 
@@ -389,6 +454,14 @@ def guest_folder(host_path):
         return None
     if host_path == SHARED_ROOT or host_path.startswith(SHARED_ROOT + "/"):
         return host_path if os.path.isdir(host_path) else None
+    # Once the shared workspace is bound at /workspace, keep that spelling for
+    # a folder under it: the agent's cwd and shell commands then read the same
+    # path the container and the folder picker use.
+    if (host_path == HOST_WORKSPACE or host_path.startswith(HOST_WORKSPACE + "/")) \
+            and same_directory(WORKSPACE_ALIAS, shared_workspace()):
+        candidate = WORKSPACE_ALIAS + host_path[len(HOST_WORKSPACE):]
+        if os.path.isdir(candidate):
+            return candidate
     candidate = os.path.join(SHARED_ROOT, host_path.lstrip("/"))
     return candidate if os.path.isdir(candidate) else None
 
@@ -400,8 +473,9 @@ def session_workdir(session, config):
     (`source_branch`) and an isolated worktree (`use_worktree`). Returns
     `(cwd, error)`: an option the guest cannot honour is an error the caller
     reports as the session's failure, never a silent fallback — the person
-    picked that folder and branch. With no folder the runner keeps its own
-    checkout, exactly as before.
+    picked that folder and branch. With no folder the session starts in the
+    account's shared workspace (at /workspace once the alias is mounted); an
+    older guest without the share keeps its own checkout.
     """
     folder = config.get("cwd")
     branch = config.get("source_branch")
@@ -409,6 +483,11 @@ def session_workdir(session, config):
     worktree = config.get("use_worktree") is True
 
     if not isinstance(folder, str) or not folder:
+        shared = shared_workspace()
+        if os.path.isdir(shared):
+            if same_directory(WORKSPACE_ALIAS, shared):
+                return WORKSPACE_ALIAS, None
+            return shared, None
         return (CHECKOUT if os.path.isdir(CHECKOUT) else "/"), None
 
     directory = guest_folder(folder)
@@ -882,9 +961,10 @@ def run_session(hint):
     if effort is not None:
         argv += ["--effort", effort]
     # The working directory comes from the session's start options. With none,
-    # the checkout is where the work happens; a guest without it (a fresh
-    # image, a stopped VM) still runs, from /, rather than failing the session
-    # on a directory.
+    # the account's shared workspace is where the work happens (see
+    # session_workdir). The virtiofs mount can arrive after this service, so
+    # re-check the /workspace alias before every turn.
+    ensure_workspace_alias()
     cwd, workdir_error = session_workdir(session, config)
     if workdir_error is not None:
         finish("report-failure", {"reason": workdir_error,
@@ -979,6 +1059,19 @@ def prepare_home():
         os.makedirs(RUNNER_HOME, mode=0o700, exist_ok=True)
     except OSError as error:
         log("could not create %s (%s); the agent keeps the service's HOME" % (RUNNER_HOME, error))
+        return
+    # The agent runs as the guest's root while the shared workspace's files
+    # belong to the host user. Git refuses a repository owned by another user
+    # unless it is declared safe; the runner's HOME is the agent's, so declare
+    # the shared tree there rather than have every first command fail.
+    config = os.path.join(RUNNER_HOME, ".gitconfig")
+    if not os.path.exists(config):
+        try:
+            with open(config, "w", encoding="utf-8") as handle:
+                handle.write("[safe]\n\tdirectory = *\n")
+            os.chmod(config, 0o600)
+        except OSError as error:
+            log("could not write %s (%s)" % (config, error))
 
 
 def run_sessions_forever(session_queue):
@@ -1007,6 +1100,7 @@ def main():
         log("warning: CLAUDESK_RUNNER_AGENT_ARGS lacks stream-json output; "
             "the transcript cannot be read from it")
     prepare_home()
+    ensure_workspace_alias()
     log("polling %s (agent %s, checkout %s)" % (BASE, CLAUDE_BIN, CHECKOUT))
     register()
     # `--once` is a probe: it runs whatever it is handed inline and returns.

@@ -228,6 +228,35 @@ print(json.dumps(module.content_of(events)))
     { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
   ], "the guest runner forwards image blocks beside the text");
 
+  // The shared workspace is bound at /workspace in the guest (or symlinked in
+  // this probe): a folderless session starts there, and a host `/workspace/…`
+  // path keeps that spelling, matching the container and the folder picker.
+  const workspaceProbe = spawnSync("python3", ["-I", "-c", `
+import importlib.util, json, os, tempfile
+root = tempfile.mkdtemp()
+shared = os.path.join(root, "shared")
+os.makedirs(os.path.join(shared, "workspace", "proj"))
+alias = os.path.join(root, "alias")
+os.symlink(os.path.join(shared, "workspace"), alias)
+os.environ["CLAUDESK_RUNNER_SHARED_ROOT"] = shared
+os.environ["CLAUDESK_RUNNER_WORKSPACE_ALIAS"] = alias
+os.environ["CLAUDESK_RUNNER_CHECKOUT"] = os.path.join(root, "checkout")
+spec = importlib.util.spec_from_file_location("guest_runner", ${JSON.stringify(join(root, "guest/runner.py"))})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps({
+  "workdir": module.session_workdir("s", {})[0],
+  "folder": module.guest_folder("/workspace/proj"),
+  "alias": alias,
+}))
+`], { encoding: "utf8" });
+  assert.equal(workspaceProbe.status, 0, workspaceProbe.stderr);
+  const workspace = JSON.parse(workspaceProbe.stdout);
+  assert.equal(workspace.workdir, workspace.alias,
+    "a folderless session starts in the shared workspace, under /workspace");
+  assert.equal(workspace.folder, join(workspace.alias, "proj"),
+    "a host /workspace path maps through the /workspace alias");
+
   // ---- Self-hosted start options and VM-side lookups ----------------------
   // The guest shares the host root at SHARED_ROOT, so a host path
   // `/workspace/<name>/repo` is `<shared>/workspace/<name>/repo` in the VM. The
