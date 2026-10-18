@@ -745,7 +745,17 @@ publishes the create config in the renderer's own shape — `session_context`
 (model, effort, sources) plus the top-level `permission_mode` — because its
 parser reads only those; a document that carries the settings solely under
 `config` (the guest runner's spelling) makes a reopened session show the
-built-in model and Accept edits again. A change made to a
+built-in model and Accept edits again.
+
+The transcript is not part of the metadata store. Each session has an
+append-only NDJSON file under the state directory's `events/`, and
+`code-runners.json` holds metadata only. The guest runner uploads a turn's
+events over **one chunked request** (`POST /v1/code/sessions/<id>/events/stream`,
+one NDJSON line per event), so a token costs a socket write rather than a
+request plus a whole-store rewrite; the bridge appends each line to that
+session's file as it arrives and keeps the live stream's in-memory tail in
+step. An older store's inline `events` arrays are split into these files once,
+on the first load. A change made to a
 **running** session is a `set_model` / `set_permission_mode` control request
 appended to the transcript, not a rewritten session document; the guest runner
 reads the latest of each before spawning the turn and applies it to the agent's

@@ -45,7 +45,7 @@
 // the instance's own state directory, like project-stars.json.
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const stateFileName = "code-runners.json";
@@ -565,6 +565,45 @@ export function createRunnerBackend({
     });
   }
 
+  // Transcripts live one file per session, append-only. The metadata store
+  // (`code-runners.json`) is rewritten by every mutation and used to carry the
+  // whole transcript inline — so appending one stream event rewrote every
+  // session's history. An event append is now O(that event): one line in one
+  // session's file, while the metadata document stays small.
+  const eventsDir = join(stateDir, "events");
+  function eventsPathFor(session) {
+    const name = String(session?.session_uuid ?? "").replace(/[^A-Za-z0-9_-]/g, "_");
+    return join(eventsDir, `${name}.jsonl`);
+  }
+
+  async function readEventsFile(session) {
+    try {
+      const text = await readFile(eventsPathFor(session), "utf8");
+      return text.split("\n").filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  async function appendEventsFile(session, appended) {
+    if (!appended.length) return;
+    await mkdir(eventsDir, { recursive: true });
+    await appendFile(eventsPathFor(session),
+      appended.map((event) => `${JSON.stringify(event)}\n`).join(""), { mode: 0o600 });
+  }
+
+  function metadataOnly(state) {
+    return {
+      ...state,
+      sessions: state.sessions.map((session) => {
+        const { events, ...rest } = session;
+        return rest;
+      }),
+    };
+  }
+
   async function load() {
     if (cache) return cache;
     try {
@@ -606,6 +645,26 @@ export function createRunnerBackend({
         }
       }
     }
+    // Split an older store's inline transcripts into their per-session files
+    // once; the metadata document that remains no longer carries them.
+    let eventsMigrated = false;
+    for (const session of cache.sessions) {
+      if (typeof session.session_uuid !== "string") continue;
+      if (Array.isArray(session.events)) {
+        const path = eventsPathFor(session);
+        const exists = await readFile(path, "utf8").then(() => true, () => false);
+        if (!exists && session.events.length) {
+          await mkdir(eventsDir, { recursive: true });
+          await writeFile(path,
+            session.events.map((event) => `${JSON.stringify(event)}\n`).join(""),
+            { mode: 0o600 });
+        }
+        eventsMigrated = true;
+      } else {
+        session.events = await readEventsFile(session);
+      }
+    }
+    if (eventsMigrated) migrated = true;
     // The deployment names this instance's pool, and a pool the operator named
     // is created on first use so a runner can be pointed at it without anyone
     // clicking through the admin UI.
@@ -640,7 +699,7 @@ export function createRunnerBackend({
   async function persist(state) {
     await mkdir(stateDir, { recursive: true });
     const tmp = `${statePath}.${randomUUID()}`;
-    await writeFile(tmp, `${JSON.stringify(state)}\n`);
+    await writeFile(tmp, `${JSON.stringify(metadataOnly(state))}\n`);
     await rename(tmp, statePath);
   }
 
@@ -1380,7 +1439,9 @@ export function createRunnerBackend({
       // The create body may carry the session's first events (a schema init
       // control request, or an eager first message); they land in the same log
       // the runner reads and the stream replays.
-      if (Array.isArray(body?.events)) appendToSession(session, body.events, source);
+      if (Array.isArray(body?.events)) {
+        await appendEventsFile(session, appendToSession(session, body.events, source));
+      }
       await save();
       // A runner already holding this pool's poll takes it on that same
       // request, not on its next tick.
@@ -1411,6 +1472,8 @@ export function createRunnerBackend({
       // renderer writes without one (its auth is the deployment's proxy).
       const appended = appendToSession(session, incoming,
         bearerToken(headers) ? "worker" : "client");
+      // One append to one session's log — never a rewrite of the store.
+      await appendEventsFile(session, appended);
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,
       // and the runner that claims it replays the conversation (the agent's
@@ -1457,6 +1520,54 @@ export function createRunnerBackend({
       // later tick.
       if (requeued) wakePool(session.pool_id);
       return { data: appended };
+    },
+
+    /**
+     * POST /v1/code/sessions/{id}/events/stream — the whole turn's events over
+     * one chunked request.
+     *
+     * The guest holds this connection open for the turn and writes one NDJSON
+     * line per event as the agent emits it. A token therefore costs no round
+     * trip of its own, and the bridge appends a line (or the handful that
+     * arrived in one socket read) to the session's own log. Keepalive lines
+     * (`{"keepalive":true}`) only keep a long thinking pause from tripping the
+     * server's request timeout; they are not events and are dropped here.
+     */
+    async appendEventStream({ sessionId, headers, request } = {}) {
+      const state = await load();
+      const session = sessionById(state, sessionId);
+      if (!session) return null;
+      const allowed = sessionFor(state, headers, sessionId);
+      if (!allowed || allowed.unauthorized) return { unauthorized: true };
+      let buffer = "";
+      let appendedCount = 0;
+      const take = async (lines) => {
+        const incoming = [];
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let entry;
+          try {
+            entry = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (!isRecord(entry) || !isRecord(entry.payload)) continue;
+          incoming.push(entry);
+        }
+        if (!incoming.length) return;
+        const appended = appendToSession(session, incoming, "worker");
+        await appendEventsFile(session, appended);
+        appendedCount += appended.length;
+      };
+      for await (const chunk of request) {
+        buffer += chunk.toString("utf8");
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        await take(lines);
+      }
+      await take([buffer]);
+      if (appendedCount) saveSoon();
+      return { ok: true, appended: appendedCount };
     },
 
     /**
@@ -1630,6 +1741,7 @@ export function createRunnerBackend({
       const session = sessionById(state, sessionId);
       if (!session) return null;
       state.sessions.splice(state.sessions.indexOf(session), 1);
+      await rm(eventsPathFor(session), { force: true }).catch(() => undefined);
       await save();
       return {};
     },

@@ -3823,6 +3823,21 @@ async function handleCodeRunnerApi(request, response, url) {
   const method = String(request.method || "GET").toUpperCase();
   const pathname = url.pathname;
   const headers = request.headers;
+  // The runner's streaming leg must be read as it arrives, not buffered like a
+  // JSON body: one chunked request carries the whole turn's events.
+  const eventStream = pathname.match(/^\/v1\/code\/sessions\/([^/]+)\/events\/stream$/);
+  if (eventStream && method === "POST") {
+    const result = await codeRunners.appendEventStream({
+      sessionId: decodeURIComponent(eventStream[1]),
+      headers,
+      request,
+    });
+    if (result && result.unauthorized) {
+      return sendJson(response, 401, { error: "unknown session credential" });
+    }
+    if (result === null) throw new ApiError(404, "session not found");
+    return sendJson(response, 200, result);
+  }
   const body = method === "GET" || method === "DELETE" ? {} : await readJson(request);
 
   // Anything the secret does not name is refused here rather than served empty,

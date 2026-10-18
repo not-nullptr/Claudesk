@@ -27,6 +27,7 @@ the agent's own logging and stays out of the transcript; and later turns
 Stdlib only, on purpose: the guest is a stock Ubuntu image, and this must not
 depend on anything we would have to install into it.
 """
+import http.client
 import json
 import os
 import queue
@@ -39,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 
 
 def env(name, default=""):
@@ -99,12 +100,6 @@ RUNNER_HOME = env("CLAUDESK_RUNNER_HOME", "/var/lib/claudesk-runner/home")
 # One turn's wall clock. Long enough for real work, short enough that a wedged
 # agent does not hold the session forever.
 TURN_TIMEOUT = float(env("CLAUDESK_RUNNER_TIMEOUT_SECONDS", "1800") or 1800)
-# The bridge persists the session store on every append, so posting each
-# stream event on its own round trip capped a fast model at the store's write
-# rate. The writer coalesces what the agent has ready for up to this window (or
-# count) into one request.
-WRITE_BATCH_MAX = 128
-WRITE_BATCH_WINDOW = 0.05
 ONCE = "--once" in sys.argv[1:]
 
 RE_SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -149,6 +144,78 @@ def expect(answer, what):
     if status != 200:
         raise RuntimeError("%s answered %s: %s" % (what, status, str(body)[:200]))
     return body
+
+
+def open_event_stream(path, token):
+    """Open the turn's event stream: one chunked upload, many events.
+
+    The agent emits an event per token. Posting each on its own request made
+    the transcript's throughput a function of the round trip and of the
+    bridge's store write, which is the wrong shape for a stream of kilobytes.
+    This holds one HTTP request open for the turn instead: each event is an
+    NDJSON line written to the socket as it arrives, and the bridge appends it
+    to the session's own log. A keepalive line every 20 s keeps a long
+    thinking pause from tripping the server's request timeout.
+
+    Returns (write, close). `write` takes one event payload; `close` finishes
+    the upload and raises if the bridge refused it.
+    """
+    parsed = urllib.parse.urlsplit(BASE)
+    if parsed.scheme == "https":
+        connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=30)
+    else:
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=30)
+    connection.putrequest("POST", path, skip_accept_encoding=True)
+    connection.putheader("content-type", "application/x-ndjson")
+    connection.putheader("authorization", "Bearer %s"
+                         % (token or RUNNER_TOKEN or SECRET))
+    connection.putheader("transfer-encoding", "chunked")
+    connection.endheaders()
+    lock = threading.Lock()
+    closed = [False]
+    stop = threading.Event()
+
+    def send_line(line):
+        data = line.encode("utf-8")
+        connection.send(("%x\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+
+    def write(payload):
+        line = json.dumps({"payload": payload}) + "\n"
+        with lock:
+            if closed[0]:
+                raise RuntimeError("the event stream is closed")
+            send_line(line)
+
+    def keepalive_loop():
+        while not stop.wait(20.0):
+            with lock:
+                if closed[0]:
+                    return
+                try:
+                    send_line('{"keepalive":true}\n')
+                except Exception:  # noqa: BLE001 - a dead stream shows at close
+                    return
+
+    keepalive = threading.Thread(target=keepalive_loop, daemon=True)
+    keepalive.start()
+
+    def close():
+        stop.set()
+        with lock:
+            if closed[0]:
+                return
+            closed[0] = True
+            try:
+                connection.send(b"0\r\n\r\n")
+                response = connection.getresponse()
+                status = response.status
+                body = response.read().decode("utf-8", "replace")
+            finally:
+                connection.close()
+        if status != 200:
+            raise RuntimeError("events stream answered %s: %s" % (status, body[:200]))
+
+    return write, close
 
 
 def register():
@@ -631,13 +698,9 @@ def handle_runner_request(item):
 def run_agent(argv, cwd, content, write):
     """Run one turn, streaming its events back to the bridge.
 
-    `write` takes a list of event payloads and posts them in one request. The
-    bridge appends events to the session store and persists it, and the agent
-    emits one event per token on a fast stream; posting each event on its own
-    round trip capped the whole transcript at the store's write rate (tens of
-    tokens a second). The writer thread therefore batches whatever the stream
-    has ready, bounded by a short window so a slow stream still starts
-    promptly.
+    `write` puts one event on the turn's open stream (see open_event_stream):
+    each token is written to the connection as it arrives, with no request of
+    its own and no coalescing delay.
     """
     """One headless turn of the agent: the prompt in, the event stream out.
 
@@ -677,31 +740,15 @@ def run_agent(argv, cwd, content, write):
 
     def writer():
         while True:
-            first = pending.get()
-            if first is None:
+            payload = pending.get()
+            if payload is None:
                 return
-            batch = [first]
-            stopped = False
-            deadline = time.monotonic() + WRITE_BATCH_WINDOW
-            while len(batch) < WRITE_BATCH_MAX:
-                timeout = deadline - time.monotonic()
-                if timeout <= 0:
-                    break
-                try:
-                    payload = pending.get(timeout=timeout)
-                except queue.Empty:
-                    break
-                if payload is None:
-                    stopped = True
-                    break
-                batch.append(payload)
-            if not failures:
-                try:
-                    write(batch)
-                except Exception as error:  # noqa: BLE001 - the run cannot land without this
-                    failures.append(str(error))
-            if stopped:
-                return
+            if failures:
+                continue
+            try:
+                write(payload)
+            except Exception as error:  # noqa: BLE001 - the run cannot land without this
+                failures.append(str(error))
 
     writer_thread = threading.Thread(target=writer, daemon=True)
     writer_thread.start()
@@ -776,11 +823,6 @@ def run_session(hint):
     token = expect(request("/v1/code/runners/self-hosted/sessions/%s/token" % quoted,
                            {}), "token")["session_token"]
 
-    def write(payloads):
-        expect(request("/v1/code/sessions/%s/events" % quoted, {
-            "events": [{"payload": payload} for payload in payloads],
-        }, token), "events")
-
     def finish(path, body):
         expect(request("/v1/code/runners/self-hosted/sessions/%s/%s" % (quoted, path),
                        body, token), path)
@@ -853,6 +895,8 @@ def run_session(hint):
     log("session %s: turn with %s (model %s, effort %s, permission %s, resume %s)" % (
         session, " ".join(AGENT_ARGS), model or "default", effort or "default",
         permission_mode or "default", resume or "none"))
+    write, close_stream = open_event_stream(
+        "/v1/code/sessions/%s/events/stream" % quoted, token)
 
     def turn(extra):
         return run_agent(argv + extra, cwd, content, write)
@@ -881,9 +925,13 @@ def run_session(hint):
     # nothing behind.
     if result is not None and not failures:
         try:
-            write([result])
+            write(result)
         except Exception as error:  # noqa: BLE001 - recorded with the run
             failures.append(str(error))
+    try:
+        close_stream()
+    except Exception as error:  # noqa: BLE001 - recorded with the run
+        failures.append(str(error))
 
     if failures:
         finish("report-failure", {"reason": "could not write events: %s" % failures[0][:300],
