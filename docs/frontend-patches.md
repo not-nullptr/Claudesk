@@ -424,10 +424,12 @@ predicate answers available. The composer's own per-environment mode builder
 needs a third splice: its `byoc`/`pool` arm builds the list without ever
 passing the bypass flag, and falls back to the remote list when the backend
 publishes no modes — so bypass stayed unreachable there however the predicate
-answered. The splice appends it to that arm's result for `byoc`/`pool` (not for
-a cloud or project place), and does not consult the Desktop's "running as root"
-availability gate: the guest agent is root by design and the runner sets
-`IS_SANDBOX=1`, which is what makes bypass work there.
+answered. The splice appends it to that arm's result for `byoc`/`pool` — and
+for `anthropic_cloud`, the name an existing remote session reaches the builder
+under, when the availability predicate answers (this deployment serves no cloud
+Code, so that is still the self-hosted session) — and does not consult the
+Desktop's "running as root" availability gate: the guest agent is root by design
+and the runner sets `IS_SANDBOX=1`, which is what makes bypass work there.
 The entitlement grant in `bridge/server.mjs` is the other half. On a tenant the
 guest runner also sets `IS_SANDBOX=1` for the agent, which is what lets Claude
 Code run with bypass permissions as root inside the VM.

@@ -3066,7 +3066,12 @@ function codeBypassSelfHostedModesReplacement(target) {
     + `__claudeskModes=${helper}("local",{auto:n,autoFirst:r}).filter(t=>e.includes(t))}`
     + `else{__claudeskModes=t.remotePlanModeEnabled?`
     + `${helper}("remote",{auto:n,autoFirst:r}):["acceptEdits"]}`
-    + `if((e==="byoc"||e==="pool")&&!__claudeskModes.includes("bypassPermissions"))`
+    // An existing remote session reaches this builder as `anthropic_cloud`
+    // (the renderer's name for the unresolved remote place); this deployment
+    // serves no cloud Code, so when the bypass predicate answers available
+    // there it means the self-hosted session too.
+    + `if((e==="byoc"||e==="pool"||(e==="anthropic_cloud"&&t.isBypassAvailable))`
+    + `&&!__claudeskModes.includes("bypassPermissions"))`
     + `__claudeskModes=[...__claudeskModes,"bypassPermissions"];return __claudeskModes}`;
   return { start, end, replacement };
 }
