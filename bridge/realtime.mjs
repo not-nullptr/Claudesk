@@ -32,6 +32,11 @@ export function createRealtimeController({
   desktop,
   isChatSession,
   ApiError,
+  // The release this bridge serves. Sent with `hello` so a page that has been
+  // open since before a deploy can notice that the chunks it booted are no
+  // longer the ones this instance serves, and reload itself once (see the
+  // remote preload's `hello` reader). Optional so a smoke need not carry one.
+  release = null,
   // Optional gate for relayed Desktop events. The notification controller uses
   // it to drop notifications whose category the settings panel turned off, so
   // a disabled category never reaches an open tab either.
@@ -258,6 +263,7 @@ export function createRealtimeController({
       transport: "server-sent-events",
       mode,
       sessionId,
+      ...(release ? { release } : {}),
     });
     if (latestSessions) send(response, "sessions", latestSessions);
     const notice = liveNotice();

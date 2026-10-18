@@ -448,6 +448,23 @@ the `claude-desktop` service rebuilt and a `patchRelease` bump (the prepared ren
 is served under an immutable path) — the bridge and preload half alone would
 log-and-drop, saying so once on the browser console.
 
+## Renderer release drift
+
+A deploy publishes a new prepared-renderer generation under a new release path, but an
+open tab keeps executing the chunks it booted with — an SPA never re-fetches its module
+graph — so the previous UI can stay on screen indefinitely after the server has moved
+on. (This is what a "the patch is deployed but the page does not show it" report
+usually is: the served bytes are current, the tab is not.)
+
+The stream's `hello` frame now carries the bridge's `release`, and the preload compares
+it with the bootstrap's `release.patchRelease` on every (re)connect. A mismatch logs
+one line and reloads the page; the document is served `no-store`, so the reload lands
+on the current entry document and its release-versioned chunks. A `sessionStorage`
+marker allows one reload per served release: a browser that somehow keeps receiving the
+old document (an intermediary cache) then stays put rather than looping. This needs a
+`patchRelease` bump like any other preload change, because `/remote-preload.js` is
+fetched with `?v=<patchRelease>`.
+
 ## Code routes
 
 ion-dist resolves its internal code route to the local Code surface (`/code` →

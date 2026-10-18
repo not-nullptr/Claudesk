@@ -1628,6 +1628,7 @@ const realtime = createRealtimeController({
   desktop,
   isChatSession,
   ApiError,
+  release,
   eventAllowed: (payload) => notifications.notificationAllowed(payload),
 });
 // A notice from the previous bridge — its restart warning — is read back before

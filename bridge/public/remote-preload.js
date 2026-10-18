@@ -1793,6 +1793,29 @@
       ) return;
       scheduleEventReconnect(generation);
     });
+    // A deploy replaces the prepared renderer generation behind a new release
+    // path, but this page keeps executing the chunks it booted with: an SPA
+    // never re-fetches its module graph, so a tab left open across a deploy
+    // shows the previous UI indefinitely. The bridge now stamps every stream
+    // `hello` with the release it serves; when it differs from the bootstrap's,
+    // reload once. The session-storage guard is what keeps a browser that
+    // somehow keeps getting the old document (an intermediary cache) from
+    // reloading in a loop: one reload per served release, then a warning.
+    events.addEventListener("hello", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const loaded = config.release?.patchRelease;
+        const served = payload?.release?.patchRelease;
+        if (typeof loaded !== "string" || typeof served !== "string" || loaded === served) return;
+        const key = "claudesk-reloaded-for-release";
+        try {
+          if (globalThis.sessionStorage?.getItem(key) === served) return;
+          globalThis.sessionStorage?.setItem(key, served);
+        } catch {}
+        console.info(`[claudesk] renderer release ${loaded} is stale; reloading for ${served}`);
+        globalThis.location.reload();
+      } catch {}
+    });
     events.addEventListener("desktop-ipc", (event) => {
       try {
         const payload = JSON.parse(event.data);
