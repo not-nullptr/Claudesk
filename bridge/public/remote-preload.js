@@ -1326,7 +1326,11 @@
         }
       }
       if (surface === "AppPreferences") {
-        if (!config.codeActionsEnabled) continue;
+        // A tenant has no local executor but does have a Code surface on its
+        // self-hosted runner; its draft permission mode, model and effort
+        // picks live behind this shim. Without it the renderer sees no
+        // preference API and every pick silently fails to persist.
+        if (!config.codeSettingsEnabled && !config.codeActionsEnabled) continue;
         settingsRoot[surface] = createCodePreferences();
       } else settingsRoot[surface] = Object.freeze(api);
     }

@@ -177,5 +177,9 @@ assert.match(preload, /config\.codeActionsEnabled \|\| config\.codeSurfaceEnable
 assert.match(serverSource, /codeRunnersEnabled;\n/, "the surface flag follows the runner API");
 assert.ok(serverSource.includes("\n    codeSurfaceEnabled,"),
   "and it must reach the bootstrap the preload reads");
+assert.match(preload, /config\.codeSettingsEnabled/,
+  "the AppPreferences shim must exist for a tenant's Code surface too");
+assert.ok(serverSource.includes("codeSettingsEnabled: codeActionsEnabled || codeSurfaceEnabled"),
+  "the bootstrap marks the settings surface for a tenant as well");
 
 process.stdout.write("tenant-code-guard-smoke: a tenant never offers the local Code executor\n");

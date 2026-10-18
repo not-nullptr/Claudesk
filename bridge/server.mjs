@@ -5422,6 +5422,11 @@ async function serveOfficialIndex(request, response) {
     release,
     codeActionsEnabled,
     codeSurfaceEnabled,
+    // The renderer's preference surface (`claude.settings.AppPreferences`) is
+    // how the Code form persists its draft permission mode, model and effort.
+    // A tenant has no local executor but does have a Code surface on its
+    // runner, so it needs this shim even though `codeActionsEnabled` is false.
+    codeSettingsEnabled: codeActionsEnabled || codeSurfaceEnabled,
     developerActionsEnabled,
     gatewaySettingsEnabled,
     webShell: webShellEnabled,

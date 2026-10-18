@@ -284,6 +284,30 @@ function sessionById(state, sessionId) {
  * and a non-string — so a caller-supplied one is ignored rather than trusted.
  * Returns the appended envelopes.
  */
+// The provider echoes the model id the CLI finally sent. For a `[1m]` spelling
+// the CLI splits the suffix off as a context flag, so the assistant stream
+// carries the base id while the session was placed with the 1M id. The
+// composer syncs its model switcher from those events, which made a 1M session
+// visibly fall back to the standard entry after its first turn. Rewrite the
+// echoed id back to the session's own when the two are the same model (only the
+// trailing `[...]` differs); a genuine fallback to another model is untouched.
+function normalizeEventModel(payload, session) {
+  const requested = sessionConfigOf(session).model;
+  if (typeof requested !== "string" || !requested) return payload;
+  const strip = (value) => typeof value === "string"
+    ? value.replace(/\[[^\]]+\]$/, "") : value;
+  const same = (value) => typeof value === "string"
+    && strip(value) === strip(requested);
+  if (payload.type === "assistant" && isRecord(payload.message) && same(payload.message.model)) {
+    payload.message = { ...payload.message, model: requested };
+  } else if (payload.type === "stream_event" && isRecord(payload.event?.message)
+    && same(payload.event.message.model)) {
+    payload.event = { ...payload.event,
+      message: { ...payload.event.message, model: requested } };
+  }
+  return payload;
+}
+
 function appendToSession(session, incoming, source) {
   session.events = Array.isArray(session.events) ? session.events : [];
   let sequence = session.events.reduce(
@@ -292,6 +316,7 @@ function appendToSession(session, incoming, source) {
   for (const entry of incoming) {
     const payload = isRecord(entry?.payload) ? entry.payload : entry;
     if (!isRecord(payload)) continue;
+    normalizeEventModel(payload, session);
     sequence += 1;
     const envelope = {
       event_id: randomUUID(),
