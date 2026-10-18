@@ -398,6 +398,14 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   assert.equal(JSON.parse(busyListing.body).ok, true, busyListing.body);
   assert.ok(Date.now() - duringTurn < 4000,
     "a folder lookup is answered while the agent's turn is still running");
+  // Back-to-back lookups must not wait out POLL_SECONDS: a poll that carried a
+  // request returns immediately, and the loop used to sleep after it.
+  const secondStarted = Date.now();
+  const secondListing = await request(
+    `/api/remote/code-folders?path=${encodeURIComponent(hostRepo)}`);
+  assert.equal(secondListing.status, 200, secondListing.body);
+  assert.ok(Date.now() - secondStarted < 2000,
+    "a second lookup follows the first without waiting a poll interval");
   busyRunner.kill("SIGTERM");
   await new Promise((resolve) => busyRunner.once("exit", resolve));
   rmSync(hostRoot, { recursive: true, force: true });

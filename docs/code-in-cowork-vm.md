@@ -703,6 +703,12 @@ stopped polling for its duration and the folder/git lookups timed out exactly
 while a session was active. Turns stay serialized (one worker), and the poll
 loop keeps answering lookups throughout.
 
+A poll that carries UI requests returns immediately — that is how the requests
+are handed over — and the loop's old pacing rule (sleep `POLL_SECONDS` after an
+immediate answer) then made every lookup after the first wait out that interval
+for the next poll. A request-carrying poll is work, not an idle tick: the loop
+goes straight back to a held poll, so back-to-back lookups are milliseconds.
+
 The runner lives only while the Cowork VM does, and the VM idle-stops. These
 lookups are often the first thing to touch it after that — the composer asks for
 git info and branches as soon as a folder is chosen — so an offline runner is

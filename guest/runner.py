@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.5"
+VERSION = "2.0.6"
 
 
 def env(name, default=""):
@@ -904,7 +904,8 @@ def main():
             continue
         # The web Code composer's folder/git lookups ride the same poll. They
         # are answered from inside the VM, before any session is started.
-        for item in polled.get("requests") or []:
+        requests = polled.get("requests") or []
+        for item in requests:
             handle_runner_request(item)
         hints = polled.get("hints") or []
         if not hints:
@@ -914,7 +915,11 @@ def main():
             # A held poll already answered as soon as there was work — or
             # paced the wait when there was none — so it needs no extra sleep.
             # Only an immediate answer (an older bridge without the hold) does.
-            if time.time() - started < 1.0:
+            # A poll that carried UI requests *is* such an immediate answer,
+            # but it did work: sleeping here made every request after the first
+            # wait out POLL_SECONDS for the next poll. Go straight back to a
+            # held poll instead.
+            if not requests and time.time() - started < 1.0:
                 time.sleep(POLL_SECONDS)
             continue
         for hint in hints:
