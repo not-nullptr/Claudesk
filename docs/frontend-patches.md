@@ -830,6 +830,19 @@ by the `source.kind === "code"` branch and the project conditional; the
 session-list sanitizer's field allowlist also gained `repo_info`, or the
 serialization path dropped it before the row builder saw it.
 
+`web-code-folder-prefill` makes the `+` on a folder group start a new session
+with that folder selected. The group's new-session handler asks the bucket's
+rows for a prefill (`oZ` in `shared-21`), which derived a folder only from
+rows of type `local`; a bridge session is `remote`, so the button opened a
+folderless composer. Three splices: the server-session row builder
+(`shared-11`) carries `cwd` from the normalized document; the prefill builder
+keeps the row's `cwd` (and the pool that ran it) when it sees one; and the
+draft setter (`uZ`) applies `folder` on a remote prefill instead of clearing
+the selection. Pinned by the `type:"remote"` row object, the prefill
+builder's `eZ({environmentId: row.environmentId})` declaration beside its
+`isAgentOwned` branch, and the setter's ssh guard plus `setSelectedFolder`
+binding.
+
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes
 before its local-agent-context branch, which otherwise picks `cowork` on the

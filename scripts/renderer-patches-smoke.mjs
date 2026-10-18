@@ -1810,6 +1810,28 @@ const selfHostedNormalizer = 'function normalizeSession(e){let t=e,n=e.config??{
   + 'self_hosted_runner_pool_id:e.self_hosted_runner_pool_id??null,'
   + 'session_context:{sources:n.sources??[],outcomes:n.outcomes??[],'
   + 'model:n.model??void 0,effort_level:n.effort_level??void 0},tags:e.tags}}';
+const selfHostedRemoteRow = 'function remoteRow(e){return{id:e.id,title:e.title,'
+  + 'type:"remote",isAgentOwned:!0,sessionGroupingId:e.session_grouping_id??void 0,'
+  + 'repoInfo:repoInfo(e),environmentId:e.environment_id,_originalSession:e}}';
+const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:t,'
+  + 'resolveGheConfigId:n,environmentIdByBucketKey:r,viewerAccountId:i}){'
+  + 'let a=new Map;for(let o of e){let e,s,c,l,u;for(let r of o.sessions){'
+  + 'if(r.type==="local"){if(!r.cwd)continue;'
+  + 'a.set(o.key,{kind:"local",folder:r.cwd});break}'
+  + 'if(l)continue;'
+  + 'let d=eZ({environmentId:r.environmentId,'
+  + 'poolId:r._originalSession?.self_hosted_runner_pool_id});'
+  + 'if(r.isAgentOwned||!d){u?.length||(u=yZ(r,n,i));continue}'
+  + 'l={kind:"remote",environmentId:d.type==="environment"?d.id:void 0,'
+  + 'poolId:d.type==="pool"?d.id:void 0,repos:yZ(r,n,i)}}'
+  + 'let d=r?.get(o.key),f=d||u?.length?{kind:"remote",environmentId:d,repos:u??[]}:void 0;'
+  + 'a.set(o.key,f)}return a}';
+const selfHostedRemotePrefill = 'function applyPrefill(e,t){'
+  + 'if(e.kind==="ssh"&&!t)return;'
+  + 'let{setSelectedFolder:n,markFolderPick:r,setWorker:i,setSelectedRepos:o}=draftStore.getState();'
+  + 'if(e.kind==="local")draftStore.getState().applyLocalFolderPick(e.folder);'
+  + 'else if(e.kind==="ssh"){i({type:"environment",id:t}),n(e.folder),r(),o([])}'
+  + 'else{n(null),r();let t=eZ(e);t&&i(t),o(e.repos)}}';
 const selfHostedFolderGroups = 'function group(e){if(e.source.kind==="code"){'
   + 'let t=e.source.data.sessionGroupingId;f(t?p({kind:"epitaxy-project",id:t}):jD,e);return}}'
   + 'function bucket(e){if(!(e.kind==="cowork-space"?n.has(e.id):'
@@ -1827,7 +1849,8 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
-  selfHostedRepoInfo, selfHostedNormalizer, selfHostedListFields, selfHostedFolderGroups,
+  selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBucketPrefill,
+  selfHostedRemotePrefill, selfHostedListFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
@@ -1865,6 +1888,9 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 3,
+  "the row builder, the bucket prefill and the draft setter must carry the folder");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -1908,8 +1934,18 @@ assert.ok(selfHostedOut.includes('function repoInfo(e){if(e.repo_info!==void 0)'
   + 'return e.repo_info;let t=e.session_context?.sources'),
   "the session row must return the bridge's repo_info before reading git sources");
 assert.ok(selfHostedOut.includes('effort_level:n.effort_level??void 0},tags:e.tags,'
-  + 'repo_info:e.repo_info??void 0}'),
-  "the response normalizer must carry repo_info into the sidebar's row data");
+  + 'repo_info:e.repo_info??void 0,cwd:e.cwd??e.config?.cwd??void 0}'),
+  "the response normalizer must carry repo_info and cwd into the row data");
+assert.ok(selfHostedOut.includes('environmentId:e.environment_id,_originalSession:e,'
+  + 'cwd:e.cwd??e.session_context?.cwd}'),
+  "the server-session row must carry the folder it ran in");
+assert.ok(selfHostedOut.includes('if(r.cwd&&d){a.set(o.key,{kind:"remote",'
+  + 'environmentId:d.type==="environment"?d.id:void 0,poolId:d.type==="pool"?d.id:void 0,'
+  + 'repos:yZ(r,n,i),folder:r.cwd});break;}if(r.isAgentOwned||!d)'),
+  "a folder bucket must prefill its new session with the folder");
+assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
+  + 't&&i(t),o(e.repos)}'),
+  "a remote prefill must apply its folder instead of clearing the selection");
 assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info"]'),
   "the session-list sanitizer must keep repo_info across serialization");
 assert.ok(selfHostedOut.includes('let t=e.source.data.sessionGroupingId'

@@ -2634,6 +2634,158 @@ function sessionNormalizerRepoInfoTarget(node) {
   return { object, param };
 }
 
+// The `+` on a folder group starts a new session in that folder. The sidebar
+// reads a prefill from the group's sessions (`oZ` in shared-21): it derives a
+// folder only for rows of type `local`, while a bridge session is `remote`, so
+// a folder group's plus opened a session with no folder. Three splices carry
+// the path and make the prefill use it:
+//   - the server-session row builder (`shared-11`) carries `cwd`;
+//   - the bucket prefill builder keeps the row's folder for a remote row;
+//   - the draft prefill setter (`uZ`) applies `folder` on a remote prefill
+//     instead of clearing the selection.
+// The row builder is pinned by the literal `type:"remote"` beside
+// `isAgentOwned` and `_originalSession`; the prefill builder by its option
+// object and its `eZ({environmentId: row.environmentId})` declaration; the
+// setter by the ssh guard and its `setSelectedFolder` binding.
+const folderPrefillPatchId = "web-code-folder-prefill";
+
+function remoteSessionRowTarget(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const properties = new Map();
+  for (const property of node.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key)
+      ?? (property.key?.type === "Literal" ? property.key.value : undefined);
+    if (typeof key === "string") properties.set(key, property);
+  }
+  if (!literal(properties.get("type")?.value, "remote")) return undefined;
+  const agentOwned = unwrap(properties.get("isAgentOwned")?.value);
+  if (agentOwned?.type !== "UnaryExpression" || agentOwned.operator !== "!"
+    || (!literal(agentOwned.argument, 0) && !literal(agentOwned.argument, true))) {
+    return undefined;
+  }
+  const session = identifier(properties.get("_originalSession")?.value);
+  if (!session || !properties.has("repoInfo")) return undefined;
+  if (properties.has("cwd")) return undefined;
+  return { object: node, session };
+}
+
+function folderBucketPrefillTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
+    return undefined;
+  }
+  const param = identifier(node.params[0]);
+  const options = node.params[1];
+  if (!param || options?.type !== "ObjectPattern") return undefined;
+  const optionNames = new Set();
+  for (const property of options.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key);
+    if (key) optionNames.add(key);
+  }
+  for (const required of ["sshConfigIdBySshHost", "resolveGheConfigId",
+    "environmentIdByBucketKey", "viewerAccountId"]) {
+    if (!optionNames.has(required)) return undefined;
+  }
+  let map;
+  let loop;
+  walk(node.body, [], (child) => {
+    if (!map && child.type === "VariableDeclarator" && identifier(child.id)
+      && child.init?.type === "NewExpression"
+      && identifier(child.init.callee) === "Map") {
+      map = identifier(child.id);
+    }
+    if (!loop && child.type === "ForOfStatement" && child.left?.type === "VariableDeclaration") {
+      loop = child;
+    }
+  });
+  const bucket = identifier(loop?.left?.declarations?.[0]?.id);
+  if (!map || !loop || !bucket || loop.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  // The row's place: `let d = eZ({environmentId: r.environmentId, …})` inside
+  // the loop over the bucket's sessions.
+  let environment;
+  let row;
+  walk(loop.body, [], (child) => {
+    if (environment || child.type !== "VariableDeclarator" || !identifier(child.id)) return;
+    if (child.init?.type !== "CallExpression") return;
+    const [argument] = child.init.arguments ?? [];
+    if (argument?.type !== "ObjectExpression") return;
+    const environmentId = argument.properties.find(property =>
+      property.type === "Property" && identifier(property.key) === "environmentId");
+    const value = unwrap(environmentId?.value);
+    if (value?.type !== "MemberExpression" || value.property?.name !== "environmentId") {
+      return;
+    }
+    const candidate = identifier(value.object);
+    if (!candidate) return;
+    row = candidate;
+    environment = identifier(child.id);
+  });
+  if (!row || !environment) return undefined;
+  // The `isAgentOwned || !place` branch and the repos builder it calls.
+  let branch;
+  let reposCall;
+  walk(loop.body, [], (child) => {
+    if (branch || child.type !== "IfStatement") return;
+    const test = unwrap(child.test);
+    const owned = test?.type === "LogicalExpression" ? unwrap(test.left) : undefined;
+    if (owned?.type !== "MemberExpression" || owned.property?.name !== "isAgentOwned"
+      || identifier(owned.object) !== row) return;
+    let call;
+    walk(child.consequent, [], (entry) => {
+      if (call || entry.type !== "CallExpression") return;
+      if (entry.arguments?.length !== 3 || identifier(entry.arguments[0]) !== row) return;
+      call = entry;
+    });
+    if (!call) return;
+    branch = child;
+    reposCall = call;
+  });
+  return branch ? { map, bucket, environment, row, branch, reposCall } : undefined;
+}
+
+function remotePrefillFolderTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
+    return undefined;
+  }
+  const param = identifier(node.params[0]);
+  const first = node.body.body[0];
+  if (!param || first?.type !== "IfStatement") return undefined;
+  let ssh = false;
+  walk(first, [], (child) => {
+    if (child.type === "MemberExpression" && child.property?.name === "kind"
+      && identifier(child.object) === param) {
+      ssh = true;
+    }
+  });
+  if (!ssh) return undefined;
+  let setter;
+  for (const statement of node.body.body) {
+    walk(statement, [], (child) => {
+      if (setter || child.type !== "VariableDeclarator" || child.id?.type !== "ObjectPattern") {
+        return;
+      }
+      for (const property of child.id.properties) {
+        if (property.type !== "Property" || identifier(property.key) !== "setSelectedFolder") {
+          continue;
+        }
+        setter = identifier(property.value) ?? undefined;
+      }
+    });
+  }
+  if (!setter) return undefined;
+  let argument;
+  walk(node.body, [], (child) => {
+    if (argument || child.type !== "CallExpression") return;
+    if (identifier(child.callee) !== setter) return;
+    if (child.arguments?.length !== 1 || !literal(child.arguments[0], null)) return;
+    argument = child.arguments[0];
+  });
+  return argument ? { argument, param } : undefined;
+}
+
 // The unified sidebar groups Code rows by `sessionGroupingId`, an id that
 // names an epitaxy project in the catalog served by claude.ai. A tenant has no
 // hosted projects, so every folder-placed session had no id (or an id the
@@ -3426,6 +3578,9 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const repoInfos = [];
     const sessionNormalizers = [];
     const sessionListFields = [];
+    const remoteRows = [];
+    const folderPrefills = [];
+    const remotePrefills = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -3449,6 +3604,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (repoInfo) repoInfos.push(repoInfo);
       const normalizer = sessionNormalizerRepoInfoTarget(node);
       if (normalizer) sessionNormalizers.push(normalizer);
+      const remoteRow = remoteSessionRowTarget(node);
+      if (remoteRow) remoteRows.push(remoteRow);
+      const folderPrefill = folderBucketPrefillTarget(node);
+      if (folderPrefill) folderPrefills.push(folderPrefill);
+      const remotePrefill = remotePrefillFolderTarget(node);
+      if (remotePrefill) remotePrefills.push(remotePrefill);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const codeGroup = codeSessionGroupTarget(node);
@@ -3539,13 +3700,37 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const { object, param } = sessionNormalizers[0];
       const at = object.end - 1;
       patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
-        original: "", replacement: `,repo_info:${param}.repo_info??void 0` });
+        original: "",
+        replacement: `,repo_info:${param}.repo_info??void 0`
+          + `,cwd:${param}.cwd??${param}.config?.cwd??void 0` });
     }
     if (sessionListFields.length === 1) {
       const { array } = sessionListFields[0];
       const at = array.end - 1;
       patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
         original: "", replacement: ',"repo_info"' });
+    }
+    if (remoteRows.length === 1) {
+      const { object, session } = remoteRows[0];
+      const at = object.end - 1;
+      patches.push({ id: folderPrefillPatchId, start: at, end: at, original: "",
+        replacement: `,cwd:${session}.cwd??${session}.session_context?.cwd` });
+    }
+    if (folderPrefills.length === 1) {
+      const { map, bucket, environment, row, branch, reposCall } = folderPrefills[0];
+      const repos = source.slice(reposCall.start, reposCall.end);
+      patches.push({ id: folderPrefillPatchId, start: branch.start, end: branch.start,
+        original: "",
+        replacement: `if(${row}.cwd&&${environment}){${map}.set(${bucket}.key,`
+          + `{kind:"remote",environmentId:${environment}.type==="environment"`
+          + `?${environment}.id:void 0,poolId:${environment}.type==="pool"`
+          + `?${environment}.id:void 0,repos:${repos},folder:${row}.cwd});break;}` });
+    }
+    if (remotePrefills.length === 1) {
+      const { argument, param } = remotePrefills[0];
+      patches.push({ id: folderPrefillPatchId, start: argument.start, end: argument.end,
+        original: source.slice(argument.start, argument.end),
+        replacement: `${param}.folder??null` });
     }
     if (codeGroups.length === 1) {
       const { declarator, session } = codeGroups[0];
