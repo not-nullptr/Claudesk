@@ -135,12 +135,19 @@ sudo "$project_dir/scripts/converge-users.sh"
 # each account's VM image, not in a container image, so a change to it needs a
 # re-stamp per account. Skipping this is a silent half-deploy: the containers
 # are current while every VM still runs the previous runner (and, for example,
-# misses the held poll that makes work pickup immediate). The installer is
-# stamped and idempotent — it stops a running VM for the write, and the next
-# placed session wakes it again — so running it for every provisioned account
-# costs a VM stop when nothing changed, and correctness when something did.
-if command -v authd >/dev/null 2>&1; then
-    authd --provisioned 2>/dev/null | while IFS= read -r account_email; do
+# misses the UI-request lane that answers the Code folder picker). The
+# installer is stamped and idempotent — it stops a running VM for the write,
+# and the next placed session wakes it again — so running it for every
+# provisioned account costs a VM stop when nothing changed, and correctness
+# when something did.
+#
+# The account list comes from authd *in its container*: it is not installed on
+# the host, and a `command -v authd` guard here silently skipped every guest
+# refresh (the containers were current while the VMs kept an old runner).
+guest_accounts="$(sudo docker compose -f compose.yaml exec -T authd \
+    /app/authd --provisioned 2>/dev/null || true)"
+if [ -n "$guest_accounts" ]; then
+    printf '%s\n' "$guest_accounts" | while IFS= read -r account_email; do
         [ -n "$account_email" ] || continue
         printf 'deploy: refreshing the guest runner for %s\n' "$account_email" >&2
         if sudo "$project_dir/scripts/install-guest-runner.sh" "$account_email" >&2; then
@@ -150,4 +157,6 @@ if command -v authd >/dev/null 2>&1; then
                 "$account_email" >&2
         fi
     done
+else
+    printf 'deploy: no provisioned accounts to refresh a guest runner for\n' >&2
 fi

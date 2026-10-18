@@ -343,10 +343,30 @@ export function createRunnerBackend({
     const raw = Number(process.env.CLAUDESK_RUNNER_WAKE_WAIT_MS);
     return Number.isFinite(raw) && raw >= 0 ? raw : 5000;
   })();
-  const runnerOnline = (state, pool) => state.runners.some((runner) =>
-    runner.pool_id === pool.pool_id
-    && typeof runner.last_poll_at === "string"
-    && Date.now() - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
+  // A poll authenticated by a runner_token is attributable to that runner; the
+  // shared pool secret (an older runner) can only say "someone on the pool
+  // polled". Prefer attributed records when there are any, so a dead
+  // registration refreshed by another runner's broad poll cannot look online
+  // — and its version cannot make the request lane look available.
+  const lastSeen = (runner) => runner.last_runner_poll_at ?? runner.last_poll_at;
+  function onlineRunners(state, pool) {
+    const now = Date.now();
+    const fresh = (runner) => {
+      const stamp = lastSeen(runner);
+      return typeof stamp === "string" && now - Date.parse(stamp) < runnerOnlineWindowMs;
+    };
+    const all = state.runners.filter(
+      (runner) => runner.pool_id === pool.pool_id && fresh(runner));
+    const attributed = all.filter(
+      (runner) => typeof runner.last_runner_poll_at === "string");
+    return attributed.length ? attributed : all;
+  }
+  const runnerOnline = (state, pool) => onlineRunners(state, pool).length > 0;
+  function liveRunner(state, pool) {
+    return [...onlineRunners(state, pool)].sort((a, b) =>
+      Date.parse(lastSeen(b) || 0) - Date.parse(lastSeen(a) || 0)
+      || Date.parse(b.registered_at || 0) - Date.parse(a.registered_at || 0))[0] ?? null;
+  }
   // The UI request lane (`requests` beside `hints` on the poll) is guest runner
   // 2.0.2+. An older runner accepts the poll and silently ignores the key, so
   // every folder/branch lookup burns the full timeout and reads as a hang. Say
@@ -366,12 +386,6 @@ export function createRunnerBackend({
     }
     return true;
   }
-  function onlineRunners(state, pool) {
-    return state.runners.filter((runner) => runner.pool_id === pool.pool_id
-      && typeof runner.last_poll_at === "string"
-      && Date.now() - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
-  }
-
   // Long polls. A runner that says how long it is willing to wait
   // (`x-claudesk-poll-wait: <seconds>`) has an empty poll held open until a
   // placement, a requeue or a retry wakes its pool — the runner then draws the
@@ -499,15 +513,10 @@ export function createRunnerBackend({
     if (!runnerOnline(state, pool)) {
       throw runnerUnavailable("no guest runner is online", 503);
     }
-    const online = onlineRunners(state, pool);
-    if (online.length && !online.some((runner) =>
-      versionAtLeast(runner.runner_version, requestLaneVersion))) {
-      // A stale registration from a pre-2.0.2 runner can sit beside the live
-      // one; only refuse when *no* online runner supports the request lane.
-      const versions = [...new Set(online.map(
-        (runner) => runner.runner_version || "unknown"))].join(", ");
+    const live = liveRunner(state, pool);
+    if (live && !versionAtLeast(live.runner_version, requestLaneVersion)) {
       throw runnerUnavailable(
-        `the guest runner is version ${versions}; `
+        `the guest runner is version ${live.runner_version || "unknown"}; `
         + "folder and branch lookups need the runner from this deployment "
         + "(2.0.2 or newer). Refresh it with scripts/install-guest-runner.sh "
         + "or deploy.sh.", 501);
@@ -640,6 +649,15 @@ export function createRunnerBackend({
       return state.pools.find((pool) => pool.pool_id === byToken.pool_id) ?? null;
     }
     return null;
+  }
+
+  // The runner a credential names, when it is a per-runner token rather than
+  // the pool's shared secret. Null means "the pool secret", which a legacy
+  // runner still polls with.
+  function runnerByToken(state, headers) {
+    const token = bearerToken(headers);
+    if (!token) return null;
+    return state.runners.find((runner) => runner.runner_token === token) ?? null;
   }
 
   // Session-scoped calls carry the session token the runner was issued, or a
@@ -775,7 +793,18 @@ export function createRunnerBackend({
         client_label: body?.client_label ?? "",
         registered_at: new Date().toISOString(),
         last_poll_at: null,
+        last_runner_poll_at: null,
       };
+      // A restart re-registers with the same client label; the previous record
+      // is the same worker, not a second one. Keeping it left a growing list
+      // of versions (and made a dead 2.0.2 registration able to vouch for the
+      // request lane while the live runner was older).
+      if (runner.client_label) {
+        state.runners = state.runners.filter(
+          (existing) => !(existing.pool_id === pool.pool_id
+            && existing.client_label === runner.client_label),
+        );
+      }
       state.runners.push(runner);
       await save();
       log.log(`[code-runners] runner ${runner.runner_id} registered on pool ${pool.pool_id}`
@@ -802,8 +831,14 @@ export function createRunnerBackend({
       const pool = poolForSecret(state, headers);
       if (!pool) return { unauthorized: true };
       const now = new Date().toISOString();
+      const poller = runnerByToken(state, headers);
       for (const runner of state.runners) {
-        if (runner.pool_id === pool.pool_id) runner.last_poll_at = now;
+        if (runner.pool_id !== pool.pool_id) continue;
+        // A token poll names its runner; the pool secret cannot, so an older
+        // runner still refreshes the whole pool's records (as it always did).
+        if (poller && runner.runner_id !== poller.runner_id) continue;
+        runner.last_poll_at = now;
+        if (poller) runner.last_runner_poll_at = now;
       }
       await save();
       const mine = state.sessions.filter(
@@ -1573,17 +1608,18 @@ export function createRunnerBackend({
       const pool = state.pools[0];
       if (!pool) return null;
       const online = onlineRunners(state, pool);
-      const newest = [...online].sort(
-        (a, b) => Date.parse(b.registered_at || 0) - Date.parse(a.registered_at || 0),
-      )[0];
+      const live = liveRunner(state, pool);
       return {
         pool_id: pool.pool_id,
         online: online.length > 0,
         runner_versions: [...new Set(online.map((runner) => runner.runner_version || "unknown"))],
-        last_poll_at: newest?.last_poll_at ?? null,
-        request_lane: online.some(
-          (runner) => versionAtLeast(runner.runner_version, requestLaneVersion),
-        ),
+        live_version: live?.runner_version || null,
+        last_poll_at: live ? lastSeen(live) : null,
+        // Whether polls are attributable to a specific runner (2.0.5+). Before
+        // that the pool secret refreshed every registration, so the list can
+        // still carry stale versions.
+        attributed: online.some((runner) => typeof runner.last_runner_poll_at === "string"),
+        request_lane: Boolean(live && versionAtLeast(live.runner_version, requestLaneVersion)),
       };
     },
 

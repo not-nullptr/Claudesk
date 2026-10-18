@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.4"
+VERSION = "2.0.5"
 
 
 def env(name, default=""):
@@ -109,13 +109,20 @@ def log(message):
     sys.stdout.flush()
 
 
+# The per-runner credential handed out by register(). Polls and results use it
+# after registration so the bridge can attribute a poll to *this* runner; with
+# the shared pool secret it could only say "someone on the pool polled", which
+# left dead registrations looking online forever.
+RUNNER_TOKEN = ""
+
+
 def request(path, body=None, token=None, method=None, headers=None):
     """One call to the bridge. Returns (status, parsed-body-or-text)."""
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(BASE + path, data=data,
                                  method=method or ("POST" if body is not None else "GET"))
     req.add_header("content-type", "application/json")
-    req.add_header("authorization", "Bearer %s" % (token or SECRET))
+    req.add_header("authorization", "Bearer %s" % (token or RUNNER_TOKEN or SECRET))
     for name, value in (headers or {}).items():
         req.add_header(name, value)
     try:
@@ -139,11 +146,13 @@ def expect(answer, what):
 
 
 def register():
+    global RUNNER_TOKEN
     body = expect(request("/v1/code/runners/self-hosted/runners/register", {
         "runner_version": VERSION,
         "use_anthropic_git_proxy": False,
         "client_label": "claudesk-guest-runner",
     }), "register")
+    RUNNER_TOKEN = body.get("runner_token") or ""
     log("registered as %s" % body["runner_id"])
     return body["runner_id"]
 

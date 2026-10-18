@@ -360,6 +360,30 @@ try {
   const archivedOnly = await backend.listSessions({ searchParams: new URLSearchParams("statuses=archived") });
   assert.equal(archivedOnly.data.some((row) => row.id === placed.session.id), true);
 
+  // A restarted runner re-registers with the same client label; it replaces
+  // its old record, and a token-authenticated poll is attributed to it alone
+  // instead of refreshing every stale registration on the pool.
+  await backend.registerRunner({
+    headers: auth,
+    body: { runner_version: "2.0.4", client_label: "claudesk-guest-runner" },
+  });
+  const relabelled = await backend.registerRunner({
+    headers: auth,
+    body: { runner_version: "2.0.5", client_label: "claudesk-guest-runner" },
+  });
+  const stored = JSON.parse(await readFile(join(stateDir, "code-runners.json"), "utf8"));
+  assert.equal(stored.runners.filter(
+    (runner) => runner.client_label === "claudesk-guest-runner").length, 1,
+  "a re-registering runner replaces its previous record");
+  await backend.pollSpawnHints({
+    headers: { authorization: `Bearer ${relabelled.runner_token}` },
+  });
+  const status = await backend.runnerStatus();
+  assert.equal(status.attributed, true, "a token poll names the runner that made it");
+  assert.equal(status.live_version, "2.0.5",
+    "the live runner is the one that polled, not every registration on the pool");
+  assert.equal(status.request_lane, true);
+
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });
   assert.equal((await backend.listPools()).pools.length, 0);

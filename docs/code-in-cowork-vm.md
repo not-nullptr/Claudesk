@@ -679,8 +679,23 @@ a runner at once with a `501` naming its version and how to refresh it
 (`scripts/install-guest-runner.sh`, or `deploy.sh`). A timeout that does happen
 says whether the runner took the request and stayed silent, or never polled to
 take it, so the two failure shapes are distinguishable in the picker's message.
-`GET /api/health` reports `codeRunner` — online, version(s), last poll and
-`request_lane` — which distinguishes a stale guest image from a bridge problem.
+`GET /api/health` reports `codeRunner` — online, version(s), live version, last
+poll, whether polls are runner-attributed, and `request_lane` — which
+distinguishes a stale guest image from a bridge problem.
+
+From runner 2.0.5 the guest switches to the per-runner `runner_token` that
+`runners/register` returns for every later call. The bridge can then attribute
+a poll to one record; a restarted runner also replaces its previous record
+(same `client_label`), so the registration list is the live runner rather than
+a growing history of versions. Older runners keep the pool-secret poll, which
+refreshes every record on the pool; the bridge falls back to that behaviour
+when no poll is attributable.
+
+`deploy.sh` refreshes every provisioned account's guest payload. It asks authd
+inside its container (`docker compose exec authd /app/authd --provisioned`);
+earlier it looked for `authd` on the host, which does not exist there, so the
+whole refresh silently did nothing even though the container images were
+current.
 
 The service also runs session turns on a worker thread, not inline in the poll
 loop. A turn can last up to `TURN_TIMEOUT`; with the agent inline the runner
