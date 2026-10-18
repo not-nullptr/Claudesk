@@ -71,6 +71,9 @@ try {
       CLAUDESK_TENANT: "1",
       CLAUDESK_CODE_RUNNERS: "1",
       CLAUDESK_CODE_RUNNER_POOL: "guest-smoke",
+      // The Code folder route waits this long for the guest before answering
+      // from the workspace mount; the smoke pins the fallback path.
+      CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS: "250",
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -90,7 +93,16 @@ try {
   const secret = JSON.parse(readFileSync(join(stateDir, "code-runners.json"), "utf8"))
     .pools[0].secret;
 
-  // The runner registers on start-up, which is what makes the pool a place.
+  // The Code folder picker never waits on a cold VM: with no runner yet, the
+  // route answers from the bridge's own workspace mount instead of leaving the
+  // dialog on "Loading server folders…".
+  const fallbackListing = JSON.parse(
+    (await request("/api/remote/code-folders?path=%2Fworkspace")).body);
+  assert.equal(fallbackListing.ok, true, JSON.stringify(fallbackListing));
+  assert.equal(fallbackListing.value.path, "/workspace",
+    "the workspace-mount fallback answers when no runner is online");
+
+  // The runner registers on start-up and answers the pool's poll.
   const idle = runRunner({ secret });
   assert.equal(idle.status, 0, idle.stderr);
   assert.match(idle.stdout, /registered as ccrunner_/, idle.stdout);
@@ -98,13 +110,21 @@ try {
 
   const places = JSON.parse((await request("/v1/environment_providers/private/organizations/"
     + "00000000-0000-4000-8000-000000000000/environments")).body).environments;
-  assert.equal(places.length, 1, "the guest runner's registration makes the pool a place");
+  assert.equal(places.length, 1, "the instance's pool is offered as its place");
 
   // A session with a prompt, placed the way the Code surface places one.
   const placed = await request("/v1/code/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "guest smoke", environment_id: poolId, config: { model: "claude-opus-5-5" } }),
+    body: JSON.stringify({
+      title: "guest smoke",
+      environment_id: poolId,
+      config: {
+        model: "claude-opus-5-5",
+        permission_mode: "bypassPermissions",
+        effort_level: "high",
+      },
+    }),
   });
   const sessionId = JSON.parse(placed.body).session.id;
   await request(`/v1/code/sessions/${sessionId}/events`, {
@@ -127,8 +147,9 @@ try {
   assert.equal(decoded[1].message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + " --permission-mode bypassPermissions --effort high"
     + " | prompt: summarise the repo",
-    "the agent ran with the product runner's own flags on the session's prompt");
+    "the agent ran with the product runner's own flags and the session's effort on the prompt");
   const releasedDoc = JSON.parse((await request(`/v1/code/sessions/${sessionId}`)).body).session;
   assert.equal(releasedDoc.status, "active", "a session the app reads stays active");
   assert.equal(releasedDoc.worker_status, "idle", "a clean run leaves it idle");
@@ -152,6 +173,7 @@ try {
   assert.equal(decoded2[4].message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + " --permission-mode bypassPermissions --effort high"
     + " --resume 11111111-1111-4111-8111-111111111111"
     + " | prompt: and tighten the summary",
     "the runner resumed the conversation the agent's own events named");

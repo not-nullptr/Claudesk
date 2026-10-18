@@ -334,6 +334,15 @@ export function createRunnerBackend({
     const raw = Number(process.env.CLAUDESK_RUNNER_WAKE_MS);
     return Number.isFinite(raw) && raw >= 0 ? raw : 20000;
   })();
+  // How long a UI read waits for the VM wake before answering unavailable. The
+  // wake itself keeps running — `startVM` can take a minute on a cold VM — but
+  // the folder picker must not sit on "Loading server folders…" for that long;
+  // the route falls back to the workspace mount and the next open finds the
+  // runner online.
+  const runnerWakeWaitMs = (() => {
+    const raw = Number(process.env.CLAUDESK_RUNNER_WAKE_WAIT_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 5000;
+  })();
   const runnerOnline = (state, pool) => state.runners.some((runner) =>
     runner.pool_id === pool.pool_id
     && typeof runner.last_poll_at === "string"
@@ -457,7 +466,10 @@ export function createRunnerBackend({
       throw runnerUnavailable("no self-hosted runner pool is configured", 503);
     }
     if (!runnerOnline(state, pool)) {
-      await wakeRunnerForReads(pool);
+      await Promise.race([
+        wakeRunnerForReads(pool),
+        new Promise((resolve) => setTimeout(resolve, runnerWakeWaitMs)),
+      ]);
       state = await load();
     }
     if (!runnerOnline(state, pool)) {
@@ -556,18 +568,19 @@ export function createRunnerBackend({
     return state.pools.find((pool) => pool.pool_id === poolId) ?? null;
   }
 
-  // Advertised places are pools a runner has actually registered with. A pool is
-  // created the moment the bridge starts, before anything can run on it, and
-  // offering it then would let a session be placed somewhere nothing is polling
-  // — it would sit pending forever, which reads as a broken product rather than
-  // an unconfigured one. So the surface starts empty and gains the place when a
-  // runner arrives, and `poolEnvironment` marks a pool without one offline.
+  // Advertised places are this instance's active pools. A pool exists from the
+  // moment the bridge starts, whether or not its runner has polled yet, and it
+  // is always the one place a session can go: placing one wakes the VM (the
+  // create route calls `wakeRunnerVm`). Filtering to pools with a registered
+  // runner made the place vanish for a fresh account — the Code composer and the
+  // routine form's environment picker were empty ("Select a cloud environment")
+  // until the user had started a session somewhere else first. The pool is what
+  // the deployment offers, so it is what the list carries; `poolEnvironment`
+  // still marks a disabled pool as unknown.
   async function environments() {
     const state = await load();
     return state.pools
-      .map((pool) => poolEnvironment(pool, {
-        online: state.runners.some((runner) => runner.pool_id === pool.pool_id),
-      }))
+      .map((pool) => poolEnvironment(pool, { online: true }))
       .filter((environment) => environment.state === "active");
   }
 
@@ -1495,11 +1508,9 @@ export function createRunnerBackend({
       const state = await load();
       const pool = poolById(state, id);
       if (!pool) return null;
-      // Same rule as the list: a pool with no registered runner is not a place
-      // anything can run, so it reads as offline rather than as a live choice.
-      return poolEnvironment(pool, {
-        online: state.runners.some((runner) => runner.pool_id === pool.pool_id),
-      });
+      // Same rule as the list: the instance's own pool is the place sessions
+      // run, and placing one wakes its VM.
+      return poolEnvironment(pool, { online: true });
     },
 
     /** The pool a runner is pointed at, for provisioning and diagnostics. */

@@ -64,18 +64,18 @@ try {
 
   const runner = createRunnerClient({ base: `http://127.0.0.1:${port}`, secret });
 
-  // A runner that has not registered yet does not make the pool a place.
-  assert.deepEqual(
-    JSON.parse((await request("/v1/environment_providers/private/organizations/"
-      + "00000000-0000-4000-8000-000000000000/environments")).body).environments,
-    [],
-    "the pool is not a place before a runner claims it",
-  );
+  // The pool is a place before a runner registers: placing a session wakes the
+  // VM, so a fresh account's picker is not empty.
+  const early = JSON.parse((await request("/v1/environment_providers/private/organizations/"
+    + "00000000-0000-4000-8000-000000000000/environments")).body).environments;
+  assert.equal(early.length, 1, "the pool is a place before a runner claims it");
+  assert.equal(early[0].environment_id, poolId);
+  assert.equal(early[0].state, "active");
   await runner.register();
   const places = JSON.parse((await request("/v1/environment_providers/private/organizations/"
     + "00000000-0000-4000-8000-000000000000/environments")).body).environments;
   assert.equal(places.length, 1);
-  assert.equal(places[0].environment_id, poolId, "registering makes the pool a place");
+  assert.equal(places[0].environment_id, poolId, "registering keeps the pool a place");
 
   // A runner with nothing to do is told so, rather than blocking.
   const idle = await runner.poll();

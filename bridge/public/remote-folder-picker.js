@@ -8,7 +8,17 @@
     return source === "code" ? "/api/remote/code-folders" : "/api/remote/folders";
   }
   async function listing(path, signal, source) {
-    const response = await fetch(`${folderApi(source)}${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal });
+    // A bridge that cannot answer must not leave the dialog on its loading
+    // line forever: bound the read, and let the catch below show the reason.
+    let effective = signal;
+    try {
+      if (typeof AbortSignal.timeout === "function") {
+        const timeout = AbortSignal.timeout(30000);
+        effective = typeof AbortSignal.any === "function"
+          ? AbortSignal.any([signal, timeout]) : timeout;
+      }
+    } catch {}
+    const response = await fetch(`${folderApi(source)}${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal: effective });
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || "Could not browse server folders");
     return result.value;

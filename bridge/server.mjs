@@ -158,7 +158,13 @@ const loginShellEnabled = process.env.CLAUDE_REMOTE_LOGIN_SHELL === "1";
 // `dramatic_shrimp` is the (secret) internal flag ion-dist's web-Cowork gate
 // reads; `cowork_remote_control` is its productized twin. Both sit beside the
 // `cowork`/`claude_code_desktop` entitlements the deployment already carries.
-const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control"];
+const webShellGrantedFeatures = ["dramatic_shrimp", "cowork_remote_control",
+  // The Code permission picker reads these to decide whether the bypass and
+  // auto rows exist. A 3p deployment has no backend that would grant them, and
+  // the operator asked for bypass in the Code surface, so the web shell says
+  // available. Only an absent entry is added — an upstream `blocked_by_*` is
+  // left to speak for itself.
+  "claude_code_desktop_bypass_permissions", "claude_code_desktop_auto_permissions"];
 // GrowthBook gates the web shell reads from the bootstrap's `growthbook.features`
 // (ion-dist keys them by a Java-style hash of the name). `bad_moon_rising` is the
 // "Claude Code web access" gate: without it the Code pill does not navigate to
@@ -2227,7 +2233,13 @@ function grantTenantCodeEntitlements(value) {
       holder.features.filter((entry) => entry && typeof entry.feature === "string")
         .map((entry) => entry.feature),
     );
-    for (const feature of ["claude_code_web", "claude_code_self_hosted_runners"]) {
+    for (const feature of ["claude_code_web", "claude_code_self_hosted_runners",
+      // The permission-mode picker's bypass and auto rows are entitlement-gated
+      // (`claude_code_desktop_bypass_permissions` / `…_auto_permissions`). This
+      // deployment has no Anthropic backend to grant them, and its sessions run
+      // in its own VM, where the operator asked for bypass to be available.
+      "claude_code_desktop_bypass_permissions",
+      "claude_code_desktop_auto_permissions"]) {
       if (present.has(feature)) continue;
       holder.features.push({ feature, status: "available" });
       changed = true;
@@ -3112,6 +3124,43 @@ async function sendSessionMessage(sessionId, message) {
     undefined,
   ], "json-undefined-v1");
   return { value, messageUuid };
+}
+
+// The Code composer's folder picker. The listing is normally answered by the
+// guest runner, because that is where a session runs. A cold or idle-stopped
+// VM must not leave the picker on "Loading server folders…" while `startVM`
+// boots, though, so the guest gets a bounded wait and the bridge answers from
+// the workspace mount it already serves when it does not arrive in time. Both
+// views are the same account tree (`/workspace/...` on the host), so the
+// fallback is a listing of the same paths, and the guest request in flight keeps
+// running: the next open finds the runner online. `CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS`
+// tunes the wait.
+const codeFolderGuestWaitMs = (() => {
+  const raw = Number(process.env.CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 6000;
+})();
+
+async function answerCodeFolderRead(guest, fallback, what) {
+  const pending = Promise.resolve().then(guest);
+  // The guest leg may settle after the race (its own timeout, or a late
+  // runner answer); keep that rejection from surfacing as unhandled.
+  pending.catch(() => {});
+  const timedOut = Symbol("guest-folder-timeout");
+  let value;
+  try {
+    value = await Promise.race([
+      pending,
+      new Promise((resolve) => setTimeout(() => resolve(timedOut), codeFolderGuestWaitMs)),
+    ]);
+  } catch (error) {
+    console.warn(`[cowork-bridge] guest ${what} folders failed (${error?.message || error}); `
+      + "answering from the workspace mount");
+    return fallback();
+  }
+  if (value !== timedOut) return value;
+  console.warn(`[cowork-bridge] guest ${what} folders did not answer within `
+    + `${codeFolderGuestWaitMs}ms; answering from the workspace mount`);
+  return fallback();
 }
 
 // Desktop's Code UI resolves a session's permission mode from the layer stored
@@ -4340,11 +4389,11 @@ async function handleApi(request, response, url) {
     const path = await resolveContainedRealPath(workspaceRoot, requested).catch(() => {
       throw new ApiError(403, "code folders are confined to the workspace");
     });
-    const value = await codeRunners.listRunnerFolders({ root: workspaceRoot, path })
-      .catch((error) => {
-        throw new ApiError(Number(error?.statusCode) || 503,
-          error?.message || "the guest runner did not answer");
-      });
+    const value = await answerCodeFolderRead(
+      () => codeRunners.listRunnerFolders({ root: workspaceRoot, path }),
+      () => listWorkspaceFolders(workspaceRoot, path),
+      "list",
+    );
     sendJson(response, 200, { ok: true, value });
     return;
   }
@@ -4356,9 +4405,11 @@ async function handleApi(request, response, url) {
         throw new ApiError(403, "code folders are confined to the workspace");
       });
     if (!validFolderName(body.name)) throw new ApiError(400, "folder name is invalid");
-    const value = await codeRunners.createRunnerFolder({
-      root: workspaceRoot, path, name: body.name,
-    }).catch((error) => {
+    const value = await answerCodeFolderRead(
+      () => codeRunners.createRunnerFolder({ root: workspaceRoot, path, name: body.name }),
+      () => createWorkspaceFolder(workspaceRoot, path, body.name),
+      "create",
+    ).catch((error) => {
       throw new ApiError(Number(error?.statusCode) || 503,
         error?.message || "the guest runner did not answer");
     });

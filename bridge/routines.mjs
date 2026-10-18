@@ -196,9 +196,14 @@ export function createRoutineService({
         tokens: isRecord(parsed.tokens) ? parsed.tokens : {},
         fires: isRecord(parsed.fires) ? parsed.fires : {},
         api_fires: Array.isArray(parsed.api_fires) ? parsed.api_fires : [],
-      } : { version: 1, tokens: {}, fires: {}, api_fires: [] };
+        // Per-routine settings the scheduled-task store has no field for. Today
+        // that is the effort level: a Code session carries `effort_level`, but
+        // the Desktop's task record only keeps model/permission/cwd. The bridge
+        // stores it here and puts it on the fire body it starts.
+        configs: isRecord(parsed.configs) ? parsed.configs : {},
+      } : { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {} };
     } catch {
-      cache = { version: 1, tokens: {}, fires: {}, api_fires: [] };
+      cache = { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {} };
     }
     return cache;
   }
@@ -303,6 +308,8 @@ export function createRoutineService({
   function triggerDocument(state, task, taskId, prompt) {
     const routineId = routineIdForTaskId(taskId);
     const token = tokenFor(state, routineId);
+    const config = isRecord(state.configs?.[routineId]) ? state.configs[routineId] : {};
+    const effort = textOf(config.effort);
     return {
       id: routineId,
       name: task.displayName || task.name || taskId,
@@ -318,6 +325,12 @@ export function createRoutineService({
               sources: [],
               outcomes: [],
               model: textOf(task.model) || null,
+              // The Code form edits through the job config; carrying the
+              // start options here (as well as the top-level fields above)
+              // is what lets the edit form show the routine's own values.
+              ...(textOf(task.cwd) ? { cwd: task.cwd } : {}),
+              ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+              ...(effort ? { effort_level: effort } : {}),
             },
             events: prompt
               ? [{
@@ -338,6 +351,7 @@ export function createRoutineService({
       ...(isoTime(task.lastRunAt) ? { last_fired_at: isoTime(task.lastRunAt) } : {}),
       ...(textOf(task.model) ? { model: task.model } : {}),
       ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+      ...(effort ? { effort_level: effort, effort } : {}),
       persist_session: false,
       source: "local",
       kind: taskKind(task),
@@ -436,7 +450,7 @@ export function createRoutineService({
     };
   }
 
-  async function startCodeSession(task, message, model, images = [], routineId = "") {
+  async function startCodeSession(task, message, model, images = [], routineId = "", effort = "") {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -456,6 +470,7 @@ export function createRoutineService({
           sources: [],
           ...(textOf(task.cwd) ? { cwd: task.cwd } : {}),
           model,
+          ...(effort ? { effort_level: effort } : {}),
           ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
         },
         events: [userEvent(message, images)],
@@ -524,8 +539,9 @@ export function createRoutineService({
 
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
+    const effort = textOf(state.configs?.[canonicalId]?.effort);
     const sessionId = kind === "code"
-      ? await startCodeSession(task, message, model, attached, canonicalId)
+      ? await startCodeSession(task, message, model, attached, canonicalId, effort)
       : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
@@ -618,13 +634,19 @@ export function createRoutineService({
       };
       if (textOf(body.cron_expression)) args.cronExpression = body.cron_expression;
       if (textOf(body.run_once_at)) args.fireAt = body.run_once_at;
-      // The Code form carries its model in the runner job, not at the top
-      // level; the Cowork form sends the flat field.
-      const chosenModel = textOf(body.model)
-        || textOf(body?.job_config?.ccr?.session_context?.model);
+      // The Code form carries its model, start folder, permission mode and
+      // effort in the runner job, not at the top level; the Cowork form sends
+      // flat fields. Both spellings are accepted.
+      const context = isRecord(body?.job_config?.ccr?.session_context)
+        ? body.job_config.ccr.session_context : {};
+      const chosenModel = textOf(body.model) || textOf(context.model);
       if (chosenModel) args.model = chosenModel;
-      if (textOf(body.permission_mode)) args.permissionMode = body.permission_mode;
-      if (textOf(body.cwd)) args.cwd = body.cwd;
+      const chosenPermission = textOf(body.permission_mode) || textOf(context.permission_mode);
+      if (chosenPermission) args.permissionMode = chosenPermission;
+      const chosenCwd = textOf(body.cwd) || textOf(context.cwd);
+      if (chosenCwd) args.cwd = chosenCwd;
+      const chosenEffort = textOf(body.effort_level ?? body.effort)
+        || textOf(context.effort_level ?? context.effort);
       // A routine is a Code scheduled task. On a build with the Code store
       // that is where every create lands, whichever form shape it came in.
       const surface = await routineStore();
@@ -645,7 +667,13 @@ export function createRoutineService({
           (task.displayName || task.name) === args.displayName)?.id;
       }
       if (!taskId) throw new RoutineError(502, "api_error", "the routine was not created");
-      return { ...(await getTriggerDocument(routineIdForTaskId(taskId))), deduplicated: false };
+      const routineId = routineIdForTaskId(taskId);
+      if (chosenEffort) {
+        await mutate((state) => {
+          state.configs[routineId] = { ...(state.configs[routineId] || {}), effort: chosenEffort };
+        });
+      }
+      return { ...(await getTriggerDocument(routineId)), deduplicated: false };
     },
 
     /** POST/PATCH /v1/code/triggers/:id */
@@ -664,13 +692,27 @@ export function createRoutineService({
       if (body.description !== undefined) patch.description = textOf(body.description);
       if (body.cron_expression !== undefined) patch.cronExpression = textOf(body.cron_expression) || undefined;
       if (body.run_once_at !== undefined) patch.fireAt = textOf(body.run_once_at) || undefined;
+      const context = isRecord(body?.job_config?.ccr?.session_context)
+        ? body.job_config.ccr.session_context : null;
       if (body.model !== undefined) {
         patch.model = textOf(body.model) || undefined;
-      } else if (isRecord(body?.job_config?.ccr?.session_context)) {
-        patch.model = textOf(body.job_config.ccr.session_context.model) || undefined;
+      } else if (context) {
+        patch.model = textOf(context.model) || undefined;
       }
-      if (body.permission_mode !== undefined) patch.permissionMode = textOf(body.permission_mode) || undefined;
-      if (body.cwd !== undefined) patch.cwd = textOf(body.cwd) || undefined;
+      if (body.permission_mode !== undefined) {
+        patch.permissionMode = textOf(body.permission_mode) || undefined;
+      } else if (context && context.permission_mode !== undefined) {
+        patch.permissionMode = textOf(context.permission_mode) || undefined;
+      }
+      if (body.cwd !== undefined) {
+        patch.cwd = textOf(body.cwd) || undefined;
+      } else if (context && context.cwd !== undefined) {
+        patch.cwd = textOf(context.cwd) || undefined;
+      }
+      const effortGiven = body.effort_level !== undefined || body.effort !== undefined
+        || (context && (context.effort_level !== undefined || context.effort !== undefined));
+      const chosenEffort = textOf(body.effort_level ?? body.effort)
+        || textOf(context?.effort_level ?? context?.effort);
       const surface = task._routineSurface ?? "CoworkScheduledTasks";
       if (Object.keys(patch).length) {
         try {
@@ -686,6 +728,13 @@ export function createRoutineService({
           [taskId, body.enabled === false ? "disabled" : "enabled", undefined,
             task.source ?? "local"]);
       }
+      if (effortGiven) {
+        await mutate((state) => {
+          const current = state.configs[routineId] || {};
+          if (chosenEffort) state.configs[routineId] = { ...current, effort: chosenEffort };
+          else delete state.configs[routineId];
+        });
+      }
       return getTriggerDocument(routineId);
     },
 
@@ -694,9 +743,11 @@ export function createRoutineService({
       const { task, taskId } = await taskRecord(routineId);
       const source = task.source ?? "local";
       const state = await load();
-      if (state.tokens[routineId]) {
-        // A routine with no future cannot keep a live fire credential.
+      if (state.tokens[routineId] || state.configs[routineId]) {
+        // A routine with no future cannot keep a live fire credential, and its
+        // per-routine settings die with it.
         delete state.tokens[routineId];
+        delete state.configs[routineId];
         await save(state);
       }
       try {

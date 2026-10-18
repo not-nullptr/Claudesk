@@ -140,6 +140,9 @@ const cloudCreate = {
         sources: [],
         outcomes: [],
         model: null,
+        cwd: "/workspace/created-repo",
+        permission_mode: "bypassPermissions",
+        effort_level: "high",
       },
       events: [{
         data: {
@@ -191,6 +194,8 @@ const createDesktop = {
         displayName: params.displayName,
         filePath: "/config/.claude/scheduled-tasks/cloud-1/SKILL.md",
         enabled: true,
+        ...(params.cwd ? { cwd: params.cwd } : {}),
+        ...(params.permissionMode ? { permissionMode: params.permissionMode } : {}),
       };
       routineTasks.push(task);
       routineFiles[task.id] = `---\nname: ${params.name}\n---\n${params.prompt}\n`;
@@ -201,6 +206,10 @@ const createDesktop = {
       lastUpdate = args[0];
       if (lastUpdate.prompt !== undefined) {
         routineFiles["cloud-1"] = `---\nname: test-routine\n---\n${lastUpdate.prompt}\n`;
+      }
+      if (lastUpdate.cwd !== undefined) routineTasks[0].cwd = lastUpdate.cwd;
+      if (lastUpdate.permissionMode !== undefined) {
+        routineTasks[0].permissionMode = lastUpdate.permissionMode;
       }
       return routineTasks[0];
     }
@@ -241,6 +250,17 @@ assert.equal(createdTrigger.trigger.prompt,
 assert.equal(createdTrigger.trigger.name, "test routine");
 assert.equal(createdTrigger.trigger.kind, "code",
   "the Code form creates a Code routine, not a Cowork one");
+assert.equal(createdTrigger.trigger.cwd, "/workspace/created-repo",
+  "the job config's folder becomes the task's cwd");
+assert.equal(createdTrigger.trigger.permission_mode, "bypassPermissions",
+  "the job config's permission mode becomes the task's permissionMode");
+assert.equal(createdTrigger.trigger.effort_level, "high",
+  "the bridge keeps the routine's effort (the task store has no field for it)");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.cwd,
+  "/workspace/created-repo", "the edit form reads the folder back from the job config");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.permission_mode,
+  "bypassPermissions");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.effort_level, "high");
 assert.equal(instructionsFromJobConfig(createdTrigger.trigger.job_config),
   "Do not output anything else other than what is specified:\n"
     + "- Current working directory\n- Current user",
@@ -251,13 +271,28 @@ assert.equal(creatorList.data.some((routine) => routine.name === "Morning brief"
 
 const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
   name: "test routine",
-  job_config: { ccr: { events: [{
-    data: { message: { role: "user", content: "List the modified files." } },
-  }] } },
+  job_config: { ccr: {
+    session_context: {
+      cwd: "/workspace/edited-repo",
+      permission_mode: "acceptEdits",
+      effort_level: "low",
+    },
+    events: [{
+      data: { message: { role: "user", content: "List the modified files." } },
+    }],
+  } },
 });
 assert.equal(lastUpdate.prompt, "List the modified files.",
   "editing the Code form updates the task's instructions");
+assert.equal(lastUpdate.cwd, "/workspace/edited-repo",
+  "editing the job config updates the task's folder");
+assert.equal(lastUpdate.permissionMode, "acceptEdits",
+  "editing the job config updates the task's permission mode");
 assert.equal(edited.trigger.prompt, "List the modified files.");
+assert.equal(edited.trigger.cwd, "/workspace/edited-repo");
+assert.equal(edited.trigger.permission_mode, "acceptEdits");
+assert.equal(edited.trigger.effort_level, "low",
+  "editing the job config updates the stored effort");
 assert.equal(instructionsFromJobConfig(edited.trigger.job_config), "List the modified files.",
   "the detail re-sent after an edit shows the new instructions");
 
@@ -269,6 +304,11 @@ assert.equal(codeFire.sessionId, "cse_cloud");
 assert.equal(createRuns.at(-1).body.trigger_id, createdTrigger.trigger.id);
 assert.equal(createRuns.at(-1).body.origin, "fire_routine");
 assert.deepEqual(createRuns.at(-1).body.config.sources, []);
+assert.equal(createRuns.at(-1).body.config.cwd, "/workspace/edited-repo",
+  "the routine's folder reaches the Code session");
+assert.equal(createRuns.at(-1).body.config.permission_mode, "acceptEdits");
+assert.equal(createRuns.at(-1).body.config.effort_level, "low",
+  "the routine's effort reaches the Code session");
 
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});

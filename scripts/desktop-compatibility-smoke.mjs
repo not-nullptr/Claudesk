@@ -33,7 +33,9 @@ try {
   // unified-composer design predicates and the routine fire origin) — plus a
   // **tenant** web shell, which is
   // the same generation plus the self-hosted start-option patches (folder,
-  // branch and worktree). See docs/code-in-cowork-vm.md.
+  // branch and worktree), and the routine form's model/effort picker and start
+  // options. The web shell itself carries the Code bypass-permission patches
+  // in both modes. See docs/code-in-cowork-vm.md.
   // A selector that drifts against a new official bundle must fail here, not
   // in production.
   for (const [gateway, webShell, tenant] of [["0", "0", "0"], ["1", "0", "0"],
@@ -51,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 73 : 60) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 81 : 62) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
@@ -71,6 +73,17 @@ try {
     assert.equal(manifest.patches.some(patch => patch.id === "routine-api-trigger"),
       webShell === "1",
       "the routine form must offer the API trigger in the web shell");
+    // A tenant's routine form carries the Code composer's model+effort picker
+    // and the start options its scheduled task stores, and its Code surface
+    // offers bypass permissions.
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-model-effort-picker"),
+      tenant === "1", "a tenant's routine form offers model and effort pickers");
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-form-start-option-rows"),
+      tenant === "1", "a tenant's routine form offers cwd and permission mode");
+    assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-permission-list"),
+      webShell === "1", "the web shell's Code permission modes include bypass");
+    assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-availability"),
+      webShell === "1", "bypass permissions is available in the web shell");
 
     if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
     if (webShell === "1" && tenant === "0") webShellManifest = manifest;

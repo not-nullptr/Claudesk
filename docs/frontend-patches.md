@@ -382,6 +382,37 @@ literals, the only such conditional in the renderer graph, and replaces it with
 itself (see `docs/routines.md`), so the copied curl command then names the
 instance. Deliberately **not** required: a bundle that no longer matches leaves
 the card pointing at the cloud origin, visibly wrong, rather than failing
+
+The routine form's start options are tenant additions (`CLAUDE_TENANT`), because
+a tenant's routine is a Code scheduled task on its own VM:
+
+- `routine-model-effort-picker` extends the form's model dropdown — the
+  renderer's own `ModelSelector` wrapper — so it carries every model's
+  `thinking.effort_options` and a separate effort dropdown (the composer's
+  `EffortControl`, the one with the slider). The wrapper, the options hook that
+  stripped the catalog down to id/name, and the picker call site are each
+  matched by shape; the composite component itself is reused, not re-created.
+- `routine-form-start-options` and `routine-job-config-start-options` add
+  `cwd`, permission mode and effort to the form state, seed them from the
+  stored job config (which is how an edit shows the routine's own values), and
+  write them back in the create/update job config. The bridge maps `cwd` and
+  `permission_mode` onto the scheduled task's own fields; effort has no task
+  field and lives in the bridge's routine state (see `docs/routines.md`).
+- `routine-form-start-option-rows` adds the two rows to the unified form: a
+  working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
+  the in-page picker lists the tenant's workspace) and a permission-mode
+  combobox. Both the create page and the edit dialog render this same form.
+
+`code-bypass-permission-list` and `code-bypass-availability` make bypass
+permissions selectable in the Code surface, in web-shell mode (a tenant's
+surface included). The session-host permission list is a hardcoded literal
+without `bypassPermissions` (the cloud service disallowed it), and the
+availability predicate refuses to offer it when the rollout gate is off. The
+deployment's Code runs in its own container or VM, and the operator asked for
+bypass there, so the list gains the mode and the predicate answers available.
+The entitlement grant in `bridge/server.mjs` is the other half. On a tenant the
+guest runner also sets `IS_SANDBOX=1` for the agent, which is what lets Claude
+Code run with bypass permissions as root inside the VM.
 renderer preparation.
 
 `web-new-page-home-layout` turns on the New page's **home** layout — the compact

@@ -35,12 +35,15 @@ try {
   const auth = { authorization: `Bearer ${primary.secret}` };
   const wrong = { authorization: "Bearer not-the-secret" };
 
-  // Nothing is advertised until a runner exists: a pool the bridge minted at
-  // start-up is not a place anything can run yet, and offering it would let a
-  // session be placed where nothing polls.
-  assert.deepEqual((await backend.environmentList()).environments, [],
-    "a pool with no runner is not offered as a place");
-  assert.equal((await backend.environment(primary.pool_id)).state, "unknown");
+  // The pool is the instance's place from the moment it exists, whether or not
+  // its runner has polled yet: the Code composer and the routine form offer it,
+  // and placing a session wakes the VM. (A fresh account otherwise saw an empty
+  // environment picker until it had started a session elsewhere.)
+  const beforeRunner = (await backend.environmentList()).environments;
+  assert.equal(beforeRunner.length, 1, "the pool is offered before a runner registers");
+  assert.equal(beforeRunner[0].environment_id, primary.pool_id);
+  assert.equal(beforeRunner[0].state, "active");
+  assert.equal((await backend.environment(primary.pool_id)).state, "active");
 
   // No secret, or the wrong one, is the same answer: no pool.
   assert.equal((await backend.registerRunner({ headers: {}, body: {} })).unauthorized, true,

@@ -145,13 +145,15 @@ try {
   const environmentsPath =
     "/v1/environment_providers/private/organizations/00000000-0000-4000-8000-000000000000/environments";
 
-  // Before a runner exists there is no place to offer — a tenant's list is
-  // empty rather than holding a pool nothing polls.
+  // The pool is the tenant's place from the moment it exists — placing a
+  // session wakes the VM — so a fresh account sees it before any runner polls.
   const early = JSON.parse((await tenantRequest(environmentsPath)).body);
-  assert.deepEqual(early.environments, [],
-    "an unclaimed pool is not advertised as a place a session can run");
-  assert.deepEqual(JSON.parse((await tenantRequest("/v1/environments")).body).environments, [],
-    "and the sheet's own leg says the same");
+  assert.equal(early.environments.length, 1,
+    "the instance's pool is advertised before a runner claims it");
+  assert.equal(early.environments[0].environment_id, poolId);
+  assert.equal(early.environments[0].state, "active");
+  assert.deepEqual(JSON.parse((await tenantRequest("/v1/environments")).body).environments,
+    early.environments, "and the sheet's own leg says the same");
 
   // Registration is authenticated by the pool secret alone.
   const registered = await tenantRequest("/v1/code/runners/self-hosted/runners/register", {

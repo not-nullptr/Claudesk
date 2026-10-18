@@ -163,6 +163,35 @@ const routineApiTriggerCard = "{type:\"api\",icon:\"Code\","
   + "title:{defaultMessage:\"API\",id:\"xwEc8KM8zK\"},"
   + "desc:{defaultMessage:\"Trigger from your own code by sending a POST request\","
   + "id:\"2eHmKFyJSw\"}}";
+// The routine form's model picker is a model-only dropdown. The Code composer
+// offers the same catalog with a second dropdown for the effort level (the
+// existing `ModelSelector`/`EffortControl` pair), so the routine form's wrapper
+// is extended to feed that pair: the catalog carries each model's own
+// `thinking.effort_options`, the state carries the chosen effort, and the
+// composite is told `thinkingStyle: "separate"` — the same shape the composer
+// builds. No new controls are introduced; the dropdowns and the slider are the
+// renderer's own components.
+const routineModelPickerPatchId = "routine-model-effort-picker";
+// The routine's own state: the form state hook gains effort, working directory
+// and permission mode, seeds them from the stored job config, sends them in the
+// create/edit job config, and returns them to the form. A routine is a Code
+// scheduled task; the task record already carries `cwd` and `permissionMode`,
+// so the bridge's create/update map them straight onto it.
+const routineFormStatePatchId = "routine-form-start-options";
+// The routine job-config parser: the Code form edits through
+// `job_config.ccr.session_context`; the parser is what seeds the form on edit.
+const routineJobConfigPatchId = "routine-job-config-start-options";
+// The unified routine form's rows: a working-directory picker (the same
+// `FileSystem.browseCodeFolder` the Code composer uses) and a permission-mode
+// dropdown (the renderer's own combobox), beside the existing environment row.
+const routineFormRowsPatchId = "routine-form-start-option-rows";
+// A tenant's Code sessions run on `session_host`, whose permission-mode list is
+// hardcoded without bypass (the cloud service disallowed it). The deployment's
+// VM is the operator's own sandbox, so bypass is offered here; the entitlement
+// below makes the renderer's availability check answer on, and this list is
+// what the mode picker can actually choose from.
+const codeBypassPermissionListPatchId = "code-bypass-permission-list";
+const codeBypassAvailabilityPatchId = "code-bypass-availability";
 const homeLayoutPatchId = "web-new-page-home-layout";
 const homeLayoutGate = "__gb__1085985672";
 const homeLayoutKeys = ["eligible", "settled", "assignment", "stringsDelivered",
@@ -2129,6 +2158,15 @@ export const prefilterNeedles = [
   "session_context:{sources:w,outcomes:T", // create serializer + wire mapper
   "browseFolder;if(n)return", // the Code composer's folder-pick helper
   'return"/"+', // the Vite chunk loader's URL builder (web-shell asset base)
+  // Routine form: model/effort picker, start options (cwd, permission mode)
+  // and the job-config parser that carries them through an edit.
+  "Describe what Claude should do in each session",
+  "routine-composer-status",
+  "autofixOnPrCreate:void 0",
+  // Bypass permissions availability and the session-host mode list.
+  "bypassPermissionsPrefEnabled",
+  "permission_modes:{available:",
+  '_R=["default","acceptEdits","plan","auto"]',
 ];
 
 // Every needle is a literal substring, so it is escaped before it reaches the
@@ -2559,6 +2597,328 @@ function routineApiTriggerTarget(node) {
   if (conditional?.type !== "ConditionalExpression") return undefined;
   if (!contains(conditional.test, child => literal(child, "github"))) return undefined;
   return cards;
+}
+
+// --- Routine form: model/effort picker and start options --------------------
+//
+// The routine form's model dropdown is the renderer's own `ModelSelector`
+// wrapper, but it was built with `thinking:{type:"none"}` and no effort state.
+// These selectors find the wrapper and the form-state hook by their shape, and
+// the replacements extend them with the same pieces the Code composer feeds:
+// each model's `thinking.effort_options`, a separate effort dropdown (which is
+// `EffortControl`, the slider popup), and the routine's `cwd` / permission mode,
+// which a Code scheduled task already stores.
+
+// A one-parameter function whose destructured parameter carries every key.
+function functionWithParamKeys(node, keys) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return undefined;
+  const param = node.params[0];
+  if (param.type !== "ObjectPattern") return undefined;
+  const names = new Set(param.properties
+    .filter(entry => entry.type === "Property")
+    .map(entry => entry.key.name ?? entry.key.value));
+  return keys.every(name => names.has(name)) ? node : undefined;
+}
+
+// The wrapper is the function that builds a catalog from `options` and returns
+// a single call whose props include `catalog`, `state` and `onStateChange`.
+function routineModelPickerTarget(node) {
+  const fn = functionWithParamKeys(node, ["options", "selectedLabel", "qualifier",
+    "internalCatalog"]);
+  if (!fn || fn.body?.type !== "BlockStatement") return undefined;
+  const returns = fn.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  const call = renderedExpression(returns[0].argument);
+  if (call?.type !== "CallExpression" || call.arguments[1]?.type !== "ObjectExpression") {
+    return undefined;
+  }
+  const props = new Set(call.arguments[1].properties
+    .filter(entry => entry.type === "Property")
+    .map(entry => entry.key.name ?? entry.key.value));
+  return ["catalog", "state", "onStateChange", "triggerName"].every(name => props.has(name))
+    ? fn : undefined;
+}
+
+function replaceExactlyOnce(text, from, to) {
+  const at = text.indexOf(from);
+  if (at < 0 || text.indexOf(from, at + 1) >= 0) return null;
+  return text.slice(0, at) + to + text.slice(at + from.length);
+}
+
+function applyReplacements(text, pairs) {
+  for (const [from, to] of pairs) {
+    text = replaceExactlyOnce(text, from, to);
+    if (text === null) return null;
+  }
+  return text;
+}
+
+function routineModelPickerReplacement(source, node) {
+  return applyReplacements(source.slice(node.start, node.end), [
+    ["internalCatalog:c=!1}",
+      "internalCatalog:c=!1,effort:__claudeskEffort=null,"
+        + "onEffortChange:__claudeskOnEffortChange,"
+        + "fallbackModel:__claudeskFallbackModel=null}"],
+    ["let l=t||Z,u=", "let l=t||__claudeskFallbackModel||Z,u="],
+    ['thinking:{type:"none"}}))',
+      'thinking:e.thinking&&e.thinking.effort_options'
+        + '&&e.thinking.effort_options.length?e.thinking:{type:"none"}}))'],
+    ["f=d(()=>({model:l}),[l]),m=s(e=>{n(e.model===Z?void 0:e.model)},[n])",
+      "f=d(()=>__claudeskEffort?{model:l,thinking:{type:\"effort\","
+        + "effort:__claudeskEffort}}:{model:l,thinking:{type:\"none\"}},"
+        + "[l,__claudeskEffort]),m=s(e=>{e.kind===\"effort\"?"
+        + "(__claudeskOnEffortChange&&__claudeskOnEffortChange(e.effort))"
+        + ":e.kind===\"model\"&&n(e.model===Z?void 0:e.model)},"
+        + "[n,__claudeskOnEffortChange])"],
+    ["config:c?me:void 0", 'config:{...me,thinkingStyle:"separate"}'],
+  ]);
+}
+
+// The routine form's state hook returns the object the form components read;
+// `submitNeedsGithubConnect` is one of its return properties, which pins it
+// without relying on the minifier's name.
+function routineFormStateTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 3) return undefined;
+  return contains(node.body, child => child.type === "Property"
+    && key(child, "submitNeedsGithubConnect")) ? node : undefined;
+}
+
+function routineFormStateReplacement(source, node) {
+  return applyReplacements(source.slice(node.start, node.end), [
+    ["[Ke,qe]=t(j.model),",
+      "[Ke,qe]=t(j.model),[__claudeskEffort,__claudeskSetEffort]=t(j.effort??null),"
+        + "[__claudeskCwd,__claudeskSetCwd]=t(j.cwd??\"\"),"
+        + "[__claudeskPermission,__claudeskSetPermission]=t(j.permissionMode??\"\"),"],
+    // Empty strings are written, not dropped: an edit that clears the working
+    // directory or permission mode must clear the stored task field, and the
+    // bridge reads a present-but-empty value as "remove it".
+    ["model:Kt,autofix_on_pr_create:",
+      "model:Kt,cwd:__claudeskCwd,permission_mode:__claudeskPermission,"
+        + "effort_level:__claudeskEffort,autofix_on_pr_create:"],
+    ["minted:Pr,clearMinted:",
+      "effort:__claudeskEffort,setEffort:__claudeskSetEffort,"
+        + "cwd:__claudeskCwd,setCwd:__claudeskSetCwd,"
+        + "permissionMode:__claudeskPermission,"
+        + "setPermissionMode:__claudeskSetPermission,minted:Pr,clearMinted:"],
+    ["Ke!==t.model||U!==t.workerId",
+      "__claudeskEffort!==t.effort||__claudeskCwd!==t.cwd"
+        + "||__claudeskPermission!==t.permissionMode||Ke!==t.model||U!==t.workerId"],
+    ["prompt:j.prompt,model:j.model,workerId:j.workerId",
+      "prompt:j.prompt,model:j.model,effort:j.effort??null,"
+        + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\",workerId:j.workerId"],
+  ]);
+}
+
+// The job-config parser: returns `{prompt, workerId, repos, repoUrls,
+// autofixOnPrCreate, model}` from `ccr.session_context`/events.
+function routineJobConfigTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return undefined;
+  const body = node.body;
+  if (!body || body.type !== "BlockStatement") return undefined;
+  if (!contains(body, child => child.type === "Property" && key(child, "workerId"))) {
+    return undefined;
+  }
+  return contains(body, child => child.type === "Property" && key(child, "autofixOnPrCreate"))
+    ? node : undefined;
+}
+
+// The instructions composer's model picker call: the wrapper receives the
+// form's effort and the model the form resolves for an unset ("Default")
+// choice, so the effort dropdown has the selected model's options.
+function routinePickerUsagePatch(source) {
+  const from = "{options:o,value:e.model??void 0,onChange:t=>e.setModel(t??null),"
+    + "selectedLabel:l,";
+  const at = source.indexOf(from);
+  if (at < 0 || source.indexOf(from, at + 1) >= 0) return null;
+  return {
+    start: at,
+    end: at + from.length,
+    original: from,
+    replacement: "{options:o,value:e.model??void 0,onChange:t=>e.setModel(t??null),"
+      + "effort:e.effort??null,onEffortChange:e.setEffort,fallbackModel:c,selectedLabel:l,",
+  };
+}
+
+// The form's model-options hook strips every catalog field but id/name. The
+// picker needs each model's own `thinking` (its effort options), description
+// and section to draw the second dropdown and the overflow group.
+function routineModelOptionsPatch(source) {
+  const from = "r.map(e=>({model:e.id,name:e.name,disabledReason:o(e.id)}))";
+  const at = source.indexOf(from);
+  if (at < 0 || source.indexOf(from, at + 1) >= 0) return null;
+  return {
+    start: at,
+    end: at + from.length,
+    original: from,
+    replacement: "r.map(e=>({model:e.id,name:e.name,description:e.description,"
+      + "section:e.section,thinking:e.thinking,disabledReason:o(e.id)}))",
+  };
+}
+
+function routineJobConfigReplacement(source, node) {
+  return applyReplacements(source.slice(node.start, node.end), [
+    ["let p=l?.model??null,m=l?.autofix_on_pr_create;",
+      "let p=l?.model??null,m=l?.autofix_on_pr_create,"
+        + "cw=l?.cwd??\"\",pm=l?.permission_mode??\"\",ef=l?.effort_level??null;"],
+    ["return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p}",
+      "return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p,"
+        + "cwd:cw,permissionMode:pm,effort:ef}"],
+  ]);
+}
+
+// The unified form's repository/environment row component. Its return's
+// children array is where the working-directory and permission-mode rows are
+// inserted, so both the create page and the edit dialog (which render the same
+// form) get them.
+function routineFormRowsTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return undefined;
+  const param = node.params[0];
+  if (param.type !== "ObjectPattern") return undefined;
+  const names = new Set(param.properties
+    .filter(entry => entry.type === "Property")
+    .map(entry => entry.key.name ?? entry.key.value));
+  // Exactly the row component's three props: the sibling form components carry
+  // extra parameters and would otherwise match too.
+  if (names.size !== 3
+    || !["state", "needsGithubConnect", "onGithubConnect"].every(name => names.has(name))) {
+    return undefined;
+  }
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  const call = renderedExpression(returns[0].argument);
+  if (call?.type !== "CallExpression" || call.arguments[1]?.type !== "ObjectExpression") {
+    return undefined;
+  }
+  const children = call.arguments[1].properties
+    .find(entry => entry.type === "Property" && key(entry, "children"))?.value;
+  if (children?.type !== "ArrayExpression") return undefined;
+  return { node, children };
+}
+
+function routineFormRowsReplacement(source, target) {
+  const { node, children } = target;
+  let jsx;          // multi-child factory (`jsxs`)
+  let jsxSingle;    // single-child factory (`jsx`)
+  let classNames;   // clsx-style helper
+  let rowClass;     // the row's shared className
+  let labelClass;   // the row label's className
+  let message;      // FormattedMessage component
+  let styles;       // the shared trigger-class object (`En`)
+  walk(node, [], (child) => {
+    if (child.type === "CallExpression") {
+      if (literal(child.arguments[0], "span") && !jsxSingle) {
+        jsxSingle = identifier(child.callee);
+      }
+      if (!classNames && child.arguments[0]?.type === "Identifier"
+        && literal(child.arguments[1], "flex-wrap")) {
+        rowClass = child.arguments[0].name;
+        classNames = identifier(child.callee);
+      }
+      const props = child.arguments[1];
+      if (props?.type === "ObjectExpression" && !message) {
+        const spread = props.properties.find(entry => entry.type === "SpreadElement");
+        if (spread && property(spread.argument, "environment")) {
+          message = identifier(child.arguments[0]);
+        }
+      }
+    }
+    if (child.type === "Property" && key(child, "className")
+      && child.value?.type === "Identifier" && !labelClass) {
+      labelClass = child.value.name;
+    }
+    if (!styles && property(child, "secondary")
+      && unwrap(child.object)?.type === "Identifier") {
+      styles = identifier(child.object);
+    }
+  });
+  // The combobox the environment row uses lives one component further down
+  // (`aa`), so its binding is read from the whole chunk rather than this
+  // component's body.
+  let combobox;
+  walk(parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true }),
+    [], (child) => {
+      if (combobox || child.type !== "CallExpression") return;
+      const props = child.arguments[1];
+      if (props?.type !== "ObjectExpression") return;
+      if (props.properties.some(entry => entry.type === "Property" && key(entry, "itemToLabel"))
+        && props.properties.some(entry => entry.type === "Property" && key(entry, "onSelect"))) {
+        combobox = identifier(child.arguments[0]);
+      }
+    });
+  const outer = renderedExpression(node.body.body
+    .find(statement => statement.type === "ReturnStatement").argument);
+  jsx = identifier(outer.callee);
+  if (!jsx || !jsxSingle || !classNames || !rowClass || !labelClass || !message
+    || !combobox || !styles) {
+    return null;
+  }
+  const row = (children) => `${jsx}("div",{className:${classNames}(${rowClass},"flex-wrap"),`
+    + `children:[${children}]})`;
+  const cwdRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Working directory",id:"claudesk-routine-cwd"})}),`
+      + `${jsx}("button",{type:"button",onClick:async()=>{`
+      + `let t=globalThis["claude.web"]?.FileSystem,`
+      + `p=await(t?.browseCodeFolder??t?.browseFolder)?.(`
+      + `"Choose the routine's working folder",!0,!0,e.cwd||void 0);`
+      + `typeof p==="string"&&p&&e.setCwd(p)},`
+      + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
+      + `children:[${jsxSingle}("span",{className:"max-w-[240px] truncate",`
+      + `children:e.cwd||"Workspace default"}),`
+      + `${jsxSingle}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
+      + `e.cwd?${jsx}("button",{type:"button",onClick:()=>e.setCwd(""),`
+      + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`,
+  );
+  const permissionRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Permission mode",id:"claudesk-routine-permission-mode"})}),`
+      + `${jsxSingle}(${combobox},{items:[{id:"default",name:"Default"},`
+      + `{id:"acceptEdits",name:"Accept edits"},{id:"plan",name:"Plan"},`
+      + `{id:"auto",name:"Auto"},{id:"bypassPermissions",name:"Bypass permissions"}],`
+      + `itemToLabel:e=>e.name,value:null,onSelect:t=>e.setPermissionMode(t.id),`
+      + `icon:"Lock",triggerLabel:({default:"Default",acceptEdits:"Accept edits",`
+      + `plan:"Plan",auto:"Auto",bypassPermissions:"Bypass permissions"})`
+      + `[e.permissionMode]??"Default",triggerAriaLabel:"Permission mode",`
+      + `triggerClassName:${styles}.secondary})`,
+  );
+  return `,${cwdRow},${permissionRow}`;
+}
+
+// The session-host mode list. It is a literal in the renderer's surface
+// capabilities (`["default","acceptEdits","plan","auto"]`), and the composer's
+// mode picker filters against it, so bypass is unreachable however the
+// entitlement reads. The deployment's sessions run in its own VM, so the list
+// carries bypass. Only an exact, unique literal is spliced.
+function codeBypassPermissionListPatch(source) {
+  const from = '_R=["default","acceptEdits","plan","auto"]';
+  const at = source.indexOf(from);
+  if (at < 0 || source.indexOf(from, at + 1) >= 0) return null;
+  return {
+    start: at,
+    end: at + from.length,
+    original: from,
+    replacement: '_R=["default","acceptEdits","plan","auto","bypassPermissions"]',
+  };
+}
+
+// The availability predicate behind both the settings row and the composer's
+// bypass mode. It begins by refusing internal/ant accounts; prepending
+// `return!0` makes the deployment's own VM count as available without touching
+// any of the conditions it reads.
+function codeBypassAvailabilityTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return undefined;
+  const body = node.body;
+  if (body?.type !== "BlockStatement" || !body.body.length) return undefined;
+  const first = body.body[0];
+  if (first.type !== "IfStatement") return undefined;
+  if (!contains(first.test, child => property(child, "isNestBuild"))) return undefined;
+  if (!contains(first.test, child => property(child, "isAntAccount"))) return undefined;
+  // The sibling predicate starts with the same two account checks but also
+  // reads the rollout gate; this one is the pure availability answer.
+  if (contains(first.test, child => property(child, "isChillingSlothEnabled"))) {
+    return undefined;
+  }
+  return body;
 }
 
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
@@ -3123,6 +3483,87 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const original = source.slice(target.start, target.end);
       patches.push({ id: routineApiTriggerPatchId, start: target.start, end: target.end,
         original, replacement: `[...${original},${routineApiTriggerCard}]` });
+    }
+  }
+  // The routine form's create page and edit dialog share one unified form. A
+  // tenant's routines are the Code scheduled tasks this deployment runs, so the
+  // form gains the model+effort picker (the composer's own two dropdowns), a
+  // working-directory picker and a permission-mode picker. Each splice is
+  // accepted only when exactly one candidate is in the chunk; none is required,
+  // so a bundle that no longer matches leaves the old form rather than failing
+  // renderer preparation.
+  if (tenantEnabled) {
+    const modelPickers = [];
+    const formStates = [];
+    const jobConfigs = [];
+    const formRows = [];
+    walk(ast, [], (node) => {
+      const picker = routineModelPickerTarget(node);
+      if (picker) modelPickers.push(picker);
+      const state = routineFormStateTarget(node);
+      if (state) formStates.push(state);
+      const job = routineJobConfigTarget(node);
+      if (job) jobConfigs.push(job);
+      const rows = routineFormRowsTarget(node);
+      if (rows) formRows.push(rows);
+    });
+    if (modelPickers.length === 1) {
+      const replacement = routineModelPickerReplacement(source, modelPickers[0]);
+      if (replacement !== null) {
+        patches.push({ id: routineModelPickerPatchId, start: modelPickers[0].start,
+          end: modelPickers[0].end,
+          original: source.slice(modelPickers[0].start, modelPickers[0].end), replacement });
+      }
+    }
+    if (formStates.length === 1) {
+      const replacement = routineFormStateReplacement(source, formStates[0]);
+      if (replacement !== null) {
+        patches.push({ id: routineFormStatePatchId, start: formStates[0].start,
+          end: formStates[0].end,
+          original: source.slice(formStates[0].start, formStates[0].end), replacement });
+      }
+    }
+    const pickerUsage = routinePickerUsagePatch(source);
+    if (pickerUsage) {
+      patches.push({ id: routineModelPickerPatchId, ...pickerUsage });
+    }
+    const modelOptions = routineModelOptionsPatch(source);
+    if (modelOptions) {
+      patches.push({ id: routineModelPickerPatchId, ...modelOptions });
+    }
+    if (jobConfigs.length === 1) {
+      const replacement = routineJobConfigReplacement(source, jobConfigs[0]);
+      if (replacement !== null) {
+        patches.push({ id: routineJobConfigPatchId, start: jobConfigs[0].start,
+          end: jobConfigs[0].end,
+          original: source.slice(jobConfigs[0].start, jobConfigs[0].end), replacement });
+      }
+    }
+    if (formRows.length === 1) {
+      const replacement = routineFormRowsReplacement(source, formRows[0]);
+      if (replacement !== null) {
+        const at = formRows[0].children.end - 1;
+        patches.push({ id: routineFormRowsPatchId, start: at, end: at,
+          original: "", replacement });
+      }
+    }
+  }
+  // Bypass permissions in the Code surface: the web shell and a tenant's own
+  // surface both run the operator's Code, and the operator asked for the mode
+  // to be selectable. The settings row and the composer's mode picker read the
+  // same availability predicate and the same session-host list.
+  if (webShellEnabled || tenantEnabled) {
+    const bypassList = codeBypassPermissionListPatch(source);
+    if (bypassList) patches.push({ id: codeBypassPermissionListPatchId, ...bypassList });
+    const availability = [];
+    walk(ast, [], (node) => {
+      const body = codeBypassAvailabilityTarget(node);
+      if (body) availability.push(body);
+    });
+    if (availability.length === 1) {
+      const at = availability[0].start + 1;
+      patches.push({ id: codeBypassAvailabilityPatchId, start: at, end: at,
+        original: "", replacement: "return!0;" });
     }
   }
   if (webShellEnabled && crashLogOptions.length === 1) {

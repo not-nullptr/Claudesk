@@ -240,12 +240,13 @@ tenant's list is its self-hosted pools and **nothing else**, so the Code UI has
 no local place to offer. The IPC guard (Phase 1) and the environment list say
 the same thing to the two layers that could independently enable a session.
 
-It is also *earned*: a pool is advertised only once a runner has registered with
-it. The bridge mints the pool at start-up, before anything can run on it, and
-offering it then would let a session be placed where nothing is polling — pending
-forever, which reads as broken rather than unconfigured. So the surface starts
-empty and gains the place when a runner arrives, and this is what makes turning
-`CLAUDESK_CODE_RUNNERS` on ahead of the runner harmless.
+The pool is advertised from the moment the bridge mints it, before its runner has
+necessarily polled. Offering it is safe because placing a session wakes the VM
+(`POST /v1/code/sessions` calls `ClaudeVM.startVM`), and hiding it until a first
+session had run elsewhere made a fresh account's Code composer and routine form
+show no environment at all ("Select a cloud environment"). So the surface carries
+the instance's place whether or not a runner has registered yet; a pool an
+operator disables is the one case that disappears.
 
 **Phase 2 — the tenant renderer generation (landed).** `tenantEnabled` is a third
 input to `patchRendererSources` alongside gateway and web shell: when set, the
@@ -681,6 +682,22 @@ is shared by every read in flight, and a wake the Desktop refuses is final — t
 read answers 503 rather than holding the request for the whole window. Without
 this, the picker and branch hooks failed until the user placed a session, the
 only other path that woke the VM.
+
+The wake itself is bounded for the interactive reads (`CLAUDESK_RUNNER_WAKE_WAIT_MS`,
+5 s by default), because `startVM` on a cold VM can take a minute. The folder
+route goes one step further: `/api/remote/code-folders` races the guest request
+against `CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS` (6 s) and, when the guest does not
+answer, lists/creates through the workspace mount the bridge already serves.
+Both views are the same account tree (`/workspace/...` on the host), so the
+picker shows the same folders instead of sitting on "Loading server folders…"
+for the length of a VM boot; the guest request keeps running, and the next open
+uses the runner. The git/branch IPC lookups keep their guest-only rule.
+
+A code session carries `effort_level` in its config, and the guest runner passes
+it to the agent as `--effort`. The agent also runs with `IS_SANDBOX=1`: the
+runner is a guest systemd service (root), and Claude Code refuses bypass
+permissions as root unless it is told it is inside a sandbox. The tenant
+renderer offers bypass in the Code mode list (see `docs/frontend-patches.md`).
 
 One rule holds those 404s together, and it is worth stating on its own: **an
 API-shaped path (`/v1/…`) this bridge does not answer is answered with the

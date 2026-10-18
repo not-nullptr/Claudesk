@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 
 
 def env(name, default=""):
@@ -599,6 +599,12 @@ def run_agent(argv, cwd, content, write):
     environment = dict(os.environ)
     if os.path.isdir(RUNNER_HOME):
         environment["HOME"] = RUNNER_HOME
+    # The service runs as root (it is the guest's own systemd unit), and the
+    # agent refuses bypass permissions as root unless it is told it is inside a
+    # sandbox. It is: this process only exists to spawn agents inside the
+    # account's Cowork VM. Without this, a session placed in bypass mode is
+    # clamped to Accept edits.
+    environment.setdefault("IS_SANDBOX", "1")
     process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, bufsize=1,
@@ -724,6 +730,8 @@ def run_session(hint):
     permission_mode = config.get("permission_mode")
     permission_mode = (permission_mode if isinstance(permission_mode, str)
                        and permission_mode else None)
+    effort = config.get("effort_level")
+    effort = effort if isinstance(effort, str) and effort else None
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
@@ -745,6 +753,8 @@ def run_session(hint):
         argv += ["--model", model]
     if permission_mode is not None:
         argv += ["--permission-mode", permission_mode]
+    if effort is not None:
+        argv += ["--effort", effort]
     # The working directory comes from the session's start options. With none,
     # the checkout is where the work happens; a guest without it (a fresh
     # image, a stopped VM) still runs, from /, rather than failing the session
@@ -756,8 +766,9 @@ def run_session(hint):
         log("session %s: %s" % (session, workdir_error))
         return session, 2
     started = time.time()
-    log("session %s: turn with %s (model %s, resume %s)" % (
-        session, " ".join(AGENT_ARGS), model or "default", resume or "none"))
+    log("session %s: turn with %s (model %s, effort %s, permission %s, resume %s)" % (
+        session, " ".join(AGENT_ARGS), model or "default", effort or "default",
+        permission_mode or "default", resume or "none"))
 
     def turn(extra):
         return run_agent(argv + extra, cwd, content, write)

@@ -259,16 +259,32 @@ its data family (`/v1/code/triggers` list/detail/run/update/delete and
   preparation.
 
 The cloud form's **Create** maps to `CCDScheduledTasks.createScheduledTask`
-(name, instructions, schedule, model and permission mode; repositories and
-connectors have no local equivalent and are not carried). The Cowork form sends the instructions as a
-flat `prompt`; the Code form sends the runner job instead
-(`job_config.ccr.events`), whose instructions are the first querying user
-event's message — the same event the Desktop's own form parser reads. An edit
-re-sends that job config, so the task's saved instructions follow its text
-field there too. **Run now** maps to the same fire path as the API. **Recent
-fires** is served empty — the local session history lives on the **Scheduled**
-page (`getSessionsForScheduledTask`), and this first cut does not project it
-into the cloud detail view.
+(name, instructions, schedule, model, working directory, permission mode and
+effort; repositories and connectors have no local equivalent and are not
+carried). The Cowork form sends the instructions as a flat `prompt`; the Code
+form sends the runner job instead (`job_config.ccr.events`), whose instructions
+are the first querying user event's message — the same event the Desktop's own
+form parser reads. The job config's `session_context` also carries the start
+options (`cwd`, `permission_mode`, `effort_level`), so an edit seeds the form
+with the routine's own values and a save writes them back. An edit re-sends
+that job config, so the task's saved instructions follow its text field there
+too. **Run now** maps to the same fire path as the API. **Recent fires** is
+served empty — the local session history lives on the **Scheduled** page
+(`getSessionsForScheduledTask`), and this first cut does not project it into
+the cloud detail view.
+
+`cwd` and `permission_mode` live in the scheduled task record itself, so the
+Desktop's own scheduler honours them alongside the bridge's fires. Effort has
+no field in that record (the Desktop only ever carried a model), so the bridge
+keeps it in `routine-triggers.json` keyed by routine id and puts
+`effort_level` on the sessions **it** starts — an API fire or **Run now**. A
+scheduled run started by the Desktop's own scheduler cannot carry it.
+
+The routine form in a tenant's web shell carries the Code composer's model and
+effort pickers (the same `ModelSelector`/`EffortControl` components), a
+working-directory picker backed by the same in-page folder browser as the
+composer, and a permission-mode dropdown (`default`, `acceptEdits`, `plan`,
+`auto`, `bypassPermissions`). See `docs/frontend-patches.md`.
 
 ## Not supported
 
