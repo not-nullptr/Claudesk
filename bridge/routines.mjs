@@ -222,33 +222,35 @@ export function createRoutineService({
     return next;
   }
 
-  // The Desktop has two scheduled-task stores: Code (`CCDScheduledTasks`,
-  // `~/.claude/scheduled-tasks`) and Cowork (`CoworkScheduledTasks`, the
-  // user-files `Scheduled` folder). A routine list is their union — a Code
-  // routine created by the agent is as much the account's as one created
-  // here. Each task carries the surface it came from, which is where its file
-  // and its edits go. A build without one surface simply contributes nothing.
-  const routineSurfaces = ["CCDScheduledTasks", "CoworkScheduledTasks"];
+  // A routine is a **Code** scheduled task: the Code form, the cloud routines
+  // API and the Code surface's own task list are views of the same objects
+  // (`CCDScheduledTasks`, `~/.claude/scheduled-tasks`). Cowork's scheduled
+  // tasks are a separate product surface (`CoworkScheduledTasks`, the
+  // user-files `Scheduled` folder) and are not routines. A build that predates
+  // the Code surface has only the Cowork store, and therein it is the routine
+  // store.
+  async function routineStore() {
+    try {
+      const surfaces = await desktop.inspect();
+      if (Array.isArray(surfaces?.CCDScheduledTasks)
+        && surfaces.CCDScheduledTasks.includes("getAllScheduledTasks")) {
+        return "CCDScheduledTasks";
+      }
+    } catch { /* an older wrapper answers no surfaces */ }
+    return "CoworkScheduledTasks";
+  }
+
   async function tasks() {
-    const results = await Promise.allSettled(routineSurfaces.map((surface) =>
-      desktop.invoke(surface, "getAllScheduledTasks", [])));
-    const listed = [];
-    const errors = [];
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        errors.push(result.reason);
-        return;
-      }
-      if (!Array.isArray(result.value)) return;
-      for (const task of result.value) {
-        if (isRecord(task)) listed.push({ ...task, _routineSurface: routineSurfaces[index] });
-      }
-    });
-    if (listed.length === 0 && errors.length === routineSurfaces.length) {
+    const surface = await routineStore();
+    try {
+      const value = await desktop.invoke(surface, "getAllScheduledTasks", []);
+      return (Array.isArray(value) ? value : [])
+        .filter(isRecord)
+        .map((task) => ({ ...task, _routineSurface: surface }));
+    } catch (error) {
       throw new RoutineError(503, "api_error",
-        `this instance cannot list its scheduled tasks: ${errors[0]?.message || errors[0]}`);
+        `this instance cannot list its scheduled tasks: ${error?.message || error}`);
     }
-    return listed;
   }
 
   async function taskRecord(routineId) {
@@ -600,14 +602,9 @@ export function createRoutineService({
       if (chosenModel) args.model = chosenModel;
       if (textOf(body.permission_mode)) args.permissionMode = body.permission_mode;
       if (textOf(body.cwd)) args.cwd = body.cwd;
-      // The Code form (`job_config.ccr`) creates a Code routine; the flat
-      // Cowork form creates a Cowork one. The store decides what a fire runs:
-      // a Code task is placed on this instance's runner, a Cowork task starts
-      // a local session.
-      const surface = isRecord(body?.job_config?.ccr)
-        || textOf(body.kind).toLowerCase() === "code"
-        || textOf(body.session_type).toLowerCase() === "code"
-        ? "CCDScheduledTasks" : "CoworkScheduledTasks";
+      // A routine is a Code scheduled task. On a build with the Code store
+      // that is where every create lands, whichever form shape it came in.
+      const surface = await routineStore();
       const existing = await tasks();
       let created;
       try {

@@ -204,7 +204,12 @@ const createDesktop = {
     return null;
   },
   async inspect() {
-    return { CCDScheduledTasks: ["createScheduledTask", "updateScheduledTask"] };
+    return {
+      CCDScheduledTasks: [
+        "createScheduledTask", "getAllScheduledTasks", "getScheduledTaskFileContent",
+        "updateScheduledTask",
+      ],
+    };
   },
 };
 const createRuns = [];
@@ -233,6 +238,9 @@ assert.equal(createdTrigger.trigger.prompt,
 assert.equal(createdTrigger.trigger.name, "test routine");
 assert.equal(createdTrigger.trigger.kind, "code",
   "the Code form creates a Code routine, not a Cowork one");
+const creatorList = await creator.listTriggers();
+assert.equal(creatorList.data.some((routine) => routine.name === "Morning brief"), false,
+  "Cowork scheduled tasks are not routines");
 
 const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
   name: "test routine",

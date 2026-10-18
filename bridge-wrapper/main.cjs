@@ -641,14 +641,19 @@ const allowedMethods = new Map([
     "updateScheduledTaskFileContent",
     "updateScheduledTaskStatus",
   ])],
-  // The Code store (`~/.claude/scheduled-tasks`). The bridge creates and edits
-  // Code routines here — the store the Code form's `job_config` belongs to —
-  // and lists it beside the Cowork store. It has no delete method: a deleted
-  // status with the file removed is its delete.
+  // The Code store (`~/.claude/scheduled-tasks`), where routines live. It has
+  // no delete method: a deleted status with the file removed is its delete.
   ["CCDScheduledTasks", new Set([
+    "ackEvent",
     "createScheduledTask",
     "getAllScheduledTasks",
     "getScheduledTaskFileContent",
+    "getWatcherHistory",
+    "markListenerReady",
+    "releaseDispatchClaim",
+    "removeApprovedPermission",
+    "setEventAckSupported",
+    "setHostRunsSupported",
     "updateScheduledTask",
     "updateScheduledTaskStatus",
   ])],
@@ -981,6 +986,7 @@ const relayedListeners = new Map([
   ])],
   ["CoworkArtifacts", new Set(["onOnArtifactsChanged"])],
   ["CoworkScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
+  ["CCDScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
   // Not a `claude.web` surface: the wrapper itself publishes the notifications

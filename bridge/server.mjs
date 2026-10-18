@@ -887,13 +887,21 @@ const allowedMethods = new Map([
     "updateScheduledTaskFileContent",
     "updateScheduledTaskStatus",
   ])],
-  // The Code store. The Code form's routine create goes here (its fires are
-  // Code sessions), and the routine list reads it beside the Cowork store.
-  // The bridge and the wrapper carry the same methods (bridge-parity-smoke).
+  // The Code store, where routines live. Its surface is the official one,
+  // including the dispatch handshake, so the Code scheduled-task page keeps
+  // working in the browser; the bridge and the wrapper carry the same methods
+  // (bridge-parity-smoke).
   ["CCDScheduledTasks", new Set([
+    "ackEvent",
     "createScheduledTask",
     "getAllScheduledTasks",
     "getScheduledTaskFileContent",
+    "getWatcherHistory",
+    "markListenerReady",
+    "releaseDispatchClaim",
+    "removeApprovedPermission",
+    "setEventAckSupported",
+    "setHostRunsSupported",
     "updateScheduledTask",
     "updateScheduledTaskStatus",
   ])],
@@ -1223,6 +1231,7 @@ const remoteListenerMethods = new Map([
   ])],
   ["CoworkArtifacts", new Set(["onOnArtifactsChanged"])],
   ["CoworkScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
+  ["CCDScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
   // Not a `claude.web` surface on the Desktop side: the wrapper publishes the

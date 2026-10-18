@@ -35,13 +35,18 @@ routine keeps its `local_…` id and `/cowork/…` URL.
 
 ## What a routine is here
 
-The routine list is the union of the Desktop's two scheduled-task stores over
-IPC — `CCDScheduledTasks.getAllScheduledTasks` and
-`CoworkScheduledTasks.getAllScheduledTasks`, the same tasks their own pages
-show. The **Code form's create** (`job_config.ccr`) writes to the Code store,
-so its fires are Code sessions; the flat Cowork form writes to the Cowork
-store. The bridge tells the stores apart by the surface a task was listed from
-and by its `filePath`:
+A routine **is** a Code scheduled task: the cloud Routines page, the Code
+form's create and the Code surface's own task list are views of the same
+objects. The routine list is therefore `CCDScheduledTasks.getAllScheduledTasks`
+(`~/.claude/scheduled-tasks`), and every create lands in that store. The Code
+surface's **Tasks** view showing the same items is expected — it is the same
+store under its local name.
+
+Cowork's scheduled tasks (`CoworkScheduledTasks`, the user-files `Scheduled`
+folder) are a separate product surface, with their own Scheduled page, and are
+not routines. A build that predates the Code store has only Cowork's, and the
+bridge then uses that as the routine store. The bridge tells a task's executor
+apart by the surface it was listed from and by its `filePath`:
 
 | store | path | fires as |
 | --- | --- | --- |
@@ -252,9 +257,9 @@ its data family (`/v1/code/triggers` list/detail/run/update/delete and
   longer matches, the card keeps the cloud URL rather than failing renderer
   preparation.
 
-The cloud form's **Create** maps to `createScheduledTask` in the store its
-shape belongs to (name, instructions, schedule, model and permission mode;
-repositories and connectors have no local equivalent and are not carried). The Cowork form sends the instructions as a
+The cloud form's **Create** maps to `CCDScheduledTasks.createScheduledTask`
+(name, instructions, schedule, model and permission mode; repositories and
+connectors have no local equivalent and are not carried). The Cowork form sends the instructions as a
 flat `prompt`; the Code form sends the runner job instead
 (`job_config.ccr.events`), whose instructions are the first querying user
 event's message — the same event the Desktop's own form parser reads. An edit
