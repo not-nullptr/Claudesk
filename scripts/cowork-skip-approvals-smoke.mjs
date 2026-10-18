@@ -42,6 +42,7 @@ function load({ webShell = false, env = {} } = {}) {
     `${flagSource}${settingsPathLine}${grantSection}
      result = {
        skipApprovals: grantCoworkSkipApprovals,
+       settingsDocument: coworkSettingsDocument,
        bypassGate: grantCoworkPermissionGates,
        connectorGate: grantConnectorGates,
        hashed: growthbookKey,
@@ -53,7 +54,21 @@ function load({ webShell = false, env = {} } = {}) {
   return sandbox.result;
 }
 
-const { skipApprovals, bypassGate, connectorGate, hashed, path } = load();
+const { skipApprovals, settingsDocument, bypassGate, connectorGate, hashed, path } = load();
+
+// Desktop's third-party answer is a 503 error document; the renderer's query
+// yields no data on failure, so the settings body must be a success to be read.
+assert.deepEqual(plain(settingsDocument({ error: { type: "custom_3p_not_available" } }, 503)),
+  { document: {}, synthetic: true }, "a 503 error document is replaced with a success document");
+assert.deepEqual(plain(settingsDocument({}, 200)), { document: {}, synthetic: false },
+  "an empty success document is kept");
+assert.deepEqual(plain(settingsDocument({ skip_approvals_enabled: true }, 200)),
+  { document: { skip_approvals_enabled: true }, synthetic: false },
+  "a successful settings document is kept");
+assert.deepEqual(plain(settingsDocument(null, 200)), { document: {}, synthetic: true },
+  "a missing body is replaced");
+assert.deepEqual(plain(settingsDocument({ error: { type: "other" } }, 200)),
+  { document: {}, synthetic: true }, "an error-shaped success body is replaced");
 
 // The settings document is rewritten to enable the row, once.
 const settings = { auto_mode_enabled: true, skip_approvals_enabled: false, other: 1 };

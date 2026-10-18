@@ -2470,6 +2470,21 @@ function grantCoworkSkipApprovals(value) {
   return true;
 }
 
+// Desktop's third-party answer to GET /cowork_settings is a 503
+// `custom_3p_not_available` document, and the renderer's query exposes data
+// only on success: a grant spliced into that error body was invisible, which
+// left both the auto and bypass rows off (the picker fell back to its three
+// basic modes). The bridge answers the settings document itself when Desktop
+// refuses the read, so the query succeeds and the grants are actually read.
+function coworkSettingsDocument(value, status) {
+  const usable = value && typeof value === "object" && !Array.isArray(value);
+  const failed = typeof status === "number" && (status < 200 || status >= 300);
+  if (usable && !failed && value.error === undefined) {
+    return { document: value, synthetic: false };
+  }
+  return { document: {}, synthetic: true };
+}
+
 // Force the two Cowork permission-mode rollout gates on in the bootstrap's
 // growthbook table. `grantWebShellGates` only adds an absent gate; these may
 // already be carried (evaluated false), so they are replaced outright.
@@ -2685,6 +2700,7 @@ async function forwardOfficialProtocol(request, response, url) {
     bodyBase64: body.toString("base64"),
   });
   let responseBody = Buffer.from(result.bodyBase64 || "", "base64");
+  let status = result.status || 502;
   if ((result.contentType || "").includes("application/json")) {
     // `let`: the greeting is injected by returning a new document (unlike the
     // mutating grant* helpers below), so the rewrite must capture the return.
@@ -2818,9 +2834,22 @@ async function forwardOfficialProtocol(request, response, url) {
     // Cowork's "Skip all approvals" needs both the org settings document and
     // the rollout gate; grant whichever the renderer reads off this response
     // (see coworkSkipApprovals).
-    if (coworkSkipApprovals && coworkSettingsPath.test(url.pathname)
-      && grantCoworkSkipApprovals(parsed)) {
-      rewrote = true;
+    if (coworkSkipApprovals && coworkSettingsPath.test(url.pathname)) {
+      // A third-party Desktop refuses this read with a 503 error document; the
+      // renderer never sees a body on a failed query, so serve the settings
+      // document itself. `auto_mode_enabled` is read beside skip approvals by
+      // the same query and gates the picker's auto row.
+      const normalized = coworkSettingsDocument(parsed, status);
+      parsed = normalized.document;
+      if (normalized.synthetic) {
+        status = 200;
+        rewrote = true;
+      }
+      if (grantCoworkSkipApprovals(parsed)) rewrote = true;
+      if (parsed.auto_mode_enabled !== true) {
+        parsed.auto_mode_enabled = true;
+        rewrote = true;
+      }
     }
     if (coworkSkipApprovals && bootstrapResponsePath.test(url.pathname)
       && grantCoworkPermissionGates(parsed)) {
@@ -2841,7 +2870,7 @@ async function forwardOfficialProtocol(request, response, url) {
       throw new ApiError(502, "Desktop protocol response contained a forbidden credential field");
     }
   }
-  response.writeHead(result.status || 502, {
+  response.writeHead(status, {
     "Cache-Control": "no-store",
     "Content-Length": responseBody.length,
     "Content-Type": result.contentType || "application/octet-stream",
