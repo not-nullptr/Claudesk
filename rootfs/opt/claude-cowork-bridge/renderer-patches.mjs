@@ -3114,12 +3114,17 @@ function routineModelPickerReplacement(source, node) {
     ['thinking:{type:"none"}}))',
       'thinking:e.thinking&&e.thinking.effort_options'
         + '&&e.thinking.effort_options.length?e.thinking:{type:"none"}}))'],
+    // `onStateChange` is called with `(nextState, event)`: the state the picker
+    // resolved is the first argument and the commit event (`{kind:"model"}`,
+    // `{kind:"effort"}`) the second. Read the model from the state as upstream
+    // does, and the effort from the event; reading `kind` off the first
+    // argument matched nothing, so picks never reached the routine's state.
     ["f=d(()=>({model:l}),[l]),m=s(e=>{n(e.model===Z?void 0:e.model)},[n])",
       "f=d(()=>__claudeskEffort?{model:l,thinking:{type:\"effort\","
         + "effort:__claudeskEffort}}:{model:l,thinking:{type:\"none\"}},"
-        + "[l,__claudeskEffort]),m=s(e=>{e.kind===\"effort\"?"
-        + "(__claudeskOnEffortChange&&__claudeskOnEffortChange(e.effort))"
-        + ":e.kind===\"model\"&&n(e.model===Z?void 0:e.model)},"
+        + "[l,__claudeskEffort]),m=s((e,t)=>{t?.kind===\"effort\"?"
+        + "(__claudeskOnEffortChange&&__claudeskOnEffortChange(t.effort))"
+        + ":n(e.model===Z?void 0:e.model)},"
         + "[n,__claudeskOnEffortChange])"],
     ["config:c?me:void 0", 'config:{...me,thinkingStyle:"separate"}'],
   ]);
