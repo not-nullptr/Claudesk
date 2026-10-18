@@ -121,7 +121,10 @@ assert.ok(listed.data.every((trigger) => trigger.prompt === undefined),
   "the list does not read every task file");
 const coworkId = routineIdForTaskId("cowork-1");
 const codeId = routineIdForTaskId("code-1");
-assert.equal((await service.getTrigger(coworkId)).trigger.prompt, "Summarize yesterday.");
+const coworkTrigger = (await service.getTrigger(coworkId)).trigger;
+assert.equal(coworkTrigger.prompt, "Summarize yesterday.");
+assert.equal(instructionsFromJobConfig(coworkTrigger.job_config), "Summarize yesterday.",
+  "the detail carries the instructions in the runner-job shape its page reads");
 
 // The Code form does not send a flat `prompt`: it creates and edits through
 // the cloud runner job (`job_config.ccr.events`). Its instructions are the
@@ -238,6 +241,10 @@ assert.equal(createdTrigger.trigger.prompt,
 assert.equal(createdTrigger.trigger.name, "test routine");
 assert.equal(createdTrigger.trigger.kind, "code",
   "the Code form creates a Code routine, not a Cowork one");
+assert.equal(instructionsFromJobConfig(createdTrigger.trigger.job_config),
+  "Do not output anything else other than what is specified:\n"
+    + "- Current working directory\n- Current user",
+  "the created routine's detail shows the instructions it runs");
 const creatorList = await creator.listTriggers();
 assert.equal(creatorList.data.some((routine) => routine.name === "Morning brief"), false,
   "Cowork scheduled tasks are not routines");
@@ -251,6 +258,8 @@ const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
 assert.equal(lastUpdate.prompt, "List the modified files.",
   "editing the Code form updates the task's instructions");
 assert.equal(edited.trigger.prompt, "List the modified files.");
+assert.equal(instructionsFromJobConfig(edited.trigger.job_config), "List the modified files.",
+  "the detail re-sent after an edit shows the new instructions");
 
 // Firing a Code-form routine starts a Code session, not a Cowork one, and
 // attributes it to the routine the run-history page asks for.

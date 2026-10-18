@@ -307,6 +307,29 @@ export function createRoutineService({
       id: routineId,
       name: task.displayName || task.name || taskId,
       ...(prompt !== undefined ? { prompt } : {}),
+      // The routine page renders its instruction block from `job_config`, not
+      // from the flat prompt: the Desktop's own form parser reads the runner
+      // job's opening user event. Build the same shape the create form posts,
+      // so the detail and edit views see the instructions the task runs.
+      ...(prompt !== undefined ? {
+        job_config: {
+          ccr: {
+            session_context: {
+              sources: [],
+              outcomes: [],
+              model: textOf(task.model) || null,
+            },
+            events: prompt
+              ? [{
+                data: {
+                  type: "user",
+                  message: { role: "user", content: prompt },
+                },
+              }]
+              : [],
+          },
+        },
+      } : {}),
       description: textOf(task.description),
       enabled: taskEnabled(task),
       ...(textOf(task.cronExpression) ? { cron_expression: task.cronExpression } : {}),

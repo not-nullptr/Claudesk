@@ -3565,8 +3565,10 @@ function codeSessionDisplayId(sessionId) {
 }
 
 function routineSessionUrl(origin, kind, sessionId) {
+  // The local Code surface's route is `/epitaxy/<session>`; `/code` is only
+  // ion-dist's alias for it.
   const path = kind === "code"
-    ? `/code/${encodeURIComponent(codeSessionDisplayId(sessionId))}`
+    ? `/epitaxy/${encodeURIComponent(codeSessionDisplayId(sessionId))}`
     : `/cowork/${encodeURIComponent(sessionId)}`;
   return `${origin}${path}`;
 }
