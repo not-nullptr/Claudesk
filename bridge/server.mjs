@@ -4289,9 +4289,11 @@ function rendererSummary(renderer) {
     patchRelease: renderer.patchRelease ?? null,
     patchCount: ids.size,
     // A tenant's routine form and the operator's own: model+effort picker,
-    // cwd/permission state and the two rows.
+    // cwd/permission state and the two rows — on both the unified form and the
+    // Code surface's own routine page.
     routineStartOptions: ["routine-model-effort-picker", "routine-form-start-options",
-      "routine-form-start-option-rows"].every((id) => ids.has(id)),
+      "routine-form-start-option-rows", "routine-epitaxy-start-options"]
+      .every((id) => ids.has(id)),
     // The Code surface's bypass mode: the mode list and the availability
     // predicate.
     codeBypass: ["code-bypass-permission-list", "code-bypass-availability"]
