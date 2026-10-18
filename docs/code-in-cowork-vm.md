@@ -670,27 +670,56 @@ worktree flag a boolean).
 Three distinct pieces of renderer state made a pick look like it "did not save"
 on a tenant's Code surface:
 
-- **The model-selector row.** The Code landing composer resolves its surface as
-  `cowork` in this build while the session page resolves `code` (the renderer's
-  route/context heuristic differs once a session exists). An effort pick was
-  therefore written to one `model_selector_state` row and read back from the
-  other, so the picker showed the old level after the next navigation. The
-  bridge settles the pair on the last placed session's own `effort_level` (and
-  model) whenever it serves `/api/bootstrap`, and mirrors a `PATCH
-  …/model_selector_state/{code|cowork}` to the other row as it arrives. Both
-  rows then follow the same pick.
+- **The model-selector row.** The Code landing composer resolved its surface as
+  `cowork` while the session page resolved `code` (the renderer's route/context
+  heuristic differs once a session exists). An effort pick was therefore
+  written to one `model_selector_state` row and read back from the other, so
+  the picker showed the old level after the next navigation. `web-code-surface`
+  makes every `/code`, `/epitaxy` and `/artifact/` route answer the `code`
+  surface before the context branch, so one SPA session writes and reads one
+  row. The bridge also mirrors a `PATCH …/model_selector_state/{code|cowork}`
+  to the other row and settles the pair when it serves `/api/bootstrap`,
+  preferring a non-default row over the catalog's recommended `high` — a
+  session that ran the stale row must not erase the pick.
 - **The draft permission mode.** The renderer keeps that pick in a per-opening
   in-memory store; unlike the model selector it never writes it to
-  `AppPreferences`. `GET /api/remote/code-defaults` returns the last placed
-  session's start settings, and the preload's `AppPreferences` shim seeds
+  `AppPreferences`. `GET /api/remote/code-defaults` returns the last *explicit*
+  start mode (skipping the composer's failsafe `default` and the transient
+  `plan`), and the preload's `AppPreferences` shim seeds
   `epitaxyPrefs["cc-landing-draft-permission-mode"]` from it (an account-scoped
-  pick still wins). A new Code draft therefore opens on the mode the last
-  session actually ran with instead of falling back to Accept edits.
+  pick still wins). A new Code draft therefore opens on the mode the person
+  last picked instead of falling back to Accept edits.
+- **The first message's permission mode.** The browser send path carries the
+  composer's *spawn* mode beside the user message; until the folder's stored
+  picks settle that is the failsafe `"default"`. The session document and the
+  guest runner both took it, so a session created in Bypass flipped to Manual
+  the moment its first message was sent. The bridge now fills an omitted or
+  `"default"` create mode from the stored pick / last explicit mode, and drops
+  a `"default"` control request that rides the same append as a user message
+  when the session's own config says otherwise. A deliberate in-session switch
+  is its own append and still applies.
 - **A running session's effort.** The effort picker calls the SDK's
   `applyFlagSettings`, which posts an `apply_flag_settings` control request with
   `settings.effortLevel`. Both the bridge (session document) and the guest
   runner (next turn's `--effort`) now apply it; previously the request was
   acknowledged and dropped, so an in-session effort change reverted.
+
+Guest git runs with the runner's own `HOME` (`RUNNER_HOME`), where
+`prepare_home` writes `[safe] directory = *`. The workspace belongs to the host
+user while the runner is root; without that file every repository reads as
+"dubious ownership", so `getGitInfo` returned null, `getWorkingTreeDirtyState`
+answered `unknown`, and a folder with git showed no branch picker or worktree
+toggle. The service's own HOME is read-only under `ProtectHome=read-only`, so
+the runner points git at its own directory explicitly.
+
+**The sidebar groups by folder.** Its group key comes from the session row's
+`repoInfo`, which the renderer derives from `session_context.sources` /
+`outcomes`; a folder-placed self-hosted session has neither, so every row fell
+under "Other". The session document now carries `repo_info` (`name` is the
+folder name, `branch` the placed branch) and `web-code-selfhosted-repo-info`
+makes the row builder take it before either git path. Old sessions created
+before the folder start option existed still have no folder and stay in
+"Other".
 
 **The UI's lookups also run in the guest.** The web composer needs a folder
 listing and git metadata *before* a session exists, and neither the folder

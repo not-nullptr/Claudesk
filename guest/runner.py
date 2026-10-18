@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.2"
+VERSION = "2.2.3"
 
 
 def env(name, default=""):
@@ -372,10 +372,26 @@ def run_git(directory, *arguments):
     agent, and a repo config that names a program must not get one executed
     even here, in the guest (the host never runs git over workspace content at
     all).
+
+    It also runs with the runner's HOME, where `prepare_home` declares the
+    shared tree safe. The workspace belongs to the host user while this service
+    is root; without that file git refuses every repository with "detected
+    dubious ownership", which made the composer's folder read as not-a-repo —
+    no branch picker, no worktree toggle — even though `list_folders` saw the
+    directory. The service's own HOME is read-only under ProtectHome, so the
+    runner must point git at its own directory rather than rely on the unit's
+    environment.
     """
+    environment = dict(os.environ)
+    if os.path.isdir(RUNNER_HOME):
+        environment["HOME"] = RUNNER_HOME
+        environment.setdefault("GIT_CONFIG_GLOBAL",
+                               os.path.join(RUNNER_HOME, ".gitconfig"))
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         completed = subprocess.run(
             ["git", "-C", directory, "-c", "core.fsmonitor=false"] + list(arguments),
+            env=environment,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             timeout=120, check=False)
     except FileNotFoundError:
@@ -666,8 +682,12 @@ def remote_slug(url):
 
 def git_info(params):
     guest, _ = contained_path(params.get("path"))
-    ok, _ = run_git(guest, "rev-parse", "--is-inside-work-tree")
+    ok, output = run_git(guest, "rev-parse", "--is-inside-work-tree")
     if not ok:
+        # A folder that is not a repository is normal; say why in the journal
+        # so a *repository* that git refuses (ownership, a missing mount, a
+        # broken .git) is diagnosable instead of silently reading as no-repo.
+        log("git_info %s: %s" % (guest, output[:300]))
         return None
     ok, top = run_git(guest, "rev-parse", "--show-toplevel")
     repo = top if ok and top else guest

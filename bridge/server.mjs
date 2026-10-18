@@ -1894,21 +1894,26 @@ function reconcileModelSelectorState(document, defaults) {
   const codeEffort = modelSelectorEffort(code);
   const coworkEffort = modelSelectorEffort(cowork);
   if (codeEffort === coworkEffort && code.model === cowork.model) return document;
-  // The last session's effort is the tiebreaker. If neither row matches it
-  // (a pick made but not yet sent), prefer the row that is not sitting on the
-  // catalog's recommended "high" default; a user pick is the non-default one.
+  // First prefer the row that is not sitting on the catalog's recommended
+  // "high" default — a user pick is the non-default one. The last session's
+  // effort is the tiebreaker when both rows are non-default (or both high).
   const desired = typeof defaults?.effort_level === "string" ? defaults.effort_level : null;
   let source;
   let target;
-  if (desired && coworkEffort === desired && codeEffort !== desired) {
-    source = cowork; target = code;
-  } else if (desired && codeEffort === desired && coworkEffort !== desired) {
-    source = code; target = cowork;
-  } else if ((codeEffort === null || codeEffort === "high")
+  // The catalog's recommended "high" is what an untouched row starts at. If
+  // one row is non-default and the other is high, the non-default row is a
+  // pick; prefer it even when the last session ran high (a session started
+  // from the stale row is not evidence against the pick). Equal/non-high
+  // pairs fall through to the last session's start settings.
+  if ((codeEffort === null || codeEffort === "high")
     && coworkEffort && coworkEffort !== "high") {
     source = cowork; target = code;
   } else if ((coworkEffort === null || coworkEffort === "high")
     && codeEffort && codeEffort !== "high") {
+    source = code; target = cowork;
+  } else if (desired && coworkEffort === desired && codeEffort !== desired) {
+    source = cowork; target = code;
+  } else if (desired && codeEffort === desired && coworkEffort !== desired) {
     source = code; target = cowork;
   } else {
     return document;
@@ -3319,6 +3324,36 @@ async function storedFolderPermissionModes() {
   return map;
 }
 
+// The permission mode a browser draft should start with when its create body
+// carries no real choice. The web composer's spawn mode falls back to the
+// failsafe "default" until its folder/preference layers settle, so a quick
+// send used to create a Manual session while the picker showed Bypass (and the
+// send-path control request then wrote "default" into the session). The
+// renderer's own persisted pick is the first answer; the mode of the last
+// placed session is the seed the preload uses for the same draft, so it is the
+// fallback when the renderer has not written one.
+async function storedDefaultPermissionMode() {
+  try {
+    const prefs = await desktop.invokeSettings(
+      "AppPreferences", "getPreferences", [], "json-undefined-v1",
+    );
+    const bucket = prefs?.epitaxyPrefs ?? {};
+    let accountPick = null;
+    let globalPick = null;
+    for (const [key, value] of Object.entries(bucket)) {
+      if (typeof value !== "string" || !value) continue;
+      if (key === "cc-landing-draft-permission-mode") globalPick = value;
+      else if (key.startsWith("cc-landing-draft-permission-mode.")) accountPick = value;
+    }
+    const mode = accountPick ?? globalPick;
+    if (mode && mode !== "plan" && mode !== "default") return mode;
+  } catch { /* the preference read is best-effort */ }
+  const recent = codeRunners
+    ? await codeRunners.recentSessionConfig().catch(() => null) : null;
+  const mode = recent?.permission_mode;
+  return mode && mode !== "plan" ? mode : null;
+}
+
 async function fillStoredStartPermissionMode(args, { defaultMeansNoChoice = false } = {}) {
   const info = args?.[0];
   if (!info || typeof info !== "object" || Array.isArray(info)) return;
@@ -4063,6 +4098,15 @@ async function handleCodeRunnerApi(request, response, url) {
       }
       if (useWorktree !== undefined && typeof useWorktree !== "boolean") {
         throw new ApiError(400, "session worktree flag is invalid");
+      }
+      // The composer's spawn permission mode is the failsafe "default" until
+      // its stored picks settle; fill in the person's actual pick (or the mode
+      // the last session ran) rather than creating a Manual session behind a
+      // Bypass picker. See storedDefaultPermissionMode.
+      if (body.config.permission_mode === undefined
+        || body.config.permission_mode === "default") {
+        const stored = await storedDefaultPermissionMode().catch(() => null);
+        if (stored) body.config.permission_mode = stored;
       }
     }
     const created = await codeRunners.createSession({ body });

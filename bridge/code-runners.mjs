@@ -120,6 +120,14 @@ function sessionDocument(session) {
   const archived = session.archived === true;
   const state = session.state;
   const config = sessionConfigOf(session);
+  // The Code sidebar groups its rows by `repoInfo` (the renderer builds that
+  // from `session_context.sources`/`outcomes`, both empty for a folder-placed
+  // self-hosted session), so a folder session read as "Other" however the
+  // sidebar was grouped. The folder name is the group the person picked; the
+  // renderer patch (`web-code-selfhosted-repo-info`) takes this field before
+  // trying to derive a repository from git metadata.
+  const folderName = typeof config.cwd === "string" && config.cwd
+    ? config.cwd.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || null : null;
   // What the runner last reported of the child's own lifecycle wins over the
   // state derived from the store's vocabulary.
   const reportedWorker = typeof session.reported_worker_status === "string"
@@ -172,6 +180,16 @@ function sessionDocument(session) {
     },
     ...(typeof config.permission_mode === "string" && config.permission_mode
       ? { permission_mode: config.permission_mode } : {}),
+    ...(folderName
+      ? {
+        repo_info: {
+          owner: "",
+          name: folderName,
+          ...(typeof config.source_branch === "string" && config.source_branch
+            ? { branch: config.source_branch } : {}),
+        },
+      }
+      : {}),
     // The runner reads this spelling (`session.config`) for the turn's argv;
     // keep it beside the renderer-facing shape.
     config,
@@ -1495,8 +1513,30 @@ export function createRunnerBackend({
         : body && typeof body === "object" ? [body] : [];
       // The runner writes through this same path with its session token; the
       // renderer writes without one (its auth is the deployment's proxy).
-      const appended = appendToSession(session, incoming,
-        bearerToken(headers) ? "worker" : "client");
+      const fromWorker = Boolean(bearerToken(headers));
+      // A browser send carries its *spawn* mode as a control request beside the
+      // user message. Until the folder's stored permission picks have settled
+      // that value is the composer's failsafe `"default"`, so a session started
+      // in bypass was demoted to Manual by the very message that began it (the
+      // pill flipped after sending, and the next turn ran Manual). A
+      // deliberate in-session switch is its own append without a user message,
+      // so only a `"default"` riding a user message onto a session whose own
+      // config says otherwise is the failsafe; drop it rather than let it
+      // rewrite the session and the transcript.
+      const carriesUserMessage = incoming.some(isUserMessage);
+      const accepted = fromWorker || !carriesUserMessage ? incoming
+        : incoming.filter((item) => {
+          const payload = item?.payload ?? item;
+          if (payload?.type !== "control_request") return true;
+          const request = payload.request;
+          if (request?.subtype !== "set_permission_mode" || request.mode !== "default") {
+            return true;
+          }
+          const current = session.session_config?.permission_mode;
+          return !current || current === "default";
+        });
+      const appended = appendToSession(session, accepted,
+        fromWorker ? "worker" : "client");
       // One append to one session's log — never a rewrite of the store.
       await appendEventsFile(session, appended);
       // A user message on a session no runner holds starts its next turn: the
@@ -1510,7 +1550,7 @@ export function createRunnerBackend({
       // document kept reporting the start values after a mid-session
       // set_model / set_permission_mode and a reopen showed them again.
       let configChanged = false;
-      for (const item of incoming) {
+      for (const item of accepted) {
         const payload = item?.payload ?? item;
         if (!payload || typeof payload !== "object" || payload.type !== "control_request") continue;
         const request = payload.request;
@@ -1861,13 +1901,27 @@ export function createRunnerBackend({
         }
         return null;
       };
+      // The permission mode is the last *explicit* one: a create body or an
+      // explicit in-session switch. "default" is both the composer's failsafe
+      // for an unsettled draft and the Manual mode, so a session that ran it is
+      // not evidence that the person chose it — a bypass pick followed by one
+      // raced session used to make every later draft Manual. Plan is a
+      // per-session posture, not a default.
+      let permissionMode = null;
+      for (let index = state.sessions.length - 1; index >= 0; index -= 1) {
+        const mode = text(sessionConfigOf(state.sessions[index]).permission_mode);
+        if (mode && mode !== "default" && mode !== "plan") {
+          permissionMode = mode;
+          break;
+        }
+      }
       // Each field is read from the most recent *placement that had it*: a
       // routine fire or a folder-less chat session carries no effort, and it
       // must not erase the effort the person last picked for their Code work.
       return {
         model: latest("model"),
         effort_level: latest("effort_level"),
-        permission_mode: latest("permission_mode"),
+        permission_mode: permissionMode,
       };
     },
 

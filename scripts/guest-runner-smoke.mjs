@@ -486,4 +486,43 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   rmSync(work, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 }
 
+// The UI's git reads must run with the runner's HOME: that is where
+// `prepare_home` declares the host-owned workspace safe. Without it every repo
+// reads as "dubious ownership" and the composer sees a plain folder (no branch
+// picker, no worktree toggle). Pin the environment with a stand-in git.
+{
+  const gitProbe = mkdtempSync(join(tmpdir(), "guest-runner-git-"));
+  try {
+    const home = join(gitProbe, "home");
+    const bin = join(gitProbe, "bin");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "git"),
+      "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$HOME\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_TERMINAL_PROMPT\"\n",
+      { mode: 0o755 });
+    const probe = spawnSync("python3", ["-I", "-c", [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('runner', sys.argv[1])",
+      "runner = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(runner)",
+      "ok, out = runner.run_git(sys.argv[2])",
+      "print('OK' if ok else 'FAIL')",
+      "print(out)",
+    ].join("\n"), `${root}guest/runner.py`, gitProbe], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CLAUDESK_RUNNER_HOME: home,
+      },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /^OK$/m, "the probe must run git successfully");
+    assert.ok(probe.stdout.includes(`${home}|${join(home, ".gitconfig")}|0`),
+      `run_git must use the runner's HOME and global config, got: ${probe.stdout}`);
+  } finally {
+    rmSync(gitProbe, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+  }
+}
+
 process.stdout.write("guest-runner-smoke: the guest runner registers, runs an agent and reports\n");

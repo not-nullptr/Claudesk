@@ -1796,6 +1796,15 @@ const selfHostedPoolCreate = 'async({intent:e})=>{let o=await create({worker:{ty
   + 'model:e.model,permissionMode:e.explicitPermissionMode??void 0,effort:e.effort})}';
 const selfHostedWire = 'function wireBody(e){let t=e.session_context;return{title:e.title,'
   + 'config:{sources:t.sources,outcomes:t.outcomes,cwd:t.cwd,model:t.model}}}';
+const selfHostedRepoInfo = 'function repoInfo(e){'
+  + 'let t=e.session_context?.sources,n=e.session_context?.outcomes?.find(e=>e.type==="git_repository");'
+  + 'if(n?.type==="git_repository"&&n.git_info){let e=n.git_info.branches??[],r=n.git_info.repo;'
+  + 'if(e.length>0&&r)return{name:r,branch:e[0]}}'
+  + 'let r=t?.find(e=>e.type==="git_repository");if(r&&r.url)return{name:r.url}}';
+const selfHostedSurface = 'function resolveSurface(e,t,n,r=null){'
+  + 'if(t?t.isLocalAgentModeContext:r==="cowork")return"cowork";'
+  + 'let i=e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/");'
+  + 'return i?"code":"chat"}';
 const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
   + 'let browse=fileSystem?.browseFolder;if(browse)return run(()=>browse(title,void 0,void 0,initialPath))}';
 const selfHostedStrip = 'function composer({envType:e}){'
@@ -1805,10 +1814,12 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
-  selfHostedFolderPicker, selfHostedStrip].join("\n");
+  selfHostedRepoInfo, selfHostedSurface, selfHostedFolderPicker,
+  selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
   "web-code-selfhosted-create", "web-code-selfhosted-create-params",
+  "web-code-selfhosted-repo-info", "web-code-surface",
   "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
@@ -1835,6 +1846,12 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create-params").length, 2,
   "both the intent mapper and the pool create argument must carry the start options");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 1,
+  "the session row must take the bridge's folder group before deriving one from git");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-surface").length, 1,
+  "the model-selector surface resolver must answer Code routes consistently");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-folder-picker").length, 1,
   "the Code folder picker must prefer the VM-backed browse method");
@@ -1871,6 +1888,13 @@ assert.ok(selfHostedOut.includes('effort:e.effort,'
   + '...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),'
   + '...(e.useWorktree&&{useWorktree:!0})'),
   "the pool create argument must carry the same start options");
+assert.ok(selfHostedOut.includes('function repoInfo(e){if(e.repo_info!==void 0)'
+  + 'return e.repo_info;let t=e.session_context?.sources'),
+  "the session row must return the bridge's repo_info before reading git sources");
+assert.ok(selfHostedOut.includes('function resolveSurface(e,t,n,r=null){'
+  + 'if(e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/"))'
+  + 'return"code";if(t?t.isLocalAgentModeContext'),
+  "the Code route must resolve the code surface before the cowork context");
 assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
   "the Code folder picker must prefer the guest-backed browse method");
 assert.ok(selfHostedOut.includes('return ((needsFolder||e==="anthropic_cloud"||e==="byoc"'

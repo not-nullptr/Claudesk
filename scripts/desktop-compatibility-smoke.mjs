@@ -53,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 87 : 72) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 89 : 72) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(

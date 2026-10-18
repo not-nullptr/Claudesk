@@ -894,6 +894,22 @@ const selfHostedCreatePatchId = "web-code-selfhosted-create";
 // pinned by their own key sets and worker type, and the intent binding is read
 // back from the object (`worker.id`, `gitRepoUrls`), never guessed.
 const selfHostedCreateParamsPatchId = "web-code-selfhosted-create-params";
+// The sidebar's folder grouping. Its group key comes from `repoInfo`, which
+// the session-row builder derives from git sources/outcomes — both empty for a
+// folder-placed self-hosted session, so every row landed under "Other". The
+// bridge publishes the folder name as `repo_info`; this splice takes it first,
+// before the git metadata paths. Pinned by the one-parameter function whose
+// first declaration reads `session_context`'s `sources` and `outcomes` and
+// tests for `git_repository`.
+const selfHostedRepoInfoPatchId = "web-code-selfhosted-repo-info";
+// The model-selector surface resolver. On a Code route the renderer normally
+// answers from its local-agent context and picks `cowork`; the session page
+// (where that context is absent) picks `code`. The two pages then write and
+// read different `model_selector_state` rows, which is why an effort pick
+// looked unsaved until the next full bootstrap. A tenant's Code pages are all
+// `/code`, `/epitaxy` or `/artifact/`, so those routes answer `code` before the
+// context branch. The server settles both rows as a second line of defence.
+const codeSurfacePatchId = "web-code-surface";
 // The Code composer's folder picker. `browseFolder` opens the in-page picker,
 // which lists the bridge's workspace mount on the host. For a tenant's Code the
 // listing must come from inside the Cowork VM (the guest runner answers it), so
@@ -2547,6 +2563,73 @@ function selfHostedCreateOptions(intent) {
     + `,...(${intent}.useWorktree&&{useWorktree:!0})`;
 }
 
+// The session-row builder's repo information (`Bs` in shared-11). Its first
+// declaration reads `session_context.sources` and `.outcomes` and it looks for
+// `git_repository`; that shape is unique in the graph. The splice returns the
+// bridge's `repo_info` before either git path runs.
+function selfHostedRepoInfoTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1) return undefined;
+  const param = identifier(node.params[0]);
+  if (!param) return undefined;
+  const first = node.body.body[0];
+  if (first?.type !== "VariableDeclaration") return undefined;
+  let sources = false;
+  let outcomes = false;
+  let gitRepository = false;
+  for (const declaration of first.declarations) {
+    walk(declaration.init, [], (child) => {
+      if (child.type === "Literal" && child.value === "git_repository") {
+        gitRepository = true;
+      }
+      if (child.type !== "MemberExpression" || child.computed) return;
+      const name = child.property?.name;
+      if (name !== "sources" && name !== "outcomes") return;
+      const inner = unwrap(child.object);
+      if (inner?.type === "MemberExpression" && inner.property?.name === "session_context"
+        && identifier(inner.object) === param) {
+        if (name === "sources") sources = true;
+        else outcomes = true;
+      }
+    });
+  }
+  if (!sources || !outcomes || !gitRepository) return undefined;
+  return { statement: first, param };
+}
+
+// The model-selector surface resolver: a three-or-more-parameter function whose
+// body tests the first parameter against the three Code path prefixes. The
+// prefix calls (`startsWith("/code")`, `"/epitaxy"`, `"/artifact/"`) are the
+// product's own route test, so no unrelated path helper can match.
+function codeSurfaceResolverTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length < 3) return undefined;
+  const path = identifier(node.params[0]);
+  if (!path) return undefined;
+  const prefixes = new Set();
+  walk(node.body, [], (child) => {
+    if (child.type !== "CallExpression") return;
+    const callee = unwrap(child.callee);
+    if (callee?.type !== "MemberExpression" || callee.property?.name !== "startsWith") {
+      return;
+    }
+    if (identifier(callee.object) !== path) return;
+    const value = unwrap(child.arguments?.[0]);
+    if (value?.type === "Literal" && typeof value.value === "string") {
+      prefixes.add(value.value);
+    }
+  });
+  if (!prefixes.has("/code") || !prefixes.has("/epitaxy")
+    || !prefixes.has("/artifact/")) {
+    return undefined;
+  }
+  return { statement: node.body.body[0], path };
+}
+
 // The wire mapper (`tO` in shared-100): its body reads `session_context` off
 // the argument and returns `config` with `sources` and `cwd`. Pinned by the
 // `cwd` member, which is the one this patch extends.
@@ -3206,6 +3289,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const creates = [];
     const createParams = [];
     const poolCreates = [];
+    const repoInfos = [];
+    const codeSurfaces = [];
     const wireConfigs = [];
     const folderPickers = [];
     const strips = [];
@@ -3222,6 +3307,10 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (params) createParams.push(params);
       const poolCreate = selfHostedPoolCreateTarget(node);
       if (poolCreate) poolCreates.push(poolCreate);
+      const repoInfo = selfHostedRepoInfoTarget(node);
+      if (repoInfo) repoInfos.push(repoInfo);
+      const codeSurface = codeSurfaceResolverTarget(node);
+      if (codeSurface) codeSurfaces.push(codeSurface);
       const wireConfig = selfHostedWireConfigTarget(node);
       if (wireConfig) wireConfigs.push(wireConfig);
       const folderPicker = selfHostedFolderPickerTarget(node);
@@ -3293,6 +3382,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const at = target.object.end - 1;
       patches.push({ id: selfHostedCreateParamsPatchId, start: at, end: at,
         original: "", replacement: selfHostedCreateOptions(target.intent) });
+    }
+    if (repoInfos.length === 1) {
+      const { statement, param } = repoInfos[0];
+      patches.push({ id: selfHostedRepoInfoPatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `if(${param}.repo_info!==void 0)return ${param}.repo_info;` });
+    }
+    if (codeSurfaces.length === 1) {
+      const { statement, path } = codeSurfaces[0];
+      patches.push({ id: codeSurfacePatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `if(${path}.startsWith("/code")||${path}.startsWith("/epitaxy")`
+          + `||${path}.startsWith("/artifact/"))return"code";` });
     }
     if (wireConfigs.length === 1) {
       const { config, context } = wireConfigs[0];
