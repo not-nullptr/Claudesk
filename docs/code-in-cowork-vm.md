@@ -740,7 +740,12 @@ renderer offers bypass in the Code mode list (see `docs/frontend-patches.md`).
 The capability document advertises `permission_modes.available`; the renderer
 builds the start intent's `permissionMode` only from that list, so a deployment
 that leaves it out has every non-default draft pick dropped silently and every
-session starts in `default` (shown as Accept edits). A change made to a
+session starts in `default` (shown as Accept edits). The session document then
+publishes the create config in the renderer's own shape — `session_context`
+(model, effort, sources) plus the top-level `permission_mode` — because its
+parser reads only those; a document that carries the settings solely under
+`config` (the guest runner's spelling) makes a reopened session show the
+built-in model and Accept edits again. A change made to a
 **running** session is a `set_model` / `set_permission_mode` control request
 appended to the transcript, not a rewritten session document; the guest runner
 reads the latest of each before spawning the turn and applies it to the agent's

@@ -191,7 +191,12 @@ try {
     body: {
       title: "hello",
       self_hosted_runner_pool_id: primary.pool_id,
-      config: { sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }] },
+      config: {
+        sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }],
+        model: "claude-sonnet-5-5[1m]",
+        permission_mode: "bypassPermissions",
+        effort_level: "max",
+      },
       tags: ["smoke"],
     },
   });
@@ -202,6 +207,14 @@ try {
   assert.equal(placed.session.self_hosted_runner_pool_id, primary.pool_id);
   assert.deepEqual(placed.session.tags, ["smoke"]);
   assert.equal(placed.session.config.sources.length, 1, "the create body's sources are echoed back");
+  // The renderer's session normalizer reads the model/effort from
+  // `session_context` and the permission mode as its own top-level field; the
+  // create config alone is the guest runner's spelling and invisible to it.
+  assert.equal(placed.session.session_context.model, "claude-sonnet-5-5[1m]",
+    "the session document carries the started model in the renderer's shape");
+  assert.equal(placed.session.session_context.effort_level, "max");
+  assert.equal(placed.session.permission_mode, "bypassPermissions",
+    "and the started permission mode where the composer reads it");
   assert.equal(placed.session.self_hosted_runner_state.pool_name, "dev-box",
     "the session carries its pool's name for the pool-wait UI");
   assert.equal(placed.session.self_hosted_runner_state.assigned_runner_label, undefined,
@@ -284,6 +297,25 @@ try {
   assert.deepEqual(await backend.deleteSession({ sessionId: withEvents.session.id }), {});
   assert.equal(await backend.session(withEvents.session.id), null, "a deleted session is gone");
   assert.equal(await backend.deleteSession({ sessionId: "no-such-session" }), null);
+
+  // A running session's settings change through control requests in its event
+  // log; the session document follows them, so reopening it shows the change.
+  const switched = await backend.createSession({
+    body: {
+      self_hosted_runner_pool_id: primary.pool_id,
+      config: { sources: [], model: "model-before", permission_mode: "acceptEdits" },
+    },
+  });
+  await backend.appendEvents({ sessionId: switched.session.id, body: { events: [
+    { payload: { type: "control_request", request: { subtype: "set_model", model: "model-after" } } },
+    { payload: { type: "control_request", request: { subtype: "set_permission_mode", mode: "plan" } } },
+  ] } });
+  const switchedDoc = (await backend.session(switched.session.id)).session;
+  assert.equal(switchedDoc.session_context.model, "model-after",
+    "a set_model control request updates the session's own model");
+  assert.equal(switchedDoc.permission_mode, "plan",
+    "a set_permission_mode control request updates the session's permission mode");
+  await backend.deleteSession({ sessionId: switched.session.id });
 
   // A routine fire's session names the routine it ran. The Code routine page
   // reads its history as `?trigger_id=`, the routines rollup as

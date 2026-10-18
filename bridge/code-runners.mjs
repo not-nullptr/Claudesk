@@ -119,6 +119,7 @@ const sessionConfigKeys = ["sources", "outcomes", "model", "cwd", "source_branch
 function sessionDocument(session) {
   const archived = session.archived === true;
   const state = session.state;
+  const config = sessionConfigOf(session);
   // What the runner last reported of the child's own lifecycle wins over the
   // state derived from the store's vocabulary.
   const reportedWorker = typeof session.reported_worker_status === "string"
@@ -158,7 +159,22 @@ function sessionDocument(session) {
       ? { trigger_id: session.trigger_id } : {}),
     ...(typeof session.origin === "string" && session.origin
       ? { origin: session.origin } : {}),
-    config: sessionConfigOf(session),
+    // The renderer normalizes a session through its own parser (`IP` in the
+    // bundle): the model and effort come from the top-level `session_context`,
+    // and the permission mode is a top-level field of its own. Publishing the
+    // create config only under `config` — the shape the guest runner reads —
+    // left both invisible to the composer, so opening a session showed the
+    // built-in model and "Accept edits" however it had been started.
+    session_context: {
+      ...config,
+      sources: Array.isArray(config.sources) ? config.sources : [],
+      outcomes: Array.isArray(config.outcomes) ? config.outcomes : [],
+    },
+    ...(typeof config.permission_mode === "string" && config.permission_mode
+      ? { permission_mode: config.permission_mode } : {}),
+    // The runner reads this spelling (`session.config`) for the turn's argv;
+    // keep it beside the renderer-facing shape.
+    config,
     tags: Array.isArray(session.tags) ? session.tags : [],
     ...(session.client_metadata ? { client_metadata: session.client_metadata } : {}),
     ...(session.unread ? { unread: true } : {}),
@@ -1343,6 +1359,31 @@ export function createRunnerBackend({
       // own `--resume`). Only the client leg requeues — the runner's writes
       // come through the worker leg, where a `user` payload is a tool result,
       // not a new turn.
+      // A client control request changes the session's own settings; the
+      // renderer never rewrites the create config, so without this the session
+      // document kept reporting the start values after a mid-session
+      // set_model / set_permission_mode and a reopen showed them again.
+      let configChanged = false;
+      for (const item of incoming) {
+        const payload = item?.payload ?? item;
+        if (!payload || typeof payload !== "object" || payload.type !== "control_request") continue;
+        const request = payload.request;
+        if (!request || typeof request !== "object") continue;
+        const next = { ...(session.session_config || {}) };
+        if (request.subtype === "set_model"
+          && typeof request.model === "string" && request.model
+          && next.model !== request.model) {
+          next.model = request.model;
+        } else if (request.subtype === "set_permission_mode"
+          && typeof request.mode === "string" && request.mode
+          && next.permission_mode !== request.mode) {
+          next.permission_mode = request.mode;
+        } else {
+          continue;
+        }
+        session.session_config = next;
+        configChanged = true;
+      }
       let requeued = false;
       if (appended.length && (session.state === "released" || session.state === "failed")
           && incoming.some(isUserMessage)) {
@@ -1353,7 +1394,7 @@ export function createRunnerBackend({
         requeued = true;
         log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
       }
-      if (appended.length) await save();
+      if (appended.length || configChanged) await save();
       // The runner holding the pool hears about it on its held poll, not on a
       // later tick.
       if (requeued) wakePool(session.pool_id);
