@@ -234,10 +234,15 @@ its data family (`/v1/code/triggers` list/detail/run/update/delete and
 
 The cloud form's **Create** maps to `createScheduledTask` (name, instructions,
 schedule, model and permission mode; repositories and connectors have no local
-equivalent and are not carried). **Run now** maps to the same fire path as the
-API. **Recent fires** is served empty — the local session history lives on the
-**Scheduled** page (`getSessionsForScheduledTask`), and this first cut does not
-project it into the cloud detail view.
+equivalent and are not carried). The Cowork form sends the instructions as a
+flat `prompt`; the Code form sends the runner job instead
+(`job_config.ccr.events`), whose instructions are the first querying user
+event's message — the same event the Desktop's own form parser reads. An edit
+re-sends that job config, so the task's saved instructions follow its text
+field there too. **Run now** maps to the same fire path as the API. **Recent
+fires** is served empty — the local session history lives on the **Scheduled**
+page (`getSessionsForScheduledTask`), and this first cut does not project it
+into the cloud detail view.
 
 ## Not supported
 

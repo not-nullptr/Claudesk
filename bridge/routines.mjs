@@ -106,6 +106,31 @@ export function promptBody(raw) {
   return (match ? text.slice(match[0].length) : text).trim();
 }
 
+// The Code routine form does not send a flat `prompt`: it posts the cloud
+// runner job (`job_config.ccr`), whose instructions are the first querying
+// user event's message. The Desktop's own form parser reads exactly that
+// event, so mirror it here — an edit re-sends the whole job config, and the
+// task's saved instructions must follow the text field, not stay behind.
+export function instructionsFromJobConfig(jobConfig) {
+  const events = jobConfig?.ccr?.events;
+  if (!Array.isArray(events)) return "";
+  for (const entry of events) {
+    const data = isRecord(entry?.data) ? entry.data
+      : isRecord(entry?.payload) ? entry.payload : null;
+    if (!data || data.shouldQuery === false || !isRecord(data.message)) continue;
+    const content = data.message.content;
+    if (typeof content === "string") return content.trim();
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .filter((block) => isRecord(block) && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 function isoTime(value) {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     const ms = value < 10_000_000_000 ? value * 1000 : value;
@@ -508,7 +533,8 @@ export function createRoutineService({
 
     /** POST /v1/code/triggers — the cloud form's create, mapped to a local task. */
     async createTrigger(body = {}) {
-      const prompt = textOf(body.prompt).trim();
+      const prompt = textOf(body.prompt).trim()
+        || instructionsFromJobConfig(body.job_config);
       if (!prompt) throw badRequest("a routine needs instructions");
       const displayName = textOf(body.name).trim() || "Routine";
       const slug = displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-")
@@ -549,7 +575,14 @@ export function createRoutineService({
       const { task, taskId } = await taskRecord(routineId);
       const patch = {};
       if (body.name !== undefined) patch.displayName = textOf(body.name).trim().slice(0, 200);
-      if (body.prompt !== undefined) patch.prompt = textOf(body.prompt);
+      if (body.prompt !== undefined) {
+        patch.prompt = textOf(body.prompt);
+      } else if (body.job_config !== undefined) {
+        // The Code form edits through the same job-config shape it creates
+        // with; keep the task's instructions in step with its text field.
+        const prompt = instructionsFromJobConfig(body.job_config);
+        if (prompt) patch.prompt = prompt;
+      }
       if (body.description !== undefined) patch.description = textOf(body.description);
       if (body.cron_expression !== undefined) patch.cronExpression = textOf(body.cron_expression) || undefined;
       if (body.run_once_at !== undefined) patch.fireAt = textOf(body.run_once_at) || undefined;

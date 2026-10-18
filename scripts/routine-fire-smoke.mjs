@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createRoutineService,
+  instructionsFromJobConfig,
   promptBody,
   routineIdForTaskId,
   taskIdForRoutineId,
@@ -121,6 +122,110 @@ assert.ok(listed.data.every((trigger) => trigger.prompt === undefined),
 const coworkId = routineIdForTaskId("cowork-1");
 const codeId = routineIdForTaskId("code-1");
 assert.equal((await service.getTrigger(coworkId)).trigger.prompt, "Summarize yesterday.");
+
+// The Code form does not send a flat `prompt`: it creates and edits through
+// the cloud runner job (`job_config.ccr.events`). Its instructions are the
+// opening querying user event, which the Desktop's own parser reads too.
+const cloudCreate = {
+  name: "test routine",
+  persist_session: false,
+  job_config: {
+    ccr: {
+      self_hosted_runner_pool_id: "ccpool_99819d0b57b2c6145219b01e969fe974",
+      session_context: {
+        allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
+        sources: [],
+        outcomes: [],
+        model: null,
+      },
+      events: [{
+        data: {
+          uuid: "991f4379-4ed1-4915-abc2-fb8244ee80fb",
+          session_id: "",
+          type: "user",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: "Do not output anything else other than what is specified:\n"
+              + "- Current working directory\n- Current user",
+          },
+        },
+      }],
+    },
+  },
+  mcp_connections: [],
+  clear_mcp_connections: true,
+};
+assert.equal(instructionsFromJobConfig(cloudCreate.job_config),
+  "Do not output anything else other than what is specified:\n"
+    + "- Current working directory\n- Current user");
+assert.equal(instructionsFromJobConfig({ ccr: { events: [
+  { data: { shouldQuery: false, message: { role: "user", content: "skip me" } } },
+  { data: { message: { role: "user", content: [
+    { type: "text", text: "first line" },
+    { type: "image", source: {} },
+    { type: "text", text: "second line" },
+  ] } } },
+] } }), "first line\nsecond line",
+"content blocks join the way the Desktop's own form parser joins them");
+
+const routineFiles = {};
+const routineTasks = [];
+let lastUpdate;
+const createDesktop = {
+  async invoke(surface, method, args) {
+    if (surface !== "CoworkScheduledTasks") return null;
+    if (method === "getAllScheduledTasks") return [...currentTasks, ...routineTasks];
+    if (method === "createScheduledTask") {
+      const [params] = args;
+      const task = {
+        id: "cloud-1",
+        displayName: params.displayName,
+        filePath: "/home/app/Claude/Scheduled/cloud-1/SKILL.md",
+        enabled: true,
+      };
+      routineTasks.push(task);
+      routineFiles[task.id] = `---\nname: ${params.name}\n---\n${params.prompt}\n`;
+      return task;
+    }
+    if (method === "getScheduledTaskFileContent") return routineFiles[args[0]] ?? null;
+    if (method === "updateScheduledTask") {
+      lastUpdate = args[0];
+      if (lastUpdate.prompt !== undefined) {
+        routineFiles["cloud-1"] = `---\nname: test-routine\n---\n${lastUpdate.prompt}\n`;
+      }
+      return routineTasks[0];
+    }
+    return null;
+  },
+  async inspect() {
+    return { CoworkScheduledTasks: ["createScheduledTask", "updateScheduledTask"] };
+  },
+};
+const creator = createRoutineService({
+  stateDir: join(home, "create"),
+  desktop: createDesktop,
+  configuredModels: ["model-a"],
+  defaultModel: "model-a",
+  log: { log() {}, warn() {} },
+});
+const createdTrigger = await creator.createTrigger(cloudCreate);
+assert.equal(createdTrigger.trigger.prompt,
+  "Do not output anything else other than what is specified:\n"
+    + "- Current working directory\n- Current user",
+  "the Code form's instructions reach the scheduled task");
+assert.equal(createdTrigger.trigger.name, "test routine");
+assert.equal(createdTrigger.trigger.kind, "cowork");
+
+const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
+  name: "test routine",
+  job_config: { ccr: { events: [{
+    data: { message: { role: "user", content: "List the modified files." } },
+  }] } },
+});
+assert.equal(lastUpdate.prompt, "List the modified files.",
+  "editing the Code form updates the task's instructions");
+assert.equal(edited.trigger.prompt, "List the modified files.");
 
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});
