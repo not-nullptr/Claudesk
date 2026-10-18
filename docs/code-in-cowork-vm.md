@@ -652,9 +652,45 @@ disk while the real files sat under `/mnt/.virtiofs-root/workspace`. The
 container, the folder picker and the agent now all agree on `/workspace`, and a
 host path under it is presented at the same path inside the guest.
 
+The options reach the create request through **three** renderer splices, and all
+three are needed: the start-intent builder (`tV`) must put them on the intent,
+the intent→create mapper (`KF`) and the submit switch's pool arm must copy them
+into the create call's argument, and the serializer (`VA`) then places them in
+`session_context`, which the wire mapper (`tO`) turns into `config`. Patching
+only the intent updated the draft and then created a folderless session; the
+folder picker appeared to do nothing while the agent started in `/workspace`.
+The two call-site splices are `web-code-selfhosted-create-params`.
+
 The bridge validates the create body before storing it (folder confirmed as a
 real directory under `COWORK_REMOTE_WORKSPACE_ROOT`; branch a bounded string; the
 worktree flag a boolean).
+
+### Model, effort and permission mode staying put
+
+Three distinct pieces of renderer state made a pick look like it "did not save"
+on a tenant's Code surface:
+
+- **The model-selector row.** The Code landing composer resolves its surface as
+  `cowork` in this build while the session page resolves `code` (the renderer's
+  route/context heuristic differs once a session exists). An effort pick was
+  therefore written to one `model_selector_state` row and read back from the
+  other, so the picker showed the old level after the next navigation. The
+  bridge settles the pair on the last placed session's own `effort_level` (and
+  model) whenever it serves `/api/bootstrap`, and mirrors a `PATCH
+  …/model_selector_state/{code|cowork}` to the other row as it arrives. Both
+  rows then follow the same pick.
+- **The draft permission mode.** The renderer keeps that pick in a per-opening
+  in-memory store; unlike the model selector it never writes it to
+  `AppPreferences`. `GET /api/remote/code-defaults` returns the last placed
+  session's start settings, and the preload's `AppPreferences` shim seeds
+  `epitaxyPrefs["cc-landing-draft-permission-mode"]` from it (an account-scoped
+  pick still wins). A new Code draft therefore opens on the mode the last
+  session actually ran with instead of falling back to Accept edits.
+- **A running session's effort.** The effort picker calls the SDK's
+  `applyFlagSettings`, which posts an `apply_flag_settings` control request with
+  `settings.effortLevel`. Both the bridge (session document) and the guest
+  runner (next turn's `--effort`) now apply it; previously the request was
+  acknowledged and dropped, so an in-session effort change reverted.
 
 **The UI's lookups also run in the guest.** The web composer needs a folder
 listing and git metadata *before* a session exists, and neither the folder

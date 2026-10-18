@@ -50,6 +50,7 @@ node scripts/code-events-smoke.mjs
 node scripts/mobile-api-smoke.mjs
 node scripts/folder-picker-ui-smoke.mjs
 node scripts/code-preferences-smoke.mjs
+node scripts/code-defaults-smoke.mjs
 node scripts/notifications-smoke.mjs
 node scripts/projects-smoke.mjs
 node scripts/composer-latch-smoke.mjs

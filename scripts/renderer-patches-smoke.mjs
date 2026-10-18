@@ -1787,6 +1787,13 @@ const selfHostedIntent = 'function startIntent({envType:r,selectedFolder:c,useWo
 const selfHostedCreate = 'async function createBody({title:e,gitRepoUrls:s,sourceBranch:c,worker:f}){'
   + 'return{title:e,events:[],...f.type==="environment"?{environment_id:f.id}'
   + ':{self_hosted_runner_pool_id:f.id},session_context:{sources:[],outcomes:[]}}}';
+const selfHostedCreateParams = 'function createParams(e,t,n){return{...n!==void 0&&{tags:[tag(n)]},'
+  + 'worker:{type:"environment",id:e.environmentId},gitRepoUrls:e.gitRepoUrls.slice(),'
+  + 'sourceBranches:{...e.sourceBranches},outputBranch:e.reuseBranch,model:e.model,'
+  + 'effort:e.effort,permissionMode:e.explicitPermissionMode??void 0}}';
+const selfHostedPoolCreate = 'async({intent:e})=>{let o=await create({worker:{type:"pool",id:e.poolId},'
+  + 'gitRepoUrls:e.gitRepoUrls.slice(),sourceBranches:{...e.sourceBranches},initialMessage:n,'
+  + 'model:e.model,permissionMode:e.explicitPermissionMode??void 0,effort:e.effort})}';
 const selfHostedWire = 'function wireBody(e){let t=e.session_context;return{title:e.title,'
   + 'config:{sources:t.sources,outcomes:t.outcomes,cwd:t.cwd,model:t.model}}}';
 const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
@@ -1797,11 +1804,12 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + '{onWorktreeChange:onWorktreeChange,worktreeSupported:worktreeSupported,'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
-  selfHostedCreate, selfHostedWire, selfHostedFolderPicker, selfHostedStrip].join("\n");
+  selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
+  selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
-  "web-code-selfhosted-create", "web-code-selfhosted-folder-picker",
-  "web-code-selfhosted-strip"];
+  "web-code-selfhosted-create", "web-code-selfhosted-create-params",
+  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -1824,6 +1832,9 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create").length, 3,
   "the create serializer binds and spreads the options and the wire mapper forwards them");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-create-params").length, 2,
+  "both the intent mapper and the pool create argument must carry the start options");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-folder-picker").length, 1,
   "the Code folder picker must prefer the VM-backed browse method");
@@ -1852,6 +1863,14 @@ assert.ok(selfHostedOut.includes('...(__claudeskCwd&&{cwd:__claudeskCwd}),'
 assert.ok(selfHostedOut.includes('...(t.source_branch&&{source_branch:t.source_branch}),'
   + '...(t.use_worktree&&{use_worktree:t.use_worktree})'),
   "the wire config must forward the branch and worktree flag");
+assert.ok(selfHostedOut.includes('permissionMode:e.explicitPermissionMode??void 0,'
+  + '...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),'
+  + '...(e.useWorktree&&{useWorktree:!0})'),
+  "the create mapper must hand the composer's folder to the cloud create call");
+assert.ok(selfHostedOut.includes('effort:e.effort,'
+  + '...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),'
+  + '...(e.useWorktree&&{useWorktree:!0})'),
+  "the pool create argument must carry the same start options");
 assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
   "the Code folder picker must prefer the guest-backed browse method");
 assert.ok(selfHostedOut.includes('return ((needsFolder||e==="anthropic_cloud"||e==="byoc"'

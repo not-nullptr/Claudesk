@@ -154,7 +154,9 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   };
   const chunks = [];
   const controller = createRealtimeController({ desktop, isChatSession: () => true, ApiError: Error });
-  controller.open({ on() {} }, { writeHead() {}, on() {}, write(c) { chunks.push(c); } }, new URL("http://local/api/events"));
+  controller.open({ headers: { "user-agent": "folder-pick-smoke" }, on() {} },
+    { writeHead() {}, on() {}, write(c) { chunks.push(c); } },
+    new URL("http://local/api/events"));
   await settle();
   queue.push({ surface: "RemoteFolderPicker", method: "onRequest", payload: { id: "req-1", title: "Share" } });
   await controller.pollDesktopEvents();

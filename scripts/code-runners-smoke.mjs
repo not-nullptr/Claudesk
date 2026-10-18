@@ -303,18 +303,23 @@ try {
   const switched = await backend.createSession({
     body: {
       self_hosted_runner_pool_id: primary.pool_id,
-      config: { sources: [], model: "model-before", permission_mode: "acceptEdits" },
+      config: { sources: [], model: "model-before", permission_mode: "acceptEdits",
+        effort_level: "high" },
     },
   });
   await backend.appendEvents({ sessionId: switched.session.id, body: { events: [
     { payload: { type: "control_request", request: { subtype: "set_model", model: "model-after" } } },
     { payload: { type: "control_request", request: { subtype: "set_permission_mode", mode: "plan" } } },
+    { payload: { type: "control_request",
+      request: { subtype: "apply_flag_settings", settings: { effortLevel: "max" } } } },
   ] } });
   const switchedDoc = (await backend.session(switched.session.id)).session;
   assert.equal(switchedDoc.session_context.model, "model-after",
     "a set_model control request updates the session's own model");
   assert.equal(switchedDoc.permission_mode, "plan",
     "a set_permission_mode control request updates the session's permission mode");
+  assert.equal(switchedDoc.session_context.effort_level, "max",
+    "an apply_flag_settings control request updates the session's effort");
   await backend.deleteSession({ sessionId: switched.session.id });
 
   // A routine fire's session names the routine it ran. The Code routine page

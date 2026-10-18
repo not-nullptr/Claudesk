@@ -727,7 +727,9 @@ chunks, and the root-relative URLs are cached across releases. Pinned by that
 exact function body; the real helper is one chunk, and a web-shell deployment
 refuses preparation if no copy matches. Spliced only in web-shell mode.
 
-The self-hosted Code start options are seven tenant-only splices. A tenant's Code
+The self-hosted Code start options are eight tenant-only patch ids (nine
+splices: the create-params patch lands on both the intent mapper and the pool
+arm). A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
 gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
@@ -786,6 +788,18 @@ caller and spreads `cwd`, `source_branch` and `use_worktree` into
 `session_context`; the mapper forwards the last two into the request `config`
 (`cwd` was already forwarded). Pinned by the `session_context` return and the
 `config:{sources, cwd}` return.
+
+`web-code-selfhosted-create-params` carries those values the last hop: the
+intent→create mapper (`KF`, the function that turns the intent into the cloud
+arm's create argument) and the submit switch's `pool` arm each build their
+argument object field by field. Both gain the same spread
+(`...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),
+...(e.useWorktree&&{useWorktree:!0})`). The function is pinned by its three
+parameters and the returned object's worker/repo/model/effort/permission key
+set; the pool object by its `worker:{type:"pool"}` value and `initialMessage`
+key, with the intent binding read back from `gitRepoUrls`. Without these two
+splices the intent patch changed only the draft, and the created session was
+still folderless — the folder picker looked inert.
 
 `web-code-selfhosted-folder-picker` makes the composer's folder-pick helper
 prefer `FileSystem.browseCodeFolder` over `browseFolder`, so the in-page picker

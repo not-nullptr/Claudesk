@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 
 
 def env(name, default=""):
@@ -937,6 +937,18 @@ def run_session(hint):
         chosen = control.get("model")
         if isinstance(chosen, str) and chosen:
             model = chosen
+    # The effort picker writes the SDK's `apply_flag_settings` request, whose
+    # settings carry `effortLevel`. It is the only way a running session's
+    # effort changes; the create config is written once. Newer builds may send
+    # the same value at the top level, so accept both spellings.
+    control = latest_control_request(events, "apply_flag_settings")
+    if isinstance(control, dict):
+        settings = control.get("settings")
+        level = settings.get("effortLevel") if isinstance(settings, dict) else None
+        if not isinstance(level, str):
+            level = control.get("effortLevel")
+        if isinstance(level, str) and level:
+            effort = level
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);

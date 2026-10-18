@@ -191,6 +191,8 @@ try {
         request: { subtype: "set_model", model: "deepseek-picked" } } },
       { payload: { type: "control_request", request_id: "set-perm-mode-smoke",
         request: { subtype: "set_permission_mode", mode: "plan" } } },
+      { payload: { type: "control_request", request_id: "set-effort-smoke",
+        request: { subtype: "apply_flag_settings", settings: { effortLevel: "max" } } } },
       { payload: { type: "user",
         message: { role: "user", content: "switch settings" } } },
     ] }),
@@ -203,10 +205,10 @@ try {
   assert.equal(lastAssistant.message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model deepseek-picked"
-    + " --permission-mode plan --effort high"
+    + " --permission-mode plan --effort max"
     + " --resume 11111111-1111-4111-8111-111111111111"
     + " | prompt: switch settings",
-    "a mid-session set_model/set_permission_mode control request reaches the next turn");
+    "a mid-session model/permission/effort control request reaches the next turn");
 
   // The opening turn can carry image blocks (a routine fire with images); the
   // runner reads the whole content list, not just its text, and forwards it to
@@ -465,7 +467,7 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
     "a second lookup follows the first without waiting a poll interval");
   busyRunner.kill("SIGTERM");
   await new Promise((resolve) => busyRunner.once("exit", resolve));
-  rmSync(hostRoot, { recursive: true, force: true });
+  rmSync(hostRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {
@@ -478,7 +480,10 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
 } finally {
   if (child) child.kill("SIGTERM");
   if (createdRelease) rmSync(releaseFile, { force: true });
-  rmSync(work, { recursive: true, force: true });
+  // The guest runner can still be flushing its state when SIGTERM lands;
+  // recursive rmSync already retries EBUSY/ENOTEMPTY, but the default window is
+  // short enough to lose that race on a loaded CI box.
+  rmSync(work, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 }
 
 process.stdout.write("guest-runner-smoke: the guest runner registers, runs an agent and reports\n");

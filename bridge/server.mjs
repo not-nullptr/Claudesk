@@ -1862,6 +1862,75 @@ function validateModelSelectorUpdate(method, pathname, body) {
   };
 }
 
+// A tenant's Code page resolves its model-selector surface inconsistently in
+// this build: the landing composer writes the `cowork` row while the session
+// page reads `code` (the renderer's route/context heuristic differs once a
+// session exists). The result is a pick that visibly "doesn't save" — the
+// create body carries the picked effort, but the next page reads the stale row
+// and shows the old level.
+//
+// The bridge settles the two rows on what the last placed session actually
+// used. A pick that reached a created session is the user's latest intent; a
+// row that disagrees is stale. In-session PATCHes are mirrored to the other
+// row as they arrive (see forwardOfficialProtocol), so after the first
+// settlement the two stay equal.
+const modelSelectorSurfaces = new Set(["code", "cowork"]);
+function modelSelectorSurfaceOf(pathname) {
+  const match = pathname.match(/^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/([A-Za-z0-9_-]+)$/i);
+  return match && modelSelectorSurfaces.has(match[1]) ? match[1] : null;
+}
+
+function modelSelectorEffort(entry) {
+  const effort = entry?.thinking?.effort;
+  return typeof effort === "string" && effort ? effort : null;
+}
+
+function reconcileModelSelectorState(document, defaults) {
+  const states = document?.model_selector_state;
+  if (!Array.isArray(states)) return document;
+  const code = states.find((entry) => entry?.id === "code");
+  const cowork = states.find((entry) => entry?.id === "cowork");
+  if (!code || !cowork) return document;
+  const codeEffort = modelSelectorEffort(code);
+  const coworkEffort = modelSelectorEffort(cowork);
+  if (codeEffort === coworkEffort && code.model === cowork.model) return document;
+  // The last session's effort is the tiebreaker. If neither row matches it
+  // (a pick made but not yet sent), prefer the row that is not sitting on the
+  // catalog's recommended "high" default; a user pick is the non-default one.
+  const desired = typeof defaults?.effort_level === "string" ? defaults.effort_level : null;
+  let source;
+  let target;
+  if (desired && coworkEffort === desired && codeEffort !== desired) {
+    source = cowork; target = code;
+  } else if (desired && codeEffort === desired && coworkEffort !== desired) {
+    source = code; target = cowork;
+  } else if ((codeEffort === null || codeEffort === "high")
+    && coworkEffort && coworkEffort !== "high") {
+    source = cowork; target = code;
+  } else if ((coworkEffort === null || coworkEffort === "high")
+    && codeEffort && codeEffort !== "high") {
+    source = code; target = cowork;
+  } else {
+    return document;
+  }
+  const settled = {
+    ...target,
+    ...(typeof source.model === "string" && source.model ? { model: source.model } : {}),
+    ...(source.thinking ? { thinking: source.thinking } : {}),
+    ...(Array.isArray(source.thinking_by_model)
+      ? { thinking_by_model: source.thinking_by_model } : {}),
+    ...(typeof source.selection_source === "string"
+      ? { selection_source: source.selection_source } : {}),
+    ...(typeof source.preset === "string" && source.preset ? { preset: source.preset } : {}),
+  };
+  console.log(`[cowork-bridge] model selector: settled ${target.id} on the `
+    + `${source.id} row (effort ${modelSelectorEffort(source) ?? "default"})`);
+  return {
+    ...document,
+    model_selector_state: states.map((entry) => entry === target ? settled : entry),
+  };
+}
+
 function sanitizeStoreValue(surface, store, value, identity) {
   if (surface === "LocalAgentModeSessions" && store === "sessionsBridgeStatusStore") {
     return { remoteToolsDeviceName: value?.remoteToolsDeviceName ?? null };
@@ -2691,24 +2760,47 @@ async function forwardOfficialProtocol(request, response, url) {
   validateAccountProfileUpdate(method, url.pathname, body);
   validateAccountSettingsUpdate(method, url.pathname, body);
   validateModelSelectorUpdate(method, url.pathname, body);
+  const protocolHeaders = {
+    accept: request.headers.accept,
+    "accept-language": request.headers["accept-language"],
+    "anthropic-anonymous-id": request.headers["anthropic-anonymous-id"],
+    "anthropic-client-build": request.headers["anthropic-client-build"],
+    "anthropic-client-device-id": request.headers["anthropic-client-device-id"],
+    "anthropic-client-platform": request.headers["anthropic-client-platform"],
+    "anthropic-client-sha": request.headers["anthropic-client-sha"],
+    "anthropic-client-version": request.headers["anthropic-client-version"],
+    "content-type": request.headers["content-type"],
+    "x-activity-session-id": request.headers["x-activity-session-id"],
+  };
   const result = await desktop.protocol({
     method,
     pathname: url.pathname,
     search: url.search,
-    headers: {
-      accept: request.headers.accept,
-      "accept-language": request.headers["accept-language"],
-      "anthropic-anonymous-id": request.headers["anthropic-anonymous-id"],
-      "anthropic-client-build": request.headers["anthropic-client-build"],
-      "anthropic-client-device-id": request.headers["anthropic-client-device-id"],
-      "anthropic-client-platform": request.headers["anthropic-client-platform"],
-      "anthropic-client-sha": request.headers["anthropic-client-sha"],
-      "anthropic-client-version": request.headers["anthropic-client-version"],
-      "content-type": request.headers["content-type"],
-      "x-activity-session-id": request.headers["x-activity-session-id"],
-    },
+    headers: protocolHeaders,
     bodyBase64: body.toString("base64"),
   });
+  // Keep the model selector's `code` and `cowork` rows equal for a tenant.
+  // The landing composer and the session page resolve different rows in this
+  // build, so a pick written to one would otherwise vanish from the other (see
+  // reconcileModelSelectorState). Mirroring is best-effort: the user's own
+  // PATCH has already succeeded, and a failed mirror only leaves the two rows
+  // disagreeing until the next bootstrap settlement.
+  const selectorSurface = tenantInstance ? modelSelectorSurfaceOf(url.pathname) : null;
+  if (method === "PATCH" && selectorSurface && (result.status || 0) < 400) {
+    const otherSurface = selectorSurface === "code" ? "cowork" : "code";
+    const otherPath = url.pathname.replace(
+      /\/model_selector_state\/[^/]+$/, `/model_selector_state/${otherSurface}`,
+    );
+    void desktop.protocol({
+      method: "PATCH",
+      pathname: otherPath,
+      search: "",
+      headers: protocolHeaders,
+      bodyBase64: body.toString("base64"),
+    }).catch((error) => {
+      console.log(`[cowork-bridge] model selector mirror to ${otherSurface} failed: ${error.message}`);
+    });
+  }
   let responseBody = Buffer.from(result.bodyBase64 || "", "base64");
   let status = result.status || 502;
   if ((result.contentType || "").includes("application/json")) {
@@ -2811,6 +2903,18 @@ async function forwardOfficialProtocol(request, response, url) {
     // build happens to read first.
     if (bootstrapResponsePath.test(url.pathname) && grantTenantCodeGates(parsed)) {
       rewrote = true;
+    }
+    // The Code landing and the Code session page resolve different
+    // model-selector rows in this build; settle them on the start settings of
+    // the session the user actually created (see reconcileModelSelectorState).
+    if (tenantInstance && bootstrapResponsePath.test(url.pathname)) {
+      const defaults = codeRunners
+        ? await codeRunners.recentSessionConfig().catch(() => null) : null;
+      const reconciled = reconcileModelSelectorState(parsed, defaults);
+      if (reconciled !== parsed) {
+        parsed = reconciled;
+        rewrote = true;
+      }
     }
     // The live transcript transport the Code surface picks between SSE and a
     // WebSocket (see grantCcrSubscribeSse).
@@ -4476,6 +4580,18 @@ async function handleApi(request, response, url) {
       throw new ApiError(Number(error?.statusCode) || 503,
         error?.message || "the guest runner did not answer");
     });
+    sendJson(response, 200, { ok: true, value });
+    return;
+  }
+  // The draft defaults behind the preload's AppPreferences shim. The
+  // renderer's own draft permission pick is not persisted anywhere by the
+  // renderer (it lives in a per-opening in-memory store), so a new Code draft
+  // fell back to "Accept edits" after every session. The last session's start
+  // settings are the user's last real pick; the preload seeds them into
+  // `cc-landing-draft-permission-mode` when the bucket has no pick of its own.
+  if (tenantCodeReadsEnabled && request.method === "GET"
+    && url.pathname === "/api/remote/code-defaults") {
+    const value = await codeRunners.recentSessionConfig();
     sendJson(response, 200, { ok: true, value });
     return;
   }

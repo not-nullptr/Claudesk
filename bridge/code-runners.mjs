@@ -1524,6 +1524,15 @@ export function createRunnerBackend({
           && typeof request.mode === "string" && request.mode
           && next.permission_mode !== request.mode) {
           next.permission_mode = request.mode;
+        } else if (request.subtype === "apply_flag_settings"
+          && typeof request.settings?.effortLevel === "string"
+          && request.settings.effortLevel
+          && next.effort_level !== request.settings.effortLevel) {
+          // The renderer changes a running session's effort by posting this
+          // control request (the SDK's `applyFlagSettings`); without it the
+          // pick was acknowledged and then silently dropped, and a reopen
+          // showed the old level again.
+          next.effort_level = request.settings.effortLevel;
         } else {
           continue;
         }
@@ -1831,6 +1840,35 @@ export function createRunnerBackend({
       const state = await load();
       const pool = state.pools[0];
       return pool ? { pool_id: pool.pool_id, name: pool.name, secret: pool.secret } : null;
+    },
+
+    /**
+     * The start settings of the most recently placed session. The web shell's
+     * Code composer resolves its `model_selector_state` surface (and its draft
+     * permission mode) from state that a self-hosted page can read before any
+     * session exists; on a tenant those two surfaces disagree in this build
+     * (the landing writes `cowork`, the session page reads `code`). This is
+     * the tiebreaker: the session that was actually created is what the picks
+     * resolved to, so the bridge can settle both surfaces on it.
+     */
+    async recentSessionConfig() {
+      const state = await load();
+      const text = (value) => typeof value === "string" && value ? value : null;
+      const latest = (key) => {
+        for (let index = state.sessions.length - 1; index >= 0; index -= 1) {
+          const value = text(sessionConfigOf(state.sessions[index])[key]);
+          if (value) return value;
+        }
+        return null;
+      };
+      // Each field is read from the most recent *placement that had it*: a
+      // routine fire or a folder-less chat session carries no effort, and it
+      // must not erase the effort the person last picked for their Code work.
+      return {
+        model: latest("model"),
+        effort_level: latest("effort_level"),
+        permission_mode: latest("permission_mode"),
+      };
     },
 
     /**

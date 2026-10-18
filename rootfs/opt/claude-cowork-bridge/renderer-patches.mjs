@@ -886,6 +886,14 @@ const branchReadPatchId = "web-code-selfhosted-branch-read";
 // `cwd: ctx.cwd` return.
 const selfHostedIntentPatchId = "web-code-selfhosted-intent";
 const selfHostedCreatePatchId = "web-code-selfhosted-create";
+// The intent carries the folder, but the create call's own parameter mapper
+// (`KF`) and the pool arm of the submit switch build their argument object
+// field by field and never copy it. Without this splice the folder picker
+// updates the draft's state and then the session is still created folderless —
+// the runner falls back to the account's shared workspace. Both objects are
+// pinned by their own key sets and worker type, and the intent binding is read
+// back from the object (`worker.id`, `gitRepoUrls`), never guessed.
+const selfHostedCreateParamsPatchId = "web-code-selfhosted-create-params";
 // The Code composer's folder picker. `browseFolder` opens the in-page picker,
 // which lists the bridge's workspace mount on the host. For a tenant's Code the
 // listing must come from inside the Cowork VM (the guest runner answers it), so
@@ -2480,6 +2488,65 @@ function selfHostedCreateTarget(node) {
   return { param: params.param, context, bindings: params.bindings };
 }
 
+// The intent-to-create mapper (`KF` in the same chunk as the submit switch):
+// a three-parameter function returning one object that carries the worker, the
+// repo list and the model/effort/permission triple. It is the argument the
+// cloud arm hands the create mutation. Pinned by that key set and by the
+// worker's `environment` type, so no unrelated serializer can match.
+function selfHostedCreateParamsTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 3) return undefined;
+  const intent = identifier(node.params[0]);
+  if (!intent) return undefined;
+  const statements = node.body.body;
+  if (statements.length !== 1 || statements[0].type !== "ReturnStatement") {
+    return undefined;
+  }
+  const returned = unwrap(statements[0].argument);
+  if (returned?.type !== "ObjectExpression") return undefined;
+  const required = ["worker", "gitRepoUrls", "sourceBranches", "model",
+    "effort", "permissionMode"];
+  if (required.some(name => !objectMember(returned, name))) return undefined;
+  const worker = unwrap(objectMember(returned, "worker").value);
+  const typeMember = objectMember(worker, "type");
+  if (!typeMember || literal(typeMember.value, "environment") !== true) {
+    return undefined;
+  }
+  return { object: returned, intent };
+}
+
+// The pool arm's create argument in the submit switch: an object carrying the
+// `pool` worker beside the same start fields. The intent binding is read back
+// from `gitRepoUrls: intent.gitRepoUrls.slice()` rather than assumed, because
+// this object sits in an arrow whose parameter destructures the intent under
+// whatever name the minifier chose.
+function selfHostedPoolCreateTarget(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const required = ["worker", "gitRepoUrls", "initialMessage", "model",
+    "permissionMode", "effort"];
+  if (required.some(name => !objectMember(node, name))) return undefined;
+  const worker = unwrap(objectMember(node, "worker").value);
+  const typeMember = objectMember(worker, "type");
+  if (!typeMember || literal(typeMember.value, "pool") !== true) return undefined;
+  const repos = unwrap(objectMember(node, "gitRepoUrls").value);
+  let receiver = repos?.type === "CallExpression" ? unwrap(repos.callee) : repos;
+  while (receiver?.type === "MemberExpression") receiver = unwrap(receiver.object);
+  const intent = identifier(receiver);
+  return intent ? { object: node, intent } : undefined;
+}
+
+// Every create argument that takes the intent must carry the composer's start
+// options, or the folder picker changes only the draft. `cwd` is the one the
+// bridge and the guest runner act on; the branch/worktree pair travels beside
+// it because the same call is what places a worktree session.
+function selfHostedCreateOptions(intent) {
+  return `,...(${intent}.cwd&&{cwd:${intent}.cwd})`
+    + `,...(${intent}.sourceBranch&&{sourceBranch:${intent}.sourceBranch})`
+    + `,...(${intent}.useWorktree&&{useWorktree:!0})`;
+}
+
 // The wire mapper (`tO` in shared-100): its body reads `session_context` off
 // the argument and returns `config` with `sources` and `cwd`. Pinned by the
 // `cwd` member, which is the one this patch extends.
@@ -3137,6 +3204,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const branchReads = [];
     const intents = [];
     const creates = [];
+    const createParams = [];
+    const poolCreates = [];
     const wireConfigs = [];
     const folderPickers = [];
     const strips = [];
@@ -3149,6 +3218,10 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (intent) intents.push(intent);
       const create = selfHostedCreateTarget(node);
       if (create) creates.push(create);
+      const params = selfHostedCreateParamsTarget(node);
+      if (params) createParams.push(params);
+      const poolCreate = selfHostedPoolCreateTarget(node);
+      if (poolCreate) poolCreates.push(poolCreate);
       const wireConfig = selfHostedWireConfigTarget(node);
       if (wireConfig) wireConfigs.push(wireConfig);
       const folderPicker = selfHostedFolderPickerTarget(node);
@@ -3213,6 +3286,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
             + `,...(${sourceBranch}&&{source_branch:${sourceBranch}})`
             + `,...(${worktree}&&{use_worktree:!0})` });
       }
+    }
+    for (const target of [createParams.length === 1 ? createParams[0] : undefined,
+      poolCreates.length === 1 ? poolCreates[0] : undefined]) {
+      if (!target?.object.properties.length) continue;
+      const at = target.object.end - 1;
+      patches.push({ id: selfHostedCreateParamsPatchId, start: at, end: at,
+        original: "", replacement: selfHostedCreateOptions(target.intent) });
     }
     if (wireConfigs.length === 1) {
       const { config, context } = wireConfigs[0];

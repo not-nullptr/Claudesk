@@ -17,7 +17,7 @@ const desktop = {
   async pollEvents() { const events = queue; queue = []; return events; },
 };
 const chunks = [];
-const request = { on() {} };
+const request = { headers: { 'user-agent': 'realtime-stream-smoke' }, on() {} };
 const response = { writeHead() {}, on() {}, write(chunk) { chunks.push(chunk); } };
 const controller = createRealtimeController({ desktop, isChatSession: () => true, ApiError: Error });
 const events = () => chunks.join('').split('\n\n').filter(s => s.includes('event:')).map(s => ({
