@@ -51,6 +51,20 @@ try {
   assert.equal((await backend.registerRunner({ headers: wrong, body: {} })).unauthorized, true,
     "register with the wrong secret is unauthorized");
 
+  // A runner older than 2.0.2 ignores the UI-request lane on its poll. The
+  // bridge must say so at once (and why), not wait out the request timeout.
+  const oldRunner = await backend.registerRunner({
+    headers: auth,
+    body: { runner_version: "2.0.1" },
+  });
+  await backend.pollSpawnHints({ headers: auth });
+  await assert.rejects(
+    () => backend.listRunnerFolders({ root: "/workspace", path: "/workspace" }),
+    (error) => error.statusCode === 501 && /2\.0\.2/.test(error.message),
+    "an old guest runner is refused with an actionable version error",
+  );
+  await backend.deregisterRunner({ headers: auth, body: { runner_id: oldRunner.runner_id } });
+
   const registered = await backend.registerRunner({
     headers: auth,
     body: { runner_version: "2.1.295", use_anthropic_git_proxy: false },

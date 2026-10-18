@@ -5022,6 +5022,12 @@ async function handleApi(request, response, url) {
         codeRunnerPool: codeRunnersEnabled
           ? (await codeRunners.primaryPool())?.pool_id ?? null
           : null,
+        // The runner itself: version(s), when it last polled, and whether it
+        // speaks the UI-request lane. An old runner makes every folder/branch
+        // lookup fail while sessions still work, which this makes visible.
+        ...(codeRunnersEnabled
+          ? { codeRunner: await codeRunners.runnerStatus().catch(() => null) }
+          : {}),
         infrastructureActionsEnabled,
         // The actual methods the renderer exposes on each surface, filtered by
         // what this bridge allows. `codeReady` only checks request/response

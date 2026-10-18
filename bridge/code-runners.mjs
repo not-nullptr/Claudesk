@@ -347,6 +347,30 @@ export function createRunnerBackend({
     runner.pool_id === pool.pool_id
     && typeof runner.last_poll_at === "string"
     && Date.now() - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
+  // The UI request lane (`requests` beside `hints` on the poll) is guest runner
+  // 2.0.2+. An older runner accepts the poll and silently ignores the key, so
+  // every folder/branch lookup burns the full timeout and reads as a hang. Say
+  // so at once instead: 501 is "this runner cannot do that", not "try later".
+  const requestLaneVersion = [2, 0, 2];
+  function versionParts(value) {
+    const text = String(value ?? "").trim();
+    if (!/^\d+(?:\.\d+)*$/.test(text)) return null;
+    return text.split(".").map((part) => Number(part));
+  }
+  function versionAtLeast(value, minimum) {
+    const parts = versionParts(value);
+    if (!parts) return false;
+    for (let index = 0; index < minimum.length; index += 1) {
+      const mine = parts[index] ?? 0;
+      if (mine !== minimum[index]) return mine > minimum[index];
+    }
+    return true;
+  }
+  function onlineRunners(state, pool) {
+    return state.runners.filter((runner) => runner.pool_id === pool.pool_id
+      && typeof runner.last_poll_at === "string"
+      && Date.now() - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
+  }
 
   // Long polls. A runner that says how long it is willing to wait
   // (`x-claudesk-poll-wait: <seconds>`) has an empty poll held open until a
@@ -475,6 +499,19 @@ export function createRunnerBackend({
     if (!runnerOnline(state, pool)) {
       throw runnerUnavailable("no guest runner is online", 503);
     }
+    const online = onlineRunners(state, pool);
+    if (online.length && !online.some((runner) =>
+      versionAtLeast(runner.runner_version, requestLaneVersion))) {
+      // A stale registration from a pre-2.0.2 runner can sit beside the live
+      // one; only refuse when *no* online runner supports the request lane.
+      const versions = [...new Set(online.map(
+        (runner) => runner.runner_version || "unknown"))].join(", ");
+      throw runnerUnavailable(
+        `the guest runner is version ${versions}; `
+        + "folder and branch lookups need the runner from this deployment "
+        + "(2.0.2 or newer). Refresh it with scripts/install-guest-runner.sh "
+        + "or deploy.sh.", 501);
+    }
     const outstanding = [...runnerRequests.values()]
       .filter((request) => request.pool_id === pool.pool_id).length;
     if (outstanding >= runnerRequestsPerPool) {
@@ -483,8 +520,13 @@ export function createRunnerBackend({
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        const entry = runnerRequests.get(requestId);
         runnerRequests.delete(requestId);
-        reject(runnerUnavailable("the guest runner did not answer", 504));
+        log.warn(`[code-runners] UI request ${entry?.method ?? requestId} timed out `
+          + `(${entry?.handed ? "handed to a runner" : "no runner took it"})`);
+        reject(runnerUnavailable(entry?.handed
+          ? "the guest runner took the request but did not answer"
+          : "no guest runner polled to take the request", 504));
       }, runnerRequestTimeoutMs);
       runnerRequests.set(requestId, {
         pool_id: pool.pool_id,
@@ -1521,6 +1563,31 @@ export function createRunnerBackend({
     },
 
     /**
+     * The runner's live state, for `/api/health`. `request_lane` says whether
+     * an online runner is new enough to answer UI lookups (2.0.2+): with an
+     * older one, folder and branch reads are refused with the version, which
+     * is the difference between a stale guest image and a broken bridge.
+     */
+    async runnerStatus() {
+      const state = await load();
+      const pool = state.pools[0];
+      if (!pool) return null;
+      const online = onlineRunners(state, pool);
+      const newest = [...online].sort(
+        (a, b) => Date.parse(b.registered_at || 0) - Date.parse(a.registered_at || 0),
+      )[0];
+      return {
+        pool_id: pool.pool_id,
+        online: online.length > 0,
+        runner_versions: [...new Set(online.map((runner) => runner.runner_version || "unknown"))],
+        last_poll_at: newest?.last_poll_at ?? null,
+        request_lane: online.some(
+          (runner) => versionAtLeast(runner.runner_version, requestLaneVersion),
+        ),
+      };
+    },
+
+    /**
      * POST /v1/code/runners/self-hosted/requests/result — the guest runner's
      * answer to a UI request it was handed on its poll (see askRunner). The
      * pool secret is the pass, like every other runner leg.
@@ -1533,8 +1600,11 @@ export function createRunnerBackend({
       if (!entry || entry.pool_id !== pool.pool_id) return {};
       runnerRequests.delete(body.request_id);
       if (typeof body?.error === "string" && body.error) {
+        log.warn(`[code-runners] UI request ${body.request_id} failed in the guest: `
+          + `${String(body.error).slice(0, 300)}`);
         entry.reject(runnerUnavailable(body.error, 502));
       } else {
+        log.log(`[code-runners] UI request ${body.request_id} answered by the guest`);
         entry.resolve(body?.result ?? null);
       }
       return {};

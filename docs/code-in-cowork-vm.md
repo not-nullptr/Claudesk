@@ -672,6 +672,22 @@ bounded (32 outstanding, a 15 s timeout, and no runner polling recently answers
 as unavailable). Guest-side git runs with `-c core.fsmonitor=false`, so a
 repo config written by the agent cannot make it execute a program.
 
+The request lane is guest runner **2.0.2+**. A 2.0.1 runner (the held-poll
+release before it) accepts the poll and silently ignores `requests`, so every
+lookup burns the full timeout and reads as a hang; the bridge now refuses such
+a runner at once with a `501` naming its version and how to refresh it
+(`scripts/install-guest-runner.sh`, or `deploy.sh`). A timeout that does happen
+says whether the runner took the request and stayed silent, or never polled to
+take it, so the two failure shapes are distinguishable in the picker's message.
+`GET /api/health` reports `codeRunner` — online, version(s), last poll and
+`request_lane` — which distinguishes a stale guest image from a bridge problem.
+
+The service also runs session turns on a worker thread, not inline in the poll
+loop. A turn can last up to `TURN_TIMEOUT`; with the agent inline the runner
+stopped polling for its duration and the folder/git lookups timed out exactly
+while a session was active. Turns stay serialized (one worker), and the poll
+loop keeps answering lookups throughout.
+
 The runner lives only while the Cowork VM does, and the VM idle-stops. These
 lookups are often the first thing to touch it after that — the composer asks for
 git info and branches as soon as a folder is chosen — so an offline runner is

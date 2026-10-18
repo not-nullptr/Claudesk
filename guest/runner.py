@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.3"
+VERSION = "2.0.4"
 
 
 def env(name, default=""):
@@ -849,6 +849,24 @@ def prepare_home():
         log("could not create %s (%s); the agent keeps the service's HOME" % (RUNNER_HOME, error))
 
 
+def run_sessions_forever(session_queue):
+    """Run session turns off the poll thread.
+
+    A turn can last as long as TURN_TIMEOUT, and the Code UI's folder and git
+    lookups ride the same poll as work. Running the agent inline meant the
+    runner stopped polling for the whole turn, so those lookups timed out
+    whenever a session was active — exactly when the user is in the Code
+    surface. One worker keeps turns serialized (the previous behavior) while
+    the poll loop stays free to answer UI requests.
+    """
+    while True:
+        hint = session_queue.get()
+        try:
+            run_session(hint)
+        except Exception as error:  # noqa: BLE001 - keep serving the pool
+            log("session %s failed: %s" % (hint.get("session_uuid"), error))
+
+
 def main():
     if not SECRET:
         log("CLAUDESK_RUNNER_SECRET is not set; refusing to poll")
@@ -859,6 +877,12 @@ def main():
     prepare_home()
     log("polling %s (agent %s, checkout %s)" % (BASE, CLAUDE_BIN, CHECKOUT))
     register()
+    # `--once` is a probe: it runs whatever it is handed inline and returns.
+    # The service keeps a single worker for turns so the poll never blocks.
+    session_queue = queue.Queue()
+    if not ONCE:
+        threading.Thread(target=run_sessions_forever, args=(session_queue,),
+                         name="claudesk-session-worker", daemon=True).start()
     while True:
         started = time.time()
         try:
@@ -885,6 +909,9 @@ def main():
                 time.sleep(POLL_SECONDS)
             continue
         for hint in hints:
+            if not ONCE:
+                session_queue.put(hint)
+                continue
             try:
                 run_session(hint)
             except Exception as error:  # noqa: BLE001 - keep serving the pool

@@ -341,6 +341,65 @@ printf '{"type":"result","subtype":"success","session_id":"22222222-2222-4222-82
     `cwd: ${join(sharedRepo, ".claude", "worktrees", suffix)}`
     + ` | branch: claude/${suffix} | prompt: isolated`,
     "a worktree session runs in its own copy on its own branch, in the VM");
+
+  // The service keeps polling while a turn runs. A UI lookup rides the poll,
+  // so an agent mid-turn must not starve the folder picker: run a slow agent
+  // and ask for a listing before its turn can finish.
+  const slowDir = join(work, "slow-bin");
+  mkdirSync(slowDir, { recursive: true });
+  const slowStub = join(slowDir, "claude");
+  writeFileSync(slowStub, `#!/bin/sh
+sleep 6
+printf '{"type":"system","subtype":"init","session_id":"33333333-3333-4333-8333-333333333333"}\\n'
+printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-8333-333333333333","is_error":false,"result":"done"}\\n'
+`);
+  chmodSync(slowStub, 0o755);
+  const busyRunner = spawn("python3", ["-I", `${root}guest/runner.py`], {
+    env: {
+      ...process.env,
+      CLAUDESK_RUNNER_BASE: `http://127.0.0.1:${port}`,
+      CLAUDESK_RUNNER_SECRET: secret,
+      CLAUDESK_RUNNER_CLAUDE_BIN: slowDir,
+      CLAUDESK_RUNNER_CHECKOUT: work,
+      CLAUDESK_RUNNER_HOME: join(work, "busy-home"),
+      CLAUDESK_RUNNER_SHARED_ROOT: sharedRoot,
+    },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  let busyLog = "";
+  busyRunner.stdout.on("data", (chunk) => { busyLog += String(chunk); });
+  const waitForLog = (needle, what) => new Promise((resolve, reject) => {
+    if (busyLog.includes(needle)) { resolve(); return; }
+    const timer = setTimeout(
+      () => reject(new Error(`${what}: ${busyLog.slice(-600)}`)), 10000);
+    busyRunner.stdout.on("data", () => {
+      if (busyLog.includes(needle)) { clearTimeout(timer); resolve(); }
+    });
+  });
+  await waitForLog("registered as", "the busy runner did not register");
+  const busyPlaced = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "busy smoke", environment_id: poolId,
+      config: { model: "claude-opus-5-5" } }),
+  });
+  const busySession = JSON.parse(busyPlaced.body).session;
+  await request(`/v1/code/sessions/${busySession.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "take your time" } } }] }),
+  });
+  await waitForLog("turn with", "the busy turn did not start");
+  const duringTurn = Date.now();
+  const busyListing = await request(
+    `/api/remote/code-folders?path=${encodeURIComponent(hostRepo)}`);
+  assert.equal(busyListing.status, 200, busyListing.body);
+  assert.equal(JSON.parse(busyListing.body).ok, true, busyListing.body);
+  assert.ok(Date.now() - duringTurn < 4000,
+    "a folder lookup is answered while the agent's turn is still running");
+  busyRunner.kill("SIGTERM");
+  await new Promise((resolve) => busyRunner.once("exit", resolve));
   rmSync(hostRoot, { recursive: true, force: true });
 
   // A runner with no secret must refuse to poll rather than guess.
