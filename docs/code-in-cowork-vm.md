@@ -668,6 +668,17 @@ bounded (32 outstanding, a 15 s timeout, and no runner polling recently answers
 as unavailable). Guest-side git runs with `-c core.fsmonitor=false`, so a
 repo config written by the agent cannot make it execute a program.
 
+The runner lives only while the Cowork VM does, and the VM idle-stops. These
+lookups are often the first thing to touch it after that — the composer asks for
+git info and branches as soon as a folder is chosen — so an offline runner is
+not answered unavailable at once: the bridge asks the Desktop to start the VM
+(the same `ClaudeVM.startVM` call session placement makes) and waits up to
+`CLAUDESK_RUNNER_WAKE_MS` (20 s by default) for the runner's next poll. One wake
+is shared by every read in flight, and a wake the Desktop refuses is final — the
+read answers 503 rather than holding the request for the whole window. Without
+this, the picker and branch hooks failed until the user placed a session, the
+only other path that woke the VM.
+
 One rule holds those 404s together, and it is worth stating on its own: **an
 API-shaped path (`/v1/…`) this bridge does not answer is answered with the
 API's own JSON envelope, never the app's HTML.** The catch-all that serves

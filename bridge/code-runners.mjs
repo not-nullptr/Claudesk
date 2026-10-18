@@ -312,9 +312,28 @@ function isUserMessage(entry) {
   return false;
 }
 
-export function createRunnerBackend({ stateDir, log = console, poolName = null } = {}) {
+export function createRunnerBackend({
+  stateDir, log = console, poolName = null, wakeRunner = null,
+} = {}) {
   const statePath = join(stateDir, stateFileName);
   let cache = null;
+  // UI reads (the folder browser, git info and branch lists behind the Code
+  // composer's start options) reach the runner inside the account's Cowork VM,
+  // and that VM idle-stops. A read after the VM has gone quiet used to answer
+  // "no guest runner is online" — so the folder picker was dead and the
+  // composer's git queries kept retrying until the user placed a session, the
+  // only other thing that wakes the VM. Wake it on demand and let it register
+  // its first poll before the read is refused. One wake is shared by every
+  // read in flight.
+  let wakeInFlight = null;
+  const runnerWakeTimeoutMs = (() => {
+    const raw = Number(process.env.CLAUDESK_RUNNER_WAKE_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 20000;
+  })();
+  const runnerOnline = (state, pool) => state.runners.some((runner) =>
+    runner.pool_id === pool.pool_id
+    && typeof runner.last_poll_at === "string"
+    && Date.now() - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
 
   // Long polls. A runner that says how long it is willing to wait
   // (`x-claudesk-poll-wait: <seconds>`) has an empty poll held open until a
@@ -398,17 +417,46 @@ export function createRunnerBackend({ stateDir, log = console, poolName = null }
     return Object.assign(new Error(message), { statusCode });
   }
 
+  // Start the VM the runner lives in, then wait for that runner's first poll.
+  // Shared so a burst of reads (the composer asks for git info, branches and
+  // the folder list together) wakes it once. A wake the Desktop refused is
+  // final: polling after it would only hold the request until the timeout.
+  function wakeRunnerForReads(pool) {
+    if (!wakeRunner) return Promise.resolve();
+    if (wakeInFlight) return wakeInFlight;
+    wakeInFlight = (async () => {
+      let started = true;
+      try {
+        started = await wakeRunner() !== false;
+      } catch (error) {
+        log.warn(`[code-runners] could not start the Cowork VM: ${error.message}`);
+        started = false;
+      }
+      if (!started) return;
+      const deadline = Date.now() + runnerWakeTimeoutMs;
+      while (Date.now() < deadline) {
+        const current = await load();
+        if (runnerOnline(current, pool)) {
+          log.log(`[code-runners] guest runner came online after waking the Cowork VM`);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    })().finally(() => { wakeInFlight = null; });
+    return wakeInFlight;
+  }
+
   async function askRunner(method, params) {
-    const state = await load();
+    let state = await load();
     const pool = state.pools[0];
     if (!pool) {
       throw runnerUnavailable("no self-hosted runner pool is configured", 503);
     }
-    const now = Date.now();
-    const online = state.runners.some((runner) => runner.pool_id === pool.pool_id
-      && typeof runner.last_poll_at === "string"
-      && now - Date.parse(runner.last_poll_at) < runnerOnlineWindowMs);
-    if (!online) {
+    if (!runnerOnline(state, pool)) {
+      await wakeRunnerForReads(pool);
+      state = await load();
+    }
+    if (!runnerOnline(state, pool)) {
       throw runnerUnavailable("no guest runner is online", 503);
     }
     const outstanding = [...runnerRequests.values()]

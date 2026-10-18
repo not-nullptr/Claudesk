@@ -122,6 +122,10 @@ const codeRunners = codeRunnersEnabled
     stateDir: bridgeStateDir,
     log: console,
     poolName: process.env.CLAUDESK_CODE_RUNNER_POOL || "self-hosted",
+    // A UI read (folder picker, git info, branches) after the VM idle-stopped
+    // is as good a reason to start it as placing a session; the runner backend
+    // wakes it and waits for the first poll. Hoisted declaration — see below.
+    wakeRunner: () => wakeRunnerVm(),
   })
   : null;
 // Experimental: render ion-dist's browser (claude.ai) chrome instead of the
@@ -3709,8 +3713,10 @@ async function wakeRunnerVm() {
   try {
     await desktop.invoke("ClaudeVM", "startVM", []);
     console.log("[code-runners] asked the Desktop to start the Cowork VM for the placed session");
+    return true;
   } catch (error) {
     console.warn(`[code-runners] could not start the Cowork VM: ${error.message}`);
+    return false;
   }
 }
 

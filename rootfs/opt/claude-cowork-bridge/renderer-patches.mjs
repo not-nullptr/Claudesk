@@ -2482,7 +2482,7 @@ function selfHostedStripTarget(node, ancestors) {
   const bindings = scope ? firstParamBindings(scope) : undefined;
   const env = bindings?.bindings.get("envType");
   if (!env) return undefined;
-  return { condition, env };
+  return { condition, env, flag };
 }
 
 // The Code composer's folder-pick helper (`Sm` / `Cle`):
@@ -2676,12 +2676,22 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         replacement: `(${surface}?.browseCodeFolder??${source.slice(init.start, init.end)})` });
     }
     if (strips.length === 1) {
-      const { condition } = strips[0];
+      const { condition, env, flag } = strips[0];
+      // Drop the desktop-rail negation beside the draft's `needsFolder`, but do
+      // not mount the strip on every composer: outside a folder-bearing draft
+      // the row is rendered against state the composer never prepared for (the
+      // chat composer has no folder props). A self-hosted place is the surface
+      // this patch exists for, and its kind is read from the composer's own
+      // parameter — so it mounts there even when the draft never published its
+      // options, and nowhere else.
+      const needed = source.slice(flag.start, flag.end);
+      const kinds = selfHostedKinds.map(kind => `${env}===${JSON.stringify(kind)}`);
       patches.push({ id: stripPatchId, start: condition.start, end: condition.end,
         original: source.slice(condition.start, condition.end),
         // The assignment is the preload fallback's cue that the renderer drew
         // the strip, so it does not inject a second copy.
-        replacement: "(globalThis.__CLAUDESK_STRIP_MOUNTED__=!0)" });
+        replacement: `((${needed}||${kinds.join("||")})`
+          + `&&(globalThis.__CLAUDESK_STRIP_MOUNTED__=!0))` });
     }
   }
   if (webShellEnabled) {
