@@ -143,6 +143,17 @@ function isoTime(value) {
   return undefined;
 }
 
+// A task's saved runner job, when the store kept the form's own document. The
+// Code form edits through `job_config.ccr.session_context`; a UI-created task
+// carries the effort there (the Desktop's task record has no effort field), so
+// both the detail view and a fire read this beside the top-level fields.
+function taskSessionContext(task) {
+  const job = isRecord(task?.jobConfig) ? task.jobConfig
+    : isRecord(task?.job_config) ? task.job_config : null;
+  const context = job?.ccr?.session_context;
+  return isRecord(context) ? context : {};
+}
+
 function taskEnabled(task) {
   if (task?.enabled === false) return false;
   const status = String(task?.status ?? "").toLowerCase();
@@ -309,7 +320,11 @@ export function createRoutineService({
     const routineId = routineIdForTaskId(taskId);
     const token = tokenFor(state, routineId);
     const config = isRecord(state.configs?.[routineId]) ? state.configs[routineId] : {};
-    const effort = textOf(config.effort);
+    const taskContext = taskSessionContext(task);
+    const effort = textOf(config.effort) || textOf(taskContext.effort_level)
+      || textOf(taskContext.effort);
+    const taskCwd = textOf(task.cwd) || textOf(taskContext.cwd);
+    const taskPermission = textOf(task.permissionMode) || textOf(taskContext.permission_mode);
     return {
       id: routineId,
       name: task.displayName || task.name || taskId,
@@ -328,8 +343,8 @@ export function createRoutineService({
               // The Code form edits through the job config; carrying the
               // start options here (as well as the top-level fields above)
               // is what lets the edit form show the routine's own values.
-              ...(textOf(task.cwd) ? { cwd: task.cwd } : {}),
-              ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+              ...(taskCwd ? { cwd: taskCwd } : {}),
+              ...(taskPermission ? { permission_mode: taskPermission } : {}),
               ...(effort ? { effort_level: effort } : {}),
             },
             events: prompt
@@ -350,12 +365,12 @@ export function createRoutineService({
       ...(isoTime(task.nextRunAt) ? { next_run_at: isoTime(task.nextRunAt) } : {}),
       ...(isoTime(task.lastRunAt) ? { last_fired_at: isoTime(task.lastRunAt) } : {}),
       ...(textOf(task.model) ? { model: task.model } : {}),
-      ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+      ...(taskPermission ? { permission_mode: taskPermission } : {}),
       ...(effort ? { effort_level: effort, effort } : {}),
       persist_session: false,
       source: "local",
       kind: taskKind(task),
-      ...(textOf(task.cwd) ? { cwd: task.cwd } : {}),
+      ...(taskCwd ? { cwd: taskCwd } : {}),
       ...(task.useWorktree === true ? { use_worktree: true } : {}),
       ...(textOf(task.spaceId) ? { space_id: task.spaceId } : {}),
       ...(isoTime(task.createdAt) ? { created_at: isoTime(task.createdAt) } : {}),
@@ -539,7 +554,9 @@ export function createRoutineService({
 
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
-    const effort = textOf(state.configs?.[canonicalId]?.effort);
+    const taskContext = taskSessionContext(task);
+    const effort = textOf(state.configs?.[canonicalId]?.effort)
+      || textOf(taskContext.effort_level) || textOf(taskContext.effort);
     const sessionId = kind === "code"
       ? await startCodeSession(task, message, model, attached, canonicalId, effort)
       : await startCoworkSession(task, taskId, message, model, attached);
