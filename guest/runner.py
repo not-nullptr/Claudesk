@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.3"
+VERSION = "2.2.4"
 
 
 def env(name, default=""):
@@ -414,7 +414,34 @@ def same_directory(left, right):
     return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
+# Concurrent turns re-check the late-arriving virtiofs mount; the mount/symlink
+# itself must happen once.
+WORKSPACE_ALIAS_LOCK = threading.Lock()
+# Git setup mutates a shared repository (branch checkout, worktree metadata).
+# Turns on the same repo serialize only that setup; the agent turns themselves
+# run concurrently. Keys are real paths; the map grows with the folders used,
+# which is bounded by the account's workspace.
+REPO_SETUP_LOCKS = {}
+REPO_SETUP_LOCKS_GUARD = threading.Lock()
+
+
+def repo_setup_lock(repo):
+    """The lock serializing git setup on one repository, created on demand."""
+    key = os.path.realpath(repo)
+    with REPO_SETUP_LOCKS_GUARD:
+        lock = REPO_SETUP_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            REPO_SETUP_LOCKS[key] = lock
+        return lock
+
+
 def ensure_workspace_alias():
+    with WORKSPACE_ALIAS_LOCK:
+        return _ensure_workspace_alias()
+
+
+def _ensure_workspace_alias():
     """Make the account's shared workspace visible at `/workspace` in the guest.
 
     The guest mounts the host's whole filesystem at SHARED_ROOT; `/workspace`
@@ -526,38 +553,47 @@ def session_workdir(session, config):
         candidate = os.path.join(worktree_path, relative)
         return candidate if os.path.isdir(candidate) else worktree_path
 
-    if not worktree:
-        if branch:
-            ok, output = run_git(repo, "checkout", branch)
-            if not ok:
-                return None, ("could not check out branch %s: %s"
-                              % (branch, output[-400:] or "git failed"))
-            log("session checkout %s on branch %s" % (repo, branch))
+    if repo is None:
         return directory, None
 
-    # Worktree sessions are deterministic per session, so a later turn resumes
-    # in the same copy. The branch starts from the selected branch (or HEAD)
-    # and is named after the session; a collision gets a suffix.
-    suffix = re.sub(r"[^A-Za-z0-9_-]", "", session)[-12:] or "session"
-    worktree_path = os.path.join(repo, ".claude", "worktrees", suffix)
-    if os.path.isdir(worktree_path):
-        log("session reusing worktree %s" % worktree_path)
-        return inside_worktree(worktree_path), None
-    start = branch or "HEAD"
-    branch_name = "claude/" + suffix
-    output = ""
-    for attempt in range(1, 20):
-        ok, output = run_git(repo, "worktree", "add", "-b", branch_name,
-                             worktree_path, start)
-        if ok:
-            log("session worktree %s (branch %s from %s)"
-                % (worktree_path, branch_name, start))
+    # Only the git setup is serialized per repository: a branch checkout
+    # mutates the shared checkout and `worktree add` writes `.git/worktrees`;
+    # concurrent turns would otherwise race there. Once the working directory
+    # is chosen, the agent turns run in parallel — especially two worktree
+    # sessions, which is the point of the worktree option.
+    with repo_setup_lock(repo):
+        if not worktree:
+            if branch:
+                ok, output = run_git(repo, "checkout", branch)
+                if not ok:
+                    return None, ("could not check out branch %s: %s"
+                                  % (branch, output[-400:] or "git failed"))
+                log("session checkout %s on branch %s" % (repo, branch))
+            return directory, None
+
+        # Worktree sessions are deterministic per session, so a later turn
+        # resumes in the same copy. The branch starts from the selected branch
+        # (or HEAD) and is named after the session; a collision gets a suffix.
+        suffix = re.sub(r"[^A-Za-z0-9_-]", "", session)[-12:] or "session"
+        worktree_path = os.path.join(repo, ".claude", "worktrees", suffix)
+        if os.path.isdir(worktree_path):
+            log("session reusing worktree %s" % worktree_path)
             return inside_worktree(worktree_path), None
-        if "already exists" not in output.lower():
-            break
-        branch_name = "claude/%s-%d" % (suffix, attempt + 1)
-    return None, ("could not create a worktree in %s: %s"
-                  % (repo, output[-400:] or "git failed"))
+        start = branch or "HEAD"
+        branch_name = "claude/" + suffix
+        output = ""
+        for attempt in range(1, 20):
+            ok, output = run_git(repo, "worktree", "add", "-b", branch_name,
+                                 worktree_path, start)
+            if ok:
+                log("session worktree %s (branch %s from %s)"
+                    % (worktree_path, branch_name, start))
+                return inside_worktree(worktree_path), None
+            if "already exists" not in output.lower():
+                break
+            branch_name = "claude/%s-%d" % (suffix, attempt + 1)
+        return None, ("could not create a worktree in %s: %s"
+                      % (repo, output[-400:] or "git failed"))
 
 
 # --- UI requests -----------------------------------------------------------
@@ -1106,22 +1142,34 @@ def prepare_home():
             log("could not write %s (%s)" % (config, error))
 
 
+def run_session_thread(hint):
+    """One session turn on its own thread; failures stay with that session."""
+    try:
+        run_session(hint)
+    except Exception as error:  # noqa: BLE001 - keep serving the pool
+        log("session %s failed: %s" % (hint.get("session_uuid"), error))
+
+
 def run_sessions_forever(session_queue):
-    """Run session turns off the poll thread.
+    """Spawn every session hint on its own thread, with no concurrency cap.
 
     A turn can last as long as TURN_TIMEOUT, and the Code UI's folder and git
     lookups ride the same poll as work. Running the agent inline meant the
     runner stopped polling for the whole turn, so those lookups timed out
     whenever a session was active — exactly when the user is in the Code
-    surface. One worker keeps turns serialized (the previous behavior) while
-    the poll loop stays free to answer UI requests.
+    surface. Moving turns to a *single* background worker freed the poll but
+    kept them serialized, which is not what a self-hosted runner is: the
+    protocol hands out spawn hints so each session may run. Sessions are
+    independent (own id, transcript, event stream and, with the worktree
+    option, own checkout); the only shared state is git setup on a repo, which
+    `session_workdir` serializes with a per-repo lock. So one thread per hint,
+    no queue depth cap, no worker pool limit.
     """
     while True:
         hint = session_queue.get()
-        try:
-            run_session(hint)
-        except Exception as error:  # noqa: BLE001 - keep serving the pool
-            log("session %s failed: %s" % (hint.get("session_uuid"), error))
+        name = "claudesk-session-%s" % (str(hint.get("session_uuid") or "?")[-12:])
+        threading.Thread(target=run_session_thread, args=(hint,),
+                         name=name, daemon=True).start()
 
 
 def main():
@@ -1136,7 +1184,8 @@ def main():
     log("polling %s (agent %s, checkout %s)" % (BASE, CLAUDE_BIN, CHECKOUT))
     register()
     # `--once` is a probe: it runs whatever it is handed inline and returns.
-    # The service keeps a single worker for turns so the poll never blocks.
+    # The service hands each hint to its own thread so the poll never blocks
+    # and sessions run concurrently.
     session_queue = queue.Queue()
     if not ONCE:
         threading.Thread(target=run_sessions_forever, args=(session_queue,),

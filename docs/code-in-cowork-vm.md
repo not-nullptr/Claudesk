@@ -645,6 +645,15 @@ and reuses that copy on later turns. With no `cwd` the session starts in the
 account's shared workspace. A folder the guest cannot see, or a branch it
 cannot check out, fails the session with the reason — never a silent fallback.
 
+Turns are concurrent, not queued: the poll loop hands every hint to its own
+thread (`guest/runner.py`, `run_sessions_forever`), so two sessions run at the
+same time. Only the git setup is serialized, with a per-repository lock around
+`checkout` and `worktree add`, and the workspace alias mount is serialized
+once. Two worktree sessions in the same repository therefore run in parallel
+with separate checkouts; two non-worktree sessions in the same folder run in
+parallel too, which is exactly the shared-checkout contention worktrees exist
+to avoid.
+
 The guest also binds the shared workspace back at `/workspace` (a bind mount,
 or a symlink when it cannot mount): the host root is at `SHARED_ROOT`, so
 without it `/workspace` inside the VM was an empty directory on the guest's own

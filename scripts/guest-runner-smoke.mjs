@@ -525,4 +525,34 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   }
 }
 
+// Session turns must actually run concurrently: the runner is handed one hint
+// per session and each gets its own thread. A single worker made two sessions
+// queue behind each other, which defeats the worktree option (two isolated
+// sessions are supposed to run at once). The probe replaces the turn with a
+// two-party barrier, so it can only complete if both turns are in flight.
+{
+  const probe = spawnSync("python3", ["-I", "-c", [
+    "import importlib.util, queue, sys, threading, time",
+    "spec = importlib.util.spec_from_file_location('runner', sys.argv[1])",
+    "runner = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(runner)",
+    "done = []",
+    "entered = threading.Barrier(2)",
+    "def fake(hint):",
+    "    entered.wait(timeout=5)",
+    "    done.append(hint.get('i'))",
+    "runner.run_session = fake",
+    "q = queue.Queue()",
+    "threading.Thread(target=runner.run_sessions_forever, args=(q,), daemon=True).start()",
+    "q.put({'i': 1})",
+    "q.put({'i': 2})",
+    "time.sleep(1.0)",
+    "print('OK' if sorted(done) == [1, 2] else 'FAIL')",
+    "print(done)",
+  ].join("\n"), `${root}guest/runner.py`], { encoding: "utf8" });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.match(probe.stdout, /^OK$/m,
+    `two session turns must be in flight at once, got: ${probe.stdout}`);
+}
+
 process.stdout.write("guest-runner-smoke: the guest runner registers, runs an agent and reports\n");
