@@ -5017,6 +5017,9 @@ async function handleApi(request, response, url) {
         release,
         renderer: desktopRuntime.renderer,
         rendererSummary: rendererSummary(desktopRuntime.renderer),
+        // Connected web-shell pages and the release each booted (see
+        // realtime.status): distinguishes a stale page from a stale server.
+        realtime: realtime.status(),
         transport: "official-renderer-ipc",
         // This container's instance, for a peer checking that the Desktop it
         // reached is the one it meant to. A single-instance host answers "",

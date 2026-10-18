@@ -1747,6 +1747,11 @@
     // subscriptions whose page is not connected (and not double-shown).
     const clientId = remoteNotificationClientId();
     if (clientId) params.set("clientId", clientId);
+    // The renderer release this page booted. The bridge reports it back on
+    // /api/health, so "the page does not show the deployed patch" can be told
+    // apart from "the server is not serving it" without console access.
+    const release = config.release?.patchRelease;
+    if (typeof release === "string" && release) params.set("release", release);
     return { key: params.toString(), url: `/api/events?${params.toString()}` };
   }
 

@@ -465,6 +465,14 @@ old document (an intermediary cache) then stays put rather than looping. This ne
 `patchRelease` bump like any other preload change, because `/remote-preload.js` is
 fetched with `?v=<patchRelease>`.
 
+Each page also reports the release it booted on its event-stream connection, and
+`/api/health.realtime` lists the connected pages (mode, release, user agent). With that
+field, "the UI does not show the deployed patch" can be resolved from the server side:
+an old release means a stale page, no clients means the screen is not the web shell at
+all (the Desktop's own window loads ion-dist from disk and does not take renderer
+patches), and the current release means the page is current and the patch itself needs
+looking at.
+
 ## Code routes
 
 ion-dist resolves its internal code route to the local Code surface (`/code` →

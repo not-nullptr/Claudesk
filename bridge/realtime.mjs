@@ -257,7 +257,11 @@ export function createRealtimeController({
     response.write(": connected\n\n");
     lastClientSeenAt = Date.now();
     if (clientId) recentClientIds.set(clientId, Date.now());
-    clients.set(response, { mode, sessionId, clientId });
+    const releaseParam = url.searchParams.get("release") || "";
+    const clientRelease = /^\d{8}-\d+$/.test(releaseParam) ? releaseParam : null;
+    const userAgent = typeof request.headers["user-agent"] === "string"
+      ? request.headers["user-agent"].slice(0, 200) : "";
+    clients.set(response, { mode, sessionId, clientId, release: clientRelease, userAgent });
     send(response, "hello", {
       ok: true,
       transport: "server-sent-events",
@@ -316,5 +320,23 @@ export function createRealtimeController({
     }
   }
 
-  return { hasRecentClient, heartbeat, notify, open, pollDesktopEvents, pollState, restore };
+  // What is connected right now, for /api/health. A page reports the renderer
+  // release it booted, so a UI that predates a deploy is visible from the
+  // server side: its release is the old one (or absent, from a preload that
+  // predates this field). `clients: 0` while someone is using a screen means
+  // that screen is not the web shell.
+  function status() {
+    return {
+      clients: clients.size,
+      pages: [...clients.values()].map((subscription) => ({
+        mode: subscription.mode,
+        sessionId: subscription.sessionId,
+        release: subscription.release,
+        userAgent: subscription.userAgent,
+      })),
+    };
+  }
+
+  return { hasRecentClient, heartbeat, notify, open, pollDesktopEvents, pollState, restore,
+    status };
 }
