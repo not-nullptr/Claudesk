@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.6"
+VERSION = "2.1.0"
 
 
 def env(name, default=""):
@@ -255,6 +255,34 @@ def resume_id(events):
         if isinstance(candidate, str) and RE_SESSION_ID.match(candidate):
             return candidate
     return ""
+
+
+def latest_control_request(events, subtype):
+    """The last client control request of one subtype in the session log.
+
+    The renderer changes a running session's model or permission mode by
+    appending a `control_request` event (`set_model`, `set_permission_mode`)
+    rather than by re-creating the session. The agent is spawned fresh for each
+    turn, so the runner can honour those requests by reading the latest one and
+    applying it to the turn's argv — otherwise the change is written down and
+    never reaches the process the user is talking to. Payloads are taken
+    directly and from the `internal_anthropic_catchall` wrapper older callers
+    used for the same control request.
+    """
+    found = None
+    for event in events or []:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") == "control_request":
+            request = payload.get("request")
+        else:
+            catchall = payload.get("internal_anthropic_catchall")
+            request = catchall.get("request") if isinstance(catchall, dict) else None
+        if not isinstance(request, dict) or request.get("subtype") != subtype:
+            continue
+        found = request
+    return found
 
 
 def run_git(directory, *arguments):
@@ -741,6 +769,20 @@ def run_session(hint):
                        and permission_mode else None)
     effort = config.get("effort_level")
     effort = effort if isinstance(effort, str) and effort else None
+    # A change made while the session is already running is a control request
+    # in the transcript, not a rewritten session document. The latest one wins
+    # over the create config (the start intent emits the same subtype, so this
+    # also covers a mode the create body dropped).
+    control = latest_control_request(events, "set_permission_mode")
+    if isinstance(control, dict):
+        mode = control.get("mode")
+        if isinstance(mode, str) and mode:
+            permission_mode = mode
+    control = latest_control_request(events, "set_model")
+    if isinstance(control, dict):
+        chosen = control.get("model")
+        if isinstance(chosen, str) and chosen:
+            model = chosen
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);

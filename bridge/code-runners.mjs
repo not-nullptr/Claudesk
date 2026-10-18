@@ -1620,6 +1620,23 @@ export function createRunnerBackend({
         // still carry stale versions.
         attributed: online.some((runner) => typeof runner.last_runner_poll_at === "string"),
         request_lane: Boolean(live && versionAtLeast(live.runner_version, requestLaneVersion)),
+        // The last few placements in the shape the renderer sent them. This is
+        // what answers "did my model/effort/permission pick reach the session?"
+        // from /api/health: the values here are the create body's own, before
+        // any runner normalization.
+        recent_sessions: state.sessions.slice(-5).map((session) => {
+          const config = sessionConfigOf(session);
+          const text = (value) => typeof value === "string" && value ? value : null;
+          return {
+            id: session.session_uuid,
+            created_at: session.created_at ?? null,
+            state: session.state ?? null,
+            model: text(config.model),
+            effort: text(config.effort_level),
+            permission_mode: text(config.permission_mode),
+            cwd: text(config.cwd),
+          };
+        }),
       };
     },
 

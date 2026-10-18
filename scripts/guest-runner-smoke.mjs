@@ -180,6 +180,34 @@ try {
     + " | prompt: and tighten the summary",
     "the runner resumed the conversation the agent's own events named");
 
+  // A running session changes its model or permission mode by appending a
+  // control request, not by rewriting the create config. The runner applies
+  // the latest of each to the next turn's argv.
+  await request(`/v1/code/sessions/${sessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [
+      { payload: { type: "control_request", request_id: "set-model-smoke",
+        request: { subtype: "set_model", model: "deepseek-picked" } } },
+      { payload: { type: "control_request", request_id: "set-perm-mode-smoke",
+        request: { subtype: "set_permission_mode", mode: "plan" } } },
+      { payload: { type: "user",
+        message: { role: "user", content: "switch settings" } } },
+    ] }),
+  });
+  const ran3 = runRunner({ secret });
+  assert.equal(ran3.status, 0, ran3.stderr);
+  const history3 = JSON.parse((await request(`/v1/code/sessions/${sessionId}/events`)).body);
+  const decoded3 = decodeClientEventsResponse(history3);
+  const lastAssistant = decoded3.filter((entry) => entry.message.type === "assistant").at(-1);
+  assert.equal(lastAssistant.message.message.content[0].text,
+    "agent saw: --print --input-format stream-json --output-format stream-json"
+    + " --verbose --include-partial-messages --model deepseek-picked"
+    + " --permission-mode plan --effort high"
+    + " --resume 11111111-1111-4111-8111-111111111111"
+    + " | prompt: switch settings",
+    "a mid-session set_model/set_permission_mode control request reaches the next turn");
+
   // The opening turn can carry image blocks (a routine fire with images); the
   // runner reads the whole content list, not just its text, and forwards it to
   // the agent unchanged.

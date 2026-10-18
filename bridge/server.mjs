@@ -1799,6 +1799,11 @@ const modelSelectorFields = new Set([
   "preset",
   "selection_source",
 ]);
+// The last model-selector PATCH this bridge accepted, surfaced on /api/health.
+// A picker that saves most effort levels but not one of them is otherwise
+// invisible from the server (the request simply never arrives), so the record
+// carries when and what was sent, not just that a save happened somewhere.
+let lastModelSelectorUpdate = null;
 
 // A bound broad enough for every field the selector sends and for the desktop's
 // `epitaxyPrefs` bucket (many small UI picks, occasional short lists), strict
@@ -1850,6 +1855,11 @@ function validateModelSelectorUpdate(method, pathname, body) {
       throw new ApiError(400, "Model selector field is not allowed");
     }
   }
+  lastModelSelectorUpdate = {
+    at: new Date().toISOString(),
+    surface: pathname.split("/").pop() || null,
+    body: parsed,
+  };
 }
 
 function sanitizeStoreValue(surface, store, value, identity) {
@@ -3874,6 +3884,14 @@ async function handleCodeRunnerApi(request, response, url) {
       plugin_marketplaces: [],
       session_files: { upload: true, download: true },
       vcs: { push: false, create_pr: false },
+      // The modes a session may start in. The renderer builds the start
+      // intent's `permissionMode` only from this list; leaving it out made
+      // every non-default pick vanish before the create body was built, so a
+      // session always started in "default" (shown as Accept edits). The
+      // session host is this deployment's own VM, where bypass is offered.
+      permission_modes: {
+        available: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"],
+      },
       device_tools_enabled: false,
       device_tools: { file_tools_bound_to_connected_folders: false },
       // The routine capability the renderer's Code frame reads before it will
@@ -5049,6 +5067,8 @@ async function handleApi(request, response, url) {
         // Connected web-shell pages and the release each booted (see
         // realtime.status): distinguishes a stale page from a stale server.
         realtime: realtime.status(),
+        // The last accepted model-selector save (see lastModelSelectorUpdate).
+        lastModelSelectorUpdate,
         transport: "official-renderer-ipc",
         // This container's instance, for a peer checking that the Desktop it
         // reached is the one it meant to. A single-instance host answers "",

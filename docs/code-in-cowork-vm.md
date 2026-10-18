@@ -737,6 +737,16 @@ runner is a guest systemd service (root), and Claude Code refuses bypass
 permissions as root unless it is told it is inside a sandbox. The tenant
 renderer offers bypass in the Code mode list (see `docs/frontend-patches.md`).
 
+The capability document advertises `permission_modes.available`; the renderer
+builds the start intent's `permissionMode` only from that list, so a deployment
+that leaves it out has every non-default draft pick dropped silently and every
+session starts in `default` (shown as Accept edits). A change made to a
+**running** session is a `set_model` / `set_permission_mode` control request
+appended to the transcript, not a rewritten session document; the guest runner
+reads the latest of each before spawning the turn and applies it to the agent's
+argv, so the change reaches the process the user is talking to (the CLI is
+spawned per turn, not kept alive).
+
 One rule holds those 404s together, and it is worth stating on its own: **an
 API-shaped path (`/v1/…`) this bridge does not answer is answered with the
 API's own JSON envelope, never the app's HTML.** The catch-all that serves
