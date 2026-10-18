@@ -160,6 +160,11 @@ function taskKind(task) {
   const path = textOf(task?.filePath).replaceAll("\\", "/");
   if (/\/scheduled-tasks\//i.test(path)) return "code";
   if (/\/Scheduled\//i.test(path)) return "cowork";
+  // A store that answered for the task knows its executor even when the path
+  // is unreadable: the Code form creates in the Code store, the Cowork form in
+  // the Cowork store.
+  if (task?._routineSurface === "CCDScheduledTasks") return "code";
+  if (task?._routineSurface === "CoworkScheduledTasks") return "cowork";
   return task?.sessionType === "code" || task?.kind === "code" ? "code" : "cowork";
 }
 
@@ -217,14 +222,33 @@ export function createRoutineService({
     return next;
   }
 
+  // The Desktop has two scheduled-task stores: Code (`CCDScheduledTasks`,
+  // `~/.claude/scheduled-tasks`) and Cowork (`CoworkScheduledTasks`, the
+  // user-files `Scheduled` folder). A routine list is their union — a Code
+  // routine created by the agent is as much the account's as one created
+  // here. Each task carries the surface it came from, which is where its file
+  // and its edits go. A build without one surface simply contributes nothing.
+  const routineSurfaces = ["CCDScheduledTasks", "CoworkScheduledTasks"];
   async function tasks() {
-    try {
-      const value = await desktop.invoke("CoworkScheduledTasks", "getAllScheduledTasks", []);
-      return Array.isArray(value) ? value : [];
-    } catch (error) {
+    const results = await Promise.allSettled(routineSurfaces.map((surface) =>
+      desktop.invoke(surface, "getAllScheduledTasks", [])));
+    const listed = [];
+    const errors = [];
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        errors.push(result.reason);
+        return;
+      }
+      if (!Array.isArray(result.value)) return;
+      for (const task of result.value) {
+        if (isRecord(task)) listed.push({ ...task, _routineSurface: routineSurfaces[index] });
+      }
+    });
+    if (listed.length === 0 && errors.length === routineSurfaces.length) {
       throw new RoutineError(503, "api_error",
-        `this instance cannot list its scheduled tasks: ${error?.message || error}`);
+        `this instance cannot list its scheduled tasks: ${errors[0]?.message || errors[0]}`);
     }
+    return listed;
   }
 
   async function taskRecord(routineId) {
@@ -240,7 +264,8 @@ export function createRoutineService({
   async function promptFor(task, taskId) {
     try {
       const value = await desktop.invoke(
-        "CoworkScheduledTasks", "getScheduledTaskFileContent", [taskId]);
+        task?._routineSurface ?? "CoworkScheduledTasks",
+        "getScheduledTaskFileContent", [taskId]);
       const body = promptBody(value);
       if (body) return body;
     } catch { /* fall back to the file the list named */ }
@@ -575,10 +600,18 @@ export function createRoutineService({
       if (chosenModel) args.model = chosenModel;
       if (textOf(body.permission_mode)) args.permissionMode = body.permission_mode;
       if (textOf(body.cwd)) args.cwd = body.cwd;
+      // The Code form (`job_config.ccr`) creates a Code routine; the flat
+      // Cowork form creates a Cowork one. The store decides what a fire runs:
+      // a Code task is placed on this instance's runner, a Cowork task starts
+      // a local session.
+      const surface = isRecord(body?.job_config?.ccr)
+        || textOf(body.kind).toLowerCase() === "code"
+        || textOf(body.session_type).toLowerCase() === "code"
+        ? "CCDScheduledTasks" : "CoworkScheduledTasks";
       const existing = await tasks();
       let created;
       try {
-        created = await desktop.invoke("CoworkScheduledTasks", "createScheduledTask",
+        created = await desktop.invoke(surface, "createScheduledTask",
           [args, { existingIds: existing.map((task) => task.id).filter(Boolean) }],
           "json-undefined-v1");
       } catch (error) {
@@ -618,9 +651,10 @@ export function createRoutineService({
       }
       if (body.permission_mode !== undefined) patch.permissionMode = textOf(body.permission_mode) || undefined;
       if (body.cwd !== undefined) patch.cwd = textOf(body.cwd) || undefined;
+      const surface = task._routineSurface ?? "CoworkScheduledTasks";
       if (Object.keys(patch).length) {
         try {
-          await desktop.invoke("CoworkScheduledTasks", "updateScheduledTask",
+          await desktop.invoke(surface, "updateScheduledTask",
             [{ scheduledTaskId: taskId, ...patch }]);
         } catch (error) {
           throw new RoutineError(502, "api_error",
@@ -628,7 +662,7 @@ export function createRoutineService({
         }
       }
       if (body.enabled !== undefined) {
-        await desktop.invoke("CoworkScheduledTasks", "updateScheduledTaskStatus",
+        await desktop.invoke(surface, "updateScheduledTaskStatus",
           [taskId, body.enabled === false ? "disabled" : "enabled", undefined,
             task.source ?? "local"]);
       }
@@ -646,12 +680,15 @@ export function createRoutineService({
         await save(state);
       }
       try {
+        const surface = task._routineSurface ?? "CoworkScheduledTasks";
         const surfaces = await desktop.inspect();
-        if (Array.isArray(surfaces?.CoworkScheduledTasks)
-          && surfaces.CoworkScheduledTasks.includes("deleteScheduledTask")) {
-          await desktop.invoke("CoworkScheduledTasks", "deleteScheduledTask", [taskId, source]);
+        // The Code store has no delete method; a deleted status with the file
+        // removed is its own delete.
+        if (Array.isArray(surfaces?.[surface])
+          && surfaces[surface].includes("deleteScheduledTask")) {
+          await desktop.invoke(surface, "deleteScheduledTask", [taskId, source]);
         } else {
-          await desktop.invoke("CoworkScheduledTasks", "updateScheduledTaskStatus",
+          await desktop.invoke(surface, "updateScheduledTaskStatus",
             [taskId, "deleted", false, source]);
         }
       } catch (error) {

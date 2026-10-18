@@ -236,7 +236,7 @@ function noteCoworkVmActivity() {
 // not expect has to be diagnosable from the failure the client sees, because the
 // machine it is stuck on is one nobody logs into.
 const routineTaskFileWriteChannel =
-  /\_\$_CoworkScheduledTasks_\$_(?:updateScheduledTask|updateScheduledTaskFileContent)$/;
+  /\_\$_(?:Cowork|CCD)ScheduledTasks_\$_(?:updateScheduledTask|updateScheduledTaskFileContent)$/;
 const routineFileLinkSuffix = ".hardlinked";
 const routineFileLinkRepairLimit = 64;
 const routineTaskIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -639,6 +639,17 @@ const allowedMethods = new Map([
     "setHostRunsSupported",
     "updateScheduledTask",
     "updateScheduledTaskFileContent",
+    "updateScheduledTaskStatus",
+  ])],
+  // The Code store (`~/.claude/scheduled-tasks`). The bridge creates and edits
+  // Code routines here — the store the Code form's `job_config` belongs to —
+  // and lists it beside the Cowork store. It has no delete method: a deleted
+  // status with the file removed is its delete.
+  ["CCDScheduledTasks", new Set([
+    "createScheduledTask",
+    "getAllScheduledTasks",
+    "getScheduledTaskFileContent",
+    "updateScheduledTask",
     "updateScheduledTaskStatus",
   ])],
   ["CoworkSpaces", new Set([

@@ -174,14 +174,19 @@ const routineTasks = [];
 let lastUpdate;
 const createDesktop = {
   async invoke(surface, method, args) {
-    if (surface !== "CoworkScheduledTasks") return null;
-    if (method === "getAllScheduledTasks") return [...currentTasks, ...routineTasks];
-    if (method === "createScheduledTask") {
+    if (method === "getAllScheduledTasks") {
+      return surface === "CCDScheduledTasks"
+        ? [codeTask, ...routineTasks] : [coworkTask];
+    }
+    // The Code form's job_config creates in the Code store; its task file is
+    // under the Claude config's `scheduled-tasks` tree, which is what makes a
+    // fire a Code session.
+    if (surface === "CCDScheduledTasks" && method === "createScheduledTask") {
       const [params] = args;
       const task = {
         id: "cloud-1",
         displayName: params.displayName,
-        filePath: "/home/app/Claude/Scheduled/cloud-1/SKILL.md",
+        filePath: "/config/.claude/scheduled-tasks/cloud-1/SKILL.md",
         enabled: true,
       };
       routineTasks.push(task);
@@ -189,7 +194,7 @@ const createDesktop = {
       return task;
     }
     if (method === "getScheduledTaskFileContent") return routineFiles[args[0]] ?? null;
-    if (method === "updateScheduledTask") {
+    if (surface === "CCDScheduledTasks" && method === "updateScheduledTask") {
       lastUpdate = args[0];
       if (lastUpdate.prompt !== undefined) {
         routineFiles["cloud-1"] = `---\nname: test-routine\n---\n${lastUpdate.prompt}\n`;
@@ -199,12 +204,23 @@ const createDesktop = {
     return null;
   },
   async inspect() {
-    return { CoworkScheduledTasks: ["createScheduledTask", "updateScheduledTask"] };
+    return { CCDScheduledTasks: ["createScheduledTask", "updateScheduledTask"] };
+  },
+};
+const createRuns = [];
+const createCodeRunners = {
+  async primaryPool() {
+    return { pool_id: "ccpool_created", name: "created" };
+  },
+  async createSession({ body, source }) {
+    createRuns.push({ body, source });
+    return { session: { id: "cse_cloud" } };
   },
 };
 const creator = createRoutineService({
   stateDir: join(home, "create"),
   desktop: createDesktop,
+  codeRunners: createCodeRunners,
   configuredModels: ["model-a"],
   defaultModel: "model-a",
   log: { log() {}, warn() {} },
@@ -215,7 +231,8 @@ assert.equal(createdTrigger.trigger.prompt,
     + "- Current working directory\n- Current user",
   "the Code form's instructions reach the scheduled task");
 assert.equal(createdTrigger.trigger.name, "test routine");
-assert.equal(createdTrigger.trigger.kind, "cowork");
+assert.equal(createdTrigger.trigger.kind, "code",
+  "the Code form creates a Code routine, not a Cowork one");
 
 const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
   name: "test routine",
@@ -226,6 +243,15 @@ const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
 assert.equal(lastUpdate.prompt, "List the modified files.",
   "editing the Code form updates the task's instructions");
 assert.equal(edited.trigger.prompt, "List the modified files.");
+
+// Firing a Code-form routine starts a Code session, not a Cowork one, and
+// attributes it to the routine the run-history page asks for.
+const codeFire = await creator.fireRoutine(createdTrigger.trigger.id, {});
+assert.equal(codeFire.kind, "code");
+assert.equal(codeFire.sessionId, "cse_cloud");
+assert.equal(createRuns.at(-1).body.trigger_id, createdTrigger.trigger.id);
+assert.equal(createRuns.at(-1).body.origin, "fire_routine");
+assert.deepEqual(createRuns.at(-1).body.config.sources, []);
 
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});

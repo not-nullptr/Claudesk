@@ -887,6 +887,16 @@ const allowedMethods = new Map([
     "updateScheduledTaskFileContent",
     "updateScheduledTaskStatus",
   ])],
+  // The Code store. The Code form's routine create goes here (its fires are
+  // Code sessions), and the routine list reads it beside the Cowork store.
+  // The bridge and the wrapper carry the same methods (bridge-parity-smoke).
+  ["CCDScheduledTasks", new Set([
+    "createScheduledTask",
+    "getAllScheduledTasks",
+    "getScheduledTaskFileContent",
+    "updateScheduledTask",
+    "updateScheduledTaskStatus",
+  ])],
   ["CoworkSpaces", new Set([
     "classifySessions",
     "getAllSpaces",
@@ -3536,9 +3546,18 @@ async function serveRoutineTokensPage(response) {
 // fits comfortably; the service enforces the per-image limits.
 const routineFireBodyLimit = 32 * 1024 * 1024;
 
+// The Code surface names a session by its display generation (`session_…`);
+// the store's wire id is `cse_…`. Its routes and the session list use the
+// former, so a routine fire's id and link do too.
+function codeSessionDisplayId(sessionId) {
+  return typeof sessionId === "string" && sessionId.startsWith("cse_")
+    ? `session_${sessionId.slice("cse_".length)}`
+    : sessionId;
+}
+
 function routineSessionUrl(origin, kind, sessionId) {
   const path = kind === "code"
-    ? `/code/${encodeURIComponent(sessionId)}`
+    ? `/code/${encodeURIComponent(codeSessionDisplayId(sessionId))}`
     : `/cowork/${encodeURIComponent(sessionId)}`;
   return `${origin}${path}`;
 }
@@ -3592,7 +3611,8 @@ async function handleRoutineApi(request, response, url) {
       const origin = routinePublicOrigin(request, url);
       sendRoutineJson(response, 200, {
         type: "routine_fire",
-        claude_code_session_id: fired.sessionId,
+        claude_code_session_id: fired.kind === "code"
+          ? codeSessionDisplayId(fired.sessionId) : fired.sessionId,
         claude_code_session_url: routineSessionUrl(origin, fired.kind, fired.sessionId),
       });
       return;
