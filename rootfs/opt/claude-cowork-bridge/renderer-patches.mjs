@@ -185,6 +185,14 @@ const routineJobConfigPatchId = "routine-job-config-start-options";
 // `FileSystem.browseCodeFolder` the Code composer uses) and a permission-mode
 // dropdown (the renderer's own combobox), beside the existing environment row.
 const routineFormRowsPatchId = "routine-form-start-option-rows";
+// The Code surface's own routine page (the "Epitaxy" create page and its edit
+// dialog) has a second instructions composer with its own layout, so it does
+// not render the unified form's picker or rows. It gets the same model+effort
+// pair and start-option rows spliced into its composer. The model picker
+// wrapper is published on the global by its own chunk; this page imports that
+// chunk for side effects only.
+const routineEpitaxyPatchId = "routine-epitaxy-start-options";
+const routineModelPickerPublishPatchId = "routine-model-picker-publish";
 // A tenant's Code sessions run on `session_host`, whose permission-mode list is
 // hardcoded without bypass (the cloud service disallowed it). The deployment's
 // VM is the operator's own sandbox, so bypass is offered here; the entitlement
@@ -2884,6 +2892,121 @@ function routineFormRowsReplacement(source, target) {
   return `,${cwdRow},${permissionRow}`;
 }
 
+// The Code surface's routine page is a second implementation of the same
+// create/edit form, with its own instructions composer. Its footer renders a
+// plain model combobox, and its layout has no start-option rows. The component
+// is pinned by its exact four props and by the model-options hook bound inside
+// it (`hideModelPicker`, `modelOptions`, `selectedModelId`,
+// `selectedModelLabel`), plus the one combobox carrying `icon:"CaretDown"`.
+function epitaxyRoutineComposerTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 1) return undefined;
+  const param = node.params[0];
+  if (param.type !== "ObjectPattern") return undefined;
+  const names = new Set(param.properties
+    .filter(entry => entry.type === "Property")
+    .map(entry => entry.key.name ?? entry.key.value));
+  if (names.size !== 4
+    || !["state", "needsGithubConnect", "onGithubConnect", "dormant"].every(name => names.has(name))) {
+    return undefined;
+  }
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  const outer = renderedExpression(returns[0].argument);
+  if (outer?.type !== "CallExpression" || outer.arguments[1]?.type !== "ObjectExpression") {
+    return undefined;
+  }
+  const children = outer.arguments[1].properties
+    .find(entry => entry.type === "Property" && key(entry, "children"))?.value;
+  if (children?.type !== "ArrayExpression") return undefined;
+  let hook;
+  const modelCalls = [];
+  walk(node.body, [], (child) => {
+    if (child.type === "VariableDeclarator" && child.id?.type === "ObjectPattern") {
+      const keys = new Set(child.id.properties
+        .filter(entry => entry.type === "Property")
+        .map(entry => entry.key.name ?? entry.key.value));
+      if (["hideModelPicker", "modelOptions", "selectedModelId", "selectedModelLabel"]
+        .every(name => keys.has(name))) hook = child;
+    }
+    if (child.type === "CallExpression" && child.arguments.length === 2
+      && child.arguments[1]?.type === "ObjectExpression") {
+      const props = child.arguments[1].properties;
+      const has = name => props.some(entry => entry.type === "Property" && key(entry, name));
+      const icon = props.find(entry => entry.type === "Property" && key(entry, "icon"));
+      if (has("items") && has("itemToLabel") && has("onSelect")
+        && literal(icon?.value, "CaretDown")) modelCalls.push(child);
+    }
+  });
+  if (!hook || modelCalls.length !== 1) return undefined;
+  return { node, param, outer, children, hook, modelCall: modelCalls[0] };
+}
+
+function epitaxyRoutineReplacement(source, target) {
+  const { param, outer, children, hook, modelCall } = target;
+  const local = (pattern, name) => identifier(pattern.properties
+    .find(entry => entry.type === "Property"
+      && (entry.key.name ?? entry.key.value) === name)?.value);
+  const state = local(param, "state");
+  const modelOptions = local(hook.id, "modelOptions");
+  const selectedModelId = local(hook.id, "selectedModelId");
+  const selectedModelLabel = local(hook.id, "selectedModelLabel");
+  const jsx = identifier(modelCall.callee);
+  const multi = identifier(outer.callee);
+  const combobox = identifier(modelCall.arguments[0]);
+  if (!state || !modelOptions || !selectedModelId || !selectedModelLabel
+    || !jsx || !multi || !combobox) return null;
+
+  // The wrapper is published by its own chunk (see the tenant block): the page
+  // imports that chunk for side effects only and has no binding to call.
+  const original = source.slice(modelCall.start, modelCall.end);
+  const picker = `(globalThis.__CLAUDESK_MODEL_PICKER__?`
+    + `${jsx}(globalThis.__CLAUDESK_MODEL_PICKER__,`
+    + `{options:${modelOptions},value:${state}.model??void 0,`
+    + `onChange:t=>${state}.setModel(t??null),effort:${state}.effort??null,`
+    + `onEffortChange:${state}.setEffort,fallbackModel:${selectedModelId},`
+    + `selectedLabel:${selectedModelLabel}}):${original})`;
+  const rowClass = '"flex flex-wrap items-center gap-2 py-1.5"';
+  const labelClass = '"text-body text-secondary"';
+  const triggerClass = '"inline-flex items-center gap-1.5 rounded-md px-2 py-1 '
+    + 'text-body text-secondary hover:text-primary"';
+  // The state hook (`routine-form-start-options`) supplies cwd, permission and
+  // effort. A bundle where that splice did not land leaves the rows inert
+  // rather than throwing: setters are tested before use.
+  const cwdRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Working directory"}),`
+    + `${multi}("button",{type:"button",onClick:async()=>{`
+    + `let t=globalThis["claude.web"]?.FileSystem,`
+    + `p=await t?.browseCodeFolder?.("Choose the routine's working folder",!0,!0,`
+    + `${state}.cwd||void 0);`
+    + `typeof p==="string"&&p&&${state}.setCwd&&${state}.setCwd(p)},`
+    + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
+    + `children:[${jsx}("span",{className:"max-w-[240px] truncate",`
+    + `children:${state}.cwd||"Workspace default"}),`
+    + `${jsx}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
+    + `${state}.cwd?${multi}("button",{type:"button",`
+    + `onClick:()=>${state}.setCwd&&${state}.setCwd(""),`
+    + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`
+    + `]})`;
+  const permissionRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Permission mode"}),`
+    + `${jsx}(${combobox},{items:[{id:"default",name:"Default"},`
+    + `{id:"acceptEdits",name:"Accept edits"},{id:"plan",name:"Plan"},`
+    + `{id:"auto",name:"Auto"},{id:"bypassPermissions",name:"Bypass permissions"}],`
+    + `itemToLabel:e=>e.name,itemDisabledReason:()=>void 0,value:null,`
+    + `onSelect:t=>${state}.setPermissionMode&&${state}.setPermissionMode(t.id),`
+    + `icon:"Lock",triggerLabel:({default:"Default",acceptEdits:"Accept edits",`
+    + `plan:"Plan",auto:"Auto",bypassPermissions:"Bypass permissions"})`
+    + `[${state}.permissionMode]??"Default",triggerAriaLabel:"Permission mode",`
+    + `triggerClassName:${triggerClass}})`
+    + `]})`;
+  return [
+    { id: routineEpitaxyPatchId, start: modelCall.start, end: modelCall.end,
+      original, replacement: picker },
+    { id: routineEpitaxyPatchId, start: children.end - 1, end: children.end - 1,
+      original: "", replacement: `,${cwdRow},${permissionRow}` },
+  ];
+}
+
 // The session-host mode list. It is a literal in the renderer's surface
 // capabilities (`["default","acceptEdits","plan","auto"]`), and the composer's
 // mode picker filters against it, so bypass is unreachable however the
@@ -3517,6 +3640,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           end: modelPickers[0].end,
           original: source.slice(modelPickers[0].start, modelPickers[0].end), replacement });
       }
+      // The Code surface's routine page imports this chunk for side effects
+      // only, so it has no binding for the wrapper. Publish it here; the page's
+      // own splice calls through the global (see routine-epitaxy-start-options).
+      if (modelPickers[0].id?.type === "Identifier") {
+        patches.push({ id: routineModelPickerPublishPatchId, start: modelPickers[0].end,
+          end: modelPickers[0].end, original: "",
+          replacement: `;globalThis.__CLAUDESK_MODEL_PICKER__=${modelPickers[0].id.name};` });
+      }
     }
     if (formStates.length === 1) {
       const replacement = routineFormStateReplacement(source, formStates[0]);
@@ -3549,6 +3680,17 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         patches.push({ id: routineFormRowsPatchId, start: at, end: at,
           original: "", replacement });
       }
+    }
+    // The Code surface's routine page and edit dialog render a second
+    // instructions composer (their own layout), not the unified form above.
+    const epitaxyComposers = [];
+    walk(ast, [], (node) => {
+      const target = epitaxyRoutineComposerTarget(node);
+      if (target) epitaxyComposers.push(target);
+    });
+    if (epitaxyComposers.length === 1) {
+      const replacements = epitaxyRoutineReplacement(source, epitaxyComposers[0]);
+      if (replacements) patches.push(...replacements);
     }
   }
   // Bypass permissions in the Code surface: the web shell and a tenant's own

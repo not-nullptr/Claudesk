@@ -403,6 +403,15 @@ scheduled task on the deployment's own VM in both cases:
   working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
   the in-page picker lists the instance's workspace) and a permission-mode
   combobox. Both the create page and the edit dialog render this same form.
+- `routine-epitaxy-start-options` covers the Code surface's **own** routine
+  page and edit dialog, which do not use the unified form: their instructions
+  composer (`EpitaxyRoutineCreatePage` → `Q`'s non-unified layout) is a second
+  implementation with a plain model combobox. The splice replaces that
+  combobox with the published model+effort wrapper and appends the same two
+  rows to its layout. The wrapper itself is published on
+  `globalThis.__CLAUDESK_MODEL_PICKER__` by `routine-model-picker-publish`,
+  because that page imports the wrapper's chunk for side effects only and has
+  no binding to call.
 
 `code-bypass-permission-list` and `code-bypass-availability` make bypass
 permissions selectable in the Code surface, in web-shell mode (a tenant's

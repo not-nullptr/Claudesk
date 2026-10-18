@@ -53,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 81 : 68) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 84 : 71) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
@@ -81,6 +81,12 @@ try {
       webShell === "1", "the web shell's routine form offers model and effort pickers");
     assert.equal(manifest.patches.some(patch => patch.id === "routine-form-start-option-rows"),
       webShell === "1", "the web shell's routine form offers cwd and permission mode");
+    // The Code surface's own routine page and edit dialog render a second
+    // instructions composer; it carries the same picker and rows.
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-epitaxy-start-options"),
+      webShell === "1", "the Code surface's routine page offers the picker and start options");
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-model-picker-publish"),
+      webShell === "1", "the shared model+effort wrapper is published for that page");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-permission-list"),
       webShell === "1", "the web shell's Code permission modes include bypass");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-availability"),

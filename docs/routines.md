@@ -284,8 +284,10 @@ The routine form in the web shell — the operator's own instance and a tenant's
 alike — carries the Code composer's model and effort pickers (the same
 `ModelSelector`/`EffortControl` components), a working-directory picker backed
 by the same in-page folder browser as the composer, and a permission-mode
-dropdown (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`). See
-`docs/frontend-patches.md`.
+dropdown (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`). Both
+routine-form implementations get them: the unified form used by the Cowork
+scheduled-task surface, and the Code surface's own create page and edit dialog
+(`routine-epitaxy-start-options`). See `docs/frontend-patches.md`.
 
 ## Not supported
 
