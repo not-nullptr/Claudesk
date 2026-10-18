@@ -684,14 +684,15 @@ this, the picker and branch hooks failed until the user placed a session, the
 only other path that woke the VM.
 
 The wake itself is bounded for the interactive reads (`CLAUDESK_RUNNER_WAKE_WAIT_MS`,
-5 s by default), because `startVM` on a cold VM can take a minute. The folder
-route goes one step further: `/api/remote/code-folders` races the guest request
-against `CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS` (6 s) and, when the guest does not
-answer, lists/creates through the workspace mount the bridge already serves.
-Both views are the same account tree (`/workspace/...` on the host), so the
-picker shows the same folders instead of sitting on "Loading server folders…"
-for the length of a VM boot; the guest request keeps running, and the next open
-uses the runner. The git/branch IPC lookups keep their guest-only rule.
+5 s by default), because `startVM` on a cold VM can take a minute. That makes a
+cold Code read answer quickly — 503 while no runner is online — rather than
+holding the request for the whole boot. The in-page picker uses that answer:
+for its Code route it keeps retrying (up to two minutes) with the status
+"Starting the workspace…" until the guest answers. `/api/remote/code-folders`
+is **guest-only** on both GET and POST: the bridge never lists or creates from
+its own workspace mount for Code, because that mount is inside the privileged
+tenant container rather than the VM. The git/branch IPC lookups keep the same
+guest-only rule.
 
 A code session carries `effort_level` in its config, and the guest runner passes
 it to the agent as `--effort`. The agent also runs with `IS_SANDBOX=1`: the

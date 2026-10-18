@@ -2859,7 +2859,7 @@ function routineFormRowsReplacement(source, target) {
       + `{defaultMessage:"Working directory",id:"claudesk-routine-cwd"})}),`
       + `${jsx}("button",{type:"button",onClick:async()=>{`
       + `let t=globalThis["claude.web"]?.FileSystem,`
-      + `p=await(t?.browseCodeFolder??t?.browseFolder)?.(`
+      + `p=await t?.browseCodeFolder?.(`
       + `"Choose the routine's working folder",!0,!0,e.cwd||void 0);`
       + `typeof p==="string"&&p&&e.setCwd(p)},`
       + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`

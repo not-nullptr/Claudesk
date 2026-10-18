@@ -7,6 +7,11 @@
   function folderApi(source) {
     return source === "code" ? "/api/remote/code-folders" : "/api/remote/folders";
   }
+  // How long the Code picker keeps asking while its VM boots. Each attempt is
+  // answered as soon as the bridge knows the guest is not up yet (503); the
+  // runner comes online while the picker shows "Starting the workspace…".
+  const codeStartWaitMs = 120000;
+  const codeRetryDelayMs = 1500;
   async function listing(path, signal, source) {
     // A bridge that cannot answer must not leave the dialog on its loading
     // line forever: bound the read, and let the catch below show the reason.
@@ -20,7 +25,11 @@
     } catch {}
     const response = await fetch(`${folderApi(source)}${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal: effective });
     const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || "Could not browse server folders");
+    if (!response.ok || !result.ok) {
+      const error = new Error(result.error || "Could not browse server folders");
+      error.status = response.status;
+      throw error;
+    }
     return result.value;
   }
   globalThis.__CLAUDE_PICK_SERVER_FOLDERS__ = function ({ title, multiple = false, initialPath, allowCreate = true, source = "" } = {}) {
@@ -162,13 +171,47 @@
         wrapper.append(input);
         parent.append(wrapper);
       }
+      // Abort-aware sleep: closing the dialog cancels a retry loop at once.
+      function delay(ms) {
+        return new Promise(resolve => {
+          const timer = setTimeout(done, ms);
+          function done() {
+            clearTimeout(timer);
+            controller.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          controller.signal.addEventListener("abort", done, { once: true });
+        });
+      }
       async function load(path) {
         const request = ++generation;
         busy = true;
         updateSelection();
+        const startDeadline = Date.now() + codeStartWaitMs;
         status.textContent = "Loading server folders…";
         try {
-          const value = await listing(path, controller.signal, source);
+          let value;
+          // A Code listing is answered only from inside the tenant's VM. While
+          // the VM boots the bridge answers 503 (or 504 if a runner did not
+          // answer in time), so the picker keeps asking and says what it is
+          // waiting for — it never falls back to the bridge's own mount.
+          for (;;) {
+            try {
+              value = await listing(path, controller.signal, source);
+              break;
+            } catch (error) {
+              const retryable = source === "code"
+                && (error?.status === 503 || error?.status === 504);
+              if (!retryable || Date.now() >= startDeadline
+                || finished || request !== generation) {
+                throw error;
+              }
+              status.textContent = "Starting the workspace…";
+              await delay(codeRetryDelayMs);
+              if (finished || request !== generation) return false;
+              status.textContent = "Loading server folders…";
+            }
+          }
           if (finished || request !== generation) return false;
           current = value;
           pathLabel.textContent = value.path;
@@ -226,7 +269,11 @@
             signal: controller.signal,
           });
           const result = await response.json().catch(() => ({}));
-          if (!response.ok || !result.ok) throw new Error(result.error || "Could not create the folder");
+          if (!response.ok || !result.ok) {
+            const error = new Error(result.error || "Could not create the folder");
+            error.status = response.status;
+            throw error;
+          }
           const created = result.value?.path;
           nameInput.value = "";
           createRow.hidden = true;
@@ -236,7 +283,11 @@
           await load(created || current.path);
           if (created) status.textContent = `Created ${created}.`;
         } catch (error) {
-          if (!finished) status.textContent = error.message;
+          if (!finished) {
+            status.textContent = error.status === 503 || error.status === 504
+              ? "The workspace is still starting. Try again in a moment."
+              : error.message;
+          }
         } finally {
           busy = false;
           createButton.disabled = false;

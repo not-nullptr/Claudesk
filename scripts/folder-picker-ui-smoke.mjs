@@ -18,7 +18,7 @@ class Element {
 }
 const body = new Element("body");
 const requests = [], created = [], posts = [];
-let missing = false, createFails = null;
+let missing = false, createFails = null, codeColdReads = 0;
 function listingFor(path) {
   return { root: "/workspace", path,
     parent: path === "/workspace" ? null : "/workspace",
@@ -28,7 +28,7 @@ function listingFor(path) {
 }
 const context = { document: { body, activeElement: new Element("button"),
   createElement(tag) { const element = new Element(tag); created.push(element); return element; } },
-  AbortController, fetch: async (url, options = {}) => {
+  AbortController, setTimeout, clearTimeout, fetch: async (url, options = {}) => {
     assert.ok(options.signal);
     const parsed = new URL(url, "https://claudesk.invalid");
     if (options.method === "POST" && parsed.pathname === "/api/remote/folders") {
@@ -39,6 +39,11 @@ const context = { document: { body, activeElement: new Element("button"),
     }
     const path = parsed.searchParams.get("path") || "/workspace";
     requests.push(path);
+    if (parsed.pathname === "/api/remote/code-folders" && codeColdReads > 0) {
+      codeColdReads -= 1;
+      return { ok: false, status: 503,
+        json: async () => ({ ok: false, error: "no guest runner is online" }) };
+    }
     if (path === "/outside" || (missing && path === "/workspace/a")) {
       return { ok: false, json: async () => ({ ok: false, error: "Folder unavailable" }) };
     }
@@ -152,6 +157,19 @@ assert.equal(body.children.length, 1, "failed revalidation must not return a sta
 assert.ok(all().some(node => node.textContent === "Folder unavailable"));
 button("Cancel").click();
 assert.equal(await result, null);
+
+// The Code picker's listing is guest-only. A cold VM answers 503; the picker
+// says it is starting the workspace and asks the guest route again, rather
+// than falling back to the bridge's own mount. The retry is on a 1.5 s timer.
+missing = false;
+codeColdReads = 1;
+result = pick({ source: "code" });
+await new Promise(resolve => setTimeout(resolve, 2500));
+assert.equal(codeColdReads, 0, "the cold answer was retried");
+assert.ok(all().some(node => node.textContent === "a"),
+  "the retried Code listing renders the guest's folders");
+button("Choose this folder").click();
+assert.deepEqual(Array.from(await result), ["/workspace"]);
 assert.ok(!created.some(node => node.type === "file"), "never create a native file picker");
 assert.ok(requests.includes("/workspace/a"));
 console.log("folder-picker-ui-smoke: navigation, multi-select, new folder, Escape, errors and server revalidation passed");

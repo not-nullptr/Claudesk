@@ -71,9 +71,9 @@ try {
       CLAUDESK_TENANT: "1",
       CLAUDESK_CODE_RUNNERS: "1",
       CLAUDESK_CODE_RUNNER_POOL: "guest-smoke",
-      // The Code folder route waits this long for the guest before answering
-      // from the workspace mount; the smoke pins the fallback path.
-      CLAUDESK_CODE_FOLDER_GUEST_WAIT_MS: "250",
+      // A cold read answers 503 as soon as the bounded wake elapses; the smoke
+      // pins that fast refusal rather than the 5 s default.
+      CLAUDESK_RUNNER_WAKE_WAIT_MS: "200",
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -93,14 +93,16 @@ try {
   const secret = JSON.parse(readFileSync(join(stateDir, "code-runners.json"), "utf8"))
     .pools[0].secret;
 
-  // The Code folder picker never waits on a cold VM: with no runner yet, the
-  // route answers from the bridge's own workspace mount instead of leaving the
-  // dialog on "Loading server folders…".
-  const fallbackListing = JSON.parse(
-    (await request("/api/remote/code-folders?path=%2Fworkspace")).body);
-  assert.equal(fallbackListing.ok, true, JSON.stringify(fallbackListing));
-  assert.equal(fallbackListing.value.path, "/workspace",
-    "the workspace-mount fallback answers when no runner is online");
+  // A Code folder listing is guest-only: with no runner online the route
+  // refuses (503) instead of reading the tenant container's own mount. The
+  // picker retries on that answer while the VM boots.
+  const coldListing = await request("/api/remote/code-folders?path=%2Fworkspace");
+  assert.equal(coldListing.status, 503, coldListing.body);
+  const coldBody = JSON.parse(coldListing.body);
+  assert.equal(coldBody.ok, false);
+  assert.match(coldBody.error, /no guest runner is online/);
+  assert.equal(Object.hasOwn(coldBody, "value"), false,
+    "the bridge never answers a Code listing from its own filesystem");
 
   // The runner registers on start-up and answers the pool's poll.
   const idle = runRunner({ secret });
