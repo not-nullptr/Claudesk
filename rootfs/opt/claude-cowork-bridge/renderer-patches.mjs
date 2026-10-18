@@ -2599,6 +2599,41 @@ function selfHostedRepoInfoTarget(node) {
   return { statement: first, param };
 }
 
+// The browser's session-list normalizer (`SD` in shared-100). Every list,
+// single-session and shared-session response is rebuilt through it, and the
+// object it returns names each field explicitly — anything missing is dropped
+// before the sidebar's row builder runs. It rebuilt `session_context` from just
+// `config.sources/outcomes/model/effort_level`, so the bridge's top-level
+// `repo_info` (and the folder it names) vanished on this path while the row
+// builder and the list sanitizer already kept it. The returned document is the
+// one pinned by `type:"session"` beside the self-hosted pool id.
+function sessionNormalizerRepoInfoTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1) return undefined;
+  const param = identifier(node.params[0]);
+  if (!param) return undefined;
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  const object = unwrap(returns[0].argument);
+  if (object?.type !== "ObjectExpression") return undefined;
+  const properties = new Map();
+  for (const property of object.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key)
+      ?? (property.key?.type === "Literal" ? property.key.value : undefined);
+    if (typeof key === "string") properties.set(key, property);
+  }
+  if (!literal(properties.get("type")?.value, "session")) return undefined;
+  if (!properties.has("self_hosted_runner_pool_id")) return undefined;
+  if (unwrap(properties.get("session_context")?.value)?.type !== "ObjectExpression") {
+    return undefined;
+  }
+  if (properties.has("repo_info")) return undefined;
+  return { object, param };
+}
+
 // The unified sidebar groups Code rows by `sessionGroupingId`, an id that
 // names an epitaxy project in the catalog served by claude.ai. A tenant has no
 // hosted projects, so every folder-placed session had no id (or an id the
@@ -3389,6 +3424,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const createParams = [];
     const poolCreates = [];
     const repoInfos = [];
+    const sessionNormalizers = [];
     const sessionListFields = [];
     const codeGroups = [];
     const projectGates = [];
@@ -3411,6 +3447,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (poolCreate) poolCreates.push(poolCreate);
       const repoInfo = selfHostedRepoInfoTarget(node);
       if (repoInfo) repoInfos.push(repoInfo);
+      const normalizer = sessionNormalizerRepoInfoTarget(node);
+      if (normalizer) sessionNormalizers.push(normalizer);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const codeGroup = codeSessionGroupTarget(node);
@@ -3496,6 +3534,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       patches.push({ id: selfHostedRepoInfoPatchId, start: statement.start,
         end: statement.start, original: "",
         replacement: `if(${param}.repo_info!==void 0)return ${param}.repo_info;` });
+    }
+    if (sessionNormalizers.length === 1) {
+      const { object, param } = sessionNormalizers[0];
+      const at = object.end - 1;
+      patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
+        original: "", replacement: `,repo_info:${param}.repo_info??void 0` });
     }
     if (sessionListFields.length === 1) {
       const { array } = sessionListFields[0];

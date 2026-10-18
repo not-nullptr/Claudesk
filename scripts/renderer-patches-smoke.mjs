@@ -1804,6 +1804,12 @@ const selfHostedRepoInfo = 'function repoInfo(e){'
 const selfHostedListFields = 'var listFields=["id","title","session_status",'
   + '"self_hosted_runner_pool_id","session_grouping_id","permission_mode"];'
   + 'function pickSession(e){return pickFields(e,listFields)}';
+const selfHostedNormalizer = 'function normalizeSession(e){let t=e,n=e.config??{};'
+  + 'return{type:"session",id:e.id,title:e.title,'
+  + 'session_grouping_id:t.session_grouping_id??void 0,'
+  + 'self_hosted_runner_pool_id:e.self_hosted_runner_pool_id??null,'
+  + 'session_context:{sources:n.sources??[],outcomes:n.outcomes??[],'
+  + 'model:n.model??void 0,effort_level:n.effort_level??void 0},tags:e.tags}}';
 const selfHostedFolderGroups = 'function group(e){if(e.source.kind==="code"){'
   + 'let t=e.source.data.sessionGroupingId;f(t?p({kind:"epitaxy-project",id:t}):jD,e);return}}'
   + 'function bucket(e){if(!(e.kind==="cowork-space"?n.has(e.id):'
@@ -1821,7 +1827,7 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
-  selfHostedRepoInfo, selfHostedListFields, selfHostedFolderGroups,
+  selfHostedRepoInfo, selfHostedNormalizer, selfHostedListFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
@@ -1854,8 +1860,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create-params").length, 2,
   "both the intent mapper and the pool create argument must carry the start options");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 2,
-  "the row builder and the session-list field allowlist must both keep repo_info");
+  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 3,
+  "the row builder, the response normalizer and the field allowlist must keep repo_info");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
@@ -1901,6 +1907,9 @@ assert.ok(selfHostedOut.includes('effort:e.effort,'
 assert.ok(selfHostedOut.includes('function repoInfo(e){if(e.repo_info!==void 0)'
   + 'return e.repo_info;let t=e.session_context?.sources'),
   "the session row must return the bridge's repo_info before reading git sources");
+assert.ok(selfHostedOut.includes('effort_level:n.effort_level??void 0},tags:e.tags,'
+  + 'repo_info:e.repo_info??void 0}'),
+  "the response normalizer must carry repo_info into the sidebar's row data");
 assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info"]'),
   "the session-list sanitizer must keep repo_info across serialization");
 assert.ok(selfHostedOut.includes('let t=e.source.data.sessionGroupingId'

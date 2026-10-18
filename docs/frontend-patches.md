@@ -812,7 +812,13 @@ the two-statement helper whose first declaration reads `?.browseFolder`.
 object; a folder-placed self-hosted session has no git source, so without this
 every row landed under "Other". Pinned by the one-parameter function whose
 first declaration reads both `session_context` members and tests for
-`git_repository`.
+`git_repository`. The same patch ID also covers the browser's response
+normalizer (`SD` in `shared-100`): every list, single-session and
+shared-session response is rebuilt through it, and its returned object named
+each field explicitly, so `repo_info` was dropped on the way to the row builder
+even though the bridge sent it. The splice adds `repo_info` to that object;
+pinned by `type:"session"` beside `self_hosted_runner_pool_id` and the
+`session_context` literal.
 
 `web-code-folder-groups` makes the unified sidebar's folder grouping work for
 a self-hosted session. That sidebar groups Code rows by `sessionGroupingId`,
