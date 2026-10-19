@@ -32,8 +32,11 @@ mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
 writeFileSync(stub, `#!/bin/sh
 prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+# The argv is echoed inside a JSON string, so escape it — a --mcp-config value
+# carries JSON of its own.
+args=$(printf '%s' "$*" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
 printf '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}\\n'
-printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent saw: %s | prompt: %s"}]},"session_id":"11111111-1111-4111-8111-111111111111"}\\n' "$*" "$prompt"
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent saw: %s | prompt: %s"}]},"session_id":"11111111-1111-4111-8111-111111111111"}\\n' "$args" "$prompt"
 printf '{"type":"result","subtype":"success","session_id":"11111111-1111-4111-8111-111111111111","is_error":false,"result":"done"}\\n'
 `);
 chmodSync(stub, 0o755);
@@ -209,6 +212,52 @@ try {
     + " --resume 11111111-1111-4111-8111-111111111111"
     + " | prompt: switch settings",
     "a mid-session model/permission/effort control request reaches the next turn");
+
+  // A session's MCP servers reach the agent as `--mcp-config`: this is where a
+  // routine fire's per-invocation connectors become the URL the agent dials,
+  // and where the session MCP editor's save lands.
+  const mcpPlaced = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      title: "mcp smoke",
+      environment_id: poolId,
+      config: {
+        model: "claude-opus-5-5",
+        mcp_servers: [
+          {
+            name: "tickets",
+            type: "http",
+            url: "https://mcp.example.com/run/abc123/mcp",
+            headers: { authorization: "Bearer t" },
+          },
+          { name: "events", type: "sse", url: "https://mcp.example.com/run/def456/sse" },
+        ],
+      },
+    }),
+  });
+  const mcpSessionId = JSON.parse(mcpPlaced.body).session.id;
+  await request(`/v1/code/sessions/${mcpSessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "use the tickets server" } } }] }),
+  });
+  const ranMcp = runRunner({ secret });
+  assert.equal(ranMcp.status, 0, ranMcp.stderr);
+  const mcpHistory = JSON.parse(
+    (await request(`/v1/code/sessions/${mcpSessionId}/events`)).body);
+  const mcpAssistant = decodeClientEventsResponse(mcpHistory)
+    .filter((entry) => entry.message.type === "assistant").at(-1);
+  assert.equal(mcpAssistant.message.message.content[0].text,
+    "agent saw: --print --input-format stream-json --output-format stream-json"
+    + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + ' --mcp-config {"mcpServers":{"tickets":{"type":"http",'
+    + '"url":"https://mcp.example.com/run/abc123/mcp",'
+    + '"headers":{"authorization":"Bearer t"}},'
+    + '"events":{"type":"sse","url":"https://mcp.example.com/run/def456/sse"}}}'
+    + " | prompt: use the tickets server",
+    "a session's MCP servers reach the agent as --mcp-config");
 
   // The opening turn can carry image blocks (a routine fire with images); the
   // runner reads the whole content list, not just its text, and forwards it to

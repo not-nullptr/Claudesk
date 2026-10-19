@@ -16,10 +16,10 @@ Content-Type: application/json
 ```
 
 The body is optional and carries `text` (≤ 65,536 characters), exactly as
-upstream, plus an optional `images` array (a Claudesk extension — see below).
-Everything else — model, folder, permission mode, schedule, the saved
-instructions — is the task's own configuration. Each successful call starts one
-new session and returns:
+upstream, plus an optional `images` array and an optional `connectors` array
+(Claudesk extensions — see below). Everything else — model, folder, permission
+mode, schedule, the saved instructions — is the task's own configuration. Each
+successful call starts one new session and returns:
 
 ```json
 {
@@ -101,6 +101,56 @@ because both executors already carry images on a session's opening turn:
 - No separate token or endpoint: the same per-routine bearer token covers it.
   A caller that sends only `text` is unaffected, and upstream would ignore the
   unknown `images` field.
+
+## Per-invocation connectors
+
+A fire of a **Code** routine may name MCP servers to attach to the run it
+starts. They belong to that session only: nothing is written to the routine or
+to the account's connector list, and the next fire may name a different set (or
+none). That is what lets a connector URL carry a per-run id:
+
+```json
+{
+  "text": "Sentry alert SEN-4521 fired in prod.",
+  "connectors": [
+    "https://mcp.example.com/run/8f2c1a/sse",
+    {
+      "name": "tickets",
+      "url": "https://mcp.example.com/run/8f2c1a/mcp",
+      "type": "http",
+      "headers": {"Authorization": "Bearer …"}
+    }
+  ]
+}
+```
+
+Each entry is either a URL string or an object:
+
+| field | |
+| --- | --- |
+| `url` | Required. A plain `http(s)` URL — the server the run dials. |
+| `name` | Optional server name (letters, digits, `-`, `_`). Defaults to the URL's hostname and is made unique per fire, because MCP tool names are prefixed with it. |
+| `type` | Optional transport: `http` (streamable HTTP, the default) or `sse`. `streamable_http` is accepted too. |
+| `headers` | Optional object of request headers, for a URL that does not carry its own credential. |
+
+Up to 20 connectors. `mcp_servers` is accepted as an alias for `connectors`, and
+an entry may be a connector document as the instance's own list returns it (its
+`uuid` is ignored; `name` and `url` are used).
+
+A Code fire puts the connectors on the new session's `mcp_servers` config; the
+guest runner passes them to the agent as `--mcp-config` on every turn of that
+session, so the agent connects to exactly the URL this fire named. The URL is
+dialed from inside the account's Cowork VM, so its host must be reachable there
+(the VM's egress policy, `CLAUDE_EGRESS_ALLOWED_HOSTS_JSON`, applies).
+
+A **Cowork** routine refuses the field (`400`). Its session's MCP servers are
+account-level connectors the Desktop proxies through claude.ai, a backend this
+deployment does not serve, and `LocalAgentModeSessions.start` has no
+per-session URL field — accepting the connectors would silently never dial
+them.
+
+No extra token or endpoint: the per-routine bearer token covers it, exactly
+like `images`.
 
 ## Tokens
 
@@ -199,7 +249,7 @@ starts another session.
 
 | status | type | cause |
 | --- | --- | --- |
-| 400 | `invalid_request_error` | missing/wrong `anthropic-version`, `text` not a string or over 65,536 chars, routine paused, no readable instructions |
+| 400 | `invalid_request_error` | missing/wrong `anthropic-version`, `text` not a string or over 65,536 chars, invalid `connectors` (or connectors on a Cowork routine), routine paused, no readable instructions |
 | 401 | `authentication_error` | no bearer token, or it does not belong to this routine |
 | 404 | `not_found_error` | no such routine |
 | 429 | `rate_limit_error` | fire limit reached |
@@ -294,7 +344,7 @@ scheduled-task surface, and the Code surface's own create page and edit dialog
 - The literal `api.anthropic.com` URL and its claude.ai-issued tokens: upstream
   routines, tokens and cloud sessions live in a backend this deployment does not
   have.
-- Per-fire overrides: `text` and `images` are the only body fields; model,
-  folder, permission mode and the rest stay the task's. Other unknown fields are
-  ignored, as upstream (which itself has no `images`).
+- Per-fire overrides: `text`, `images` and `connectors` are the only body
+  fields; model, folder, permission mode and the rest stay the task's. Other
+  unknown fields are ignored, as upstream (which itself has none of the three).
 - Notifications, repositories and connector configuration on the cloud form.

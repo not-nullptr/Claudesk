@@ -358,6 +358,35 @@ await assert.rejects(
   (error) => error.statusCode === 400 && /png, jpeg, gif or webp/.test(error.message),
   "an unsupported image type is refused");
 
+// Per-invocation connectors (a Claudesk extension) ride only the run they were
+// named on — a URL with a per-run id is just a URL. Nothing is saved onto the
+// routine, so the next fire starts from a clean slate.
+//
+// A Cowork session's MCP servers are account-level connectors the Desktop
+// proxies through claude.ai, which this deployment does not serve; there is no
+// per-session URL field, so the API refuses rather than accepting connectors
+// that would never be dialed.
+await assert.rejects(
+  () => service.fireRoutine(coworkId, {
+    connectors: ["https://mcp.example.com/run/abc123/sse"],
+  }),
+  (error) => error.statusCode === 400 && /Code routines only/.test(error.message),
+  "a Cowork routine refuses per-invocation connectors");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, { connectors: [{ url: "ftp://mcp.example.com" }] }),
+  (error) => error.statusCode === 400 && /http\(s\) url/.test(error.message),
+  "a non-http connector URL is refused");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, {
+    connectors: [{ name: "x", url: "https://mcp.example.com", type: "ws" }],
+  }),
+  (error) => error.statusCode === 400 && /http or sse/.test(error.message),
+  "an unsupported connector transport is refused");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, { connectors: { url: "https://mcp.example.com" } }),
+  (error) => error.statusCode === 400 && /must be an array/.test(error.message),
+  "connectors must be an array");
+
 // Firing a Code task places a session on the runner with the prompt as the
 // client's first user event — the shape the runner reads and the transcript
 // releases when the runner stamps it.
@@ -388,6 +417,32 @@ assert.deepEqual(created[1].body.events[0].payload.message.content[1], {
   type: "image",
   source: { type: "base64", media_type: "image/png", data: tinyPng },
 });
+
+// The extension on a Code routine: the connectors land on the session config
+// the guest runner turns into the agent's `--mcp-config`.
+await service.fireRoutine(codeId, {
+  connectors: [
+    "https://mcp.example.com/run/abc123/sse",
+    {
+      name: "tickets!",
+      url: "https://mcp.example.com/run/xyz789/mcp",
+      type: "streamable_http",
+      headers: { authorization: "Bearer t" },
+    },
+  ],
+});
+assert.deepEqual(created.at(-1).body.config.mcp_servers, [{
+  name: "mcp-example-com",
+  type: "http",
+  url: "https://mcp.example.com/run/abc123/sse",
+}, {
+  name: "tickets",
+  type: "http",
+  url: "https://mcp.example.com/run/xyz789/mcp",
+  headers: { authorization: "Bearer t" },
+}], "a fire's connectors reach the Code session and its agent's MCP config");
+assert.equal(Object.hasOwn(created[0].body.config, "mcp_servers"), false,
+  "a fire without connectors adds no MCP config");
 
 // A deployment whose models come from gateway discovery leaves the env list
 // empty; the fire asks the instance for the models it offers rather than
@@ -579,6 +634,23 @@ try {
   assert.deepEqual(httpStarts.at(-1).images,
     [{ name: "image-1", mimeType: "image/png", base64: tinyPng }],
     "images in the HTTP body reach the started session");
+  // The route forwards `connectors` into the service (this is a Cowork routine,
+  // so the service's own kind check is what answers).
+  const connectorsFire = await fetch(
+    `${base}/v1/claude_code/routines/${encodeURIComponent(coworkId)}/fire`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        connectors: [{ name: "tickets", url: "https://mcp.example.com/run/http1/mcp" }],
+      }),
+    });
+  assert.equal(connectorsFire.status, 400);
+  assert.match((await connectorsFire.json()).error.message, /Code routines only/,
+    "connectors in the HTTP body reach the service");
 
   const noVersion = await fetch(
     `${base}/v1/claude_code/routines/${encodeURIComponent(coworkId)}/fire`, {

@@ -952,6 +952,52 @@ def run_agent(argv, cwd, content, write):
     return code, result, bool(timed_out), forwarded, failures, errors
 
 
+def mcp_config_of(servers):
+    """The `--mcp-config` document for a session's MCP servers.
+
+    A Code routine fire may bring its own connectors for that run (the bridge's
+    `connectors` extension), and the session's MCP editor saves the same field.
+    The bridge writes them as a list of `{name, type, url, headers?}`; the
+    agent's own `.mcp.json` record shape is accepted too. Only remote servers
+    (a URL) are used — a fire must not be able to name a command to execute.
+    The document is inline JSON on the agent's argv, so it is scoped to this
+    session and disappears with it.
+    """
+    entries = []
+    if isinstance(servers, dict):
+        entries = list(servers.items())
+    elif isinstance(servers, list):
+        for index, entry in enumerate(servers):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                name = "connector-%d" % (index + 1)
+            entries.append((name, entry))
+    else:
+        return None
+    mapping = {}
+    for name, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        transport = entry.get("type") or entry.get("transport") or "http"
+        transport = (transport if isinstance(transport, str) else "http")
+        transport = transport.strip().lower().replace("_", "-")
+        if transport in ("streamable-http", "streamable"):
+            transport = "http"
+        if transport not in ("http", "sse"):
+            transport = "http"
+        spec = {"type": transport, "url": url}
+        headers = entry.get("headers")
+        if isinstance(headers, dict) and headers:
+            spec["headers"] = {str(key): str(value) for key, value in headers.items()}
+        mapping[str(name)] = spec
+    return {"mcpServers": mapping} if mapping else None
+
+
 def run_session(hint):
     session = hint["session_uuid"]
     quoted = urllib.parse.quote(session)
@@ -1021,6 +1067,11 @@ def run_session(hint):
         log("session %s: %s" % (session, reason))
         return session, 2
 
+    # The session's MCP servers: a routine fire's per-invocation connectors (or
+    # the session MCP editor's saved set). This is what makes the URL a fire
+    # carried — with whatever per-run id it held — the server the agent dials.
+    mcp_config = mcp_config_of(config.get("mcp_servers"))
+
     argv = [CLAUDE_BIN] + AGENT_ARGS
     if model is not None:
         argv += ["--model", model]
@@ -1028,6 +1079,8 @@ def run_session(hint):
         argv += ["--permission-mode", permission_mode]
     if effort is not None:
         argv += ["--effort", effort]
+    if mcp_config is not None:
+        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
     # The working directory comes from the session's start options. With none,
     # the account's shared workspace is where the work happens (see
     # session_workdir). The virtiofs mount can arrive after this service, so
@@ -1040,9 +1093,12 @@ def run_session(hint):
         log("session %s: %s" % (session, workdir_error))
         return session, 2
     started = time.time()
-    log("session %s: turn with %s (model %s, effort %s, permission %s, resume %s)" % (
-        session, " ".join(AGENT_ARGS), model or "default", effort or "default",
-        permission_mode or "default", resume or "none"))
+    log("session %s: turn with %s (model %s, effort %s, permission %s, "
+        "connectors %s, resume %s)" % (
+            session, " ".join(AGENT_ARGS), model or "default", effort or "default",
+            permission_mode or "default",
+            ",".join(mcp_config["mcpServers"]) if mcp_config else "none",
+            resume or "none"))
     write, close_stream = open_event_stream(
         "/v1/code/sessions/%s/events/stream" % quoted, token)
 
