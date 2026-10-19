@@ -10,13 +10,18 @@ const MiB = 1024 * 1024;
 // container can hold must be clamped, not obeyed: the DTO is assembled in
 // memory several times over and an unclamped request OOM-looped the bridge.
 assert.equal(
-  sessionFileReadLimit({ requestedBytes: 1024 * MiB, memoryLimitBytes: 256 * MiB }),
+  sessionFileReadLimit({ requestedBytes: 1024 * MiB, memoryLimitBytes: 1024 * MiB }),
   32 * MiB,
   "a huge request is clamped to the absolute ceiling",
 );
 assert.equal(
+  sessionFileReadLimit({ requestedBytes: 1024 * MiB, memoryLimitBytes: 256 * MiB }),
+  16 * MiB,
+  "a 256 MB container keeps enough heap for the DTO's several copies",
+);
+assert.equal(
   sessionFileReadLimit({ requestedBytes: 1024 * MiB, memoryLimitBytes: 64 * MiB }),
-  8 * MiB,
+  4 * MiB,
   "a small container clamps below the absolute ceiling",
 );
 assert.equal(

@@ -3062,6 +3062,52 @@ async function tenantGitAnswer(body) {
 // read the file from the roots this bridge serves and answer the same call, so
 // the pane previews it normally. Desktop still owns the happy path: we only
 // fill a result it refused, never override one it produced.
+// A forwarded file read arrives inline from Desktop. Keep one that fits the
+// same bound the root reader uses; a larger one is refused as too large so the
+// pane offers the streaming download instead of the bridge holding it.
+function sessionFileValueSize(value) {
+  const file = value?.file && typeof value.file === "object" ? value.file : value;
+  const size = Number(file?.fileSize);
+  if (Number.isFinite(size) && size >= 0) return size;
+  return typeof file?.contents === "string" ? Buffer.byteLength(file.contents, "utf8") : 0;
+}
+
+function capForwardedSessionFile(value) {
+  return sessionFileValueSize(value) > sessionFileMaxBytes ? null : value;
+}
+
+// Answer a session-file read from the roots this bridge serves before asking
+// Desktop. Desktop hands file contents back inline, so a large file made the
+// bridge hold the read Buffer, the decoded string, the IPC JSON and the HTTP
+// response at once — the 256 MB container OOM-loop that a big download
+// triggered. The root reader stats first and refuses past its cap, so an
+// oversized file costs nothing; only a path the roots cannot answer falls
+// through to Desktop.
+async function bridgeLocalSessionFile(body) {
+  const requested = body.method === "readFileAtCwd" ? body.args?.[0] : body.args?.[1];
+  if (typeof requested !== "string" || !requested) return { handled: false };
+  const read = await readContainedFile(downloadRoots, requested, {
+    maxBytes: sessionFileMaxBytes,
+    allowRoot: false,
+    missingMessage: "session file was not found",
+    outsideMessage: "session file path is outside the allowed read roots",
+  });
+  if (read.file) {
+    console.log(
+      `[cowork-bridge] session-file ${body.method} served ${requested} (${read.file.fileSize} bytes)`,
+    );
+    return { handled: true, value: read.file };
+  }
+  if (read.failure === "too_large") {
+    console.log(
+      `[cowork-bridge] session-file ${body.method} declined ${requested}: too_large`
+        + ` (${read.fileSize} bytes, cap ${sessionFileMaxBytes})`,
+    );
+    return { handled: true, value: null };
+  }
+  return { handled: false };
+}
+
 async function supplementSessionFileRead(body, value) {
   if (value != null) return value;
   if (body.method === "resolveSessionFile") {
@@ -3107,9 +3153,33 @@ async function supplementSessionFileRead(body, value) {
 // file pane prefers this method whenever the surface advertises it, and it is
 // the only way a refusal reaches the pane as a reason: readSessionFile's bare
 // null becomes a generic "Couldn't read this file", while tooLarge becomes
-// "Preview isn't available for this file" with the size. Desktop still answers
-// first for the files it can see; we only fill in what it refuses.
+// "Preview isn't available for this file" with the size. The roots this bridge
+// serves answer first so a large local file is refused by stat, never inlined
+// through Desktop; a path they cannot resolve still gets Desktop's view.
 async function bridgeSessionFileWithStatus(args, argsEncoding) {
+  const requested = args?.[1];
+  let read;
+  if (typeof requested === "string" && requested) {
+    read = await readContainedFile(downloadRoots, requested, {
+      maxBytes: sessionFileMaxBytes,
+      allowRoot: false,
+      missingMessage: "session file was not found",
+      outsideMessage: "session file path is outside the allowed read roots",
+    });
+    if (read.file) {
+      console.log(
+        `[cowork-bridge] session-file readSessionFileWithStatus served ${requested} (${read.file.fileSize} bytes)`,
+      );
+      return { status: "ok", file: read.file };
+    }
+    if (read.failure === "too_large") {
+      console.log(
+        `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: too_large`
+          + ` (${read.fileSize} bytes, cap ${sessionFileMaxBytes})`,
+      );
+      return { status: "tooLarge" };
+    }
+  }
   let described = null;
   try {
     described = await desktop.invoke(
@@ -3119,33 +3189,18 @@ async function bridgeSessionFileWithStatus(args, argsEncoding) {
       argsEncoding,
     );
   } catch {
-    // The inner surface may not expose it; the roots below are the fallback.
+    // The inner surface may not expose it; the roots above are the fallback.
   }
-  if (described?.status === "ok" && described.file) return described;
-  const requested = args?.[1];
-  if (typeof requested !== "string" || !requested) {
-    return described ?? { status: "readError" };
-  }
-  const read = await readContainedFile(downloadRoots, requested, {
-    maxBytes: sessionFileMaxBytes,
-    allowRoot: false,
-    missingMessage: "session file was not found",
-    outsideMessage: "session file path is outside the allowed read roots",
-  });
-  if (read.file) {
+  if (described?.status === "ok" && described.file) {
+    const capped = capForwardedSessionFile(described.file);
+    if (capped) return { status: "ok", file: capped };
     console.log(
-      `[cowork-bridge] session-file readSessionFileWithStatus served ${requested} (${read.file.fileSize} bytes)`,
-    );
-    return { status: "ok", file: read.file };
-  }
-  if (read.failure === "too_large") {
-    console.log(
-      `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: too_large`
-        + ` (${read.fileSize} bytes, cap ${sessionFileMaxBytes})`,
+      `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}:`
+        + ` too_large from Desktop (cap ${sessionFileMaxBytes})`,
     );
     return { status: "tooLarge" };
   }
-  if (read.failure === "not_found") {
+  if (read?.failure === "not_found") {
     console.log(
       `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: not_found`,
     );
@@ -3155,12 +3210,17 @@ async function bridgeSessionFileWithStatus(args, argsEncoding) {
   if (described) return described;
   try {
     const file = await desktop.invoke("LocalSessions", "readSessionFile", args, argsEncoding);
-    if (file) return { status: "ok", file };
+    if (file) {
+      const capped = capForwardedSessionFile(file);
+      if (capped) return { status: "ok", file: capped };
+      return { status: "tooLarge" };
+    }
   } catch {
     // Fall through to readError below.
   }
+  if (typeof requested !== "string" || !requested) return { status: "readError" };
   console.log(
-    `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: ${read.failure}`,
+    `[cowork-bridge] session-file readSessionFileWithStatus declined ${requested}: ${read?.failure ?? "read_error"}`,
   );
   return { status: "readError" };
 }
@@ -5124,6 +5184,24 @@ async function handleApi(request, response, url) {
           body.args ?? [],
           body.argsEncoding,
         );
+      } else if (
+        body.surface === "LocalSessions"
+        && (body.method === "readSessionFile" || body.method === "readFileAtCwd")
+      ) {
+        // Read from the served roots first: Desktop's inline answer for a large
+        // file is what exhausted the bridge heap (see bridgeLocalSessionFile).
+        const local = await bridgeLocalSessionFile(body);
+        if (local.handled) {
+          value = local.value;
+        } else {
+          value = await invokeWithRoutineFileRepair(
+            body.surface,
+            body.method,
+            body.args ?? [],
+            body.argsEncoding,
+          );
+          value = await supplementSessionFileRead(body, value);
+        }
       } else {
         value = await invokeWithRoutineFileRepair(
           body.surface,
@@ -5131,14 +5209,7 @@ async function handleApi(request, response, url) {
           body.args ?? [],
           body.argsEncoding,
         );
-        if (
-          body.surface === "LocalSessions"
-          && (
-            body.method === "readSessionFile"
-            || body.method === "readFileAtCwd"
-            || body.method === "resolveSessionFile"
-          )
-        ) {
+        if (body.surface === "LocalSessions" && body.method === "resolveSessionFile") {
           value = await supplementSessionFileRead(body, value);
         }
       }

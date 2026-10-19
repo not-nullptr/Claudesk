@@ -1915,6 +1915,35 @@ async function readJson(request, maxSize = 1024 * 1024) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+// Inline session-file reads arrive from Desktop with the whole file in the
+// value, and the outer bridge then holds the decoded string, its JSON and the
+// HTTP response together. Refuse past this bound before serializing, so one
+// large file cannot OOM the bridge; its streaming download route serves large
+// files without buffering them.
+const sessionFileInlineMaxBytes = Number(
+  process.env.COWORK_SESSION_FILE_MAX_BYTES || 16 * 1024 * 1024,
+);
+
+function sessionFileValueSize(value) {
+  const file = value?.file && typeof value.file === "object" ? value.file : value;
+  const size = Number(file?.fileSize);
+  if (Number.isFinite(size) && size >= 0) return size;
+  return typeof file?.contents === "string" ? Buffer.byteLength(file.contents, "utf8") : 0;
+}
+
+function capSessionFileValue(surface, method, value) {
+  if (surface !== "LocalSessions") return value;
+  if (method === "readSessionFile" || method === "readFileAtCwd") {
+    return sessionFileValueSize(value) > sessionFileInlineMaxBytes ? null : value;
+  }
+  if (method === "readSessionFileWithStatus"
+    && value?.status === "ok" && value.file
+    && sessionFileValueSize(value.file) > sessionFileInlineMaxBytes) {
+    return { status: "tooLarge" };
+  }
+  return value;
+}
+
 function validateInvocation(surface, method, args) {
   if (!allowedSurfaces.has(surface)) throw new Error("Cowork surface is not allowed");
   if (!/^[A-Za-z][A-Za-z0-9]*$/.test(method)) throw new Error("invalid method name");
@@ -3261,11 +3290,15 @@ const server = http.createServer(async (request, response) => {
       // independent check because direct port exposure has no app-layer auth.
       // Preserve enough room for Desktop's base64 image attachment contract.
       const body = await readJson(request, 72 * 1024 * 1024);
-      const value = await invoke(
+      const value = capSessionFileValue(
         body.surface,
         body.method,
-        body.args || [],
-        body.argsEncoding,
+        await invoke(
+          body.surface,
+          body.method,
+          body.args || [],
+          body.argsEncoding,
+        ),
       );
       sendJson(response, 200, { ok: true, value });
       return;

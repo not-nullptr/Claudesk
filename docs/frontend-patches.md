@@ -116,6 +116,15 @@ against the bridge process's cwd. Opening a new tab keeps a refused download fro
 replacing the app. It is always applied, independent of the Gateway setting, and
 must also match exactly once.
 
+Large files never travel through the inline session-file reader. The download
+route streams from disk with a length, and a session-file read is answered from
+the served roots with a stat-first cap (a sixteenth of the container's memory
+limit, at most 32 MiB); a larger file returns `tooLarge` and the pane offers the
+streaming download instead. Desktop-forwarded reads are capped in the wrapper
+(16 MiB) before serialization, because the bridge holds the decoded string, its
+JSON and the response at once — a single large file was enough to OOM the 256 MiB
+bridge.
+
 The inserted code must name three mangled locals — the pane's `fileView`
 selector, the element factory the array already calls, and the ghost icon-only
 Button component. None is hard-coded: each is read back from the same parsed
