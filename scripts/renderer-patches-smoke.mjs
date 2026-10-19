@@ -1897,6 +1897,8 @@ const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:
   + 'poolId:d.type==="pool"?d.id:void 0,repos:yZ(r,n,i)}}'
   + 'let d=r?.get(o.key),f=d||u?.length?{kind:"remote",environmentId:d,repos:u??[]}:void 0;'
   + 'a.set(o.key,f)}return a}';
+const selfHostedFolderSetter = 'var draftStore={selectedFolder:null,'
+  + 'setSelectedFolder:t=>e({selectedFolder:t,trustedSelectedFolder:null})};';
 const selfHostedPlusTrace = 'function plusHandler(e){return function(t){'
   + 'track({event_key:"claudeai.epitaxy.sidebar.group_new_session_clicked",'
   + 'prefill_kind:M?.kind??"none",group_kind:"project",source:t}),m(M,void 0,B)}}';
@@ -1924,7 +1926,8 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedPlusTrace, selfHostedRemotePrefill, selfHostedListFields,
+  selfHostedBucketPrefill, selfHostedFolderSetter, selfHostedPlusTrace,
+  selfHostedRemotePrefill, selfHostedListFields,
   selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
@@ -1964,8 +1967,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-folder-prefill").length, 7,
-  "both row builders, both sanitizer fields, the prefill, the setter and the trace must fit");
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 8,
+  "both row builders, sanitizer fields, prefill, setter and traces must fit");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -2028,6 +2031,10 @@ assert.ok(selfHostedOut.includes('if(globalThis.__claudeskTrace)globalThis.__cla
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
+assert.ok(selfHostedOut.includes('setSelectedFolder:t=>(globalThis.__claudeskTrace&&'
+  + 'globalThis.__claudeskTrace("set-folder",{value:t,stack:(new Error).stack}),'
+  + 'e({selectedFolder:t,trustedSelectedFolder:null}))'),
+  "the draft store's folder setter must report every change");
 assert.ok(selfHostedOut.includes('prefill_kind:M?.kind??"none",group_kind:"project",'
   + 'source:t}),globalThis.__claudeskTrace&&globalThis.__claudeskTrace("plus",'
   + '{groupKind:"project",hasPrefill:!!M,prefill:M}),m(M,void 0,B)'),

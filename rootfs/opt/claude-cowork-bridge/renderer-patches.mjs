@@ -2797,6 +2797,26 @@ function folderPlusTraceTarget(node, ancestors) {
   return undefined;
 }
 
+// The draft store's folder setter, traced so a later clear can be attributed
+// to its caller while the live renderer is being diagnosed.
+function sessionStoreFolderTraceTarget(node) {
+  if (node.type !== "Property" || node.computed) return undefined;
+  if (identifier(node.key) !== "setSelectedFolder") return undefined;
+  const value = unwrap(node.value);
+  if (value?.type !== "ArrowFunctionExpression" || value.params.length !== 1) {
+    return undefined;
+  }
+  const param = identifier(value.params[0]);
+  const body = unwrap(value.body);
+  if (!param || body?.type !== "CallExpression") return undefined;
+  const [argument] = body.arguments ?? [];
+  const object = unwrap(argument);
+  if (object?.type !== "ObjectExpression") return undefined;
+  const folder = objectProperties(object).get("selectedFolder");
+  if (!folder || identifier(unwrap(folder.value)) !== param) return undefined;
+  return { body, param };
+}
+
 function remotePrefillFolderTarget(node) {
   if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
     return undefined;
@@ -3822,6 +3842,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const folderPrefills = [];
     const remotePrefills = [];
     const plusTraces = [];
+    const folderSetterTraces = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -3853,6 +3874,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (remotePrefill) remotePrefills.push(remotePrefill);
       const plusTrace = folderPlusTraceTarget(node, ancestors);
       if (plusTrace) plusTraces.push(plusTrace);
+      const folderSetter = sessionStoreFolderTraceTarget(node);
+      if (folderSetter) folderSetterTraces.push(folderSetter);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const contextFields = sessionContextFieldsTarget(node);
@@ -3987,6 +4010,14 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         replacement: `globalThis.__claudeskTrace&&globalThis.__claudeskTrace("plus",`
           + `{groupKind:${JSON.stringify(kind)},hasPrefill:!!${prefill},`
           + `prefill:${prefill}}),` });
+    }
+    if (folderSetterTraces.length === 1) {
+      const { body, param } = folderSetterTraces[0];
+      patches.push({ id: folderPrefillPatchId, start: body.start, end: body.end,
+        original: source.slice(body.start, body.end),
+        replacement: `(globalThis.__claudeskTrace&&globalThis.__claudeskTrace(`
+          + `"set-folder",{value:${param},stack:(new Error).stack}),`
+          + `${source.slice(body.start, body.end)})` });
     }
     if (remotePrefills.length === 1) {
       const { argument, param, body } = remotePrefills[0];
