@@ -26,7 +26,8 @@
 #   /opt/claudesk/runner.py                        the runner
 #   /opt/claudesk/claude                           the agent it runs (staged)
 #   /etc/claudesk/runner.env                       its environment (pool, bridge,
-#                                                  agent, model endpoint)
+#                                                  agent, model endpoint and
+#                                                  aliases)
 #   /etc/systemd/system/claudesk-code-runner.service
 #
 # Why the guest's own disk and not the host: there is no host-to-guest exec API.
@@ -187,6 +188,15 @@ fi
 # the agent is never started "without a prompt". The Desktop's own behaviour is
 # untouched; this only shapes how the runner asks.
 agent_args="${CLAUDESK_GUEST_RUNNER_ARGS:---print --input-format stream-json --output-format stream-json --verbose --include-partial-messages}"
+# Auto permission mode reviews shell and network tool calls with a safety
+# classifier whose fallback model is an Opus when the provider is not Anthropic:
+# Opus 5 unless ANTHROPIC_DEFAULT_OPUS_MODEL names another. The container's
+# startapp.sh maps CLAUDE_AUTO_MODE_MODEL onto that variable, but the guest
+# boots with its own environment, so Code sessions running here would still ask
+# the gateway for claude-opus-5 and trip "auto mode cannot determine the safety
+# of <tool>". Carry the same value into the guest.
+auto_mode_model="${CLAUDE_AUTO_MODE_MODEL:-${ANTHROPIC_DEFAULT_OPUS_MODEL:-}}"
+
 # The agent's model calls ride the bridge (below); its own nonessential traffic
 # (update checks, telemetry) would ride the guest's narrow egress allowlist,
 # where a blocked call hangs rather than fails, and none of it is needed to
@@ -197,6 +207,10 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 DISABLE_AUTOUPDATER=1
 DISABLE_TELEMETRY=1
 DISABLE_ERROR_REPORTING=1"
+if [ -n "$auto_mode_model" ]; then
+    model_env="$model_env
+ANTHROPIC_DEFAULT_OPUS_MODEL=\"$auto_mode_model\""
+fi
 
 # A stamp over everything that lands in the image, so a re-run with an unchanged
 # payload and the same pool is a no-op while an edited runner, a new agent or a
@@ -206,6 +220,9 @@ stamp="$(cat "$project_dir/guest/runner.py" "$project_dir/scripts/install-guest-
     | sha256sum | cut -d' ' -f1)"
 stamp="$stamp:$pool_id:$runner_base:$claude_bin:$checkout:$agent_source"
 stamp="$stamp:$(printf '%s' "$secret" | sha256sum | cut -c1-16)"
+# A changed auto-mode model is a changed runner.env, so it must re-run the
+# install even though neither the runner nor the agent changed.
+stamp="$stamp:auto-mode:$auto_mode_model"
 
 mount_dir="$(mktemp -d)"
 loop_device=""
@@ -317,7 +334,8 @@ if [ "$mode" = "--status" ]; then
     if [ -f "$mount_dir/etc/claudesk/runner.env" ]; then
         grep -E '^CLAUDESK_RUNNER_(BASE|CLAUDE_BIN|CHECKOUT|AGENT_ARGS)=' "$mount_dir/etc/claudesk/runner.env" \
             | sed 's/^/  /'
-        grep -E '^ANTHROPIC_BASE_URL=' "$mount_dir/etc/claudesk/runner.env" | sed 's/^/  /'
+        grep -E '^ANTHROPIC_(BASE_URL|DEFAULT_OPUS_MODEL)=' "$mount_dir/etc/claudesk/runner.env" \
+            | sed 's/^/  /'
         printf '  secret:   present (not printed)\n'
     else
         printf '  env:      absent — the service has no pool to talk to\n'

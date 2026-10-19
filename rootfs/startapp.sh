@@ -18,7 +18,10 @@ export ELECTRON_OZONE_PLATFORM_HINT=x11
 # model the gateway serves (see CLAUDE_AUTO_MODE_MODEL). Exported before the app
 # is exec'd so the Code engine Desktop spawns inherits it. It also remaps the
 # `opus` model alias for the whole session, which is inert here — the Code
-# surface offers the gateway's own models, not the alias.
+# surface offers the gateway's own models, not the alias. Code sessions that run
+# in an account's Cowork VM get the same value from install-guest-runner.sh,
+# which writes it into the guest's runner.env; this export does not cross into
+# that VM.
 if [ -n "${CLAUDE_AUTO_MODE_MODEL:-}" ]; then
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDE_AUTO_MODE_MODEL}"
     printf '[claude-start] auto-mode classifier fallback model=%s\n' \

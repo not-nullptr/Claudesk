@@ -3194,6 +3194,42 @@ function routineFormStateTarget(node) {
 }
 
 function routineFormStateReplacement(source, node) {
+  // The start-option state added below is read by two memoized values: the
+  // job-config builder whose result the submit sends, and the form's
+  // `hasChanges` guard. A hook only recomputes when its dependency array
+  // changes, so leaving the new state out meant a save sent whichever values
+  // were captured at the last recomputation — normally the initial, empty
+  // ones — and the request succeeded while carrying nothing. Both arrays are
+  // located by what their callbacks read (stable property names), not by the
+  // minifier's variable names, and the new state is appended to each.
+  const memoDeps = (reads) => {
+    let found;
+    walk(node, [], (child) => {
+      if (found || child.type !== "VariableDeclarator" || !child.init) return;
+      const call = child.init;
+      if (call.type !== "CallExpression" || call.arguments.length !== 2) return;
+      const [callback, deps] = call.arguments;
+      if (deps?.type !== "ArrayExpression") return;
+      if (!["ArrowFunctionExpression", "FunctionExpression"].includes(callback.type)) return;
+      if (reads(callback)) found = deps;
+    });
+    return found;
+  };
+  const readsMember = (name) => (callback) => contains(callback, (child) =>
+    child.type === "MemberExpression" && !child.computed && child.property?.name === name);
+  const builderDeps = memoDeps((callback) => contains(callback, (child) =>
+    key(child, "jobConfig")));
+  const changedDeps = memoDeps((callback) => readsMember("connectorUuids")(callback)
+    && readsMember("pluginIds")(callback));
+  const startOptionState = "__claudeskCwd,__claudeskPermission,__claudeskEffort,"
+    + "__claudeskSourceBranch,__claudeskUseWorktree";
+  const extendDeps = (deps) => {
+    const text = source.slice(deps.start, deps.end);
+    return [text, `${text.slice(0, -1)}${text === "[]" ? "" : ","}${startOptionState}]`];
+  };
+  // Without both arrays the state would not reach the submit payload, so leave
+  // the form alone rather than ship a picker whose values never leave the page.
+  if (!builderDeps || !changedDeps) return null;
   // The git probe runs as a hook call in the state declaration list. `t` and
   // `n` are the chunk's own useState/useEffect imports; the function body has
   // no binding named `n` at this scope, so the effect stays the import.
@@ -3256,6 +3292,8 @@ function routineFormStateReplacement(source, node) {
         + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\","
         + "sourceBranch:j.sourceBranch??\"\",useWorktree:j.useWorktree===!0,"
         + "workerId:j.workerId"],
+    extendDeps(builderDeps),
+    extendDeps(changedDeps),
   ]);
 }
 

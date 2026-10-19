@@ -878,15 +878,24 @@ export function createRoutineService({
         || textOf(context?.effort_level ?? context?.effort);
       const surface = task._routineSurface ?? "CoworkScheduledTasks";
       if (Object.keys(patch).length) {
+        let applied;
         try {
           // `json-undefined-v1` keeps a present-but-undefined field on the
           // wire: that is how a cleared cwd/branch is removed from the task
           // record (the Desktop tests `"sourceBranch" in n`, not truthiness).
-          await desktop.invoke(surface, "updateScheduledTask",
+          applied = await desktop.invoke(surface, "updateScheduledTask",
             [{ scheduledTaskId: taskId, ...patch }], "json-undefined-v1");
         } catch (error) {
           throw new RoutineError(502, "api_error",
             `the scheduled task store refused the update: ${error?.message || error}`);
+        }
+        // The store answers null when it refuses the write (policy, an
+        // uninitialized scheduler, a task file it will not touch) rather than
+        // throwing. Reporting success there made an edit look saved while the
+        // old values were still stored, so surface it instead.
+        if (!applied) {
+          throw new RoutineError(502, "api_error",
+            "the scheduled task store did not apply the update");
         }
       }
       if (body.enabled !== undefined) {

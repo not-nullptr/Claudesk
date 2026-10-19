@@ -90,7 +90,8 @@ services:
       CLAUDE_GATEWAY_AUTH_SCHEME: "${CLAUDE_GATEWAY_AUTH_SCHEME:-bearer}"
       CLAUDE_INFERENCE_MODELS_JSON: "${CLAUDE_INFERENCE_MODELS_JSON:-}"
       # Model Auto permission mode's safety classifier falls back to on this
-      # gateway (exported as ANTHROPIC_DEFAULT_OPUS_MODEL by startapp.sh). A
+      # gateway (exported as ANTHROPIC_DEFAULT_OPUS_MODEL by startapp.sh, and
+      # carried into each account's Cowork VM by install-guest-runner.sh). A
       # model the gateway serves; empty keeps the built-in resolution. See
       # .env.example.
       CLAUDE_AUTO_MODE_MODEL: "${CLAUDE_AUTO_MODE_MODEL:-}"

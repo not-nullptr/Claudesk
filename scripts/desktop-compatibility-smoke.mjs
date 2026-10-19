@@ -108,6 +108,15 @@ try {
         && routineSource.includes('defaultMessage:"Branch"')
         && routineSource.includes('defaultMessage:"Worktree"'),
       "the routine form carries the branch and worktree state and rows");
+      // The start-option state must be in the dependency arrays of both the
+      // job-config builder and the has-changes guard: a memo that does not
+      // depend on it keeps the values captured at its last computation, so a
+      // save posts the old (or empty) settings and the request succeeds with
+      // nothing carried. Both arrays carry the same inserted marker.
+      assert.equal((routineSource.match(
+        /,__claudeskCwd,__claudeskPermission,__claudeskEffort,__claudeskSourceBranch,__claudeskUseWorktree\]/g,
+      ) || []).length, 2,
+      "the job-config builder and the has-changes guard depend on the start options");
       const publishPath = manifest.patches
         .find(patch => patch.id === "routine-worktree-control-publish")?.path;
       const publishSource = await readFile(join(state,
