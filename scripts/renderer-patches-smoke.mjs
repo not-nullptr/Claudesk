@@ -1897,6 +1897,9 @@ const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:
   + 'poolId:d.type==="pool"?d.id:void 0,repos:yZ(r,n,i)}}'
   + 'let d=r?.get(o.key),f=d||u?.length?{kind:"remote",environmentId:d,repos:u??[]}:void 0;'
   + 'a.set(o.key,f)}return a}';
+const selfHostedPlusTrace = 'function plusHandler(e){return function(t){'
+  + 'track({event_key:"claudeai.epitaxy.sidebar.group_new_session_clicked",'
+  + 'prefill_kind:M?.kind??"none",group_kind:"project",source:t}),m(M,void 0,B)}}';
 const selfHostedRemotePrefill = 'function applyPrefill(e,t){'
   + 'if(e.kind==="ssh"&&!t)return;'
   + 'let{setSelectedFolder:n,markFolderPick:r,setWorker:i,setSelectedRepos:o}=draftStore.getState();'
@@ -1921,7 +1924,7 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedRemotePrefill, selfHostedListFields,
+  selfHostedBucketPrefill, selfHostedPlusTrace, selfHostedRemotePrefill, selfHostedListFields,
   selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
@@ -1961,8 +1964,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-folder-prefill").length, 5,
-  "both row builders, both sanitizer fields, the prefill and the setter must carry the folder");
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 7,
+  "both row builders, both sanitizer fields, the prefill, the setter and the trace must fit");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -2015,13 +2018,20 @@ assert.ok(selfHostedOut.includes('type:r?"bridge":"remote",sessionGroupingId:'
   + 'e.session_grouping_id??void 0,repoInfo:repoInfo(e),environmentId:e.environment_id,'
   + '_originalSession:e,cwd:e.cwd??e.session_context?.cwd??e.config?.cwd}'),
   "the main remote row builder must carry the folder too");
-assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
+assert.ok(selfHostedOut.includes('if(globalThis.__claudeskTrace)globalThis.__claudeskTrace'
+  + '("bucket-row",{key:o.key,type:r.type,cwd:r.cwd,environmentId:r.environmentId,'
+  + 'repo:r.repoInfo&&r.repoInfo.name?{owner:r.repoInfo.owner,name:r.repoInfo.name}:null});'
+  + 'if(r.cwd){a.set(o.key,{kind:"remote",'
   + 'environmentId:r.environmentId,repos:yZ(r,n,i),folder:r.cwd});break;}'
   + 'if(r.isAgentOwned||!d)'),
   "a folder bucket must prefill its new session with the folder");
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
+assert.ok(selfHostedOut.includes('prefill_kind:M?.kind??"none",group_kind:"project",'
+  + 'source:t}),globalThis.__claudeskTrace&&globalThis.__claudeskTrace("plus",'
+  + '{groupKind:"project",hasPrefill:!!M,prefill:M}),m(M,void 0,B)'),
+  "the plus must report its prefill to the diagnosis channel");
 assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info","cwd"]'),
   "the session-list sanitizer must keep repo_info and cwd across serialization");
 assert.ok(selfHostedOut.includes('pickFields(e,["model","effort_level","cwd"])'),

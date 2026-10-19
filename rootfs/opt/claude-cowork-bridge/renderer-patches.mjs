@@ -2767,6 +2767,36 @@ function folderBucketPrefillTarget(node) {
   return branch ? { map, bucket, environment, row, branch, reposCall } : undefined;
 }
 
+function folderPlusTraceTarget(node, ancestors) {
+  if (node.type !== "ExpressionStatement") return undefined;
+  const expression = unwrap(node.expression);
+  const calls = expression?.type === "SequenceExpression"
+    ? expression.expressions
+    : [expression];
+  if (!calls.every(call => call?.type === "CallExpression")) return undefined;
+  for (let index = 0; index < calls.length - 1; index += 1) {
+    const [argument] = calls[index].arguments ?? [];
+    if (argument?.type !== "ObjectExpression") continue;
+    const properties = objectProperties(argument);
+    const event = properties.get("event_key")?.value;
+    if (!literal(unwrap(event),
+      "claudeai.epitaxy.sidebar.group_new_session_clicked")) continue;
+    let candidate = unwrap(properties.get("prefill_kind")?.value);
+    if (candidate?.type === "LogicalExpression") candidate = unwrap(candidate.left);
+    else if (candidate?.type === "ConditionalExpression") candidate = unwrap(candidate.test);
+    while (candidate?.type === "MemberExpression") candidate = unwrap(candidate.object);
+    const prefill = identifier(candidate);
+    if (!prefill) return undefined;
+    const groupKind = unwrap(properties.get("group_kind")?.value);
+    return {
+      next: calls[index + 1],
+      prefill,
+      kind: typeof groupKind?.value === "string" ? groupKind.value : "unknown",
+    };
+  }
+  return undefined;
+}
+
 function remotePrefillFolderTarget(node) {
   if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
     return undefined;
@@ -2804,7 +2834,7 @@ function remotePrefillFolderTarget(node) {
     if (child.arguments?.length !== 1 || !literal(child.arguments[0], null)) return;
     argument = child.arguments[0];
   });
-  return argument ? { argument, param } : undefined;
+  return argument ? { argument, param, body: node.body } : undefined;
 }
 
 // The unified sidebar groups Code rows by `sessionGroupingId`, an id that
@@ -3791,6 +3821,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const remoteRows = [];
     const folderPrefills = [];
     const remotePrefills = [];
+    const plusTraces = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -3820,6 +3851,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (folderPrefill) folderPrefills.push(folderPrefill);
       const remotePrefill = remotePrefillFolderTarget(node);
       if (remotePrefill) remotePrefills.push(remotePrefill);
+      const plusTrace = folderPlusTraceTarget(node, ancestors);
+      if (plusTrace) plusTraces.push(plusTrace);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const contextFields = sessionContextFieldsTarget(node);
@@ -3939,15 +3972,32 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const repos = source.slice(reposCall.start, reposCall.end);
       patches.push({ id: folderPrefillPatchId, start: branch.start, end: branch.start,
         original: "",
-        replacement: `if(${row}.cwd){${map}.set(${bucket}.key,`
+        replacement: `if(globalThis.__claudeskTrace)globalThis.__claudeskTrace("bucket-row",`
+          + `{key:${bucket}.key,type:${row}.type,cwd:${row}.cwd,`
+          + `environmentId:${row}.environmentId,`
+          + `repo:${row}.repoInfo&&${row}.repoInfo.name`
+          + `?{owner:${row}.repoInfo.owner,name:${row}.repoInfo.name}:null});`
+          + `if(${row}.cwd){${map}.set(${bucket}.key,`
           + `{kind:"remote",environmentId:${row}.environmentId,`
           + `repos:${repos},folder:${row}.cwd});break;}` });
     }
+    for (const { next, prefill, kind } of plusTraces) {
+      patches.push({ id: folderPrefillPatchId, start: next.start, end: next.start,
+        original: "",
+        replacement: `globalThis.__claudeskTrace&&globalThis.__claudeskTrace("plus",`
+          + `{groupKind:${JSON.stringify(kind)},hasPrefill:!!${prefill},`
+          + `prefill:${prefill}}),` });
+    }
     if (remotePrefills.length === 1) {
-      const { argument, param } = remotePrefills[0];
+      const { argument, param, body } = remotePrefills[0];
       patches.push({ id: folderPrefillPatchId, start: argument.start, end: argument.end,
         original: source.slice(argument.start, argument.end),
         replacement: `${param}.folder??null` });
+      patches.push({ id: folderPrefillPatchId, start: body.start + 1, end: body.start + 1,
+        original: "",
+        replacement: `globalThis.__claudeskTrace&&globalThis.__claudeskTrace("apply-prefill",`
+          + `{kind:${param}&&${param}.kind,folder:${param}&&${param}.folder,`
+          + `environmentId:${param}&&${param}.environmentId});` });
     }
     if (codeGroups.length === 1) {
       const { declarator, session } = codeGroups[0];
