@@ -848,15 +848,18 @@ serialization path dropped it before the row builder saw it.
 with that folder selected. The group's new-session handler asks the bucket's
 rows for a prefill (`oZ` in `shared-21`), which derived a folder only from
 rows of type `local`; a bridge session is `remote`, so the button opened a
-folderless composer. Four splices: both server-session row builders in
-`shared-11` (the annotated `type:"remote"` object and the main
-`isBridge ? "bridge" : "remote"` one) carry `cwd` from the document; the
-prefill builder keeps the row's `cwd` and the place that ran it when it sees
-one; and the draft setter (`uZ`) applies `folder` on a remote prefill instead
-of clearing the selection. Pinned by the two `_originalSession` row objects,
-the prefill builder's `eZ({environmentId: row.environmentId})` declaration
-beside its `isAgentOwned` branch, and the setter's ssh guard plus
-`setSelectedFolder` binding.
+folderless composer. Both server-session row builders in `shared-11` (the
+annotated `type:"remote"` object and the main `isBridge ? "bridge" :
+"remote"` one) carry `cwd` from the document; the session-list sanitizer
+(`IP` in `shared-25`) keeps `cwd` in the `session_context` it rebuilds, and
+its top-level allowlist keeps the normalized document's `cwd`; the prefill
+builder keeps the row's `cwd` and the place that ran it when it sees one; and
+the draft setter (`uZ`) applies `folder` on a remote prefill instead of
+clearing the selection. Pinned by the two `_originalSession` row objects, the
+exact `["model","effort_level"]` context array, the prefill builder's
+`eZ({environmentId: row.environmentId})` declaration beside its
+`isAgentOwned` branch, and the setter's ssh guard plus `setSelectedFolder`
+binding.
 
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes

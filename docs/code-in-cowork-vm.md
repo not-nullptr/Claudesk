@@ -738,11 +738,13 @@ dropping it), and keeps it in the session-list sanitizer's allowlist;
 `web-code-folder-groups` makes the unified sidebar fall back to
 `repoInfo.name` for the group id and accept an id the project catalog does not
 contain, so the bucket label is the folder name. The `+` on a folder group
-starts a new session with that folder pre-picked: the sidebar's bucket
-prefill keeps the row's `cwd` and the pool that ran it, and the draft setter
-applies the folder instead of clearing it (a bridge row is `remote`, where
-the stock prefill only carries repositories). Old sessions created before the
-folder start option existed still have no folder and stay in "Other".
+starts a new session with that folder pre-picked: both row builders carry the
+row's `cwd`, the session-list sanitizer keeps it in the `session_context` it
+rebuilds, the bucket prefill keeps the folder and the pool that ran it, and
+the draft setter applies it instead of clearing it (a bridge row is `remote`,
+where the stock prefill only carries repositories). Old sessions created
+before the folder start option existed still have no folder and stay in
+"Other".
 
 **The UI's lookups also run in the guest.** The web composer needs a folder
 listing and git metadata *before* a session exists, and neither the folder
