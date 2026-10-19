@@ -1326,7 +1326,11 @@
         }
       }
       if (surface === "AppPreferences") {
-        if (!config.codeActionsEnabled) continue;
+        // A tenant has no local executor but does have a Code surface on its
+        // self-hosted runner; its draft permission mode, model and effort
+        // picks live behind this shim. Without it the renderer sees no
+        // preference API and every pick silently fails to persist.
+        if (!config.codeSettingsEnabled && !config.codeActionsEnabled) continue;
         settingsRoot[surface] = createCodePreferences();
       } else settingsRoot[surface] = Object.freeze(api);
     }
@@ -1693,8 +1697,50 @@
   function createCodePreferences() {
     const listeners = new Set();
     let timer, previous;
+    // The renderer keeps its draft permission pick in a per-opening in-memory
+    // store; nothing writes it to AppPreferences. A new draft therefore came
+    // back as "Accept edits" however the last session was started. The last
+    // session's own start settings are the person's latest real pick, so seed
+    // the global preference the draft hook already reads. An account-scoped
+    // pick, when the renderer has written one, is an explicit choice and wins.
+    let defaultsAt = 0;
+    let defaults = null;
+    async function codeDefaults() {
+      if (!config.tenantCodeReads) return null;
+      if (Date.now() - defaultsAt < 5000) return defaults;
+      defaultsAt = Date.now();
+      try {
+        const response = await fetch("/api/remote/code-defaults", {
+          cache: "no-store", credentials: "same-origin",
+        });
+        const payload = await response.json().catch(() => ({}));
+        defaults = response.ok && payload.ok ? payload.value : null;
+      } catch {
+        defaults = null;
+      }
+      return defaults;
+    }
     async function refresh() {
-      const value = await invokeSettings("AppPreferences", "getPreferences", []);
+      let value = await invokeSettings("AppPreferences", "getPreferences", []);
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const seed = (await codeDefaults())?.permission_mode;
+        if (typeof seed === "string" && seed && seed !== "plan") {
+          const bucket = value.epitaxyPrefs && typeof value.epitaxyPrefs === "object"
+            && !Array.isArray(value.epitaxyPrefs) ? value.epitaxyPrefs : {};
+          // An account-scoped pick is the renderer's own explicit choice and
+          // wins (`Ib` reads it before the global key). The global key follows
+          // the last session, so a pick made in this session is the default of
+          // the next one without needing a renderer-side write.
+          const accountPicked = Object.keys(bucket).some((key) =>
+            key.startsWith("cc-landing-draft-permission-mode."));
+          if (!accountPicked) {
+            const seeded = { ...bucket, "cc-landing-draft-permission-mode": seed };
+            if (JSON.stringify(seeded) !== JSON.stringify(bucket)) {
+              value = { ...value, epitaxyPrefs: seeded };
+            }
+          }
+        }
+      }
       const next = JSON.stringify(value);
       if (next !== previous) {
         previous = next;

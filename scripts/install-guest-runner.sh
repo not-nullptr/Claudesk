@@ -386,6 +386,9 @@ CLAUDESK_RUNNER_BASE=$runner_base
 CLAUDESK_RUNNER_SECRET=$secret
 CLAUDESK_RUNNER_CLAUDE_BIN=$claude_bin
 CLAUDESK_RUNNER_CHECKOUT=$checkout
+# The account's shared workspace is bound back at /workspace in the guest (see
+# guest/runner.py), so a session and a shell see the same path as the container.
+CLAUDESK_RUNNER_WORKSPACE_ALIAS=/workspace
 CLAUDESK_RUNNER_AGENT_ARGS="$agent_args"
 $model_env
 ENV

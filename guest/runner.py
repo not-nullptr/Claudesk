@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.0"
+VERSION = "2.2.4"
 
 
 def env(name, default=""):
@@ -80,6 +80,13 @@ CHECKOUT = env("CLAUDESK_RUNNER_CHECKOUT", "/sessions")
 # is that path joined onto this root. Overridable for a deployment whose guest
 # mounts the share elsewhere.
 SHARED_ROOT = env("CLAUDESK_RUNNER_SHARED_ROOT", "/mnt/.virtiofs-root")
+# The account's workspace, as the container and the folder picker spell it.
+# Inside the guest the host root is at SHARED_ROOT, so the workspace would only
+# be reachable at `<SHARED_ROOT>/workspace`; the runner bind-mounts it back at
+# this same path, so a shell (and the agent's own cwd) sees `/workspace` and
+# the files are the shared ones, not an empty directory in the guest image.
+HOST_WORKSPACE = "/workspace"
+WORKSPACE_ALIAS = env("CLAUDESK_RUNNER_WORKSPACE_ALIAS", HOST_WORKSPACE)
 POLL_SECONDS = float(env("CLAUDESK_RUNNER_POLL_SECONDS", "5") or 5)
 # How the agent is asked — flag for flag what the product's own runner passes
 # its child (from the shipped binary's spawn: `--print`, stream-json both ways,
@@ -365,10 +372,26 @@ def run_git(directory, *arguments):
     agent, and a repo config that names a program must not get one executed
     even here, in the guest (the host never runs git over workspace content at
     all).
+
+    It also runs with the runner's HOME, where `prepare_home` declares the
+    shared tree safe. The workspace belongs to the host user while this service
+    is root; without that file git refuses every repository with "detected
+    dubious ownership", which made the composer's folder read as not-a-repo —
+    no branch picker, no worktree toggle — even though `list_folders` saw the
+    directory. The service's own HOME is read-only under ProtectHome, so the
+    runner must point git at its own directory rather than rely on the unit's
+    environment.
     """
+    environment = dict(os.environ)
+    if os.path.isdir(RUNNER_HOME):
+        environment["HOME"] = RUNNER_HOME
+        environment.setdefault("GIT_CONFIG_GLOBAL",
+                               os.path.join(RUNNER_HOME, ".gitconfig"))
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         completed = subprocess.run(
             ["git", "-C", directory, "-c", "core.fsmonitor=false"] + list(arguments),
+            env=environment,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             timeout=120, check=False)
     except FileNotFoundError:
@@ -376,6 +399,91 @@ def run_git(directory, *arguments):
     except (OSError, subprocess.SubprocessError) as error:
         return False, "git could not run: %s" % error
     return completed.returncode == 0, (completed.stdout or "").strip()
+
+
+def shared_workspace():
+    return os.path.join(SHARED_ROOT, "workspace")
+
+
+def same_directory(left, right):
+    try:
+        a = os.stat(left)
+        b = os.stat(right)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+# Concurrent turns re-check the late-arriving virtiofs mount; the mount/symlink
+# itself must happen once.
+WORKSPACE_ALIAS_LOCK = threading.Lock()
+# Git setup mutates a shared repository (branch checkout, worktree metadata).
+# Turns on the same repo serialize only that setup; the agent turns themselves
+# run concurrently. Keys are real paths; the map grows with the folders used,
+# which is bounded by the account's workspace.
+REPO_SETUP_LOCKS = {}
+REPO_SETUP_LOCKS_GUARD = threading.Lock()
+
+
+def repo_setup_lock(repo):
+    """The lock serializing git setup on one repository, created on demand."""
+    key = os.path.realpath(repo)
+    with REPO_SETUP_LOCKS_GUARD:
+        lock = REPO_SETUP_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            REPO_SETUP_LOCKS[key] = lock
+        return lock
+
+
+def ensure_workspace_alias():
+    with WORKSPACE_ALIAS_LOCK:
+        return _ensure_workspace_alias()
+
+
+def _ensure_workspace_alias():
+    """Make the account's shared workspace visible at `/workspace` in the guest.
+
+    The guest mounts the host's whole filesystem at SHARED_ROOT; `/workspace`
+    itself is an empty directory on the guest's own disk. The container, the
+    folder picker and the people using them all spell the workspace
+    `/workspace`, so a shell command that cd's there landed in that empty
+    directory. A bind mount over it (only when it is empty, so nothing local is
+    hidden) makes the two the same path. Runs as the runner's root; harmless
+    when it cannot mount.
+    """
+    shared = shared_workspace()
+    if not os.path.isdir(shared):
+        return False
+    if same_directory(WORKSPACE_ALIAS, shared):
+        return True
+    try:
+        os.makedirs(WORKSPACE_ALIAS, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        if os.listdir(WORKSPACE_ALIAS):
+            return False
+    except OSError:
+        return False
+    try:
+        completed = subprocess.run(["mount", "--bind", shared, WORKSPACE_ALIAS],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        log("workspace alias: %s is the shared workspace (bind mount)" % WORKSPACE_ALIAS)
+        return True
+    # A guest that cannot mount (no CAP_SYS_ADMIN, a restricted unit) still
+    # gets the same path with a symlink over the empty directory. It survives a
+    # reboot, and dangles harmlessly until the virtiofs mount is ready.
+    try:
+        os.rmdir(WORKSPACE_ALIAS)
+        os.symlink(shared, WORKSPACE_ALIAS)
+    except OSError:
+        return False
+    log("workspace alias: %s is the shared workspace (symlink)" % WORKSPACE_ALIAS)
+    return True
 
 
 def guest_folder(host_path):
@@ -389,6 +497,14 @@ def guest_folder(host_path):
         return None
     if host_path == SHARED_ROOT or host_path.startswith(SHARED_ROOT + "/"):
         return host_path if os.path.isdir(host_path) else None
+    # Once the shared workspace is bound at /workspace, keep that spelling for
+    # a folder under it: the agent's cwd and shell commands then read the same
+    # path the container and the folder picker use.
+    if (host_path == HOST_WORKSPACE or host_path.startswith(HOST_WORKSPACE + "/")) \
+            and same_directory(WORKSPACE_ALIAS, shared_workspace()):
+        candidate = WORKSPACE_ALIAS + host_path[len(HOST_WORKSPACE):]
+        if os.path.isdir(candidate):
+            return candidate
     candidate = os.path.join(SHARED_ROOT, host_path.lstrip("/"))
     return candidate if os.path.isdir(candidate) else None
 
@@ -400,8 +516,9 @@ def session_workdir(session, config):
     (`source_branch`) and an isolated worktree (`use_worktree`). Returns
     `(cwd, error)`: an option the guest cannot honour is an error the caller
     reports as the session's failure, never a silent fallback — the person
-    picked that folder and branch. With no folder the runner keeps its own
-    checkout, exactly as before.
+    picked that folder and branch. With no folder the session starts in the
+    account's shared workspace (at /workspace once the alias is mounted); an
+    older guest without the share keeps its own checkout.
     """
     folder = config.get("cwd")
     branch = config.get("source_branch")
@@ -409,6 +526,11 @@ def session_workdir(session, config):
     worktree = config.get("use_worktree") is True
 
     if not isinstance(folder, str) or not folder:
+        shared = shared_workspace()
+        if os.path.isdir(shared):
+            if same_directory(WORKSPACE_ALIAS, shared):
+                return WORKSPACE_ALIAS, None
+            return shared, None
         return (CHECKOUT if os.path.isdir(CHECKOUT) else "/"), None
 
     directory = guest_folder(folder)
@@ -431,38 +553,47 @@ def session_workdir(session, config):
         candidate = os.path.join(worktree_path, relative)
         return candidate if os.path.isdir(candidate) else worktree_path
 
-    if not worktree:
-        if branch:
-            ok, output = run_git(repo, "checkout", branch)
-            if not ok:
-                return None, ("could not check out branch %s: %s"
-                              % (branch, output[-400:] or "git failed"))
-            log("session checkout %s on branch %s" % (repo, branch))
+    if repo is None:
         return directory, None
 
-    # Worktree sessions are deterministic per session, so a later turn resumes
-    # in the same copy. The branch starts from the selected branch (or HEAD)
-    # and is named after the session; a collision gets a suffix.
-    suffix = re.sub(r"[^A-Za-z0-9_-]", "", session)[-12:] or "session"
-    worktree_path = os.path.join(repo, ".claude", "worktrees", suffix)
-    if os.path.isdir(worktree_path):
-        log("session reusing worktree %s" % worktree_path)
-        return inside_worktree(worktree_path), None
-    start = branch or "HEAD"
-    branch_name = "claude/" + suffix
-    output = ""
-    for attempt in range(1, 20):
-        ok, output = run_git(repo, "worktree", "add", "-b", branch_name,
-                             worktree_path, start)
-        if ok:
-            log("session worktree %s (branch %s from %s)"
-                % (worktree_path, branch_name, start))
+    # Only the git setup is serialized per repository: a branch checkout
+    # mutates the shared checkout and `worktree add` writes `.git/worktrees`;
+    # concurrent turns would otherwise race there. Once the working directory
+    # is chosen, the agent turns run in parallel — especially two worktree
+    # sessions, which is the point of the worktree option.
+    with repo_setup_lock(repo):
+        if not worktree:
+            if branch:
+                ok, output = run_git(repo, "checkout", branch)
+                if not ok:
+                    return None, ("could not check out branch %s: %s"
+                                  % (branch, output[-400:] or "git failed"))
+                log("session checkout %s on branch %s" % (repo, branch))
+            return directory, None
+
+        # Worktree sessions are deterministic per session, so a later turn
+        # resumes in the same copy. The branch starts from the selected branch
+        # (or HEAD) and is named after the session; a collision gets a suffix.
+        suffix = re.sub(r"[^A-Za-z0-9_-]", "", session)[-12:] or "session"
+        worktree_path = os.path.join(repo, ".claude", "worktrees", suffix)
+        if os.path.isdir(worktree_path):
+            log("session reusing worktree %s" % worktree_path)
             return inside_worktree(worktree_path), None
-        if "already exists" not in output.lower():
-            break
-        branch_name = "claude/%s-%d" % (suffix, attempt + 1)
-    return None, ("could not create a worktree in %s: %s"
-                  % (repo, output[-400:] or "git failed"))
+        start = branch or "HEAD"
+        branch_name = "claude/" + suffix
+        output = ""
+        for attempt in range(1, 20):
+            ok, output = run_git(repo, "worktree", "add", "-b", branch_name,
+                                 worktree_path, start)
+            if ok:
+                log("session worktree %s (branch %s from %s)"
+                    % (worktree_path, branch_name, start))
+                return inside_worktree(worktree_path), None
+            if "already exists" not in output.lower():
+                break
+            branch_name = "claude/%s-%d" % (suffix, attempt + 1)
+        return None, ("could not create a worktree in %s: %s"
+                      % (repo, output[-400:] or "git failed"))
 
 
 # --- UI requests -----------------------------------------------------------
@@ -587,8 +718,12 @@ def remote_slug(url):
 
 def git_info(params):
     guest, _ = contained_path(params.get("path"))
-    ok, _ = run_git(guest, "rev-parse", "--is-inside-work-tree")
+    ok, output = run_git(guest, "rev-parse", "--is-inside-work-tree")
     if not ok:
+        # A folder that is not a repository is normal; say why in the journal
+        # so a *repository* that git refuses (ownership, a missing mount, a
+        # broken .git) is diagnosable instead of silently reading as no-repo.
+        log("git_info %s: %s" % (guest, output[:300]))
         return None
     ok, top = run_git(guest, "rev-parse", "--show-toplevel")
     repo = top if ok and top else guest
@@ -817,6 +952,52 @@ def run_agent(argv, cwd, content, write):
     return code, result, bool(timed_out), forwarded, failures, errors
 
 
+def mcp_config_of(servers):
+    """The `--mcp-config` document for a session's MCP servers.
+
+    A Code routine fire may bring its own connectors for that run (the bridge's
+    `connectors` extension), and the session's MCP editor saves the same field.
+    The bridge writes them as a list of `{name, type, url, headers?}`; the
+    agent's own `.mcp.json` record shape is accepted too. Only remote servers
+    (a URL) are used — a fire must not be able to name a command to execute.
+    The document is inline JSON on the agent's argv, so it is scoped to this
+    session and disappears with it.
+    """
+    entries = []
+    if isinstance(servers, dict):
+        entries = list(servers.items())
+    elif isinstance(servers, list):
+        for index, entry in enumerate(servers):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                name = "connector-%d" % (index + 1)
+            entries.append((name, entry))
+    else:
+        return None
+    mapping = {}
+    for name, entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        transport = entry.get("type") or entry.get("transport") or "http"
+        transport = (transport if isinstance(transport, str) else "http")
+        transport = transport.strip().lower().replace("_", "-")
+        if transport in ("streamable-http", "streamable"):
+            transport = "http"
+        if transport not in ("http", "sse"):
+            transport = "http"
+        spec = {"type": transport, "url": url}
+        headers = entry.get("headers")
+        if isinstance(headers, dict) and headers:
+            spec["headers"] = {str(key): str(value) for key, value in headers.items()}
+        mapping[str(name)] = spec
+    return {"mcpServers": mapping} if mapping else None
+
+
 def run_session(hint):
     session = hint["session_uuid"]
     quoted = urllib.parse.quote(session)
@@ -858,6 +1039,18 @@ def run_session(hint):
         chosen = control.get("model")
         if isinstance(chosen, str) and chosen:
             model = chosen
+    # The effort picker writes the SDK's `apply_flag_settings` request, whose
+    # settings carry `effortLevel`. It is the only way a running session's
+    # effort changes; the create config is written once. Newer builds may send
+    # the same value at the top level, so accept both spellings.
+    control = latest_control_request(events, "apply_flag_settings")
+    if isinstance(control, dict):
+        settings = control.get("settings")
+        level = settings.get("effortLevel") if isinstance(settings, dict) else None
+        if not isinstance(level, str):
+            level = control.get("effortLevel")
+        if isinstance(level, str) and level:
+            effort = level
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
@@ -874,6 +1067,11 @@ def run_session(hint):
         log("session %s: %s" % (session, reason))
         return session, 2
 
+    # The session's MCP servers: a routine fire's per-invocation connectors (or
+    # the session MCP editor's saved set). This is what makes the URL a fire
+    # carried — with whatever per-run id it held — the server the agent dials.
+    mcp_config = mcp_config_of(config.get("mcp_servers"))
+
     argv = [CLAUDE_BIN] + AGENT_ARGS
     if model is not None:
         argv += ["--model", model]
@@ -881,10 +1079,13 @@ def run_session(hint):
         argv += ["--permission-mode", permission_mode]
     if effort is not None:
         argv += ["--effort", effort]
+    if mcp_config is not None:
+        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
     # The working directory comes from the session's start options. With none,
-    # the checkout is where the work happens; a guest without it (a fresh
-    # image, a stopped VM) still runs, from /, rather than failing the session
-    # on a directory.
+    # the account's shared workspace is where the work happens (see
+    # session_workdir). The virtiofs mount can arrive after this service, so
+    # re-check the /workspace alias before every turn.
+    ensure_workspace_alias()
     cwd, workdir_error = session_workdir(session, config)
     if workdir_error is not None:
         finish("report-failure", {"reason": workdir_error,
@@ -892,9 +1093,12 @@ def run_session(hint):
         log("session %s: %s" % (session, workdir_error))
         return session, 2
     started = time.time()
-    log("session %s: turn with %s (model %s, effort %s, permission %s, resume %s)" % (
-        session, " ".join(AGENT_ARGS), model or "default", effort or "default",
-        permission_mode or "default", resume or "none"))
+    log("session %s: turn with %s (model %s, effort %s, permission %s, "
+        "connectors %s, resume %s)" % (
+            session, " ".join(AGENT_ARGS), model or "default", effort or "default",
+            permission_mode or "default",
+            ",".join(mcp_config["mcpServers"]) if mcp_config else "none",
+            resume or "none"))
     write, close_stream = open_event_stream(
         "/v1/code/sessions/%s/events/stream" % quoted, token)
 
@@ -979,24 +1183,49 @@ def prepare_home():
         os.makedirs(RUNNER_HOME, mode=0o700, exist_ok=True)
     except OSError as error:
         log("could not create %s (%s); the agent keeps the service's HOME" % (RUNNER_HOME, error))
+        return
+    # The agent runs as the guest's root while the shared workspace's files
+    # belong to the host user. Git refuses a repository owned by another user
+    # unless it is declared safe; the runner's HOME is the agent's, so declare
+    # the shared tree there rather than have every first command fail.
+    config = os.path.join(RUNNER_HOME, ".gitconfig")
+    if not os.path.exists(config):
+        try:
+            with open(config, "w", encoding="utf-8") as handle:
+                handle.write("[safe]\n\tdirectory = *\n")
+            os.chmod(config, 0o600)
+        except OSError as error:
+            log("could not write %s (%s)" % (config, error))
+
+
+def run_session_thread(hint):
+    """One session turn on its own thread; failures stay with that session."""
+    try:
+        run_session(hint)
+    except Exception as error:  # noqa: BLE001 - keep serving the pool
+        log("session %s failed: %s" % (hint.get("session_uuid"), error))
 
 
 def run_sessions_forever(session_queue):
-    """Run session turns off the poll thread.
+    """Spawn every session hint on its own thread, with no concurrency cap.
 
     A turn can last as long as TURN_TIMEOUT, and the Code UI's folder and git
     lookups ride the same poll as work. Running the agent inline meant the
     runner stopped polling for the whole turn, so those lookups timed out
     whenever a session was active — exactly when the user is in the Code
-    surface. One worker keeps turns serialized (the previous behavior) while
-    the poll loop stays free to answer UI requests.
+    surface. Moving turns to a *single* background worker freed the poll but
+    kept them serialized, which is not what a self-hosted runner is: the
+    protocol hands out spawn hints so each session may run. Sessions are
+    independent (own id, transcript, event stream and, with the worktree
+    option, own checkout); the only shared state is git setup on a repo, which
+    `session_workdir` serializes with a per-repo lock. So one thread per hint,
+    no queue depth cap, no worker pool limit.
     """
     while True:
         hint = session_queue.get()
-        try:
-            run_session(hint)
-        except Exception as error:  # noqa: BLE001 - keep serving the pool
-            log("session %s failed: %s" % (hint.get("session_uuid"), error))
+        name = "claudesk-session-%s" % (str(hint.get("session_uuid") or "?")[-12:])
+        threading.Thread(target=run_session_thread, args=(hint,),
+                         name=name, daemon=True).start()
 
 
 def main():
@@ -1007,10 +1236,12 @@ def main():
         log("warning: CLAUDESK_RUNNER_AGENT_ARGS lacks stream-json output; "
             "the transcript cannot be read from it")
     prepare_home()
+    ensure_workspace_alias()
     log("polling %s (agent %s, checkout %s)" % (BASE, CLAUDE_BIN, CHECKOUT))
     register()
     # `--once` is a probe: it runs whatever it is handed inline and returns.
-    # The service keeps a single worker for turns so the poll never blocks.
+    # The service hands each hint to its own thread so the poll never blocks
+    # and sessions run concurrently.
     session_queue = queue.Queue()
     if not ONCE:
         threading.Thread(target=run_sessions_forever, args=(session_queue,),

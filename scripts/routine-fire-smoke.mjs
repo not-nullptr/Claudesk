@@ -49,6 +49,8 @@ const codeTask = {
   enabled: true,
   model: "model-a",
   cwd: "/workspace/repo",
+  sourceBranch: "release",
+  useWorktree: true,
 };
 const files = {
   "cowork-1": "---\nname: Morning brief\ndescription: say hi\n---\nSummarize yesterday.\n",
@@ -143,6 +145,8 @@ const cloudCreate = {
         cwd: "/workspace/created-repo",
         permission_mode: "bypassPermissions",
         effort_level: "high",
+        source_branch: "release",
+        use_worktree: true,
       },
       events: [{
         data: {
@@ -196,6 +200,8 @@ const createDesktop = {
         enabled: true,
         ...(params.cwd ? { cwd: params.cwd } : {}),
         ...(params.permissionMode ? { permissionMode: params.permissionMode } : {}),
+        ...(params.sourceBranch ? { sourceBranch: params.sourceBranch } : {}),
+        ...(params.useWorktree === true ? { useWorktree: true } : {}),
       };
       routineTasks.push(task);
       routineFiles[task.id] = `---\nname: ${params.name}\n---\n${params.prompt}\n`;
@@ -210,6 +216,14 @@ const createDesktop = {
       if (lastUpdate.cwd !== undefined) routineTasks[0].cwd = lastUpdate.cwd;
       if (lastUpdate.permissionMode !== undefined) {
         routineTasks[0].permissionMode = lastUpdate.permissionMode;
+      }
+      // A present-but-undefined key is a cleared field (the bridge encodes the
+      // update with json-undefined-v1 so the Desktop sees the key).
+      if ("sourceBranch" in lastUpdate) {
+        routineTasks[0].sourceBranch = lastUpdate.sourceBranch;
+      }
+      if ("useWorktree" in lastUpdate) {
+        routineTasks[0].useWorktree = lastUpdate.useWorktree;
       }
       return routineTasks[0];
     }
@@ -261,6 +275,14 @@ assert.equal(createdTrigger.trigger.job_config.ccr.session_context.cwd,
 assert.equal(createdTrigger.trigger.job_config.ccr.session_context.permission_mode,
   "bypassPermissions");
 assert.equal(createdTrigger.trigger.job_config.ccr.session_context.effort_level, "high");
+assert.equal(createdTrigger.trigger.source_branch, "release",
+  "the job config's branch becomes the task's sourceBranch");
+assert.equal(createdTrigger.trigger.use_worktree, true,
+  "the job config's worktree flag becomes the task's useWorktree");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.source_branch,
+  "release", "the edit form reads the branch back from the job config");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.use_worktree,
+  true, "the edit form reads the worktree flag back from the job config");
 assert.equal(instructionsFromJobConfig(createdTrigger.trigger.job_config),
   "Do not output anything else other than what is specified:\n"
     + "- Current working directory\n- Current user",
@@ -276,6 +298,8 @@ const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
       cwd: "/workspace/edited-repo",
       permission_mode: "acceptEdits",
       effort_level: "low",
+      source_branch: "develop",
+      use_worktree: true,
     },
     events: [{
       data: { message: { role: "user", content: "List the modified files." } },
@@ -293,6 +317,12 @@ assert.equal(edited.trigger.cwd, "/workspace/edited-repo");
 assert.equal(edited.trigger.permission_mode, "acceptEdits");
 assert.equal(edited.trigger.effort_level, "low",
   "editing the job config updates the stored effort");
+assert.equal(lastUpdate.sourceBranch, "develop",
+  "editing the job config updates the task's branch");
+assert.equal(lastUpdate.useWorktree, true,
+  "editing the job config updates the task's worktree flag");
+assert.equal(edited.trigger.source_branch, "develop");
+assert.equal(edited.trigger.use_worktree, true);
 assert.equal(instructionsFromJobConfig(edited.trigger.job_config), "List the modified files.",
   "the detail re-sent after an edit shows the new instructions");
 
@@ -309,6 +339,56 @@ assert.equal(createRuns.at(-1).body.config.cwd, "/workspace/edited-repo",
 assert.equal(createRuns.at(-1).body.config.permission_mode, "acceptEdits");
 assert.equal(createRuns.at(-1).body.config.effort_level, "low",
   "the routine's effort reaches the Code session");
+assert.equal(createRuns.at(-1).body.config.source_branch, "develop",
+  "the routine's branch reaches the Code session");
+assert.equal(createRuns.at(-1).body.config.use_worktree, true,
+  "the routine's worktree flag reaches the Code session");
+
+// Clearing both values removes them from the task record and from the next
+// fire's start config. The empty string is sent, not omitted: that is what
+// tells the bridge to remove the stored branch.
+const cleared = await creator.updateTrigger(createdTrigger.trigger.id, {
+  job_config: { ccr: { session_context: { source_branch: "", use_worktree: false } } },
+});
+assert.ok("sourceBranch" in lastUpdate && lastUpdate.sourceBranch === undefined,
+  "an emptied branch clears the task's sourceBranch");
+assert.ok("useWorktree" in lastUpdate && lastUpdate.useWorktree === false,
+  "an unchecked worktree clears the task's useWorktree");
+assert.equal(cleared.trigger.source_branch, undefined);
+assert.equal(cleared.trigger.use_worktree, undefined);
+await creator.fireRoutine(createdTrigger.trigger.id, {});
+assert.equal("source_branch" in createRuns.at(-1).body.config, false,
+  "a cleared branch is not sent to the runner");
+assert.equal("use_worktree" in createRuns.at(-1).body.config, false,
+  "a cleared worktree flag is not sent to the runner");
+
+// The Desktop store refuses a write by answering null, not by throwing. That
+// must not be reported as a successful save: the page would show "saved" while
+// the old values were still stored.
+const refusing = createRoutineService({
+  stateDir: join(home, "refusing"),
+  desktop: {
+    async invoke(surface, method) {
+      if (method === "getAllScheduledTasks") return [codeTask];
+      if (method === "getScheduledTaskFileContent") return files["code-1"];
+      return null; // includes updateScheduledTask
+    },
+    async inspect() {
+      return {
+        CCDScheduledTasks: [
+          "getAllScheduledTasks", "getScheduledTaskFileContent", "updateScheduledTask",
+        ],
+      };
+    },
+  },
+  configuredModels: ["model-a"],
+  defaultModel: "model-a",
+  log: { log() {}, warn() {} },
+});
+await assert.rejects(
+  () => refusing.updateTrigger(codeId, { name: "renamed" }),
+  (error) => error.statusCode === 502 && /did not apply/.test(error.message),
+  "a store that refuses an update is not reported as success");
 
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});
@@ -358,6 +438,35 @@ await assert.rejects(
   (error) => error.statusCode === 400 && /png, jpeg, gif or webp/.test(error.message),
   "an unsupported image type is refused");
 
+// Per-invocation connectors (a Claudesk extension) ride only the run they were
+// named on — a URL with a per-run id is just a URL. Nothing is saved onto the
+// routine, so the next fire starts from a clean slate.
+//
+// A Cowork session's MCP servers are account-level connectors the Desktop
+// proxies through claude.ai, which this deployment does not serve; there is no
+// per-session URL field, so the API refuses rather than accepting connectors
+// that would never be dialed.
+await assert.rejects(
+  () => service.fireRoutine(coworkId, {
+    connectors: ["https://mcp.example.com/run/abc123/sse"],
+  }),
+  (error) => error.statusCode === 400 && /Code routines only/.test(error.message),
+  "a Cowork routine refuses per-invocation connectors");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, { connectors: [{ url: "ftp://mcp.example.com" }] }),
+  (error) => error.statusCode === 400 && /http\(s\) url/.test(error.message),
+  "a non-http connector URL is refused");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, {
+    connectors: [{ name: "x", url: "https://mcp.example.com", type: "ws" }],
+  }),
+  (error) => error.statusCode === 400 && /http or sse/.test(error.message),
+  "an unsupported connector transport is refused");
+await assert.rejects(
+  () => service.fireRoutine(coworkId, { connectors: { url: "https://mcp.example.com" } }),
+  (error) => error.statusCode === 400 && /must be an array/.test(error.message),
+  "connectors must be an array");
+
 // Firing a Code task places a session on the runner with the prompt as the
 // client's first user event — the shape the runner reads and the transcript
 // releases when the runner stamps it.
@@ -373,6 +482,10 @@ assert.equal(created[0].body.trigger_id, codeId,
 assert.equal(created[0].body.origin, "fire_routine");
 assert.equal(created[0].body.config.model, "model-a");
 assert.equal(created[0].body.config.cwd, "/workspace/repo");
+assert.equal(created[0].body.config.source_branch, "release",
+  "the task's branch is the worktree's source");
+assert.equal(created[0].body.config.use_worktree, true,
+  "the task's worktree option reaches a bridge fire");
 assert.equal(created[0].body.events[0].payload.type, "user");
 assert.equal(created[0].body.events[0].payload.message.content[0].text,
   "Fix the failing test.\n\n---\nAdditional context for this run:\nCI failed");
@@ -388,6 +501,32 @@ assert.deepEqual(created[1].body.events[0].payload.message.content[1], {
   type: "image",
   source: { type: "base64", media_type: "image/png", data: tinyPng },
 });
+
+// The extension on a Code routine: the connectors land on the session config
+// the guest runner turns into the agent's `--mcp-config`.
+await service.fireRoutine(codeId, {
+  connectors: [
+    "https://mcp.example.com/run/abc123/sse",
+    {
+      name: "tickets!",
+      url: "https://mcp.example.com/run/xyz789/mcp",
+      type: "streamable_http",
+      headers: { authorization: "Bearer t" },
+    },
+  ],
+});
+assert.deepEqual(created.at(-1).body.config.mcp_servers, [{
+  name: "mcp-example-com",
+  type: "http",
+  url: "https://mcp.example.com/run/abc123/sse",
+}, {
+  name: "tickets",
+  type: "http",
+  url: "https://mcp.example.com/run/xyz789/mcp",
+  headers: { authorization: "Bearer t" },
+}], "a fire's connectors reach the Code session and its agent's MCP config");
+assert.equal(Object.hasOwn(created[0].body.config, "mcp_servers"), false,
+  "a fire without connectors adds no MCP config");
 
 // A deployment whose models come from gateway discovery leaves the env list
 // empty; the fire asks the instance for the models it offers rather than
@@ -579,6 +718,23 @@ try {
   assert.deepEqual(httpStarts.at(-1).images,
     [{ name: "image-1", mimeType: "image/png", base64: tinyPng }],
     "images in the HTTP body reach the started session");
+  // The route forwards `connectors` into the service (this is a Cowork routine,
+  // so the service's own kind check is what answers).
+  const connectorsFire = await fetch(
+    `${base}/v1/claude_code/routines/${encodeURIComponent(coworkId)}/fire`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        connectors: [{ name: "tickets", url: "https://mcp.example.com/run/http1/mcp" }],
+      }),
+    });
+  assert.equal(connectorsFire.status, 400);
+  assert.match((await connectorsFire.json()).error.message, /Code routines only/,
+    "connectors in the HTTP body reach the service");
 
   const noVersion = await fetch(
     `${base}/v1/claude_code/routines/${encodeURIComponent(coworkId)}/fire`, {

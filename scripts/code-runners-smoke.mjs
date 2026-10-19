@@ -303,19 +303,56 @@ try {
   const switched = await backend.createSession({
     body: {
       self_hosted_runner_pool_id: primary.pool_id,
-      config: { sources: [], model: "model-before", permission_mode: "acceptEdits" },
+      config: { sources: [], model: "model-before", permission_mode: "acceptEdits",
+        effort_level: "high" },
     },
   });
   await backend.appendEvents({ sessionId: switched.session.id, body: { events: [
     { payload: { type: "control_request", request: { subtype: "set_model", model: "model-after" } } },
     { payload: { type: "control_request", request: { subtype: "set_permission_mode", mode: "plan" } } },
+    { payload: { type: "control_request",
+      request: { subtype: "apply_flag_settings", settings: { effortLevel: "max" } } } },
   ] } });
   const switchedDoc = (await backend.session(switched.session.id)).session;
   assert.equal(switchedDoc.session_context.model, "model-after",
     "a set_model control request updates the session's own model");
   assert.equal(switchedDoc.permission_mode, "plan",
     "a set_permission_mode control request updates the session's permission mode");
+  assert.equal(switchedDoc.session_context.effort_level, "max",
+    "an apply_flag_settings control request updates the session's effort");
   await backend.deleteSession({ sessionId: switched.session.id });
+
+  // The browser send path carries the composer's *spawn* permission mode in
+  // the same batch as the first user message. Until the folder's stored picks
+  // settle that value is the failsafe "default" — a session started in bypass
+  // must not be demoted to Manual by its own first message.
+  const failsafe = await backend.createSession({
+    body: {
+      self_hosted_runner_pool_id: primary.pool_id,
+      config: { sources: [], permission_mode: "bypassPermissions" },
+    },
+  });
+  await backend.appendEvents({ sessionId: failsafe.session.id, body: { events: [
+    { payload: { type: "control_request",
+      request: { subtype: "set_permission_mode", mode: "default" } } },
+    { payload: { type: "user", message: { role: "user", content: "hi" } } },
+  ] } });
+  assert.equal((await backend.session(failsafe.session.id)).session.permission_mode,
+    "bypassPermissions",
+    "the batched failsafe default must not demote the started permission mode");
+  const failsafeEvents = await backend.eventsAfter(failsafe.session.id, 0);
+  assert.ok(!failsafeEvents.some((event) =>
+    (event.payload ?? event).type === "control_request"
+    && (event.payload ?? event).request?.subtype === "set_permission_mode"),
+  "the dropped failsafe must not reach the transcript the runner replays");
+  // A deliberate switch is its own append (no user message) and still lands.
+  await backend.appendEvents({ sessionId: failsafe.session.id, body: { events: [
+    { payload: { type: "control_request",
+      request: { subtype: "set_permission_mode", mode: "default" } } },
+  ] } });
+  assert.equal((await backend.session(failsafe.session.id)).session.permission_mode,
+    "default", "an explicit in-session switch to Manual still applies");
+  await backend.deleteSession({ sessionId: failsafe.session.id });
 
   // A routine fire's session names the routine it ran. The Code routine page
   // reads its history as `?trigger_id=`, the routines rollup as

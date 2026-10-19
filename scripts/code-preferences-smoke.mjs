@@ -6,6 +6,10 @@ const factory = source.slice(source.indexOf("  function createCodePreferences()"
 let stored = { bypassPermissionsOptInByAccount: {}, bypassPermissionsGateByAccount: {} };
 let writes = 0, interval, cleared = false;
 const api = vm.runInNewContext(`${factory}\ncreateCodePreferences()`, {
+  // The bridge's bootstrap config; this smoke exercises the shim's preference
+  // forwarding, not the tenant draft seed (which code-defaults-smoke covers).
+  config: { tenantCodeReads: false },
+  fetch: async () => { throw new Error("no bridge in this smoke"); },
   invokeSettings: async (surface, method, args) => {
     assert.equal(surface, "AppPreferences");
     if (method === "setPreference") { writes++; stored = { ...stored, [args[0]]: args[1] }; }

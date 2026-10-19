@@ -37,6 +37,18 @@ const triggerPrefix = "trig_";
 const maxImages = 20;
 const maxImageBytes = 5 * 1024 * 1024;
 const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+// Claudesk extension: MCP servers attached to a single fire. Unlike `images`
+// these are not content — they are connection definitions the run's agent (or,
+// for a Cowork routine, the Desktop's MCP proxy) dials for that session only.
+// Nothing is persisted on the routine or in the account's connector list, so a
+// URL carrying a per-run id (`…/run/<id>/mcp`) is the normal case.
+const maxConnectors = 20;
+const maxConnectorUrlChars = 2000;
+const maxConnectorNameChars = 100;
+const maxConnectorHeaders = 20;
+const maxHeaderNameChars = 200;
+const maxHeaderValueChars = 4000;
+const headerNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 export class RoutineError extends Error {
   constructor(statusCode, type, message, { retryAfter } = {}) {
@@ -325,6 +337,14 @@ export function createRoutineService({
       || textOf(taskContext.effort);
     const taskCwd = textOf(task.cwd) || textOf(taskContext.cwd);
     const taskPermission = textOf(task.permissionMode) || textOf(taskContext.permission_mode);
+    // The scheduled-task record has both fields (the Desktop's scheduler reads
+    // them); a task written by an older bridge carries them in the job config.
+    // A present but empty `sourceBranch` is a cleared value, so it wins over
+    // the job config's stale copy.
+    const taskBranch = typeof task.sourceBranch === "string"
+      ? task.sourceBranch : textOf(taskContext.source_branch);
+    const taskWorktree = typeof task.useWorktree === "boolean"
+      ? task.useWorktree : taskContext.use_worktree === true;
     return {
       id: routineId,
       name: task.displayName || task.name || taskId,
@@ -346,6 +366,8 @@ export function createRoutineService({
               ...(taskCwd ? { cwd: taskCwd } : {}),
               ...(taskPermission ? { permission_mode: taskPermission } : {}),
               ...(effort ? { effort_level: effort } : {}),
+              ...(taskBranch ? { source_branch: taskBranch } : {}),
+              ...(taskWorktree ? { use_worktree: true } : {}),
             },
             events: prompt
               ? [{
@@ -371,7 +393,8 @@ export function createRoutineService({
       source: "local",
       kind: taskKind(task),
       ...(taskCwd ? { cwd: taskCwd } : {}),
-      ...(task.useWorktree === true ? { use_worktree: true } : {}),
+      ...(taskBranch ? { source_branch: taskBranch } : {}),
+      ...(taskWorktree ? { use_worktree: true } : {}),
       ...(textOf(task.spaceId) ? { space_id: task.spaceId } : {}),
       ...(isoTime(task.createdAt) ? { created_at: isoTime(task.createdAt) } : {}),
       ...(isoTime(task.updatedAt) ? { updated_at: isoTime(task.updatedAt) } : {}),
@@ -447,6 +470,85 @@ export function createRoutineService({
     });
   }
 
+  /**
+   * The fire body's connectors, normalized to the session's `mcp_servers`
+   * shape (`{name, type, url, headers?}`). An entry may be a URL string, a
+   * connector document (`{uuid?, name, url}` — the extra fields are ignored),
+   * or an explicit `{name?, type?, url, headers?}`. `type` is the MCP
+   * transport: `http` (streamable HTTP, the default) or `sse`.
+   */
+  function normalizeConnectors(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw badRequest("connectors must be an array");
+    if (raw.length > maxConnectors) {
+      throw badRequest(`at most ${maxConnectors} connectors are allowed`);
+    }
+    const names = new Set();
+    return raw.map((entry, index) => {
+      const record = typeof entry === "string" ? { url: entry }
+        : isRecord(entry) ? entry : null;
+      if (!record) {
+        throw badRequest(`connector ${index + 1} must be a URL or an object`);
+      }
+      const rawUrl = textOf(record.url).trim();
+      let parsedUrl = null;
+      try {
+        parsedUrl = rawUrl && rawUrl.length <= maxConnectorUrlChars
+          ? new URL(rawUrl) : null;
+      } catch { /* not a URL */ }
+      if (!parsedUrl || (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:")) {
+        throw badRequest(`connector ${index + 1} must carry an http(s) url`);
+      }
+      const typeValue = record.type ?? record.transport;
+      if (typeValue !== undefined && typeValue !== null && typeof typeValue !== "string") {
+        throw badRequest(`connector ${index + 1} type must be http or sse`);
+      }
+      const rawType = textOf(typeValue).trim().toLowerCase().replaceAll("_", "-");
+      const type = !rawType || rawType === "streamable-http" || rawType === "streamable"
+        ? "http" : rawType;
+      if (type !== "http" && type !== "sse") {
+        throw badRequest(`connector ${index + 1} type must be http or sse`);
+      }
+      let headers;
+      if (record.headers !== undefined && record.headers !== null) {
+        if (!isRecord(record.headers)) {
+          throw badRequest(`connector ${index + 1} headers must be an object`);
+        }
+        const entries = Object.entries(record.headers);
+        if (entries.length > maxConnectorHeaders) {
+          throw badRequest(`connector ${index + 1} has too many headers`);
+        }
+        headers = {};
+        for (const [name, value] of entries) {
+          if (name.length > maxHeaderNameChars || !headerNamePattern.test(name)) {
+            throw badRequest(`connector ${index + 1} has an invalid header name`);
+          }
+          if (typeof value !== "string" || value.length > maxHeaderValueChars
+            || /[\r\n]/.test(value)) {
+            throw badRequest(
+              `connector ${index + 1} header ${name} must be a single-line string`);
+          }
+          headers[name] = value;
+        }
+        if (!Object.keys(headers).length) headers = undefined;
+      }
+      // MCP tool names are prefixed with the server name, so keep it to the
+      // characters both the agent and the Desktop accept and make it unique.
+      let name = textOf(record.name).trim()
+        .replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "")
+        .slice(0, maxConnectorNameChars)
+        || parsedUrl.hostname.replace(/[^A-Za-z0-9_-]+/g, "-")
+        || `connector-${index + 1}`;
+      if (names.has(name)) {
+        let suffix = 2;
+        while (names.has(`${name}-${suffix}`)) suffix += 1;
+        name = `${name}-${suffix}`;
+      }
+      names.add(name);
+      return { name, type, url: rawUrl, ...(headers ? { headers } : {}) };
+    });
+  }
+
   function userEvent(message, images = []) {
     const content = [{ type: "text", text: message }];
     for (const image of images) {
@@ -465,7 +567,8 @@ export function createRoutineService({
     };
   }
 
-  async function startCodeSession(task, message, model, images = [], routineId = "", effort = "") {
+  async function startCodeSession(task, message, model, images = [], routineId = "",
+    effort = "", sourceBranch = "", useWorktree = false, connectors = []) {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -487,6 +590,14 @@ export function createRoutineService({
           model,
           ...(effort ? { effort_level: effort } : {}),
           ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+          // The guest runner creates the isolated copy from this branch and
+          // names its own branch after the session, exactly as a composer start
+          // with the folder/branch/worktree strip does.
+          ...(sourceBranch ? { source_branch: sourceBranch } : {}),
+          ...(useWorktree ? { use_worktree: true } : {}),
+          // This fire's own MCP servers. The guest runner turns them into the
+          // agent's `--mcp-config`, so they are live for this session only.
+          ...(connectors.length ? { mcp_servers: connectors } : {}),
         },
         events: [userEvent(message, images)],
       },
@@ -526,7 +637,7 @@ export function createRoutineService({
     return result?.sessionId || result?.session?.sessionId || sessionId;
   }
 
-  async function fire({ routineId, text, images, via = "api" }) {
+  async function fire({ routineId, text, images, connectors, via = "api" }) {
     if (text !== undefined && typeof text !== "string") {
       throw badRequest("text must be a string");
     }
@@ -534,6 +645,7 @@ export function createRoutineService({
       throw badRequest(`text must be at most ${maxTextChars} characters`);
     }
     const attached = normalizeImages(images);
+    const attachedConnectors = normalizeConnectors(connectors);
     const { task, taskId } = await taskRecord(routineId);
     // A caller may address the task by its raw id; everything the record keys
     // on — the fire budget, the run attribution — uses the routine id the
@@ -554,11 +666,26 @@ export function createRoutineService({
 
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
+    // A Cowork session's MCP servers are account-level connector rows the
+    // Desktop proxies through claude.ai, which this deployment does not serve;
+    // there is no per-session URL field to carry a fire's own. Refuse rather
+    // than accept connectors that would silently never be dialed.
+    if (kind === "cowork" && attachedConnectors.length) {
+      throw badRequest(
+        "connectors are supported on Code routines only; this is a Cowork routine");
+    }
     const taskContext = taskSessionContext(task);
     const effort = textOf(state.configs?.[canonicalId]?.effort)
       || textOf(taskContext.effort_level) || textOf(taskContext.effort);
+    const sourceBranch = typeof task.sourceBranch === "string"
+      ? task.sourceBranch
+      : textOf(taskContext.source_branch);
+    const useWorktree = typeof task.useWorktree === "boolean"
+      ? task.useWorktree
+      : taskContext.use_worktree === true;
     const sessionId = kind === "code"
-      ? await startCodeSession(task, message, model, attached, canonicalId, effort)
+      ? await startCodeSession(task, message, model, attached, canonicalId, effort,
+        sourceBranch, useWorktree, attachedConnectors)
       : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
@@ -566,7 +693,8 @@ export function createRoutineService({
     await mutate((current) => recordFire(current, canonicalId, via)).catch((error) => {
       log.warn(`[routines] could not record the fire of ${canonicalId}: ${error?.message || error}`);
     });
-    log.log(`[routines] fired ${canonicalId} (${kind}) as ${sessionId}`);
+    log.log(`[routines] fired ${canonicalId} (${kind}) as ${sessionId}`
+      + (attachedConnectors.length ? ` with ${attachedConnectors.length} connector(s)` : ""));
     return { sessionId, kind };
   }
 
@@ -662,6 +790,14 @@ export function createRoutineService({
       if (chosenPermission) args.permissionMode = chosenPermission;
       const chosenCwd = textOf(body.cwd) || textOf(context.cwd);
       if (chosenCwd) args.cwd = chosenCwd;
+      // The branch and worktree flag are task-record fields (the Desktop's own
+      // scheduler acts on them), so they ride the create call rather than a
+      // bridge-side sidecar like effort.
+      const chosenSourceBranch = textOf(body.source_branch) || textOf(context.source_branch);
+      if (chosenSourceBranch) args.sourceBranch = chosenSourceBranch;
+      const chosenUseWorktree = body.use_worktree !== undefined
+        ? body.use_worktree === true : context.use_worktree === true;
+      if (chosenUseWorktree) args.useWorktree = true;
       const chosenEffort = textOf(body.effort_level ?? body.effort)
         || textOf(context.effort_level ?? context.effort);
       // A routine is a Code scheduled task. On a build with the Code store
@@ -726,18 +862,40 @@ export function createRoutineService({
       } else if (context && context.cwd !== undefined) {
         patch.cwd = textOf(context.cwd) || undefined;
       }
+      if (body.source_branch !== undefined) {
+        patch.sourceBranch = textOf(body.source_branch) || undefined;
+      } else if (context && context.source_branch !== undefined) {
+        patch.sourceBranch = textOf(context.source_branch) || undefined;
+      }
+      if (body.use_worktree !== undefined) {
+        patch.useWorktree = body.use_worktree === true;
+      } else if (context && context.use_worktree !== undefined) {
+        patch.useWorktree = context.use_worktree === true;
+      }
       const effortGiven = body.effort_level !== undefined || body.effort !== undefined
         || (context && (context.effort_level !== undefined || context.effort !== undefined));
       const chosenEffort = textOf(body.effort_level ?? body.effort)
         || textOf(context?.effort_level ?? context?.effort);
       const surface = task._routineSurface ?? "CoworkScheduledTasks";
       if (Object.keys(patch).length) {
+        let applied;
         try {
-          await desktop.invoke(surface, "updateScheduledTask",
-            [{ scheduledTaskId: taskId, ...patch }]);
+          // `json-undefined-v1` keeps a present-but-undefined field on the
+          // wire: that is how a cleared cwd/branch is removed from the task
+          // record (the Desktop tests `"sourceBranch" in n`, not truthiness).
+          applied = await desktop.invoke(surface, "updateScheduledTask",
+            [{ scheduledTaskId: taskId, ...patch }], "json-undefined-v1");
         } catch (error) {
           throw new RoutineError(502, "api_error",
             `the scheduled task store refused the update: ${error?.message || error}`);
+        }
+        // The store answers null when it refuses the write (policy, an
+        // uninitialized scheduler, a task file it will not touch) rather than
+        // throwing. Reporting success there made an edit look saved while the
+        // old values were still stored, so surface it instead.
+        if (!applied) {
+          throw new RoutineError(502, "api_error",
+            "the scheduled task store did not apply the update");
         }
       }
       if (body.enabled !== undefined) {
@@ -787,9 +945,9 @@ export function createRoutineService({
     },
 
     /** POST /v1/code/triggers/:id/run — Run now, over the same path as a fire. */
-    async runTrigger(routineId, text, images) {
+    async runTrigger(routineId, text, images, connectors) {
       const { task, taskId } = await taskRecord(routineId);
-      const fired = await fire({ routineId, text, images, via: "run" });
+      const fired = await fire({ routineId, text, images, connectors, via: "run" });
       return {
         trigger: triggerDocument(await load(), task, taskId),
         session_id: fired.sessionId,
@@ -842,8 +1000,8 @@ export function createRoutineService({
     },
 
     /** POST /v1/claude_code/routines/:id/fire */
-    async fireRoutine(routineId, { text, images } = {}) {
-      return fire({ routineId, text, images, via: "api" });
+    async fireRoutine(routineId, { text, images, connectors } = {}) {
+      return fire({ routineId, text, images, connectors, via: "api" });
     },
 
     /** Whether a routine id names a task this instance can fire. */

@@ -193,6 +193,11 @@ const routineFormRowsPatchId = "routine-form-start-option-rows";
 // chunk for side effects only.
 const routineEpitaxyPatchId = "routine-epitaxy-start-options";
 const routineModelPickerPublishPatchId = "routine-model-picker-publish";
+// The composer's worktree toggle is a shared Checkbox component, and the
+// routine form's chunk imports only the Switch. Its own chunk publishes the
+// Checkbox on the global so both routine forms can render the composer's exact
+// control (the Switch is the fallback in the unified form).
+const routineWorktreeCheckboxPatchId = "routine-worktree-control-publish";
 // A tenant's Code sessions run on `session_host`, whose permission-mode list is
 // hardcoded without bypass (the cloud service disallowed it). The deployment's
 // VM is the operator's own sandbox, so bypass is offered here; the entitlement
@@ -886,6 +891,30 @@ const branchReadPatchId = "web-code-selfhosted-branch-read";
 // `cwd: ctx.cwd` return.
 const selfHostedIntentPatchId = "web-code-selfhosted-intent";
 const selfHostedCreatePatchId = "web-code-selfhosted-create";
+// The intent carries the folder, but the create call's own parameter mapper
+// (`KF`) and the pool arm of the submit switch build their argument object
+// field by field and never copy it. Without this splice the folder picker
+// updates the draft's state and then the session is still created folderless —
+// the runner falls back to the account's shared workspace. Both objects are
+// pinned by their own key sets and worker type, and the intent binding is read
+// back from the object (`worker.id`, `gitRepoUrls`), never guessed.
+const selfHostedCreateParamsPatchId = "web-code-selfhosted-create-params";
+// The sidebar's folder grouping. Its group key comes from `repoInfo`, which
+// the session-row builder derives from git sources/outcomes — both empty for a
+// folder-placed self-hosted session, so every row landed under "Other". The
+// bridge publishes the folder name as `repo_info`; this splice takes it first,
+// before the git metadata paths. Pinned by the one-parameter function whose
+// first declaration reads `session_context`'s `sources` and `outcomes` and
+// tests for `git_repository`.
+const selfHostedRepoInfoPatchId = "web-code-selfhosted-repo-info";
+// The model-selector surface resolver. On a Code route the renderer normally
+// answers from its local-agent context and picks `cowork`; the session page
+// (where that context is absent) picks `code`. The two pages then write and
+// read different `model_selector_state` rows, which is why an effort pick
+// looked unsaved until the next full bootstrap. A tenant's Code pages are all
+// `/code`, `/epitaxy` or `/artifact/`, so those routes answer `code` before the
+// context branch. The server settles both rows as a second line of defence.
+const codeSurfacePatchId = "web-code-surface";
 // The Code composer's folder picker. `browseFolder` opens the in-page picker,
 // which lists the bridge's workspace mount on the host. For a tenant's Code the
 // listing must come from inside the Cowork VM (the guest runner answers it), so
@@ -2178,6 +2207,9 @@ export const prefilterNeedles = [
   "Describe what Claude should do in each session",
   "routine-composer-status",
   "autofixOnPrCreate:void 0",
+  // The shared Checkbox the composer's worktree toggle renders; its chunk
+  // publishes it for the routine forms (routine-worktree-control-publish).
+  '"data-cds":"Checkbox"',
   // Bypass permissions availability and the session-host mode list.
   "bypassPermissionsPrefEnabled",
   "permission_modes:{available:",
@@ -2480,6 +2512,431 @@ function selfHostedCreateTarget(node) {
   return { param: params.param, context, bindings: params.bindings };
 }
 
+// The intent-to-create mapper (`KF` in the same chunk as the submit switch):
+// a three-parameter function returning one object that carries the worker, the
+// repo list and the model/effort/permission triple. It is the argument the
+// cloud arm hands the create mutation. Pinned by that key set and by the
+// worker's `environment` type, so no unrelated serializer can match.
+function selfHostedCreateParamsTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 3) return undefined;
+  const intent = identifier(node.params[0]);
+  if (!intent) return undefined;
+  const statements = node.body.body;
+  if (statements.length !== 1 || statements[0].type !== "ReturnStatement") {
+    return undefined;
+  }
+  const returned = unwrap(statements[0].argument);
+  if (returned?.type !== "ObjectExpression") return undefined;
+  const required = ["worker", "gitRepoUrls", "sourceBranches", "model",
+    "effort", "permissionMode"];
+  if (required.some(name => !objectMember(returned, name))) return undefined;
+  const worker = unwrap(objectMember(returned, "worker").value);
+  const typeMember = objectMember(worker, "type");
+  if (!typeMember || literal(typeMember.value, "environment") !== true) {
+    return undefined;
+  }
+  return { object: returned, intent };
+}
+
+// The pool arm's create argument in the submit switch: an object carrying the
+// `pool` worker beside the same start fields. The intent binding is read back
+// from `gitRepoUrls: intent.gitRepoUrls.slice()` rather than assumed, because
+// this object sits in an arrow whose parameter destructures the intent under
+// whatever name the minifier chose.
+function selfHostedPoolCreateTarget(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const required = ["worker", "gitRepoUrls", "initialMessage", "model",
+    "permissionMode", "effort"];
+  if (required.some(name => !objectMember(node, name))) return undefined;
+  const worker = unwrap(objectMember(node, "worker").value);
+  const typeMember = objectMember(worker, "type");
+  if (!typeMember || literal(typeMember.value, "pool") !== true) return undefined;
+  const repos = unwrap(objectMember(node, "gitRepoUrls").value);
+  let receiver = repos?.type === "CallExpression" ? unwrap(repos.callee) : repos;
+  while (receiver?.type === "MemberExpression") receiver = unwrap(receiver.object);
+  const intent = identifier(receiver);
+  return intent ? { object: node, intent } : undefined;
+}
+
+// Every create argument that takes the intent must carry the composer's start
+// options, or the folder picker changes only the draft. `cwd` is the one the
+// bridge and the guest runner act on; the branch/worktree pair travels beside
+// it because the same call is what places a worktree session.
+function selfHostedCreateOptions(intent) {
+  return `,...(${intent}.cwd&&{cwd:${intent}.cwd})`
+    + `,...(${intent}.sourceBranch&&{sourceBranch:${intent}.sourceBranch})`
+    + `,...(${intent}.useWorktree&&{useWorktree:!0})`;
+}
+
+// The session-row builder's repo information (`Bs` in shared-11). Its first
+// declaration reads `session_context.sources` and `.outcomes` and it looks for
+// `git_repository`; that shape is unique in the graph. The splice returns the
+// bridge's `repo_info` before either git path runs.
+function selfHostedRepoInfoTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1) return undefined;
+  const param = identifier(node.params[0]);
+  if (!param) return undefined;
+  const first = node.body.body[0];
+  if (first?.type !== "VariableDeclaration") return undefined;
+  let sources = false;
+  let outcomes = false;
+  let gitRepository = false;
+  for (const declaration of first.declarations) {
+    walk(declaration.init, [], (child) => {
+      if (child.type === "Literal" && child.value === "git_repository") {
+        gitRepository = true;
+      }
+      if (child.type !== "MemberExpression" || child.computed) return;
+      const name = child.property?.name;
+      if (name !== "sources" && name !== "outcomes") return;
+      const inner = unwrap(child.object);
+      if (inner?.type === "MemberExpression" && inner.property?.name === "session_context"
+        && identifier(inner.object) === param) {
+        if (name === "sources") sources = true;
+        else outcomes = true;
+      }
+    });
+  }
+  if (!sources || !outcomes || !gitRepository) return undefined;
+  return { statement: first, param };
+}
+
+// The browser's session-list normalizer (`SD` in shared-100). Every list,
+// single-session and shared-session response is rebuilt through it, and the
+// object it returns names each field explicitly — anything missing is dropped
+// before the sidebar's row builder runs. It rebuilt `session_context` from just
+// `config.sources/outcomes/model/effort_level`, so the bridge's top-level
+// `repo_info` (and the folder it names) vanished on this path while the row
+// builder and the list sanitizer already kept it. The returned document is the
+// one pinned by `type:"session"` beside the self-hosted pool id.
+function sessionNormalizerRepoInfoTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length !== 1) return undefined;
+  const param = identifier(node.params[0]);
+  if (!param) return undefined;
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  const object = unwrap(returns[0].argument);
+  if (object?.type !== "ObjectExpression") return undefined;
+  const properties = new Map();
+  for (const property of object.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key)
+      ?? (property.key?.type === "Literal" ? property.key.value : undefined);
+    if (typeof key === "string") properties.set(key, property);
+  }
+  if (!literal(properties.get("type")?.value, "session")) return undefined;
+  if (!properties.has("self_hosted_runner_pool_id")) return undefined;
+  if (unwrap(properties.get("session_context")?.value)?.type !== "ObjectExpression") {
+    return undefined;
+  }
+  if (properties.has("repo_info")) return undefined;
+  return { object, param };
+}
+
+// The `+` on a folder group starts a new session in that folder. The sidebar
+// reads a prefill from the group's sessions (`oZ` in shared-21): it derives a
+// folder only for rows of type `local`, while a bridge session is `remote`, so
+// a folder group's plus opened a session with no folder. Three splices carry
+// the path and make the prefill use it:
+//   - the server-session row builder (`shared-11`) carries `cwd`;
+//   - the bucket prefill builder keeps the row's folder for a remote row;
+//   - the draft prefill setter (`uZ`) applies `folder` on a remote prefill
+//     instead of clearing the selection.
+// The row builder is pinned by the literal `type:"remote"` beside
+// `isAgentOwned` and `_originalSession`; the prefill builder by its option
+// object and its `eZ({environmentId: row.environmentId})` declaration; the
+// setter by the ssh guard and its `setSelectedFolder` binding.
+const folderPrefillPatchId = "web-code-folder-prefill";
+
+function objectProperties(node) {
+  const properties = new Map();
+  for (const property of node.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key)
+      ?? (property.key?.type === "Literal" ? property.key.value : undefined);
+    if (typeof key === "string") properties.set(key, property);
+  }
+  return properties;
+}
+
+function remoteSessionRowTarget(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const properties = objectProperties(node);
+  const type = unwrap(properties.get("type")?.value);
+  let matches;
+  if (literal(type, "remote")) {
+    const agentOwned = unwrap(properties.get("isAgentOwned")?.value);
+    matches = agentOwned?.type === "UnaryExpression" && agentOwned.operator === "!"
+      && (literal(agentOwned.argument, 0) || literal(agentOwned.argument, true));
+  } else if (type?.type === "ConditionalExpression") {
+    // The main remote row builder: `type: isBridge ? "bridge" : "remote"`.
+    matches = literal(unwrap(type.consequent), "bridge")
+      && literal(unwrap(type.alternate), "remote");
+  }
+  if (!matches) return undefined;
+  const session = identifier(properties.get("_originalSession")?.value);
+  if (!session || !properties.has("repoInfo") || !properties.has("environmentId")) {
+    return undefined;
+  }
+  if (properties.has("cwd")) return undefined;
+  return { object: node, session };
+}
+
+function folderBucketPrefillTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
+    return undefined;
+  }
+  const param = identifier(node.params[0]);
+  const options = node.params[1];
+  if (!param || options?.type !== "ObjectPattern") return undefined;
+  const optionNames = new Set();
+  for (const property of options.properties) {
+    if (property.type !== "Property" || property.computed) continue;
+    const key = identifier(property.key);
+    if (key) optionNames.add(key);
+  }
+  for (const required of ["sshConfigIdBySshHost", "resolveGheConfigId",
+    "environmentIdByBucketKey", "viewerAccountId"]) {
+    if (!optionNames.has(required)) return undefined;
+  }
+  let map;
+  let loop;
+  walk(node.body, [], (child) => {
+    if (!map && child.type === "VariableDeclarator" && identifier(child.id)
+      && child.init?.type === "NewExpression"
+      && identifier(child.init.callee) === "Map") {
+      map = identifier(child.id);
+    }
+    if (!loop && child.type === "ForOfStatement" && child.left?.type === "VariableDeclaration") {
+      loop = child;
+    }
+  });
+  const bucket = identifier(loop?.left?.declarations?.[0]?.id);
+  if (!map || !loop || !bucket || loop.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  // The row's place: `let d = eZ({environmentId: r.environmentId, …})` inside
+  // the loop over the bucket's sessions.
+  let environment;
+  let row;
+  walk(loop.body, [], (child) => {
+    if (environment || child.type !== "VariableDeclarator" || !identifier(child.id)) return;
+    if (child.init?.type !== "CallExpression") return;
+    const [argument] = child.init.arguments ?? [];
+    if (argument?.type !== "ObjectExpression") return;
+    const environmentId = argument.properties.find(property =>
+      property.type === "Property" && identifier(property.key) === "environmentId");
+    const value = unwrap(environmentId?.value);
+    if (value?.type !== "MemberExpression" || value.property?.name !== "environmentId") {
+      return;
+    }
+    const candidate = identifier(value.object);
+    if (!candidate) return;
+    row = candidate;
+    environment = identifier(child.id);
+  });
+  if (!row || !environment) return undefined;
+  // The `isAgentOwned || !place` branch and the repos builder it calls.
+  let branch;
+  let reposCall;
+  walk(loop.body, [], (child) => {
+    if (branch || child.type !== "IfStatement") return;
+    const test = unwrap(child.test);
+    const owned = test?.type === "LogicalExpression" ? unwrap(test.left) : undefined;
+    if (owned?.type !== "MemberExpression" || owned.property?.name !== "isAgentOwned"
+      || identifier(owned.object) !== row) return;
+    let call;
+    walk(child.consequent, [], (entry) => {
+      if (call || entry.type !== "CallExpression") return;
+      if (entry.arguments?.length !== 3 || identifier(entry.arguments[0]) !== row) return;
+      call = entry;
+    });
+    if (!call) return;
+    branch = child;
+    reposCall = call;
+  });
+  return branch ? { map, bucket, environment, row, branch, reposCall } : undefined;
+}
+
+function remotePrefillFolderTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.params.length !== 2) {
+    return undefined;
+  }
+  const param = identifier(node.params[0]);
+  const first = node.body.body[0];
+  if (!param || first?.type !== "IfStatement") return undefined;
+  let ssh = false;
+  walk(first, [], (child) => {
+    if (child.type === "MemberExpression" && child.property?.name === "kind"
+      && identifier(child.object) === param) {
+      ssh = true;
+    }
+  });
+  if (!ssh) return undefined;
+  let setter;
+  for (const statement of node.body.body) {
+    walk(statement, [], (child) => {
+      if (setter || child.type !== "VariableDeclarator" || child.id?.type !== "ObjectPattern") {
+        return;
+      }
+      for (const property of child.id.properties) {
+        if (property.type !== "Property" || identifier(property.key) !== "setSelectedFolder") {
+          continue;
+        }
+        setter = identifier(property.value) ?? undefined;
+      }
+    });
+  }
+  if (!setter) return undefined;
+  let argument;
+  walk(node.body, [], (child) => {
+    if (argument || child.type !== "CallExpression") return;
+    if (identifier(child.callee) !== setter) return;
+    if (child.arguments?.length !== 1 || !literal(child.arguments[0], null)) return;
+    argument = child.arguments[0];
+  });
+  return argument ? { argument, param } : undefined;
+}
+
+// The unified sidebar groups Code rows by `sessionGroupingId`, an id that
+// names an epitaxy project in the catalog served by claude.ai. A tenant has no
+// hosted projects, so every folder-placed session had no id (or an id the
+// catalog does not contain) and landed under "Other". Two splices make the
+// folder the group: the code branch falls back to the row's `repoInfo.name`
+// when no grouping id is present, and the catalog check accepts an id it does
+// not know (its label then falls back to the id, which is the folder name).
+const codeFolderGroupPatchId = "web-code-folder-groups";
+
+// The session-list sanitizer's top-level field allowlist (`FP` in
+// shared-25). The browser serializes the `sessions_api_list_sessions` query
+// through it; a field not named here is dropped before the sidebar's row
+// builder sees it, which silently undid `repo_info` on that path. Pinned by
+// the array carrying the session-list-only keys beside `permission_mode`.
+function sessionListFieldsTarget(node) {
+  if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier") {
+    return undefined;
+  }
+  const array = unwrap(node.init);
+  if (array?.type !== "ArrayExpression") return undefined;
+  const values = new Set(array.elements
+    .filter(entry => entry?.type === "Literal" && typeof entry.value === "string")
+    .map(entry => entry.value));
+  for (const required of ["session_status", "self_hosted_runner_pool_id",
+    "session_grouping_id", "permission_mode"]) {
+    if (!values.has(required)) return undefined;
+  }
+  return { array };
+}
+
+// The unified sidebar's code-session branch: `if (session.source.kind ===
+// "code") { let group = session.source.data.sessionGroupingId; … }`. Returns
+// the declarator so the caller can add the folder fallback to the
+// initializer. Pinned by the `source.kind === "code"` test and the
+// `source.data.sessionGroupingId` read on the same binding.
+function codeSessionGroupTarget(node) {
+  if (node.type !== "IfStatement") return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "BinaryExpression" || test.operator !== "===") return undefined;
+  const right = unwrap(test.right);
+  if (!(right?.type === "Literal" && right.value === "code")) return undefined;
+  const left = unwrap(test.left);
+  if (left?.type !== "MemberExpression" || left.property?.name !== "kind") {
+    return undefined;
+  }
+  const source = unwrap(left.object);
+  if (source?.type !== "MemberExpression" || source.property?.name !== "source") {
+    return undefined;
+  }
+  const session = identifier(source.object);
+  if (!session) return undefined;
+  let declarator;
+  walk(node.consequent, [], (child) => {
+    if (declarator || child.type !== "VariableDeclarator"
+      || child.id?.type !== "Identifier") return;
+    const init = unwrap(child.init);
+    if (init?.type !== "MemberExpression" || init.property?.name !== "sessionGroupingId") {
+      return;
+    }
+    const data = unwrap(init.object);
+    if (data?.type !== "MemberExpression" || data.property?.name !== "data") return;
+    const receiver = unwrap(data.object);
+    if (receiver?.type !== "MemberExpression" || receiver.property?.name !== "source"
+      || identifier(receiver.object) !== session) return;
+    declarator = child;
+  });
+  return declarator ? { declarator, session } : undefined;
+}
+
+// The epitaxy-project acceptance test in the grouping bucket resolver:
+// `kind === "epitaxy-project" ? catalog.has(id) : projects.has(id)`. Returns
+// the `catalog.has(id)` call so the caller can treat an unknown id as a group
+// (its label is the id, i.e. the folder name).
+function codeProjectGateTarget(node) {
+  if (node.type !== "ConditionalExpression") return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "BinaryExpression" || test.operator !== "===") return undefined;
+  const right = unwrap(test.right);
+  if (!(right?.type === "Literal" && right.value === "epitaxy-project")) {
+    return undefined;
+  }
+  const left = unwrap(test.left);
+  if (left?.type !== "MemberExpression" || left.property?.name !== "kind") {
+    return undefined;
+  }
+  const session = identifier(left.object);
+  if (!session) return undefined;
+  const consequent = unwrap(node.consequent);
+  if (consequent?.type !== "CallExpression") return undefined;
+  const callee = unwrap(consequent.callee);
+  if (callee?.type !== "MemberExpression" || callee.property?.name !== "has") {
+    return undefined;
+  }
+  const argument = unwrap(consequent.arguments?.[0]);
+  if (argument?.type !== "MemberExpression" || argument.property?.name !== "id"
+    || identifier(argument.object) !== session) return undefined;
+  return { consequent };
+}
+
+// The model-selector surface resolver: a three-or-more-parameter function whose
+// body tests the first parameter against the three Code path prefixes. The
+// prefix calls (`startsWith("/code")`, `"/epitaxy"`, `"/artifact/"`) are the
+// product's own route test, so no unrelated path helper can match.
+function codeSurfaceResolverTarget(node) {
+  if (node.type !== "FunctionDeclaration" || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  if (node.params.length < 3) return undefined;
+  const path = identifier(node.params[0]);
+  if (!path) return undefined;
+  const prefixes = new Set();
+  walk(node.body, [], (child) => {
+    if (child.type !== "CallExpression") return;
+    const callee = unwrap(child.callee);
+    if (callee?.type !== "MemberExpression" || callee.property?.name !== "startsWith") {
+      return;
+    }
+    if (identifier(callee.object) !== path) return;
+    const value = unwrap(child.arguments?.[0]);
+    if (value?.type === "Literal" && typeof value.value === "string") {
+      prefixes.add(value.value);
+    }
+  });
+  if (!prefixes.has("/code") || !prefixes.has("/epitaxy")
+    || !prefixes.has("/artifact/")) {
+    return undefined;
+  }
+  return { statement: node.body.body[0], path };
+}
+
 // The wire mapper (`tO` in shared-100): its body reads `session_context` off
 // the argument and returns `config` with `sources` and `cwd`. Pinned by the
 // `cwd` member, which is the one this patch extends.
@@ -2654,6 +3111,21 @@ function routineModelPickerTarget(node) {
     ? fn : undefined;
 }
 
+// The shared Checkbox component: the variable declarator whose initializer
+// builds the `data-cds: "Checkbox"` element. Unique in the renderer graph; the
+// folder strip imports it as its worktree toggle.
+function worktreeCheckboxTarget(node, ancestors) {
+  if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier" || !node.init) {
+    return undefined;
+  }
+  // The component's own body declares the base element under the same
+  // `data-cds` literal; only the module-level declarator is the component.
+  if (ancestors.some(entry => ["FunctionDeclaration", "FunctionExpression",
+    "ArrowFunctionExpression"].includes(entry.type))) return undefined;
+  return contains(node.init, child => child.type === "Property"
+    && key(child, "data-cds") && literal(child.value, "Checkbox")) ? node : undefined;
+}
+
 function replaceExactlyOnce(text, from, to) {
   const at = text.indexOf(from);
   if (at < 0 || text.indexOf(from, at + 1) >= 0) return null;
@@ -2678,12 +3150,17 @@ function routineModelPickerReplacement(source, node) {
     ['thinking:{type:"none"}}))',
       'thinking:e.thinking&&e.thinking.effort_options'
         + '&&e.thinking.effort_options.length?e.thinking:{type:"none"}}))'],
+    // `onStateChange` is called with `(nextState, event)`: the state the picker
+    // resolved is the first argument and the commit event (`{kind:"model"}`,
+    // `{kind:"effort"}`) the second. Read the model from the state as upstream
+    // does, and the effort from the event; reading `kind` off the first
+    // argument matched nothing, so picks never reached the routine's state.
     ["f=d(()=>({model:l}),[l]),m=s(e=>{n(e.model===Z?void 0:e.model)},[n])",
       "f=d(()=>__claudeskEffort?{model:l,thinking:{type:\"effort\","
         + "effort:__claudeskEffort}}:{model:l,thinking:{type:\"none\"}},"
-        + "[l,__claudeskEffort]),m=s(e=>{e.kind===\"effort\"?"
-        + "(__claudeskOnEffortChange&&__claudeskOnEffortChange(e.effort))"
-        + ":e.kind===\"model\"&&n(e.model===Z?void 0:e.model)},"
+        + "[l,__claudeskEffort]),m=s((e,t)=>{t?.kind===\"effort\"?"
+        + "(__claudeskOnEffortChange&&__claudeskOnEffortChange(t.effort))"
+        + ":n(e.model===Z?void 0:e.model)},"
         + "[n,__claudeskOnEffortChange])"],
     ["config:c?me:void 0", 'config:{...me,thinkingStyle:"separate"}'],
   ]);
@@ -2699,28 +3176,106 @@ function routineFormStateTarget(node) {
 }
 
 function routineFormStateReplacement(source, node) {
+  // The start-option state added below is read by two memoized values: the
+  // job-config builder whose result the submit sends, and the form's
+  // `hasChanges` guard. A hook only recomputes when its dependency array
+  // changes, so leaving the new state out meant a save sent whichever values
+  // were captured at the last recomputation — normally the initial, empty
+  // ones — and the request succeeded while carrying nothing. Both arrays are
+  // located by what their callbacks read (stable property names), not by the
+  // minifier's variable names, and the new state is appended to each.
+  const memoDeps = (reads) => {
+    let found;
+    walk(node, [], (child) => {
+      if (found || child.type !== "VariableDeclarator" || !child.init) return;
+      const call = child.init;
+      if (call.type !== "CallExpression" || call.arguments.length !== 2) return;
+      const [callback, deps] = call.arguments;
+      if (deps?.type !== "ArrayExpression") return;
+      if (!["ArrowFunctionExpression", "FunctionExpression"].includes(callback.type)) return;
+      if (reads(callback)) found = deps;
+    });
+    return found;
+  };
+  const readsMember = (name) => (callback) => contains(callback, (child) =>
+    child.type === "MemberExpression" && !child.computed && child.property?.name === name);
+  const builderDeps = memoDeps((callback) => contains(callback, (child) =>
+    key(child, "jobConfig")));
+  const changedDeps = memoDeps((callback) => readsMember("connectorUuids")(callback)
+    && readsMember("pluginIds")(callback));
+  const startOptionState = "__claudeskCwd,__claudeskPermission,__claudeskEffort,"
+    + "__claudeskSourceBranch,__claudeskUseWorktree";
+  const extendDeps = (deps) => {
+    const text = source.slice(deps.start, deps.end);
+    return [text, `${text.slice(0, -1)}${text === "[]" ? "" : ","}${startOptionState}]`];
+  };
+  // Without both arrays the state would not reach the submit payload, so leave
+  // the form alone rather than ship a picker whose values never leave the page.
+  if (!builderDeps || !changedDeps) return null;
+  // The git probe runs as a hook call in the state declaration list. `t` and
+  // `n` are the chunk's own useState/useEffect imports; the function body has
+  // no binding named `n` at this scope, so the effect stays the import.
+  const gitProbe = "n(()=>{let path=__claudeskCwd;"
+    + "__claudeskSetBranches([]);__claudeskSetGitRepo(!1);"
+    + "if(!path){__claudeskSetBranchesLoading(!1);return}"
+    + "let api=globalThis[\"claude.web\"]&&globalThis[\"claude.web\"].LocalSessions;"
+    + "if(!api||typeof api.getGitInfo!==\"function\"){"
+    + "__claudeskSetBranchesLoading(!1);return}"
+    + "let live=!0;__claudeskSetBranchesLoading(!0);"
+    + "Promise.resolve().then(()=>api.getGitInfo(path)).then(info=>{"
+    + "if(!live)return;"
+    + "if(!info){__claudeskSetBranches([]);__claudeskSetGitRepo(!1);"
+    + "__claudeskSetBranchesLoading(!1);return}"
+    + "__claudeskSetGitRepo(!0);"
+    + "return Promise.resolve(api.getLocalBranches?api.getLocalBranches(path):[])"
+    + ".then(list=>{if(!live)return;"
+    + "__claudeskSetBranches(Array.isArray(list)?list:[]);"
+    + "__claudeskSetBranchesLoading(!1)})"
+    + "}).catch(()=>{if(!live)return;__claudeskSetBranches([]);"
+    + "__claudeskSetGitRepo(!1);__claudeskSetBranchesLoading(!1)});"
+    + "return()=>{live=!1}},[__claudeskCwd])";
   return applyReplacements(source.slice(node.start, node.end), [
     ["[Ke,qe]=t(j.model),",
       "[Ke,qe]=t(j.model),[__claudeskEffort,__claudeskSetEffort]=t(j.effort??null),"
         + "[__claudeskCwd,__claudeskSetCwd]=t(j.cwd??\"\"),"
-        + "[__claudeskPermission,__claudeskSetPermission]=t(j.permissionMode??\"\"),"],
+        + "[__claudeskPermission,__claudeskSetPermission]=t(j.permissionMode??\"\"),"
+        + "[__claudeskSourceBranch,__claudeskSetSourceBranch]=t(j.sourceBranch??\"\"),"
+        + "[__claudeskUseWorktree,__claudeskSetUseWorktree]=t(j.useWorktree===!0),"
+        + "[__claudeskBranches,__claudeskSetBranches]=t([]),"
+        + "[__claudeskGitRepo,__claudeskSetGitRepo]=t(!1),"
+        + "[__claudeskBranchesLoading,__claudeskSetBranchesLoading]=t(!1),"
+        + `__claudeskGitProbe=${gitProbe},`],
     // Empty strings are written, not dropped: an edit that clears the working
-    // directory or permission mode must clear the stored task field, and the
-    // bridge reads a present-but-empty value as "remove it".
+    // directory, branch or permission mode must clear the stored task field,
+    // and the bridge reads a present-but-empty value as "remove it".
     ["model:Kt,autofix_on_pr_create:",
       "model:Kt,cwd:__claudeskCwd,permission_mode:__claudeskPermission,"
-        + "effort_level:__claudeskEffort,autofix_on_pr_create:"],
+        + "effort_level:__claudeskEffort,source_branch:__claudeskSourceBranch,"
+        + "use_worktree:__claudeskUseWorktree,autofix_on_pr_create:"],
     ["minted:Pr,clearMinted:",
       "effort:__claudeskEffort,setEffort:__claudeskSetEffort,"
         + "cwd:__claudeskCwd,setCwd:__claudeskSetCwd,"
         + "permissionMode:__claudeskPermission,"
-        + "setPermissionMode:__claudeskSetPermission,minted:Pr,clearMinted:"],
+        + "setPermissionMode:__claudeskSetPermission,"
+        + "sourceBranch:__claudeskSourceBranch,"
+        + "setSourceBranch:__claudeskSetSourceBranch,"
+        + "useWorktree:__claudeskUseWorktree,"
+        + "setUseWorktree:__claudeskSetUseWorktree,"
+        + "branches:__claudeskBranches,branchesLoading:__claudeskBranchesLoading,"
+        + "isGitRepo:__claudeskGitRepo,minted:Pr,clearMinted:"],
     ["Ke!==t.model||U!==t.workerId",
       "__claudeskEffort!==t.effort||__claudeskCwd!==t.cwd"
-        + "||__claudeskPermission!==t.permissionMode||Ke!==t.model||U!==t.workerId"],
+        + "||__claudeskPermission!==t.permissionMode"
+        + "||__claudeskSourceBranch!==t.sourceBranch"
+        + "||__claudeskUseWorktree!==t.useWorktree"
+        + "||Ke!==t.model||U!==t.workerId"],
     ["prompt:j.prompt,model:j.model,workerId:j.workerId",
       "prompt:j.prompt,model:j.model,effort:j.effort??null,"
-        + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\",workerId:j.workerId"],
+        + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\","
+        + "sourceBranch:j.sourceBranch??\"\",useWorktree:j.useWorktree===!0,"
+        + "workerId:j.workerId"],
+    extendDeps(builderDeps),
+    extendDeps(changedDeps),
   ]);
 }
 
@@ -2774,10 +3329,11 @@ function routineJobConfigReplacement(source, node) {
   return applyReplacements(source.slice(node.start, node.end), [
     ["let p=l?.model??null,m=l?.autofix_on_pr_create;",
       "let p=l?.model??null,m=l?.autofix_on_pr_create,"
-        + "cw=l?.cwd??\"\",pm=l?.permission_mode??\"\",ef=l?.effort_level??null;"],
+        + "cw=l?.cwd??\"\",pm=l?.permission_mode??\"\",ef=l?.effort_level??null,"
+        + "sb=l?.source_branch??\"\",uw=l?.use_worktree===!0;"],
     ["return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p}",
       "return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p,"
-        + "cwd:cw,permissionMode:pm,effort:ef}"],
+        + "cwd:cw,permissionMode:pm,effort:ef,sourceBranch:sb,useWorktree:uw}"],
   ]);
 }
 
@@ -2847,19 +3403,32 @@ function routineFormRowsReplacement(source, target) {
     }
   });
   // The combobox the environment row uses lives one component further down
-  // (`aa`), so its binding is read from the whole chunk rather than this
-  // component's body.
+  // (`aa`), and the toggle another row uses is the form's own switch, so both
+  // bindings are read from the whole chunk rather than this component's body.
+  const chunkAst = parse(source, {
+    ecmaVersion: "latest", sourceType: "module", allowHashBang: true,
+  });
   let combobox;
-  walk(parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true }),
-    [], (child) => {
-      if (combobox || child.type !== "CallExpression") return;
-      const props = child.arguments[1];
-      if (props?.type !== "ObjectExpression") return;
-      if (props.properties.some(entry => entry.type === "Property" && key(entry, "itemToLabel"))
-        && props.properties.some(entry => entry.type === "Property" && key(entry, "onSelect"))) {
-        combobox = identifier(child.arguments[0]);
-      }
-    });
+  walk(chunkAst, [], (child) => {
+    if (combobox || child.type !== "CallExpression") return;
+    const props = child.arguments[1];
+    if (props?.type !== "ObjectExpression") return;
+    if (props.properties.some(entry => entry.type === "Property" && key(entry, "itemToLabel"))
+      && props.properties.some(entry => entry.type === "Property" && key(entry, "onSelect"))) {
+      combobox = identifier(child.arguments[0]);
+    }
+  });
+  // The composer's worktree toggle is published on the global (the exact
+  // Checkbox component its folder strip renders); the form's own switch is the
+  // fallback for a bundle where that publish did not land.
+  let toggle;
+  walk(chunkAst, [], (child) => {
+    if (toggle || child.type !== "CallExpression") return;
+    const props = child.arguments[1];
+    if (props?.type !== "ObjectExpression") return;
+    const has = name => props.properties.some(entry => key(entry, name));
+    if (has("checked") && has("onCheckedChange")) toggle = identifier(child.arguments[0]);
+  });
   const outer = renderedExpression(node.body.body
     .find(statement => statement.type === "ReturnStatement").argument);
   jsx = identifier(outer.callee);
@@ -2876,13 +3445,45 @@ function routineFormRowsReplacement(source, target) {
       + `let t=globalThis["claude.web"]?.FileSystem,`
       + `p=await t?.browseCodeFolder?.(`
       + `"Choose the routine's working folder",!0,!0,e.cwd||void 0);`
-      + `typeof p==="string"&&p&&e.setCwd(p)},`
+      + `typeof p==="string"&&p&&(p!==e.cwd?(e.setCwd(p),`
+      + `e.setSourceBranch&&e.setSourceBranch(""),`
+      + `e.setUseWorktree&&e.setUseWorktree(!1)):e.setCwd(p))},`
       + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
       + `children:[${jsxSingle}("span",{className:"max-w-[240px] truncate",`
       + `children:e.cwd||"Workspace default"}),`
       + `${jsxSingle}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
-      + `e.cwd?${jsx}("button",{type:"button",onClick:()=>e.setCwd(""),`
+      + `e.cwd?${jsx}("button",{type:"button",onClick:()=>{e.setCwd(""),`
+      + `e.setSourceBranch&&e.setSourceBranch(""),`
+      + `e.setUseWorktree&&e.setUseWorktree(!1)},`
       + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`,
+  );
+  // The composer's own branch dropdown (`hn` is that component) over the git
+  // branches the state hook probes for the selected folder, and its worktree
+  // checkbox published by `routine-worktree-control-publish`.
+  const branchRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Branch",id:"claudesk-routine-branch"})}),`
+      + `${jsx}(${combobox},{items:e.branches??[],itemToLabel:t=>t,`
+      + `value:e.sourceBranch||null,onSelect:t=>e.setSourceBranch&&e.setSourceBranch(t),`
+      + `icon:"GitBranch",triggerLabel:e.sourceBranch||"Default branch",`
+      + `triggerAriaLabel:"Branch",triggerClassName:${styles}.secondary,`
+      + `disabled:!e.isGitRepo,isLoading:!!e.branchesLoading,`
+      + `placeholder:"Search branches…",side:"bottom",`
+      + `emptyMessage:e.isGitRepo?"No branches match":"Not a git repository"}),`
+      + `e.sourceBranch?${jsx}("button",{type:"button",`
+      + `onClick:()=>e.setSourceBranch&&e.setSourceBranch(""),`
+      + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`,
+  );
+  const worktreeControl = toggle
+    ? `(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__||${toggle})`
+    : "globalThis.__CLAUDESK_WORKTREE_CHECKBOX__";
+  const worktreeRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Worktree",id:"claudesk-routine-worktree"})}),`
+      + `(${worktreeControl}?${jsx}(${worktreeControl},{size:"xxs",`
+      + `checked:!!e.useWorktree,disabled:!e.isGitRepo,`
+      + `onCheckedChange:t=>e.setUseWorktree&&e.setUseWorktree(t===!0),`
+      + `"aria-label":"Run in an isolated worktree"}):null)`,
   );
   const permissionRow = row(
     `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
@@ -2896,7 +3497,7 @@ function routineFormRowsReplacement(source, target) {
       + `[e.permissionMode]??"Default",triggerAriaLabel:"Permission mode",`
       + `triggerClassName:${styles}.secondary})`,
   );
-  return `,${cwdRow},${permissionRow}`;
+  return `,${cwdRow},${branchRow},${worktreeRow},${permissionRow}`;
 }
 
 // The Code surface's routine page is a second implementation of the same
@@ -2985,14 +3586,40 @@ function epitaxyRoutineReplacement(source, target) {
     + `let t=globalThis["claude.web"]?.FileSystem,`
     + `p=await t?.browseCodeFolder?.("Choose the routine's working folder",!0,!0,`
     + `${state}.cwd||void 0);`
-    + `typeof p==="string"&&p&&${state}.setCwd&&${state}.setCwd(p)},`
+    + `typeof p==="string"&&p&&${state}.setCwd&&(p!==${state}.cwd?`
+    + `(${state}.setCwd(p),${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `${state}.setUseWorktree&&${state}.setUseWorktree(!1)):${state}.setCwd(p))},`
     + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
     + `children:[${jsx}("span",{className:"max-w-[240px] truncate",`
     + `children:${state}.cwd||"Workspace default"}),`
     + `${jsx}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
     + `${state}.cwd?${multi}("button",{type:"button",`
-    + `onClick:()=>${state}.setCwd&&${state}.setCwd(""),`
+    + `onClick:()=>{${state}.setCwd&&${state}.setCwd(""),`
+    + `${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `${state}.setUseWorktree&&${state}.setUseWorktree(!1)},`
     + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`
+    + `]})`;
+  const branchRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Branch"}),`
+    + `${jsx}(${combobox},{items:${state}.branches??[],itemToLabel:t=>t,`
+    + `value:${state}.sourceBranch||null,`
+    + `onSelect:t=>${state}.setSourceBranch&&${state}.setSourceBranch(t),`
+    + `icon:"GitBranch",triggerLabel:${state}.sourceBranch||"Default branch",`
+    + `triggerAriaLabel:"Branch",triggerClassName:${triggerClass},`
+    + `disabled:!${state}.isGitRepo,isLoading:!!${state}.branchesLoading,`
+    + `placeholder:"Search branches…",side:"bottom",`
+    + `emptyMessage:${state}.isGitRepo?"No branches match":"Not a git repository"}),`
+    + `${state}.sourceBranch?${multi}("button",{type:"button",`
+    + `onClick:()=>${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`
+    + `]})`;
+  const worktreeRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Worktree"}),`
+    + `(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__?`
+    + `${jsx}(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__,{size:"xxs",`
+    + `checked:!!${state}.useWorktree,disabled:!${state}.isGitRepo,`
+    + `onCheckedChange:t=>${state}.setUseWorktree&&${state}.setUseWorktree(t===!0),`
+    + `"aria-label":"Run in an isolated worktree"}):null)`
     + `]})`;
   const permissionRow = `${multi}("div",{className:${rowClass},children:[`
     + `${jsx}("span",{className:${labelClass},children:"Permission mode"}),`
@@ -3010,7 +3637,7 @@ function epitaxyRoutineReplacement(source, target) {
     { id: routineEpitaxyPatchId, start: modelCall.start, end: modelCall.end,
       original, replacement: picker },
     { id: routineEpitaxyPatchId, start: children.end - 1, end: children.end - 1,
-      original: "", replacement: `,${cwdRow},${permissionRow}` },
+      original: "", replacement: `,${cwdRow},${branchRow},${worktreeRow},${permissionRow}` },
   ];
 }
 
@@ -3137,6 +3764,17 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const branchReads = [];
     const intents = [];
     const creates = [];
+    const createParams = [];
+    const poolCreates = [];
+    const repoInfos = [];
+    const sessionNormalizers = [];
+    const sessionListFields = [];
+    const remoteRows = [];
+    const folderPrefills = [];
+    const remotePrefills = [];
+    const codeGroups = [];
+    const projectGates = [];
+    const codeSurfaces = [];
     const wireConfigs = [];
     const folderPickers = [];
     const strips = [];
@@ -3149,6 +3787,28 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (intent) intents.push(intent);
       const create = selfHostedCreateTarget(node);
       if (create) creates.push(create);
+      const params = selfHostedCreateParamsTarget(node);
+      if (params) createParams.push(params);
+      const poolCreate = selfHostedPoolCreateTarget(node);
+      if (poolCreate) poolCreates.push(poolCreate);
+      const repoInfo = selfHostedRepoInfoTarget(node);
+      if (repoInfo) repoInfos.push(repoInfo);
+      const normalizer = sessionNormalizerRepoInfoTarget(node);
+      if (normalizer) sessionNormalizers.push(normalizer);
+      const remoteRow = remoteSessionRowTarget(node);
+      if (remoteRow) remoteRows.push(remoteRow);
+      const folderPrefill = folderBucketPrefillTarget(node);
+      if (folderPrefill) folderPrefills.push(folderPrefill);
+      const remotePrefill = remotePrefillFolderTarget(node);
+      if (remotePrefill) remotePrefills.push(remotePrefill);
+      const listFields = sessionListFieldsTarget(node);
+      if (listFields) sessionListFields.push(listFields);
+      const codeGroup = codeSessionGroupTarget(node);
+      if (codeGroup) codeGroups.push(codeGroup);
+      const projectGate = codeProjectGateTarget(node);
+      if (projectGate) projectGates.push(projectGate);
+      const codeSurface = codeSurfaceResolverTarget(node);
+      if (codeSurface) codeSurfaces.push(codeSurface);
       const wireConfig = selfHostedWireConfigTarget(node);
       if (wireConfig) wireConfigs.push(wireConfig);
       const folderPicker = selfHostedFolderPickerTarget(node);
@@ -3213,6 +3873,75 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
             + `,...(${sourceBranch}&&{source_branch:${sourceBranch}})`
             + `,...(${worktree}&&{use_worktree:!0})` });
       }
+    }
+    for (const target of [createParams.length === 1 ? createParams[0] : undefined,
+      poolCreates.length === 1 ? poolCreates[0] : undefined]) {
+      if (!target?.object.properties.length) continue;
+      const at = target.object.end - 1;
+      patches.push({ id: selfHostedCreateParamsPatchId, start: at, end: at,
+        original: "", replacement: selfHostedCreateOptions(target.intent) });
+    }
+    if (repoInfos.length === 1) {
+      const { statement, param } = repoInfos[0];
+      patches.push({ id: selfHostedRepoInfoPatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `if(${param}.repo_info!==void 0)return ${param}.repo_info;` });
+    }
+    if (sessionNormalizers.length === 1) {
+      const { object, param } = sessionNormalizers[0];
+      const at = object.end - 1;
+      patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
+        original: "",
+        replacement: `,repo_info:${param}.repo_info??void 0`
+          + `,cwd:${param}.cwd??${param}.config?.cwd??void 0` });
+    }
+    if (sessionListFields.length === 1) {
+      const { array } = sessionListFields[0];
+      const at = array.end - 1;
+      patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
+        original: "", replacement: ',"repo_info"' });
+    }
+    for (const { object, session } of remoteRows) {
+      const at = object.end - 1;
+      patches.push({ id: folderPrefillPatchId, start: at, end: at, original: "",
+        replacement: `,cwd:${session}.cwd??${session}.session_context?.cwd`
+          + `??${session}.config?.cwd` });
+    }
+    if (folderPrefills.length === 1) {
+      const { map, bucket, row, branch, reposCall } = folderPrefills[0];
+      const repos = source.slice(reposCall.start, reposCall.end);
+      patches.push({ id: folderPrefillPatchId, start: branch.start, end: branch.start,
+        original: "",
+        replacement: `if(${row}.cwd){${map}.set(${bucket}.key,`
+          + `{kind:"remote",environmentId:${row}.environmentId,`
+          + `repos:${repos},folder:${row}.cwd});break;}` });
+    }
+    if (remotePrefills.length === 1) {
+      const { argument, param } = remotePrefills[0];
+      patches.push({ id: folderPrefillPatchId, start: argument.start, end: argument.end,
+        original: source.slice(argument.start, argument.end),
+        replacement: `${param}.folder??null` });
+    }
+    if (codeGroups.length === 1) {
+      const { declarator, session } = codeGroups[0];
+      patches.push({ id: codeFolderGroupPatchId, start: declarator.init.end,
+        end: declarator.init.end, original: "",
+        replacement: `||(${session}.source.data.repoInfo`
+          + `&&${session}.source.data.repoInfo.name)||void 0` });
+    }
+    if (projectGates.length === 1) {
+      const { consequent } = projectGates[0];
+      patches.push({ id: codeFolderGroupPatchId, start: consequent.start,
+        end: consequent.end,
+        original: source.slice(consequent.start, consequent.end),
+        replacement: "!0" });
+    }
+    if (codeSurfaces.length === 1) {
+      const { statement, path } = codeSurfaces[0];
+      patches.push({ id: codeSurfacePatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `if(${path}.startsWith("/code")||${path}.startsWith("/epitaxy")`
+          + `||${path}.startsWith("/artifact/"))return"code";` });
     }
     if (wireConfigs.length === 1) {
       const { config, context } = wireConfigs[0];
@@ -3692,7 +4421,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const formStates = [];
     const jobConfigs = [];
     const formRows = [];
-    walk(ast, [], (node) => {
+    const worktreeCheckboxes = [];
+    walk(ast, [], (node, ancestors) => {
       const picker = routineModelPickerTarget(node);
       if (picker) modelPickers.push(picker);
       const state = routineFormStateTarget(node);
@@ -3701,7 +4431,23 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (job) jobConfigs.push(job);
       const rows = routineFormRowsTarget(node);
       if (rows) formRows.push(rows);
+      const checkbox = worktreeCheckboxTarget(node, ancestors);
+      if (checkbox) {
+        worktreeCheckboxes.push({
+          declarator: checkbox,
+          declaration: ancestors[ancestors.length - 1],
+        });
+      }
     });
+    if (worktreeCheckboxes.length === 1) {
+      const { declarator, declaration } = worktreeCheckboxes[0];
+      // Insert after the whole declaration list, not the declarator: this one
+      // sits in a comma-separated `var` list, and a statement spliced between
+      // declarators would leave the rest of the list dangling.
+      const at = declaration?.type === "VariableDeclaration" ? declaration.end : declarator.end;
+      patches.push({ id: routineWorktreeCheckboxPatchId, start: at, end: at, original: "",
+        replacement: `;globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=${declarator.id.name};` });
+    }
     if (modelPickers.length === 1) {
       const replacement = routineModelPickerReplacement(source, modelPickers[0]);
       if (replacement !== null) {

@@ -947,6 +947,72 @@ const routineTriggerCompiled = await minify(routineTriggerCards, {
 assert.equal(inspectRenderer(routineTriggerCompiled.code, false, true).patches
   .filter(patch => patch.id === "routine-api-trigger").length, 1,
   "a mangled availableCards memo must still be spliced once");
+// The routine form's model picker wrapper, extended with an effort prop and the
+// routine's own state. Its `onStateChange` is called with `(nextState, event)`:
+// the model comes from the state (as upstream read it) and the effort from the
+// event's kind. Picking an effort whose `kind` this handler never saw left the
+// pill on the first option ("Low"), and model picks never reached the form.
+const routineModelPicker = 'function Q({options:e,value:t,onChange:n,selectedLabel:r,'
+  + 'qualifier:i,disabled:o=!1,internalCatalog:c=!1}){'
+  + 'let l=t||Z,u=d(()=>{let t=e.map(e=>({id:e.model||Z,name:e.name,'
+  + 'description:e.description??null,section:e.section==="overflow"?"overflow":"main",'
+  + 'disabled:e.disabledReason!==void 0,'
+  + 'disabled_reason:e.disabledReason===void 0?null:{type:"model_disabled",'
+  + 'message:e.disabledReason},thinking:{type:"none"}})),n=c?N(t):t;'
+  + 'return n.some(e=>e.id===l)||n.push({id:l,name:r??l,section:"deprecated",'
+  + 'disabled:!0,thinking:{type:"none"}}),{models:n}},[e,l,r,c]),'
+  + 'f=d(()=>({model:l}),[l]),m=s(e=>{n(e.model===Z?void 0:e.model)},[n]);'
+  + 'return a(ee,{size:"sm",align:"end",catalog:u,state:f,onStateChange:m,'
+  + 'triggerQualifier:i,triggerName:te(t,p(t??"")),disabled:o,config:c?me:void 0})}';
+const pickerPatch = inspectRenderer(routineModelPicker, false, true).patches
+  .filter(patch => patch.id === "routine-model-effort-picker");
+assert.equal(pickerPatch.length, 1,
+  "the routine form's model picker must be extended exactly once");
+assert.ok(pickerPatch[0].replacement
+  .includes('m=s((e,t)=>{t?.kind==="effort"'),
+  "the effort commit event must be read from onStateChange's second argument");
+assert.ok(pickerPatch[0].replacement.includes(':n(e.model===Z?void 0:e.model)'),
+  "the model must still be forwarded from onStateChange's first argument");
+assert.ok(!pickerPatch[0].replacement.includes('e.kind==='),
+  "the state object is not the commit event");
+// The composer's worktree toggle is the shared Checkbox component. The routine
+// form's chunk imports only the Switch, so its own chunk publishes the Checkbox
+// on the global; the form rows fall back to the Switch if that splice is absent.
+const worktreeCheckboxChunk = 'var before=null,'
+  + 'rO=J(({label:e,disabled:t,...n},r)=>{let v=K(z,{ref:r,"data-cds":"Checkbox",...n});'
+  + 'return v}),after=q(null);'
+  // The same literal inside a component body declares the base element; only
+  // the module-level declarator is the component and must be published.
+  + 'function inner(){let v=K(z,{"data-cds":"Checkbox"});return v}';
+assert.equal(inspectRenderer(worktreeCheckboxChunk, false, false).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "the worktree control is not published outside web-shell mode");
+const worktreeControlPatches = inspectRenderer(worktreeCheckboxChunk, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish");
+assert.equal(worktreeControlPatches.length, 1,
+  "exactly the module-level Checkbox component is published");
+assert.equal(worktreeControlPatches[0].replacement,
+  ";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;",
+  "the splice names the component binding in its own chunk");
+assert.equal(inspectRenderer(`${worktreeCheckboxChunk}\n`
+  + `${worktreeCheckboxChunk.replace("rO", "bO").replace("function inner", "function innerB")}`,
+  false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "two Checkbox components must refuse the publish rather than pick one");
+const worktreeControlOut = patchRendererSources(
+  new Map([["worktree-control.js",
+    `${webShellFixtures}\n${accountMenuName}\n${worktreeCheckboxChunk}`]]), false, true)
+  .sources.get("worktree-control.js");
+assert.ok(worktreeControlOut.includes(";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the component must be published after the declaration list");
+assert.ok(worktreeControlOut.includes(",after=q(null);;globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the publish must land after the whole declaration, not between declarators");
+const worktreeControlCompiled = await minify(worktreeCheckboxChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(worktreeControlCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 1,
+  "a mangled Checkbox component must still be published once");
 // The home-layout assignment: the chunk that reads the new-page gate returns
 // the assignment object the Desktop build compiles out — eligible, settled and
 // assignment hardcoded false — so the renderer always settles on the classic
@@ -1787,8 +1853,62 @@ const selfHostedIntent = 'function startIntent({envType:r,selectedFolder:c,useWo
 const selfHostedCreate = 'async function createBody({title:e,gitRepoUrls:s,sourceBranch:c,worker:f}){'
   + 'return{title:e,events:[],...f.type==="environment"?{environment_id:f.id}'
   + ':{self_hosted_runner_pool_id:f.id},session_context:{sources:[],outcomes:[]}}}';
+const selfHostedCreateParams = 'function createParams(e,t,n){return{...n!==void 0&&{tags:[tag(n)]},'
+  + 'worker:{type:"environment",id:e.environmentId},gitRepoUrls:e.gitRepoUrls.slice(),'
+  + 'sourceBranches:{...e.sourceBranches},outputBranch:e.reuseBranch,model:e.model,'
+  + 'effort:e.effort,permissionMode:e.explicitPermissionMode??void 0}}';
+const selfHostedPoolCreate = 'async({intent:e})=>{let o=await create({worker:{type:"pool",id:e.poolId},'
+  + 'gitRepoUrls:e.gitRepoUrls.slice(),sourceBranches:{...e.sourceBranches},initialMessage:n,'
+  + 'model:e.model,permissionMode:e.explicitPermissionMode??void 0,effort:e.effort})}';
 const selfHostedWire = 'function wireBody(e){let t=e.session_context;return{title:e.title,'
   + 'config:{sources:t.sources,outcomes:t.outcomes,cwd:t.cwd,model:t.model}}}';
+const selfHostedRepoInfo = 'function repoInfo(e){'
+  + 'let t=e.session_context?.sources,n=e.session_context?.outcomes?.find(e=>e.type==="git_repository");'
+  + 'if(n?.type==="git_repository"&&n.git_info){let e=n.git_info.branches??[],r=n.git_info.repo;'
+  + 'if(e.length>0&&r)return{name:r,branch:e[0]}}'
+  + 'let r=t?.find(e=>e.type==="git_repository");if(r&&r.url)return{name:r.url}}';
+const selfHostedListFields = 'var listFields=["id","title","session_status",'
+  + '"self_hosted_runner_pool_id","session_grouping_id","permission_mode"];'
+  + 'function pickSession(e){return pickFields(e,listFields)}';
+const selfHostedNormalizer = 'function normalizeSession(e){let t=e,n=e.config??{};'
+  + 'return{type:"session",id:e.id,title:e.title,'
+  + 'session_grouping_id:t.session_grouping_id??void 0,'
+  + 'self_hosted_runner_pool_id:e.self_hosted_runner_pool_id??null,'
+  + 'session_context:{sources:n.sources??[],outcomes:n.outcomes??[],'
+  + 'model:n.model??void 0,effort_level:n.effort_level??void 0},tags:e.tags}}';
+const selfHostedRemoteRow = 'function remoteRow(e){return{id:e.id,title:e.title,'
+  + 'type:"remote",isAgentOwned:!0,sessionGroupingId:e.session_grouping_id??void 0,'
+  + 'repoInfo:repoInfo(e),environmentId:e.environment_id,_originalSession:e}}';
+const selfHostedBridgeRow = 'function bridgeRow(e){let r=isBridge(e);return{id:e.id,'
+  + 'title:e.title,type:r?"bridge":"remote",sessionGroupingId:e.session_grouping_id??void 0,'
+  + 'repoInfo:repoInfo(e),environmentId:e.environment_id,_originalSession:e}}';
+const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:t,'
+  + 'resolveGheConfigId:n,environmentIdByBucketKey:r,viewerAccountId:i}){'
+  + 'let a=new Map;for(let o of e){let e,s,c,l,u;for(let r of o.sessions){'
+  + 'if(r.type==="local"){if(!r.cwd)continue;'
+  + 'a.set(o.key,{kind:"local",folder:r.cwd});break}'
+  + 'if(l)continue;'
+  + 'let d=eZ({environmentId:r.environmentId,'
+  + 'poolId:r._originalSession?.self_hosted_runner_pool_id});'
+  + 'if(r.isAgentOwned||!d){u?.length||(u=yZ(r,n,i));continue}'
+  + 'l={kind:"remote",environmentId:d.type==="environment"?d.id:void 0,'
+  + 'poolId:d.type==="pool"?d.id:void 0,repos:yZ(r,n,i)}}'
+  + 'let d=r?.get(o.key),f=d||u?.length?{kind:"remote",environmentId:d,repos:u??[]}:void 0;'
+  + 'a.set(o.key,f)}return a}';
+const selfHostedRemotePrefill = 'function applyPrefill(e,t){'
+  + 'if(e.kind==="ssh"&&!t)return;'
+  + 'let{setSelectedFolder:n,markFolderPick:r,setWorker:i,setSelectedRepos:o}=draftStore.getState();'
+  + 'if(e.kind==="local")draftStore.getState().applyLocalFolderPick(e.folder);'
+  + 'else if(e.kind==="ssh"){i({type:"environment",id:t}),n(e.folder),r(),o([])}'
+  + 'else{n(null),r();let t=eZ(e);t&&i(t),o(e.repos)}}';
+const selfHostedFolderGroups = 'function group(e){if(e.source.kind==="code"){'
+  + 'let t=e.source.data.sessionGroupingId;f(t?p({kind:"epitaxy-project",id:t}):jD,e);return}}'
+  + 'function bucket(e){if(!(e.kind==="cowork-space"?n.has(e.id):'
+  + 'e.kind==="epitaxy-project"?catalog.has(e.id):projects.has(e.id)))return jD;return e}';
+const selfHostedSurface = 'function resolveSurface(e,t,n,r=null){'
+  + 'if(t?t.isLocalAgentModeContext:r==="cowork")return"cowork";'
+  + 'let i=e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/");'
+  + 'return i?"code":"chat"}';
 const selfHostedFolderPicker = 'function pickFolder(title, initialPath){'
   + 'let browse=fileSystem?.browseFolder;if(browse)return run(()=>browse(title,void 0,void 0,initialPath))}';
 const selfHostedStrip = 'function composer({envType:e}){'
@@ -1797,11 +1917,15 @@ const selfHostedStrip = 'function composer({envType:e}){'
   + '{onWorktreeChange:onWorktreeChange,worktreeSupported:worktreeSupported,'
   + 'onSelectBranch:onSelectBranch})}';
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
-  selfHostedCreate, selfHostedWire, selfHostedFolderPicker, selfHostedStrip].join("\n");
+  selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
+  selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
+  selfHostedBucketPrefill, selfHostedRemotePrefill, selfHostedListFields, selfHostedFolderGroups,
+  selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
-  "web-code-selfhosted-create", "web-code-selfhosted-folder-picker",
-  "web-code-selfhosted-strip"];
+  "web-code-selfhosted-create", "web-code-selfhosted-create-params",
+  "web-code-selfhosted-repo-info", "web-code-folder-groups", "web-code-surface",
+  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -1824,6 +1948,21 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-create").length, 3,
   "the create serializer binds and spreads the options and the wire mapper forwards them");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-create-params").length, 2,
+  "both the intent mapper and the pool create argument must carry the start options");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-repo-info").length, 3,
+  "the row builder, the response normalizer and the field allowlist must keep repo_info");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-folder-groups").length, 2,
+  "the sidebar must fall back to the folder and accept its group id");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 4,
+  "both row builders, the bucket prefill and the draft setter must carry the folder");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-surface").length, 1,
+  "the model-selector surface resolver must answer Code routes consistently");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-folder-picker").length, 1,
   "the Code folder picker must prefer the VM-backed browse method");
@@ -1852,6 +1991,45 @@ assert.ok(selfHostedOut.includes('...(__claudeskCwd&&{cwd:__claudeskCwd}),'
 assert.ok(selfHostedOut.includes('...(t.source_branch&&{source_branch:t.source_branch}),'
   + '...(t.use_worktree&&{use_worktree:t.use_worktree})'),
   "the wire config must forward the branch and worktree flag");
+assert.ok(selfHostedOut.includes('permissionMode:e.explicitPermissionMode??void 0,'
+  + '...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),'
+  + '...(e.useWorktree&&{useWorktree:!0})'),
+  "the create mapper must hand the composer's folder to the cloud create call");
+assert.ok(selfHostedOut.includes('effort:e.effort,'
+  + '...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),'
+  + '...(e.useWorktree&&{useWorktree:!0})'),
+  "the pool create argument must carry the same start options");
+assert.ok(selfHostedOut.includes('function repoInfo(e){if(e.repo_info!==void 0)'
+  + 'return e.repo_info;let t=e.session_context?.sources'),
+  "the session row must return the bridge's repo_info before reading git sources");
+assert.ok(selfHostedOut.includes('effort_level:n.effort_level??void 0},tags:e.tags,'
+  + 'repo_info:e.repo_info??void 0,cwd:e.cwd??e.config?.cwd??void 0}'),
+  "the response normalizer must carry repo_info and cwd into the row data");
+assert.ok(selfHostedOut.includes('environmentId:e.environment_id,_originalSession:e,'
+  + 'cwd:e.cwd??e.session_context?.cwd??e.config?.cwd}'),
+  "the server-session row must carry the folder it ran in");
+assert.ok(selfHostedOut.includes('type:r?"bridge":"remote",sessionGroupingId:'
+  + 'e.session_grouping_id??void 0,repoInfo:repoInfo(e),environmentId:e.environment_id,'
+  + '_originalSession:e,cwd:e.cwd??e.session_context?.cwd??e.config?.cwd}'),
+  "the main remote row builder must carry the folder too");
+assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
+  + 'environmentId:r.environmentId,repos:yZ(r,n,i),folder:r.cwd});break;}'
+  + 'if(r.isAgentOwned||!d)'),
+  "a folder bucket must prefill its new session with the folder");
+assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
+  + 't&&i(t),o(e.repos)}'),
+  "a remote prefill must apply its folder instead of clearing the selection");
+assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info"]'),
+  "the session-list sanitizer must keep repo_info across serialization");
+assert.ok(selfHostedOut.includes('let t=e.source.data.sessionGroupingId'
+  + '||(e.source.data.repoInfo&&e.source.data.repoInfo.name)||void 0;'),
+  "a code row with no project id must group by its folder");
+assert.ok(selfHostedOut.includes('e.kind==="epitaxy-project"?!0:projects.has(e.id)'),
+  "an unknown project id (the folder name) must still form a group");
+assert.ok(selfHostedOut.includes('function resolveSurface(e,t,n,r=null){'
+  + 'if(e.startsWith("/code")||e.startsWith("/epitaxy")||e.startsWith("/artifact/"))'
+  + 'return"code";if(t?t.isLocalAgentModeContext'),
+  "the Code route must resolve the code surface before the cowork context");
 assert.ok(selfHostedOut.includes('(fileSystem?.browseCodeFolder??fileSystem?.browseFolder)'),
   "the Code folder picker must prefer the guest-backed browse method");
 assert.ok(selfHostedOut.includes('return ((needsFolder||e==="anthropic_cloud"||e==="byoc"'

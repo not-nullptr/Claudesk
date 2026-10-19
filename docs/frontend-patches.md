@@ -394,20 +394,34 @@ scheduled task on the deployment's own VM in both cases:
   stripped the catalog down to id/name, and the picker call site are each
   matched by shape; the composite component itself is reused, not re-created.
 - `routine-form-start-options` and `routine-job-config-start-options` add
-  `cwd`, permission mode and effort to the form state, seed them from the
-  stored job config (which is how an edit shows the routine's own values), and
-  write them back in the create/update job config. The bridge maps `cwd` and
-  `permission_mode` onto the scheduled task's own fields; effort has no task
-  field and lives in the bridge's routine state (see `docs/routines.md`).
-- `routine-form-start-option-rows` adds the two rows to the unified form: a
+  `cwd`, permission mode, effort, source branch and worktree flag to the form
+  state, seed them from the stored job config (which is how an edit shows the
+  routine's own values), and write them back in the create/update job config.
+  The state hook also probes the selected folder through the renderer's own git
+  IPC (`LocalSessions.getGitInfo`/`getLocalBranches`, answered by the guest
+  runner on a tenant) and exposes the branch list, loading and
+  `isGitRepo` to the rows. The new state is appended to the dependency arrays
+  of the form's memoized job-config builder and its `hasChanges` guard: without
+  that a save posts the values captured at the memo's last computation (the
+  initial ones), so the request succeeded and carried none of the picks. The
+  bridge maps `cwd`, `permission_mode`, `source_branch` and `use_worktree` onto
+  the scheduled task's own fields; effort has no task field and lives in the
+  bridge's routine state (see `docs/routines.md`).
+- `routine-form-start-option-rows` adds four rows to the unified form: a
   working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
-  the in-page picker lists the instance's workspace) and a permission-mode
-  combobox. Both the create page and the edit dialog render this same form.
+  the in-page picker lists the instance's workspace), the composer's own branch
+  combobox (`itemToLabel` over the probed branches, with a tooltip and a Clear
+  action), its worktree checkbox, and a permission-mode combobox. Both the
+  create page and the edit dialog render this same form. The branch and
+  worktree rows are disabled until the folder probes as a git repository; the
+  checkbox is the exact shared `Checkbox` component the composer's strip uses,
+  published as `globalThis.__CLAUDESK_WORKTREE_CHECKBOX__` by
+  `routine-worktree-control-publish` (the form's own switch is the fallback).
 - `routine-epitaxy-start-options` covers the Code surface's **own** routine
   page and edit dialog, which do not use the unified form: their instructions
   composer (`EpitaxyRoutineCreatePage` → `Q`'s non-unified layout) is a second
   implementation with a plain model combobox. The splice replaces that
-  combobox with the published model+effort wrapper and appends the same two
+  combobox with the published model+effort wrapper and appends the same four
   rows to its layout. The wrapper itself is published on
   `globalThis.__CLAUDESK_MODEL_PICKER__` by `routine-model-picker-publish`,
   because that page imports the wrapper's chunk for side effects only and has
@@ -727,7 +741,9 @@ chunks, and the root-relative URLs are cached across releases. Pinned by that
 exact function body; the real helper is one chunk, and a web-shell deployment
 refuses preparation if no copy matches. Spliced only in web-shell mode.
 
-The self-hosted Code start options are seven tenant-only splices. A tenant's Code
+The self-hosted Code surface is eleven tenant-only patch ids (several land in
+more than one place: the intent, serializer, create-params, repo-info and
+folder-group patches each rewrite more than one call site). A tenant's Code
 runs in its Cowork VM, and the renderer offers a self-hosted place as
 `byoc`/`pool`; the folder/branch/worktree strip Desktop's local composer has is
 gated to `local|ssh|wsl`, and the create body drops the values. Each splice is
@@ -787,10 +803,68 @@ caller and spreads `cwd`, `source_branch` and `use_worktree` into
 (`cwd` was already forwarded). Pinned by the `session_context` return and the
 `config:{sources, cwd}` return.
 
+`web-code-selfhosted-create-params` carries those values the last hop: the
+intent→create mapper (`KF`, the function that turns the intent into the cloud
+arm's create argument) and the submit switch's `pool` arm each build their
+argument object field by field. Both gain the same spread
+(`...(e.cwd&&{cwd:e.cwd}),...(e.sourceBranch&&{sourceBranch:e.sourceBranch}),
+...(e.useWorktree&&{useWorktree:!0})`). The function is pinned by its three
+parameters and the returned object's worker/repo/model/effort/permission key
+set; the pool object by its `worker:{type:"pool"}` value and `initialMessage`
+key, with the intent binding read back from `gitRepoUrls`. Without these two
+splices the intent patch changed only the draft, and the created session was
+still folderless — the folder picker looked inert.
+
 `web-code-selfhosted-folder-picker` makes the composer's folder-pick helper
 prefer `FileSystem.browseCodeFolder` over `browseFolder`, so the in-page picker
 asks the bridge's VM-backed route instead of the workspace listing. Pinned by
 the two-statement helper whose first declaration reads `?.browseFolder`.
+
+`web-code-selfhosted-repo-info` makes the session-row builder (`Bs` in
+`shared-11`) return the bridge's `repo_info` before deriving one from
+`session_context.sources` / `outcomes`. The sidebar groups Code rows by that
+object; a folder-placed self-hosted session has no git source, so without this
+every row landed under "Other". Pinned by the one-parameter function whose
+first declaration reads both `session_context` members and tests for
+`git_repository`. The same patch ID also covers the browser's response
+normalizer (`SD` in `shared-100`): every list, single-session and
+shared-session response is rebuilt through it, and its returned object named
+each field explicitly, so `repo_info` was dropped on the way to the row builder
+even though the bridge sent it. The splice adds `repo_info` to that object;
+pinned by `type:"session"` beside `self_hosted_runner_pool_id` and the
+`session_context` literal.
+
+`web-code-folder-groups` makes the unified sidebar's folder grouping work for
+a self-hosted session. That sidebar groups Code rows by `sessionGroupingId`,
+an id naming an epitaxy project in claude.ai's catalog — a tenant has neither.
+The code branch falls back to the row's `repoInfo.name` when no id is present,
+and the catalog check (`epitaxy-project ? catalog.has(id) : …`) accepts an id
+it does not know, so the label falls back to the id (the folder name). Pinned
+by the `source.kind === "code"` branch and the project conditional; the
+session-list sanitizer's field allowlist also gained `repo_info`, or the
+serialization path dropped it before the row builder saw it.
+
+`web-code-folder-prefill` makes the `+` on a folder group start a new session
+with that folder selected. The group's new-session handler asks the bucket's
+rows for a prefill (`oZ` in `shared-21`), which derived a folder only from
+rows of type `local`; a bridge session is `remote`, so the button opened a
+folderless composer. Four splices: both server-session row builders in
+`shared-11` (the annotated `type:"remote"` object and the main
+`isBridge ? "bridge" : "remote"` one) carry `cwd` from the document; the
+prefill builder keeps the row's `cwd` and the place that ran it when it sees
+one; and the draft setter (`uZ`) applies `folder` on a remote prefill instead
+of clearing the selection. Pinned by the two `_originalSession` row objects,
+the prefill builder's `eZ({environmentId: row.environmentId})` declaration
+beside its `isAgentOwned` branch, and the setter's ssh guard plus
+`setSelectedFolder` binding.
+
+`web-code-surface` makes the model-selector surface resolver (`XO` in
+`shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes
+before its local-agent-context branch, which otherwise picks `cowork` on the
+Code landing while the session page picks `code`. The two pages then write and
+read different `model_selector_state` rows, so an effort pick looked unsaved.
+Pinned by the three route-prefix `startsWith` calls on the function's first
+parameter.
 
 The code generator splices only the selected node. It does not regenerate
 the rest of a bundle, rewrite imports, or depend on chunk hashes. Native feature

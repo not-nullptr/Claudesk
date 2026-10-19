@@ -583,7 +583,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 | `GET /v1/code/sessions` | The list; the sidebar's call carries `statuses=active&statuses=paused`, which is how archived sessions drop out. Rows are the same session document. |
 | `GET/PUT/DELETE /v1/code/sessions/{id}` | GET reads, PUT is the one edit endpoint (`{title?}`, `{add_tags?}`/`{remove_tags?}`, `{client_metadata?}`), DELETE removes. Each answers `{session}`. |
 | `POST …/{id}/archive`, `…/mark_read` | The page's buttons; archive is its own axis (log and place stay, the list filter above stops carrying it). `{session}` back. |
-| `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. |
+| `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. The guest runner reads the list (it is also where a Code routine fire's per-invocation connectors land, see `docs/routines.md`) and passes its URL servers to the agent as `--mcp-config` for every turn of the session. |
 | `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. Answered under **both generations of the path**: `ccr_v2_send_events_web` decides whether the client posts to `/v1/code/sessions/{id}/events` or the original `/v1/sessions/{id}/events`, and the Desktop build's hardcoded feature table carries the gate false — so the original leg is the one the browser actually sends its first message over. |
 | `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the streamed answer passes back untouched, and the request body is normalized for the chain: the newest fields the provider would reject without their beta headers (`context_management`, `thinking.display`) are dropped here, one log line per request that needed it, rather than pinning the CLI to the chain's vintage. |
@@ -644,13 +644,105 @@ virtiofs root (`/mnt/.virtiofs-root` by default,
 files the account sees. A plain session checks the branch out in that folder;
 a worktree session runs in `<repo>/.claude/worktrees/<session-suffix>` on a
 `claude/<session-suffix>` branch created from the selected branch (or `HEAD`),
-and reuses that copy on later turns. With no `cwd` the runner keeps its own
-checkout, exactly as before. A folder the guest cannot see, or a branch it
+and reuses that copy on later turns. With no `cwd` the session starts in the
+account's shared workspace. A folder the guest cannot see, or a branch it
 cannot check out, fails the session with the reason — never a silent fallback.
+
+Turns are concurrent, not queued: the poll loop hands every hint to its own
+thread (`guest/runner.py`, `run_sessions_forever`), so two sessions run at the
+same time. Only the git setup is serialized, with a per-repository lock around
+`checkout` and `worktree add`, and the workspace alias mount is serialized
+once. Two worktree sessions in the same repository therefore run in parallel
+with separate checkouts; two non-worktree sessions in the same folder run in
+parallel too, which is exactly the shared-checkout contention worktrees exist
+to avoid.
+
+The guest also binds the shared workspace back at `/workspace` (a bind mount,
+or a symlink when it cannot mount): the host root is at `SHARED_ROOT`, so
+without it `/workspace` inside the VM was an empty directory on the guest's own
+disk while the real files sat under `/mnt/.virtiofs-root/workspace`. The
+container, the folder picker and the agent now all agree on `/workspace`, and a
+host path under it is presented at the same path inside the guest.
+
+The options reach the create request through **three** renderer splices, and all
+three are needed: the start-intent builder (`tV`) must put them on the intent,
+the intent→create mapper (`KF`) and the submit switch's pool arm must copy them
+into the create call's argument, and the serializer (`VA`) then places them in
+`session_context`, which the wire mapper (`tO`) turns into `config`. Patching
+only the intent updated the draft and then created a folderless session; the
+folder picker appeared to do nothing while the agent started in `/workspace`.
+The two call-site splices are `web-code-selfhosted-create-params`.
 
 The bridge validates the create body before storing it (folder confirmed as a
 real directory under `COWORK_REMOTE_WORKSPACE_ROOT`; branch a bounded string; the
 worktree flag a boolean).
+
+### Model, effort and permission mode staying put
+
+Three distinct pieces of renderer state made a pick look like it "did not save"
+on a tenant's Code surface:
+
+- **The model-selector row.** The Code landing composer resolved its surface as
+  `cowork` while the session page resolved `code` (the renderer's route/context
+  heuristic differs once a session exists). An effort pick was therefore
+  written to one `model_selector_state` row and read back from the other, so
+  the picker showed the old level after the next navigation. `web-code-surface`
+  makes every `/code`, `/epitaxy` and `/artifact/` route answer the `code`
+  surface before the context branch, so one SPA session writes and reads one
+  row. The bridge also mirrors a `PATCH …/model_selector_state/{code|cowork}`
+  to the other row and settles the pair when it serves `/api/bootstrap`,
+  preferring a non-default row over the catalog's recommended `high` — a
+  session that ran the stale row must not erase the pick.
+- **The draft permission mode.** The renderer keeps that pick in a per-opening
+  in-memory store; unlike the model selector it never writes it to
+  `AppPreferences`. `GET /api/remote/code-defaults` returns the last *explicit*
+  start mode (skipping the composer's failsafe `default` and the transient
+  `plan`), and the preload's `AppPreferences` shim seeds
+  `epitaxyPrefs["cc-landing-draft-permission-mode"]` from it (an account-scoped
+  pick still wins). A new Code draft therefore opens on the mode the person
+  last picked instead of falling back to Accept edits.
+- **The first message's permission mode.** The browser send path carries the
+  composer's *spawn* mode beside the user message; until the folder's stored
+  picks settle that is the failsafe `"default"`. The session document and the
+  guest runner both took it, so a session created in Bypass flipped to Manual
+  the moment its first message was sent. The bridge now fills an omitted or
+  `"default"` create mode from the stored pick / last explicit mode, and drops
+  a `"default"` control request that rides the same append as a user message
+  when the session's own config says otherwise. A deliberate in-session switch
+  is its own append and still applies.
+- **A running session's effort.** The effort picker calls the SDK's
+  `applyFlagSettings`, which posts an `apply_flag_settings` control request with
+  `settings.effortLevel`. Both the bridge (session document) and the guest
+  runner (next turn's `--effort`) now apply it; previously the request was
+  acknowledged and dropped, so an in-session effort change reverted.
+
+Guest git runs with the runner's own `HOME` (`RUNNER_HOME`), where
+`prepare_home` writes `[safe] directory = *`. The workspace belongs to the host
+user while the runner is root; without that file every repository reads as
+"dubious ownership", so `getGitInfo` returned null, `getWorkingTreeDirtyState`
+answered `unknown`, and a folder with git showed no branch picker or worktree
+toggle. The service's own HOME is read-only under `ProtectHome=read-only`, so
+the runner points git at its own directory explicitly.
+
+**The sidebar groups by folder.** There are two paths in this build. The
+environment-grouped Code sidebar keys on the row's `repoInfo`; the unified
+sidebar groups Code rows by `sessionGroupingId` (an epitaxy-project id from
+claude.ai's catalog). A folder-placed self-hosted session has neither a git
+source nor a hosted project, so every row fell under "Other".
+
+The session document now carries `repo_info` (`name` is the folder name,
+`branch` the placed branch). `web-code-selfhosted-repo-info` makes the row
+builder take it before either git path, carries it through the browser's
+response normalizer (which rebuilt each session object field by field and was
+dropping it), and keeps it in the session-list sanitizer's allowlist;
+`web-code-folder-groups` makes the unified sidebar fall back to
+`repoInfo.name` for the group id and accept an id the project catalog does not
+contain, so the bucket label is the folder name. The `+` on a folder group
+starts a new session with that folder pre-picked: the sidebar's bucket
+prefill keeps the row's `cwd` and the pool that ran it, and the draft setter
+applies the folder instead of clearing it (a bridge row is `remote`, where
+the stock prefill only carries repositories). Old sessions created before the
+folder start option existed still have no folder and stay in "Other".
 
 **The UI's lookups also run in the guest.** The web composer needs a folder
 listing and git metadata *before* a session exists, and neither the folder

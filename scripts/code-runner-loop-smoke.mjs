@@ -152,7 +152,7 @@ try {
 } finally {
   if (child) child.kill("SIGTERM");
   if (createdRelease) rmSync(releaseFile, { force: true });
-  rmSync(stateDir, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 }
 
 process.stdout.write("code-runner-loop-smoke: a session is placed, run by a runner and read back\n");

@@ -53,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 85 : 72) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 98 : 73) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
@@ -87,6 +87,8 @@ try {
       webShell === "1", "the Code surface's routine page offers the picker and start options");
     assert.equal(manifest.patches.some(patch => patch.id === "routine-model-picker-publish"),
       webShell === "1", "the shared model+effort wrapper is published for that page");
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-worktree-control-publish"),
+      webShell === "1", "the composer's worktree checkbox is published for the routine forms");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-permission-list"),
       webShell === "1", "the web shell's Code permission modes include bypass");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-availability"),
@@ -94,6 +96,34 @@ try {
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-self-hosted-modes"),
       webShell === "1", "a self-hosted place's mode list carries bypass");
 
+    if (webShell === "1") {
+      // The routine form's branch/worktree state and rows must actually land in
+      // the real chunk, not merely report a patch id.
+      const routinePath = manifest.patches
+        .find(patch => patch.id === "routine-form-start-options")?.path;
+      const routineSource = await readFile(join(state,
+        release.desktopVersion, release.patchRelease, routinePath), "utf8");
+      assert.ok(routineSource.includes("__claudeskSourceBranch")
+        && routineSource.includes("__claudeskUseWorktree")
+        && routineSource.includes('defaultMessage:"Branch"')
+        && routineSource.includes('defaultMessage:"Worktree"'),
+      "the routine form carries the branch and worktree state and rows");
+      // The start-option state must be in the dependency arrays of both the
+      // job-config builder and the has-changes guard: a memo that does not
+      // depend on it keeps the values captured at its last computation, so a
+      // save posts the old (or empty) settings and the request succeeds with
+      // nothing carried. Both arrays carry the same inserted marker.
+      assert.equal((routineSource.match(
+        /,__claudeskCwd,__claudeskPermission,__claudeskEffort,__claudeskSourceBranch,__claudeskUseWorktree\]/g,
+      ) || []).length, 2,
+      "the job-config builder and the has-changes guard depend on the start options");
+      const publishPath = manifest.patches
+        .find(patch => patch.id === "routine-worktree-control-publish")?.path;
+      const publishSource = await readFile(join(state,
+        release.desktopVersion, release.patchRelease, publishPath), "utf8");
+      assert.ok(publishSource.includes("globalThis.__CLAUDESK_WORKTREE_CHECKBOX__="),
+        "the composer's Checkbox is published for the routine forms");
+    }
     if (gateway === "1" && webShell === "0") gatewayManifest = manifest;
     if (webShell === "1" && tenant === "0") webShellManifest = manifest;
     if (tenant === "1") tenantManifest = manifest;

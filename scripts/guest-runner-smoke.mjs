@@ -32,8 +32,11 @@ mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
 writeFileSync(stub, `#!/bin/sh
 prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+# The argv is echoed inside a JSON string, so escape it — a --mcp-config value
+# carries JSON of its own.
+args=$(printf '%s' "$*" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
 printf '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}\\n'
-printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent saw: %s | prompt: %s"}]},"session_id":"11111111-1111-4111-8111-111111111111"}\\n' "$*" "$prompt"
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent saw: %s | prompt: %s"}]},"session_id":"11111111-1111-4111-8111-111111111111"}\\n' "$args" "$prompt"
 printf '{"type":"result","subtype":"success","session_id":"11111111-1111-4111-8111-111111111111","is_error":false,"result":"done"}\\n'
 `);
 chmodSync(stub, 0o755);
@@ -191,6 +194,8 @@ try {
         request: { subtype: "set_model", model: "deepseek-picked" } } },
       { payload: { type: "control_request", request_id: "set-perm-mode-smoke",
         request: { subtype: "set_permission_mode", mode: "plan" } } },
+      { payload: { type: "control_request", request_id: "set-effort-smoke",
+        request: { subtype: "apply_flag_settings", settings: { effortLevel: "max" } } } },
       { payload: { type: "user",
         message: { role: "user", content: "switch settings" } } },
     ] }),
@@ -203,10 +208,56 @@ try {
   assert.equal(lastAssistant.message.message.content[0].text,
     "agent saw: --print --input-format stream-json --output-format stream-json"
     + " --verbose --include-partial-messages --model deepseek-picked"
-    + " --permission-mode plan --effort high"
+    + " --permission-mode plan --effort max"
     + " --resume 11111111-1111-4111-8111-111111111111"
     + " | prompt: switch settings",
-    "a mid-session set_model/set_permission_mode control request reaches the next turn");
+    "a mid-session model/permission/effort control request reaches the next turn");
+
+  // A session's MCP servers reach the agent as `--mcp-config`: this is where a
+  // routine fire's per-invocation connectors become the URL the agent dials,
+  // and where the session MCP editor's save lands.
+  const mcpPlaced = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      title: "mcp smoke",
+      environment_id: poolId,
+      config: {
+        model: "claude-opus-5-5",
+        mcp_servers: [
+          {
+            name: "tickets",
+            type: "http",
+            url: "https://mcp.example.com/run/abc123/mcp",
+            headers: { authorization: "Bearer t" },
+          },
+          { name: "events", type: "sse", url: "https://mcp.example.com/run/def456/sse" },
+        ],
+      },
+    }),
+  });
+  const mcpSessionId = JSON.parse(mcpPlaced.body).session.id;
+  await request(`/v1/code/sessions/${mcpSessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "use the tickets server" } } }] }),
+  });
+  const ranMcp = runRunner({ secret });
+  assert.equal(ranMcp.status, 0, ranMcp.stderr);
+  const mcpHistory = JSON.parse(
+    (await request(`/v1/code/sessions/${mcpSessionId}/events`)).body);
+  const mcpAssistant = decodeClientEventsResponse(mcpHistory)
+    .filter((entry) => entry.message.type === "assistant").at(-1);
+  assert.equal(mcpAssistant.message.message.content[0].text,
+    "agent saw: --print --input-format stream-json --output-format stream-json"
+    + " --verbose --include-partial-messages --model claude-opus-5-5"
+    + ' --mcp-config {"mcpServers":{"tickets":{"type":"http",'
+    + '"url":"https://mcp.example.com/run/abc123/mcp",'
+    + '"headers":{"authorization":"Bearer t"}},'
+    + '"events":{"type":"sse","url":"https://mcp.example.com/run/def456/sse"}}}'
+    + " | prompt: use the tickets server",
+    "a session's MCP servers reach the agent as --mcp-config");
 
   // The opening turn can carry image blocks (a routine fire with images); the
   // runner reads the whole content list, not just its text, and forwards it to
@@ -227,6 +278,35 @@ print(json.dumps(module.content_of(events)))
     { type: "text", text: "look" },
     { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
   ], "the guest runner forwards image blocks beside the text");
+
+  // The shared workspace is bound at /workspace in the guest (or symlinked in
+  // this probe): a folderless session starts there, and a host `/workspace/…`
+  // path keeps that spelling, matching the container and the folder picker.
+  const workspaceProbe = spawnSync("python3", ["-I", "-c", `
+import importlib.util, json, os, tempfile
+root = tempfile.mkdtemp()
+shared = os.path.join(root, "shared")
+os.makedirs(os.path.join(shared, "workspace", "proj"))
+alias = os.path.join(root, "alias")
+os.symlink(os.path.join(shared, "workspace"), alias)
+os.environ["CLAUDESK_RUNNER_SHARED_ROOT"] = shared
+os.environ["CLAUDESK_RUNNER_WORKSPACE_ALIAS"] = alias
+os.environ["CLAUDESK_RUNNER_CHECKOUT"] = os.path.join(root, "checkout")
+spec = importlib.util.spec_from_file_location("guest_runner", ${JSON.stringify(join(root, "guest/runner.py"))})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps({
+  "workdir": module.session_workdir("s", {})[0],
+  "folder": module.guest_folder("/workspace/proj"),
+  "alias": alias,
+}))
+`], { encoding: "utf8" });
+  assert.equal(workspaceProbe.status, 0, workspaceProbe.stderr);
+  const workspace = JSON.parse(workspaceProbe.stdout);
+  assert.equal(workspace.workdir, workspace.alias,
+    "a folderless session starts in the shared workspace, under /workspace");
+  assert.equal(workspace.folder, join(workspace.alias, "proj"),
+    "a host /workspace path maps through the /workspace alias");
 
   // ---- Self-hosted start options and VM-side lookups ----------------------
   // The guest shares the host root at SHARED_ROOT, so a host path
@@ -436,7 +516,7 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
     "a second lookup follows the first without waiting a poll interval");
   busyRunner.kill("SIGTERM");
   await new Promise((resolve) => busyRunner.once("exit", resolve));
-  rmSync(hostRoot, { recursive: true, force: true });
+  rmSync(hostRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {
@@ -449,7 +529,79 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
 } finally {
   if (child) child.kill("SIGTERM");
   if (createdRelease) rmSync(releaseFile, { force: true });
-  rmSync(work, { recursive: true, force: true });
+  // The guest runner can still be flushing its state when SIGTERM lands;
+  // recursive rmSync already retries EBUSY/ENOTEMPTY, but the default window is
+  // short enough to lose that race on a loaded CI box.
+  rmSync(work, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+}
+
+// The UI's git reads must run with the runner's HOME: that is where
+// `prepare_home` declares the host-owned workspace safe. Without it every repo
+// reads as "dubious ownership" and the composer sees a plain folder (no branch
+// picker, no worktree toggle). Pin the environment with a stand-in git.
+{
+  const gitProbe = mkdtempSync(join(tmpdir(), "guest-runner-git-"));
+  try {
+    const home = join(gitProbe, "home");
+    const bin = join(gitProbe, "bin");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "git"),
+      "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$HOME\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_TERMINAL_PROMPT\"\n",
+      { mode: 0o755 });
+    const probe = spawnSync("python3", ["-I", "-c", [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('runner', sys.argv[1])",
+      "runner = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(runner)",
+      "ok, out = runner.run_git(sys.argv[2])",
+      "print('OK' if ok else 'FAIL')",
+      "print(out)",
+    ].join("\n"), `${root}guest/runner.py`, gitProbe], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CLAUDESK_RUNNER_HOME: home,
+      },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /^OK$/m, "the probe must run git successfully");
+    assert.ok(probe.stdout.includes(`${home}|${join(home, ".gitconfig")}|0`),
+      `run_git must use the runner's HOME and global config, got: ${probe.stdout}`);
+  } finally {
+    rmSync(gitProbe, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+  }
+}
+
+// Session turns must actually run concurrently: the runner is handed one hint
+// per session and each gets its own thread. A single worker made two sessions
+// queue behind each other, which defeats the worktree option (two isolated
+// sessions are supposed to run at once). The probe replaces the turn with a
+// two-party barrier, so it can only complete if both turns are in flight.
+{
+  const probe = spawnSync("python3", ["-I", "-c", [
+    "import importlib.util, queue, sys, threading, time",
+    "spec = importlib.util.spec_from_file_location('runner', sys.argv[1])",
+    "runner = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(runner)",
+    "done = []",
+    "entered = threading.Barrier(2)",
+    "def fake(hint):",
+    "    entered.wait(timeout=5)",
+    "    done.append(hint.get('i'))",
+    "runner.run_session = fake",
+    "q = queue.Queue()",
+    "threading.Thread(target=runner.run_sessions_forever, args=(q,), daemon=True).start()",
+    "q.put({'i': 1})",
+    "q.put({'i': 2})",
+    "time.sleep(1.0)",
+    "print('OK' if sorted(done) == [1, 2] else 'FAIL')",
+    "print(done)",
+  ].join("\n"), `${root}guest/runner.py`], { encoding: "utf8" });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.match(probe.stdout, /^OK$/m,
+    `two session turns must be in flight at once, got: ${probe.stdout}`);
 }
 
 process.stdout.write("guest-runner-smoke: the guest runner registers, runs an agent and reports\n");

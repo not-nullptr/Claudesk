@@ -41,7 +41,8 @@ try {
   });
   controller.restore(loadNotice(dir));
   const response = { writeHead() {}, on() {}, write(chunk) { chunks.push(chunk); } };
-  controller.open({ on() {} }, response, new URL('http://local/api/events'));
+  controller.open({ headers: { "user-agent": "restart-notice-smoke" }, on() {} },
+    response, new URL('http://local/api/events'));
   await new Promise((resolve) => setImmediate(resolve));
   const notices = chunks.join('').split('\n\n')
     .filter((frame) => frame.includes('event: notice')).map((frame) => JSON.parse(/data: ([^\n]+)/.exec(frame)[1]));
@@ -58,7 +59,8 @@ try {
   });
   stale.restore(loadNotice(dir));
   const after = [];
-  stale.open({ on() {} }, { writeHead() {}, on() {}, write(chunk) { after.push(chunk); } },
+  stale.open({ headers: { "user-agent": "restart-notice-smoke" }, on() {} },
+    { writeHead() {}, on() {}, write(chunk) { after.push(chunk); } },
     new URL('http://local/api/events'));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(after.join('').includes('event: notice'), false,
