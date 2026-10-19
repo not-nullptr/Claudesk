@@ -2649,8 +2649,7 @@ function sessionNormalizerRepoInfoTarget(node) {
 // setter by the ssh guard and its `setSelectedFolder` binding.
 const folderPrefillPatchId = "web-code-folder-prefill";
 
-function remoteSessionRowTarget(node) {
-  if (node.type !== "ObjectExpression") return undefined;
+function objectProperties(node) {
   const properties = new Map();
   for (const property of node.properties) {
     if (property.type !== "Property" || property.computed) continue;
@@ -2658,14 +2657,28 @@ function remoteSessionRowTarget(node) {
       ?? (property.key?.type === "Literal" ? property.key.value : undefined);
     if (typeof key === "string") properties.set(key, property);
   }
-  if (!literal(properties.get("type")?.value, "remote")) return undefined;
-  const agentOwned = unwrap(properties.get("isAgentOwned")?.value);
-  if (agentOwned?.type !== "UnaryExpression" || agentOwned.operator !== "!"
-    || (!literal(agentOwned.argument, 0) && !literal(agentOwned.argument, true))) {
+  return properties;
+}
+
+function remoteSessionRowTarget(node) {
+  if (node.type !== "ObjectExpression") return undefined;
+  const properties = objectProperties(node);
+  const type = unwrap(properties.get("type")?.value);
+  let matches;
+  if (literal(type, "remote")) {
+    const agentOwned = unwrap(properties.get("isAgentOwned")?.value);
+    matches = agentOwned?.type === "UnaryExpression" && agentOwned.operator === "!"
+      && (literal(agentOwned.argument, 0) || literal(agentOwned.argument, true));
+  } else if (type?.type === "ConditionalExpression") {
+    // The main remote row builder: `type: isBridge ? "bridge" : "remote"`.
+    matches = literal(unwrap(type.consequent), "bridge")
+      && literal(unwrap(type.alternate), "remote");
+  }
+  if (!matches) return undefined;
+  const session = identifier(properties.get("_originalSession")?.value);
+  if (!session || !properties.has("repoInfo") || !properties.has("environmentId")) {
     return undefined;
   }
-  const session = identifier(properties.get("_originalSession")?.value);
-  if (!session || !properties.has("repoInfo")) return undefined;
   if (properties.has("cwd")) return undefined;
   return { object: node, session };
 }
@@ -3710,21 +3723,20 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
         original: "", replacement: ',"repo_info"' });
     }
-    if (remoteRows.length === 1) {
-      const { object, session } = remoteRows[0];
+    for (const { object, session } of remoteRows) {
       const at = object.end - 1;
       patches.push({ id: folderPrefillPatchId, start: at, end: at, original: "",
-        replacement: `,cwd:${session}.cwd??${session}.session_context?.cwd` });
+        replacement: `,cwd:${session}.cwd??${session}.session_context?.cwd`
+          + `??${session}.config?.cwd` });
     }
     if (folderPrefills.length === 1) {
-      const { map, bucket, environment, row, branch, reposCall } = folderPrefills[0];
+      const { map, bucket, row, branch, reposCall } = folderPrefills[0];
       const repos = source.slice(reposCall.start, reposCall.end);
       patches.push({ id: folderPrefillPatchId, start: branch.start, end: branch.start,
         original: "",
-        replacement: `if(${row}.cwd&&${environment}){${map}.set(${bucket}.key,`
-          + `{kind:"remote",environmentId:${environment}.type==="environment"`
-          + `?${environment}.id:void 0,poolId:${environment}.type==="pool"`
-          + `?${environment}.id:void 0,repos:${repos},folder:${row}.cwd});break;}` });
+        replacement: `if(${row}.cwd){${map}.set(${bucket}.key,`
+          + `{kind:"remote",environmentId:${row}.environmentId,`
+          + `repos:${repos},folder:${row}.cwd});break;}` });
     }
     if (remotePrefills.length === 1) {
       const { argument, param } = remotePrefills[0];
