@@ -975,6 +975,44 @@ assert.ok(pickerPatch[0].replacement.includes(':n(e.model===Z?void 0:e.model)'),
   "the model must still be forwarded from onStateChange's first argument");
 assert.ok(!pickerPatch[0].replacement.includes('e.kind==='),
   "the state object is not the commit event");
+// The composer's worktree toggle is the shared Checkbox component. The routine
+// form's chunk imports only the Switch, so its own chunk publishes the Checkbox
+// on the global; the form rows fall back to the Switch if that splice is absent.
+const worktreeCheckboxChunk = 'var before=null,'
+  + 'rO=J(({label:e,disabled:t,...n},r)=>{let v=K(z,{ref:r,"data-cds":"Checkbox",...n});'
+  + 'return v}),after=q(null);'
+  // The same literal inside a component body declares the base element; only
+  // the module-level declarator is the component and must be published.
+  + 'function inner(){let v=K(z,{"data-cds":"Checkbox"});return v}';
+assert.equal(inspectRenderer(worktreeCheckboxChunk, false, false).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "the worktree control is not published outside web-shell mode");
+const worktreeControlPatches = inspectRenderer(worktreeCheckboxChunk, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish");
+assert.equal(worktreeControlPatches.length, 1,
+  "exactly the module-level Checkbox component is published");
+assert.equal(worktreeControlPatches[0].replacement,
+  ";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;",
+  "the splice names the component binding in its own chunk");
+assert.equal(inspectRenderer(`${worktreeCheckboxChunk}\n`
+  + `${worktreeCheckboxChunk.replace("rO", "bO").replace("function inner", "function innerB")}`,
+  false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "two Checkbox components must refuse the publish rather than pick one");
+const worktreeControlOut = patchRendererSources(
+  new Map([["worktree-control.js",
+    `${webShellFixtures}\n${accountMenuName}\n${worktreeCheckboxChunk}`]]), false, true)
+  .sources.get("worktree-control.js");
+assert.ok(worktreeControlOut.includes(";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the component must be published after the declaration list");
+assert.ok(worktreeControlOut.includes(",after=q(null);;globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the publish must land after the whole declaration, not between declarators");
+const worktreeControlCompiled = await minify(worktreeCheckboxChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(worktreeControlCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 1,
+  "a mangled Checkbox component must still be published once");
 // The home-layout assignment: the chunk that reads the new-page gate returns
 // the assignment object the Desktop build compiles out — eligible, settled and
 // assignment hardcoded false — so the renderer always settles on the classic

@@ -17,9 +17,9 @@ Content-Type: application/json
 
 The body is optional and carries `text` (≤ 65,536 characters), exactly as
 upstream, plus an optional `images` array (a Claudesk extension — see below).
-Everything else — model, folder, permission mode, schedule, the saved
-instructions — is the task's own configuration. Each successful call starts one
-new session and returns:
+Everything else — model, folder, branch, worktree, permission mode, schedule,
+the saved instructions — is the task's own configuration. Each successful call
+starts one new session and returns:
 
 ```json
 {
@@ -259,24 +259,30 @@ its data family (`/v1/code/triggers` list/detail/run/update/delete and
   preparation.
 
 The cloud form's **Create** maps to `CCDScheduledTasks.createScheduledTask`
-(name, instructions, schedule, model, working directory, permission mode and
-effort; repositories and connectors have no local equivalent and are not
-carried). The Cowork form sends the instructions as a flat `prompt`; the Code
-form sends the runner job instead (`job_config.ccr.events`), whose instructions
-are the first querying user event's message — the same event the Desktop's own
-form parser reads. The job config's `session_context` also carries the start
-options (`cwd`, `permission_mode`, `effort_level`), so an edit seeds the form
-with the routine's own values and a save writes them back. An edit re-sends
+(name, instructions, schedule, model, working directory, permission mode,
+source branch, worktree flag and effort; repositories and connectors have no
+local equivalent and are not carried). The Cowork form sends the instructions
+as a flat `prompt`; the Code form sends the runner job instead
+(`job_config.ccr.events`), whose instructions are the first querying user
+event's message — the same event the Desktop's own form parser reads. The job
+config's `session_context` also carries the start options (`cwd`,
+`permission_mode`, `source_branch`, `use_worktree`, `effort_level`), so an edit
+seeds the form with the routine's own values and a save writes them back. An edit re-sends
 that job config, so the task's saved instructions follow its text field there
 too. **Run now** maps to the same fire path as the API. **Recent fires** is
 served empty — the local session history lives on the **Scheduled** page
 (`getSessionsForScheduledTask`), and this first cut does not project it into
 the cloud detail view.
 
-`cwd` and `permission_mode` live in the scheduled task record itself, so the
-Desktop's own scheduler honours them alongside the bridge's fires. Effort has
-no field in that record (the Desktop only ever carried a model), so the bridge
-keeps it in `routine-triggers.json` keyed by routine id and puts
+`cwd`, `permission_mode`, `source_branch` and `use_worktree` live in the
+scheduled task record itself, so the Desktop's own scheduler honours them
+alongside the bridge's fires. The branch selects the worktree's source; with
+the worktree flag off, the Desktop scheduler forwards no branch (its start
+payload sends `sourceBranch` only with `useWorktree`), while a bridge fire does
+check the branch out in the shared folder — the composer's own semantics. A
+routine that must not touch the shared checkout should keep the worktree flag
+on. Effort has no field in that record (the Desktop only ever carried a model),
+so the bridge keeps it in `routine-triggers.json` keyed by routine id and puts
 `effort_level` on the sessions **it** starts — an API fire or **Run now**. A
 scheduled run started by the Desktop's own scheduler cannot carry it.
 
@@ -284,10 +290,14 @@ The routine form in the web shell — the operator's own instance and a tenant's
 alike — carries the Code composer's model and effort pickers (the same
 `ModelSelector`/`EffortControl` components), a working-directory picker backed
 by the same in-page folder browser as the composer, and a permission-mode
-dropdown (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`). Both
-routine-form implementations get them: the unified form used by the Cowork
-scheduled-task surface, and the Code surface's own create page and edit dialog
-(`routine-epitaxy-start-options`). See `docs/frontend-patches.md`.
+dropdown (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`). It
+also carries the composer's own branch dropdown and worktree checkbox (the
+same combobox and Checkbox components the folder/branch/worktree strip uses),
+over the branches of the selected folder read through the renderer's git IPC:
+`getGitInfo` and `getLocalBranches`, answered by the guest runner on a tenant.
+Both routine-form implementations get them: the unified form used by the
+Cowork scheduled-task surface, and the Code surface's own create page and edit
+dialog (`routine-epitaxy-start-options`). See `docs/frontend-patches.md`.
 
 ## Not supported
 

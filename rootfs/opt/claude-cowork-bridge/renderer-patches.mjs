@@ -193,6 +193,11 @@ const routineFormRowsPatchId = "routine-form-start-option-rows";
 // chunk for side effects only.
 const routineEpitaxyPatchId = "routine-epitaxy-start-options";
 const routineModelPickerPublishPatchId = "routine-model-picker-publish";
+// The composer's worktree toggle is a shared Checkbox component, and the
+// routine form's chunk imports only the Switch. Its own chunk publishes the
+// Checkbox on the global so both routine forms can render the composer's exact
+// control (the Switch is the fallback in the unified form).
+const routineWorktreeCheckboxPatchId = "routine-worktree-control-publish";
 // A tenant's Code sessions run on `session_host`, whose permission-mode list is
 // hardcoded without bypass (the cloud service disallowed it). The deployment's
 // VM is the operator's own sandbox, so bypass is offered here; the entitlement
@@ -2202,6 +2207,9 @@ export const prefilterNeedles = [
   "Describe what Claude should do in each session",
   "routine-composer-status",
   "autofixOnPrCreate:void 0",
+  // The shared Checkbox the composer's worktree toggle renders; its chunk
+  // publishes it for the routine forms (routine-worktree-control-publish).
+  '"data-cds":"Checkbox"',
   // Bypass permissions availability and the session-host mode list.
   "bypassPermissionsPrefEnabled",
   "permission_modes:{available:",
@@ -3090,6 +3098,21 @@ function routineModelPickerTarget(node) {
     ? fn : undefined;
 }
 
+// The shared Checkbox component: the variable declarator whose initializer
+// builds the `data-cds: "Checkbox"` element. Unique in the renderer graph; the
+// folder strip imports it as its worktree toggle.
+function worktreeCheckboxTarget(node, ancestors) {
+  if (node.type !== "VariableDeclarator" || node.id?.type !== "Identifier" || !node.init) {
+    return undefined;
+  }
+  // The component's own body declares the base element under the same
+  // `data-cds` literal; only the module-level declarator is the component.
+  if (ancestors.some(entry => ["FunctionDeclaration", "FunctionExpression",
+    "ArrowFunctionExpression"].includes(entry.type))) return undefined;
+  return contains(node.init, child => child.type === "Property"
+    && key(child, "data-cds") && literal(child.value, "Checkbox")) ? node : undefined;
+}
+
 function replaceExactlyOnce(text, from, to) {
   const at = text.indexOf(from);
   if (at < 0 || text.indexOf(from, at + 1) >= 0) return null;
@@ -3140,28 +3163,68 @@ function routineFormStateTarget(node) {
 }
 
 function routineFormStateReplacement(source, node) {
+  // The git probe runs as a hook call in the state declaration list. `t` and
+  // `n` are the chunk's own useState/useEffect imports; the function body has
+  // no binding named `n` at this scope, so the effect stays the import.
+  const gitProbe = "n(()=>{let path=__claudeskCwd;"
+    + "__claudeskSetBranches([]);__claudeskSetGitRepo(!1);"
+    + "if(!path){__claudeskSetBranchesLoading(!1);return}"
+    + "let api=globalThis[\"claude.web\"]&&globalThis[\"claude.web\"].LocalSessions;"
+    + "if(!api||typeof api.getGitInfo!==\"function\"){"
+    + "__claudeskSetBranchesLoading(!1);return}"
+    + "let live=!0;__claudeskSetBranchesLoading(!0);"
+    + "Promise.resolve().then(()=>api.getGitInfo(path)).then(info=>{"
+    + "if(!live)return;"
+    + "if(!info){__claudeskSetBranches([]);__claudeskSetGitRepo(!1);"
+    + "__claudeskSetBranchesLoading(!1);return}"
+    + "__claudeskSetGitRepo(!0);"
+    + "return Promise.resolve(api.getLocalBranches?api.getLocalBranches(path):[])"
+    + ".then(list=>{if(!live)return;"
+    + "__claudeskSetBranches(Array.isArray(list)?list:[]);"
+    + "__claudeskSetBranchesLoading(!1)})"
+    + "}).catch(()=>{if(!live)return;__claudeskSetBranches([]);"
+    + "__claudeskSetGitRepo(!1);__claudeskSetBranchesLoading(!1)});"
+    + "return()=>{live=!1}},[__claudeskCwd])";
   return applyReplacements(source.slice(node.start, node.end), [
     ["[Ke,qe]=t(j.model),",
       "[Ke,qe]=t(j.model),[__claudeskEffort,__claudeskSetEffort]=t(j.effort??null),"
         + "[__claudeskCwd,__claudeskSetCwd]=t(j.cwd??\"\"),"
-        + "[__claudeskPermission,__claudeskSetPermission]=t(j.permissionMode??\"\"),"],
+        + "[__claudeskPermission,__claudeskSetPermission]=t(j.permissionMode??\"\"),"
+        + "[__claudeskSourceBranch,__claudeskSetSourceBranch]=t(j.sourceBranch??\"\"),"
+        + "[__claudeskUseWorktree,__claudeskSetUseWorktree]=t(j.useWorktree===!0),"
+        + "[__claudeskBranches,__claudeskSetBranches]=t([]),"
+        + "[__claudeskGitRepo,__claudeskSetGitRepo]=t(!1),"
+        + "[__claudeskBranchesLoading,__claudeskSetBranchesLoading]=t(!1),"
+        + `__claudeskGitProbe=${gitProbe},`],
     // Empty strings are written, not dropped: an edit that clears the working
-    // directory or permission mode must clear the stored task field, and the
-    // bridge reads a present-but-empty value as "remove it".
+    // directory, branch or permission mode must clear the stored task field,
+    // and the bridge reads a present-but-empty value as "remove it".
     ["model:Kt,autofix_on_pr_create:",
       "model:Kt,cwd:__claudeskCwd,permission_mode:__claudeskPermission,"
-        + "effort_level:__claudeskEffort,autofix_on_pr_create:"],
+        + "effort_level:__claudeskEffort,source_branch:__claudeskSourceBranch,"
+        + "use_worktree:__claudeskUseWorktree,autofix_on_pr_create:"],
     ["minted:Pr,clearMinted:",
       "effort:__claudeskEffort,setEffort:__claudeskSetEffort,"
         + "cwd:__claudeskCwd,setCwd:__claudeskSetCwd,"
         + "permissionMode:__claudeskPermission,"
-        + "setPermissionMode:__claudeskSetPermission,minted:Pr,clearMinted:"],
+        + "setPermissionMode:__claudeskSetPermission,"
+        + "sourceBranch:__claudeskSourceBranch,"
+        + "setSourceBranch:__claudeskSetSourceBranch,"
+        + "useWorktree:__claudeskUseWorktree,"
+        + "setUseWorktree:__claudeskSetUseWorktree,"
+        + "branches:__claudeskBranches,branchesLoading:__claudeskBranchesLoading,"
+        + "isGitRepo:__claudeskGitRepo,minted:Pr,clearMinted:"],
     ["Ke!==t.model||U!==t.workerId",
       "__claudeskEffort!==t.effort||__claudeskCwd!==t.cwd"
-        + "||__claudeskPermission!==t.permissionMode||Ke!==t.model||U!==t.workerId"],
+        + "||__claudeskPermission!==t.permissionMode"
+        + "||__claudeskSourceBranch!==t.sourceBranch"
+        + "||__claudeskUseWorktree!==t.useWorktree"
+        + "||Ke!==t.model||U!==t.workerId"],
     ["prompt:j.prompt,model:j.model,workerId:j.workerId",
       "prompt:j.prompt,model:j.model,effort:j.effort??null,"
-        + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\",workerId:j.workerId"],
+        + "cwd:j.cwd??\"\",permissionMode:j.permissionMode??\"\","
+        + "sourceBranch:j.sourceBranch??\"\",useWorktree:j.useWorktree===!0,"
+        + "workerId:j.workerId"],
   ]);
 }
 
@@ -3215,10 +3278,11 @@ function routineJobConfigReplacement(source, node) {
   return applyReplacements(source.slice(node.start, node.end), [
     ["let p=l?.model??null,m=l?.autofix_on_pr_create;",
       "let p=l?.model??null,m=l?.autofix_on_pr_create,"
-        + "cw=l?.cwd??\"\",pm=l?.permission_mode??\"\",ef=l?.effort_level??null;"],
+        + "cw=l?.cwd??\"\",pm=l?.permission_mode??\"\",ef=l?.effort_level??null,"
+        + "sb=l?.source_branch??\"\",uw=l?.use_worktree===!0;"],
     ["return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p}",
       "return{prompt:c,workerId:a,repos:d,repoUrls:f,autofixOnPrCreate:m,model:p,"
-        + "cwd:cw,permissionMode:pm,effort:ef}"],
+        + "cwd:cw,permissionMode:pm,effort:ef,sourceBranch:sb,useWorktree:uw}"],
   ]);
 }
 
@@ -3288,19 +3352,32 @@ function routineFormRowsReplacement(source, target) {
     }
   });
   // The combobox the environment row uses lives one component further down
-  // (`aa`), so its binding is read from the whole chunk rather than this
-  // component's body.
+  // (`aa`), and the toggle another row uses is the form's own switch, so both
+  // bindings are read from the whole chunk rather than this component's body.
+  const chunkAst = parse(source, {
+    ecmaVersion: "latest", sourceType: "module", allowHashBang: true,
+  });
   let combobox;
-  walk(parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true }),
-    [], (child) => {
-      if (combobox || child.type !== "CallExpression") return;
-      const props = child.arguments[1];
-      if (props?.type !== "ObjectExpression") return;
-      if (props.properties.some(entry => entry.type === "Property" && key(entry, "itemToLabel"))
-        && props.properties.some(entry => entry.type === "Property" && key(entry, "onSelect"))) {
-        combobox = identifier(child.arguments[0]);
-      }
-    });
+  walk(chunkAst, [], (child) => {
+    if (combobox || child.type !== "CallExpression") return;
+    const props = child.arguments[1];
+    if (props?.type !== "ObjectExpression") return;
+    if (props.properties.some(entry => entry.type === "Property" && key(entry, "itemToLabel"))
+      && props.properties.some(entry => entry.type === "Property" && key(entry, "onSelect"))) {
+      combobox = identifier(child.arguments[0]);
+    }
+  });
+  // The composer's worktree toggle is published on the global (the exact
+  // Checkbox component its folder strip renders); the form's own switch is the
+  // fallback for a bundle where that publish did not land.
+  let toggle;
+  walk(chunkAst, [], (child) => {
+    if (toggle || child.type !== "CallExpression") return;
+    const props = child.arguments[1];
+    if (props?.type !== "ObjectExpression") return;
+    const has = name => props.properties.some(entry => key(entry, name));
+    if (has("checked") && has("onCheckedChange")) toggle = identifier(child.arguments[0]);
+  });
   const outer = renderedExpression(node.body.body
     .find(statement => statement.type === "ReturnStatement").argument);
   jsx = identifier(outer.callee);
@@ -3317,13 +3394,45 @@ function routineFormRowsReplacement(source, target) {
       + `let t=globalThis["claude.web"]?.FileSystem,`
       + `p=await t?.browseCodeFolder?.(`
       + `"Choose the routine's working folder",!0,!0,e.cwd||void 0);`
-      + `typeof p==="string"&&p&&e.setCwd(p)},`
+      + `typeof p==="string"&&p&&(p!==e.cwd?(e.setCwd(p),`
+      + `e.setSourceBranch&&e.setSourceBranch(""),`
+      + `e.setUseWorktree&&e.setUseWorktree(!1)):e.setCwd(p))},`
       + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
       + `children:[${jsxSingle}("span",{className:"max-w-[240px] truncate",`
       + `children:e.cwd||"Workspace default"}),`
       + `${jsxSingle}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
-      + `e.cwd?${jsx}("button",{type:"button",onClick:()=>e.setCwd(""),`
+      + `e.cwd?${jsx}("button",{type:"button",onClick:()=>{e.setCwd(""),`
+      + `e.setSourceBranch&&e.setSourceBranch(""),`
+      + `e.setUseWorktree&&e.setUseWorktree(!1)},`
       + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`,
+  );
+  // The composer's own branch dropdown (`hn` is that component) over the git
+  // branches the state hook probes for the selected folder, and its worktree
+  // checkbox published by `routine-worktree-control-publish`.
+  const branchRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Branch",id:"claudesk-routine-branch"})}),`
+      + `${jsx}(${combobox},{items:e.branches??[],itemToLabel:t=>t,`
+      + `value:e.sourceBranch||null,onSelect:t=>e.setSourceBranch&&e.setSourceBranch(t),`
+      + `icon:"GitBranch",triggerLabel:e.sourceBranch||"Default branch",`
+      + `triggerAriaLabel:"Branch",triggerClassName:${styles}.secondary,`
+      + `disabled:!e.isGitRepo,isLoading:!!e.branchesLoading,`
+      + `placeholder:"Search branches…",side:"bottom",`
+      + `emptyMessage:e.isGitRepo?"No branches match":"Not a git repository"}),`
+      + `e.sourceBranch?${jsx}("button",{type:"button",`
+      + `onClick:()=>e.setSourceBranch&&e.setSourceBranch(""),`
+      + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`,
+  );
+  const worktreeControl = toggle
+    ? `(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__||${toggle})`
+    : "globalThis.__CLAUDESK_WORKTREE_CHECKBOX__";
+  const worktreeRow = row(
+    `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
+      + `{defaultMessage:"Worktree",id:"claudesk-routine-worktree"})}),`
+      + `(${worktreeControl}?${jsx}(${worktreeControl},{size:"xxs",`
+      + `checked:!!e.useWorktree,disabled:!e.isGitRepo,`
+      + `onCheckedChange:t=>e.setUseWorktree&&e.setUseWorktree(t===!0),`
+      + `"aria-label":"Run in an isolated worktree"}):null)`,
   );
   const permissionRow = row(
     `${jsxSingle}("span",{className:${labelClass},children:${jsxSingle}(${message},`
@@ -3337,7 +3446,7 @@ function routineFormRowsReplacement(source, target) {
       + `[e.permissionMode]??"Default",triggerAriaLabel:"Permission mode",`
       + `triggerClassName:${styles}.secondary})`,
   );
-  return `,${cwdRow},${permissionRow}`;
+  return `,${cwdRow},${branchRow},${worktreeRow},${permissionRow}`;
 }
 
 // The Code surface's routine page is a second implementation of the same
@@ -3426,14 +3535,40 @@ function epitaxyRoutineReplacement(source, target) {
     + `let t=globalThis["claude.web"]?.FileSystem,`
     + `p=await t?.browseCodeFolder?.("Choose the routine's working folder",!0,!0,`
     + `${state}.cwd||void 0);`
-    + `typeof p==="string"&&p&&${state}.setCwd&&${state}.setCwd(p)},`
+    + `typeof p==="string"&&p&&${state}.setCwd&&(p!==${state}.cwd?`
+    + `(${state}.setCwd(p),${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `${state}.setUseWorktree&&${state}.setUseWorktree(!1)):${state}.setCwd(p))},`
     + `className:"inline-flex min-w-0 items-center gap-1.5 text-body text-secondary hover:text-primary",`
     + `children:[${jsx}("span",{className:"max-w-[240px] truncate",`
     + `children:${state}.cwd||"Workspace default"}),`
     + `${jsx}("span",{className:"text-footnote text-muted",children:"Change"})]}),`
     + `${state}.cwd?${multi}("button",{type:"button",`
-    + `onClick:()=>${state}.setCwd&&${state}.setCwd(""),`
+    + `onClick:()=>{${state}.setCwd&&${state}.setCwd(""),`
+    + `${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `${state}.setUseWorktree&&${state}.setUseWorktree(!1)},`
     + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`
+    + `]})`;
+  const branchRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Branch"}),`
+    + `${jsx}(${combobox},{items:${state}.branches??[],itemToLabel:t=>t,`
+    + `value:${state}.sourceBranch||null,`
+    + `onSelect:t=>${state}.setSourceBranch&&${state}.setSourceBranch(t),`
+    + `icon:"GitBranch",triggerLabel:${state}.sourceBranch||"Default branch",`
+    + `triggerAriaLabel:"Branch",triggerClassName:${triggerClass},`
+    + `disabled:!${state}.isGitRepo,isLoading:!!${state}.branchesLoading,`
+    + `placeholder:"Search branches…",side:"bottom",`
+    + `emptyMessage:${state}.isGitRepo?"No branches match":"Not a git repository"}),`
+    + `${state}.sourceBranch?${multi}("button",{type:"button",`
+    + `onClick:()=>${state}.setSourceBranch&&${state}.setSourceBranch(""),`
+    + `className:"text-footnote text-muted hover:text-primary",children:"Clear"}):null`
+    + `]})`;
+  const worktreeRow = `${multi}("div",{className:${rowClass},children:[`
+    + `${jsx}("span",{className:${labelClass},children:"Worktree"}),`
+    + `(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__?`
+    + `${jsx}(globalThis.__CLAUDESK_WORKTREE_CHECKBOX__,{size:"xxs",`
+    + `checked:!!${state}.useWorktree,disabled:!${state}.isGitRepo,`
+    + `onCheckedChange:t=>${state}.setUseWorktree&&${state}.setUseWorktree(t===!0),`
+    + `"aria-label":"Run in an isolated worktree"}):null)`
     + `]})`;
   const permissionRow = `${multi}("div",{className:${rowClass},children:[`
     + `${jsx}("span",{className:${labelClass},children:"Permission mode"}),`
@@ -3451,7 +3586,7 @@ function epitaxyRoutineReplacement(source, target) {
     { id: routineEpitaxyPatchId, start: modelCall.start, end: modelCall.end,
       original, replacement: picker },
     { id: routineEpitaxyPatchId, start: children.end - 1, end: children.end - 1,
-      original: "", replacement: `,${cwdRow},${permissionRow}` },
+      original: "", replacement: `,${cwdRow},${branchRow},${worktreeRow},${permissionRow}` },
   ];
 }
 
@@ -4236,7 +4371,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const formStates = [];
     const jobConfigs = [];
     const formRows = [];
-    walk(ast, [], (node) => {
+    const worktreeCheckboxes = [];
+    walk(ast, [], (node, ancestors) => {
       const picker = routineModelPickerTarget(node);
       if (picker) modelPickers.push(picker);
       const state = routineFormStateTarget(node);
@@ -4245,7 +4381,23 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (job) jobConfigs.push(job);
       const rows = routineFormRowsTarget(node);
       if (rows) formRows.push(rows);
+      const checkbox = worktreeCheckboxTarget(node, ancestors);
+      if (checkbox) {
+        worktreeCheckboxes.push({
+          declarator: checkbox,
+          declaration: ancestors[ancestors.length - 1],
+        });
+      }
     });
+    if (worktreeCheckboxes.length === 1) {
+      const { declarator, declaration } = worktreeCheckboxes[0];
+      // Insert after the whole declaration list, not the declarator: this one
+      // sits in a comma-separated `var` list, and a statement spliced between
+      // declarators would leave the rest of the list dangling.
+      const at = declaration?.type === "VariableDeclaration" ? declaration.end : declarator.end;
+      patches.push({ id: routineWorktreeCheckboxPatchId, start: at, end: at, original: "",
+        replacement: `;globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=${declarator.id.name};` });
+    }
     if (modelPickers.length === 1) {
       const replacement = routineModelPickerReplacement(source, modelPickers[0]);
       if (replacement !== null) {

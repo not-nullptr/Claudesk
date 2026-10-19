@@ -49,6 +49,8 @@ const codeTask = {
   enabled: true,
   model: "model-a",
   cwd: "/workspace/repo",
+  sourceBranch: "release",
+  useWorktree: true,
 };
 const files = {
   "cowork-1": "---\nname: Morning brief\ndescription: say hi\n---\nSummarize yesterday.\n",
@@ -143,6 +145,8 @@ const cloudCreate = {
         cwd: "/workspace/created-repo",
         permission_mode: "bypassPermissions",
         effort_level: "high",
+        source_branch: "release",
+        use_worktree: true,
       },
       events: [{
         data: {
@@ -196,6 +200,8 @@ const createDesktop = {
         enabled: true,
         ...(params.cwd ? { cwd: params.cwd } : {}),
         ...(params.permissionMode ? { permissionMode: params.permissionMode } : {}),
+        ...(params.sourceBranch ? { sourceBranch: params.sourceBranch } : {}),
+        ...(params.useWorktree === true ? { useWorktree: true } : {}),
       };
       routineTasks.push(task);
       routineFiles[task.id] = `---\nname: ${params.name}\n---\n${params.prompt}\n`;
@@ -210,6 +216,14 @@ const createDesktop = {
       if (lastUpdate.cwd !== undefined) routineTasks[0].cwd = lastUpdate.cwd;
       if (lastUpdate.permissionMode !== undefined) {
         routineTasks[0].permissionMode = lastUpdate.permissionMode;
+      }
+      // A present-but-undefined key is a cleared field (the bridge encodes the
+      // update with json-undefined-v1 so the Desktop sees the key).
+      if ("sourceBranch" in lastUpdate) {
+        routineTasks[0].sourceBranch = lastUpdate.sourceBranch;
+      }
+      if ("useWorktree" in lastUpdate) {
+        routineTasks[0].useWorktree = lastUpdate.useWorktree;
       }
       return routineTasks[0];
     }
@@ -261,6 +275,14 @@ assert.equal(createdTrigger.trigger.job_config.ccr.session_context.cwd,
 assert.equal(createdTrigger.trigger.job_config.ccr.session_context.permission_mode,
   "bypassPermissions");
 assert.equal(createdTrigger.trigger.job_config.ccr.session_context.effort_level, "high");
+assert.equal(createdTrigger.trigger.source_branch, "release",
+  "the job config's branch becomes the task's sourceBranch");
+assert.equal(createdTrigger.trigger.use_worktree, true,
+  "the job config's worktree flag becomes the task's useWorktree");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.source_branch,
+  "release", "the edit form reads the branch back from the job config");
+assert.equal(createdTrigger.trigger.job_config.ccr.session_context.use_worktree,
+  true, "the edit form reads the worktree flag back from the job config");
 assert.equal(instructionsFromJobConfig(createdTrigger.trigger.job_config),
   "Do not output anything else other than what is specified:\n"
     + "- Current working directory\n- Current user",
@@ -276,6 +298,8 @@ const edited = await creator.updateTrigger(createdTrigger.trigger.id, {
       cwd: "/workspace/edited-repo",
       permission_mode: "acceptEdits",
       effort_level: "low",
+      source_branch: "develop",
+      use_worktree: true,
     },
     events: [{
       data: { message: { role: "user", content: "List the modified files." } },
@@ -293,6 +317,12 @@ assert.equal(edited.trigger.cwd, "/workspace/edited-repo");
 assert.equal(edited.trigger.permission_mode, "acceptEdits");
 assert.equal(edited.trigger.effort_level, "low",
   "editing the job config updates the stored effort");
+assert.equal(lastUpdate.sourceBranch, "develop",
+  "editing the job config updates the task's branch");
+assert.equal(lastUpdate.useWorktree, true,
+  "editing the job config updates the task's worktree flag");
+assert.equal(edited.trigger.source_branch, "develop");
+assert.equal(edited.trigger.use_worktree, true);
 assert.equal(instructionsFromJobConfig(edited.trigger.job_config), "List the modified files.",
   "the detail re-sent after an edit shows the new instructions");
 
@@ -309,6 +339,28 @@ assert.equal(createRuns.at(-1).body.config.cwd, "/workspace/edited-repo",
 assert.equal(createRuns.at(-1).body.config.permission_mode, "acceptEdits");
 assert.equal(createRuns.at(-1).body.config.effort_level, "low",
   "the routine's effort reaches the Code session");
+assert.equal(createRuns.at(-1).body.config.source_branch, "develop",
+  "the routine's branch reaches the Code session");
+assert.equal(createRuns.at(-1).body.config.use_worktree, true,
+  "the routine's worktree flag reaches the Code session");
+
+// Clearing both values removes them from the task record and from the next
+// fire's start config. The empty string is sent, not omitted: that is what
+// tells the bridge to remove the stored branch.
+const cleared = await creator.updateTrigger(createdTrigger.trigger.id, {
+  job_config: { ccr: { session_context: { source_branch: "", use_worktree: false } } },
+});
+assert.ok("sourceBranch" in lastUpdate && lastUpdate.sourceBranch === undefined,
+  "an emptied branch clears the task's sourceBranch");
+assert.ok("useWorktree" in lastUpdate && lastUpdate.useWorktree === false,
+  "an unchecked worktree clears the task's useWorktree");
+assert.equal(cleared.trigger.source_branch, undefined);
+assert.equal(cleared.trigger.use_worktree, undefined);
+await creator.fireRoutine(createdTrigger.trigger.id, {});
+assert.equal("source_branch" in createRuns.at(-1).body.config, false,
+  "a cleared branch is not sent to the runner");
+assert.equal("use_worktree" in createRuns.at(-1).body.config, false,
+  "a cleared worktree flag is not sent to the runner");
 
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});
@@ -373,6 +425,10 @@ assert.equal(created[0].body.trigger_id, codeId,
 assert.equal(created[0].body.origin, "fire_routine");
 assert.equal(created[0].body.config.model, "model-a");
 assert.equal(created[0].body.config.cwd, "/workspace/repo");
+assert.equal(created[0].body.config.source_branch, "release",
+  "the task's branch is the worktree's source");
+assert.equal(created[0].body.config.use_worktree, true,
+  "the task's worktree option reaches a bridge fire");
 assert.equal(created[0].body.events[0].payload.type, "user");
 assert.equal(created[0].body.events[0].payload.message.content[0].text,
   "Fix the failing test.\n\n---\nAdditional context for this run:\nCI failed");

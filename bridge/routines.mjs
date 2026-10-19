@@ -325,6 +325,14 @@ export function createRoutineService({
       || textOf(taskContext.effort);
     const taskCwd = textOf(task.cwd) || textOf(taskContext.cwd);
     const taskPermission = textOf(task.permissionMode) || textOf(taskContext.permission_mode);
+    // The scheduled-task record has both fields (the Desktop's scheduler reads
+    // them); a task written by an older bridge carries them in the job config.
+    // A present but empty `sourceBranch` is a cleared value, so it wins over
+    // the job config's stale copy.
+    const taskBranch = typeof task.sourceBranch === "string"
+      ? task.sourceBranch : textOf(taskContext.source_branch);
+    const taskWorktree = typeof task.useWorktree === "boolean"
+      ? task.useWorktree : taskContext.use_worktree === true;
     return {
       id: routineId,
       name: task.displayName || task.name || taskId,
@@ -346,6 +354,8 @@ export function createRoutineService({
               ...(taskCwd ? { cwd: taskCwd } : {}),
               ...(taskPermission ? { permission_mode: taskPermission } : {}),
               ...(effort ? { effort_level: effort } : {}),
+              ...(taskBranch ? { source_branch: taskBranch } : {}),
+              ...(taskWorktree ? { use_worktree: true } : {}),
             },
             events: prompt
               ? [{
@@ -371,7 +381,8 @@ export function createRoutineService({
       source: "local",
       kind: taskKind(task),
       ...(taskCwd ? { cwd: taskCwd } : {}),
-      ...(task.useWorktree === true ? { use_worktree: true } : {}),
+      ...(taskBranch ? { source_branch: taskBranch } : {}),
+      ...(taskWorktree ? { use_worktree: true } : {}),
       ...(textOf(task.spaceId) ? { space_id: task.spaceId } : {}),
       ...(isoTime(task.createdAt) ? { created_at: isoTime(task.createdAt) } : {}),
       ...(isoTime(task.updatedAt) ? { updated_at: isoTime(task.updatedAt) } : {}),
@@ -465,7 +476,8 @@ export function createRoutineService({
     };
   }
 
-  async function startCodeSession(task, message, model, images = [], routineId = "", effort = "") {
+  async function startCodeSession(task, message, model, images = [], routineId = "",
+    effort = "", sourceBranch = "", useWorktree = false) {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -487,6 +499,11 @@ export function createRoutineService({
           model,
           ...(effort ? { effort_level: effort } : {}),
           ...(textOf(task.permissionMode) ? { permission_mode: task.permissionMode } : {}),
+          // The guest runner creates the isolated copy from this branch and
+          // names its own branch after the session, exactly as a composer start
+          // with the folder/branch/worktree strip does.
+          ...(sourceBranch ? { source_branch: sourceBranch } : {}),
+          ...(useWorktree ? { use_worktree: true } : {}),
         },
         events: [userEvent(message, images)],
       },
@@ -557,8 +574,15 @@ export function createRoutineService({
     const taskContext = taskSessionContext(task);
     const effort = textOf(state.configs?.[canonicalId]?.effort)
       || textOf(taskContext.effort_level) || textOf(taskContext.effort);
+    const sourceBranch = typeof task.sourceBranch === "string"
+      ? task.sourceBranch
+      : textOf(taskContext.source_branch);
+    const useWorktree = typeof task.useWorktree === "boolean"
+      ? task.useWorktree
+      : taskContext.use_worktree === true;
     const sessionId = kind === "code"
-      ? await startCodeSession(task, message, model, attached, canonicalId, effort)
+      ? await startCodeSession(task, message, model, attached, canonicalId, effort,
+        sourceBranch, useWorktree)
       : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
@@ -662,6 +686,14 @@ export function createRoutineService({
       if (chosenPermission) args.permissionMode = chosenPermission;
       const chosenCwd = textOf(body.cwd) || textOf(context.cwd);
       if (chosenCwd) args.cwd = chosenCwd;
+      // The branch and worktree flag are task-record fields (the Desktop's own
+      // scheduler acts on them), so they ride the create call rather than a
+      // bridge-side sidecar like effort.
+      const chosenSourceBranch = textOf(body.source_branch) || textOf(context.source_branch);
+      if (chosenSourceBranch) args.sourceBranch = chosenSourceBranch;
+      const chosenUseWorktree = body.use_worktree !== undefined
+        ? body.use_worktree === true : context.use_worktree === true;
+      if (chosenUseWorktree) args.useWorktree = true;
       const chosenEffort = textOf(body.effort_level ?? body.effort)
         || textOf(context.effort_level ?? context.effort);
       // A routine is a Code scheduled task. On a build with the Code store
@@ -726,6 +758,16 @@ export function createRoutineService({
       } else if (context && context.cwd !== undefined) {
         patch.cwd = textOf(context.cwd) || undefined;
       }
+      if (body.source_branch !== undefined) {
+        patch.sourceBranch = textOf(body.source_branch) || undefined;
+      } else if (context && context.source_branch !== undefined) {
+        patch.sourceBranch = textOf(context.source_branch) || undefined;
+      }
+      if (body.use_worktree !== undefined) {
+        patch.useWorktree = body.use_worktree === true;
+      } else if (context && context.use_worktree !== undefined) {
+        patch.useWorktree = context.use_worktree === true;
+      }
       const effortGiven = body.effort_level !== undefined || body.effort !== undefined
         || (context && (context.effort_level !== undefined || context.effort !== undefined));
       const chosenEffort = textOf(body.effort_level ?? body.effort)
@@ -733,8 +775,11 @@ export function createRoutineService({
       const surface = task._routineSurface ?? "CoworkScheduledTasks";
       if (Object.keys(patch).length) {
         try {
+          // `json-undefined-v1` keeps a present-but-undefined field on the
+          // wire: that is how a cleared cwd/branch is removed from the task
+          // record (the Desktop tests `"sourceBranch" in n`, not truthiness).
           await desktop.invoke(surface, "updateScheduledTask",
-            [{ scheduledTaskId: taskId, ...patch }]);
+            [{ scheduledTaskId: taskId, ...patch }], "json-undefined-v1");
         } catch (error) {
           throw new RoutineError(502, "api_error",
             `the scheduled task store refused the update: ${error?.message || error}`);
