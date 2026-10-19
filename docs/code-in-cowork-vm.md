@@ -489,6 +489,9 @@ What is left is the **deployment** half, and it needs the box:
    container when one is there, else fetched once from the pinned npm artifact
    into the account's data root), carries the account's model endpoint and key
    into the guest's root-only `runner.env` (loopback rewritten to `10.0.2.2`),
+   along with the auto permission mode classifier's fallback model when
+   `CLAUDE_AUTO_MODE_MODEL` names one (`ANTHROPIC_DEFAULT_OPUS_MODEL` — the
+   container's `startapp.sh` export does not cross into the VM),
    and the runner asks the agent the way the product's own runner asks its
    child — read from the shipped binary: `--print`, `--input-format
    stream-json` / `--output-format stream-json`, `--verbose`,
