@@ -947,6 +947,72 @@ const routineTriggerCompiled = await minify(routineTriggerCards, {
 assert.equal(inspectRenderer(routineTriggerCompiled.code, false, true).patches
   .filter(patch => patch.id === "routine-api-trigger").length, 1,
   "a mangled availableCards memo must still be spliced once");
+// The routine form's model picker wrapper, extended with an effort prop and the
+// routine's own state. Its `onStateChange` is called with `(nextState, event)`:
+// the model comes from the state (as upstream read it) and the effort from the
+// event's kind. Picking an effort whose `kind` this handler never saw left the
+// pill on the first option ("Low"), and model picks never reached the form.
+const routineModelPicker = 'function Q({options:e,value:t,onChange:n,selectedLabel:r,'
+  + 'qualifier:i,disabled:o=!1,internalCatalog:c=!1}){'
+  + 'let l=t||Z,u=d(()=>{let t=e.map(e=>({id:e.model||Z,name:e.name,'
+  + 'description:e.description??null,section:e.section==="overflow"?"overflow":"main",'
+  + 'disabled:e.disabledReason!==void 0,'
+  + 'disabled_reason:e.disabledReason===void 0?null:{type:"model_disabled",'
+  + 'message:e.disabledReason},thinking:{type:"none"}})),n=c?N(t):t;'
+  + 'return n.some(e=>e.id===l)||n.push({id:l,name:r??l,section:"deprecated",'
+  + 'disabled:!0,thinking:{type:"none"}}),{models:n}},[e,l,r,c]),'
+  + 'f=d(()=>({model:l}),[l]),m=s(e=>{n(e.model===Z?void 0:e.model)},[n]);'
+  + 'return a(ee,{size:"sm",align:"end",catalog:u,state:f,onStateChange:m,'
+  + 'triggerQualifier:i,triggerName:te(t,p(t??"")),disabled:o,config:c?me:void 0})}';
+const pickerPatch = inspectRenderer(routineModelPicker, false, true).patches
+  .filter(patch => patch.id === "routine-model-effort-picker");
+assert.equal(pickerPatch.length, 1,
+  "the routine form's model picker must be extended exactly once");
+assert.ok(pickerPatch[0].replacement
+  .includes('m=s((e,t)=>{t?.kind==="effort"'),
+  "the effort commit event must be read from onStateChange's second argument");
+assert.ok(pickerPatch[0].replacement.includes(':n(e.model===Z?void 0:e.model)'),
+  "the model must still be forwarded from onStateChange's first argument");
+assert.ok(!pickerPatch[0].replacement.includes('e.kind==='),
+  "the state object is not the commit event");
+// The composer's worktree toggle is the shared Checkbox component. The routine
+// form's chunk imports only the Switch, so its own chunk publishes the Checkbox
+// on the global; the form rows fall back to the Switch if that splice is absent.
+const worktreeCheckboxChunk = 'var before=null,'
+  + 'rO=J(({label:e,disabled:t,...n},r)=>{let v=K(z,{ref:r,"data-cds":"Checkbox",...n});'
+  + 'return v}),after=q(null);'
+  // The same literal inside a component body declares the base element; only
+  // the module-level declarator is the component and must be published.
+  + 'function inner(){let v=K(z,{"data-cds":"Checkbox"});return v}';
+assert.equal(inspectRenderer(worktreeCheckboxChunk, false, false).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "the worktree control is not published outside web-shell mode");
+const worktreeControlPatches = inspectRenderer(worktreeCheckboxChunk, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish");
+assert.equal(worktreeControlPatches.length, 1,
+  "exactly the module-level Checkbox component is published");
+assert.equal(worktreeControlPatches[0].replacement,
+  ";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;",
+  "the splice names the component binding in its own chunk");
+assert.equal(inspectRenderer(`${worktreeCheckboxChunk}\n`
+  + `${worktreeCheckboxChunk.replace("rO", "bO").replace("function inner", "function innerB")}`,
+  false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 0,
+  "two Checkbox components must refuse the publish rather than pick one");
+const worktreeControlOut = patchRendererSources(
+  new Map([["worktree-control.js",
+    `${webShellFixtures}\n${accountMenuName}\n${worktreeCheckboxChunk}`]]), false, true)
+  .sources.get("worktree-control.js");
+assert.ok(worktreeControlOut.includes(";globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the component must be published after the declaration list");
+assert.ok(worktreeControlOut.includes(",after=q(null);;globalThis.__CLAUDESK_WORKTREE_CHECKBOX__=rO;"),
+  "the publish must land after the whole declaration, not between declarators");
+const worktreeControlCompiled = await minify(worktreeCheckboxChunk, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(worktreeControlCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-worktree-control-publish").length, 1,
+  "a mangled Checkbox component must still be published once");
 // The home-layout assignment: the chunk that reads the new-page gate returns
 // the assignment object the Desktop build compiles out — eligible, settled and
 // assignment hardcoded false — so the renderer always settles on the classic

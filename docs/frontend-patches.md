@@ -394,20 +394,31 @@ scheduled task on the deployment's own VM in both cases:
   stripped the catalog down to id/name, and the picker call site are each
   matched by shape; the composite component itself is reused, not re-created.
 - `routine-form-start-options` and `routine-job-config-start-options` add
-  `cwd`, permission mode and effort to the form state, seed them from the
-  stored job config (which is how an edit shows the routine's own values), and
-  write them back in the create/update job config. The bridge maps `cwd` and
-  `permission_mode` onto the scheduled task's own fields; effort has no task
-  field and lives in the bridge's routine state (see `docs/routines.md`).
-- `routine-form-start-option-rows` adds the two rows to the unified form: a
+  `cwd`, permission mode, effort, source branch and worktree flag to the form
+  state, seed them from the stored job config (which is how an edit shows the
+  routine's own values), and write them back in the create/update job config.
+  The state hook also probes the selected folder through the renderer's own git
+  IPC (`LocalSessions.getGitInfo`/`getLocalBranches`, answered by the guest
+  runner on a tenant) and exposes the branch list, loading and
+  `isGitRepo` to the rows. The bridge maps `cwd`, `permission_mode`,
+  `source_branch` and `use_worktree` onto the scheduled task's own fields;
+  effort has no task field and lives in the bridge's routine state (see
+  `docs/routines.md`).
+- `routine-form-start-option-rows` adds four rows to the unified form: a
   working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
-  the in-page picker lists the instance's workspace) and a permission-mode
-  combobox. Both the create page and the edit dialog render this same form.
+  the in-page picker lists the instance's workspace), the composer's own branch
+  combobox (`itemToLabel` over the probed branches, with a tooltip and a Clear
+  action), its worktree checkbox, and a permission-mode combobox. Both the
+  create page and the edit dialog render this same form. The branch and
+  worktree rows are disabled until the folder probes as a git repository; the
+  checkbox is the exact shared `Checkbox` component the composer's strip uses,
+  published as `globalThis.__CLAUDESK_WORKTREE_CHECKBOX__` by
+  `routine-worktree-control-publish` (the form's own switch is the fallback).
 - `routine-epitaxy-start-options` covers the Code surface's **own** routine
   page and edit dialog, which do not use the unified form: their instructions
   composer (`EpitaxyRoutineCreatePage` → `Q`'s non-unified layout) is a second
   implementation with a plain model combobox. The splice replaces that
-  combobox with the published model+effort wrapper and appends the same two
+  combobox with the published model+effort wrapper and appends the same four
   rows to its layout. The wrapper itself is published on
   `globalThis.__CLAUDESK_MODEL_PICKER__` by `routine-model-picker-publish`,
   because that page imports the wrapper's chunk for side effects only and has
