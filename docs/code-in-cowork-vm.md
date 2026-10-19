@@ -456,6 +456,25 @@ the images are current, so a runner change cannot be half-deployed — the
 containers current while every VM keeps the previous runner — which is a
 mistake this payload has already seen.
 
+**Stop reaches the VM (landed).** The Code surface's Stop is not a REST verb:
+the renderer appends an SDK `control_request` (`{type:"control_request",
+request_id, request:{subtype:"interrupt"}}`) to the session's event log, in the
+same `POST …/events` collection as a user turn. The bridge records it on the
+session, clears the runner assignment (the shipped runner's poll reader aborts
+a child whose assignment disappears), and wakes the pool's held poll with a
+`cancellations` list. `guest/runner.py` applies that list to the live turn: it
+signals the child with SIGINT (then terminate, then kill), writes the
+`result` terminal the reader closes the turn on — synthesized as
+`error_during_execution` if the child exits without one — and releases the
+session, which reads idle in the UI. The bridge also writes the
+`control_response` the Stop button's receipt waits on, because the runner closes
+the child's stdin after the prompt and so never forwards mid-turn control
+requests to it. The REST spelling (`POST …/interrupt` / `…/stop`) and a
+session's delete do the same thing; a deleted session's id is carried as a
+short-lived cancellation tombstone, since its record is already gone. A held
+poll whose connection died (the VM suspended or restarted) is dropped with its
+socket and no longer claims the placement it was woken for.
+
 This bakes the payload in rather than reading it from the `claudeshared` share,
 because it does not depend on the still-open question of whether the host can
 write that share's directory. Once that is answered, the env — and the runner

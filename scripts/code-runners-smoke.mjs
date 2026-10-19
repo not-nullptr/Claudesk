@@ -103,6 +103,24 @@ try {
   assert.equal(polled.hints.length, 1, "a nacked session is offered again");
   assert.equal(polled.hints[0].attempt, 2, "the attempt is bumped on a nack");
 
+  // A poll whose connection died must not claim anything. The guest VM can
+  // suspend with its held poll still open on the bridge; when the pool was
+  // then woken, the dead request used to take the session — leaving it
+  // `offered` with no runner holding it and no client that received it.
+  await backend.queueSession({ poolId: primary.pool_id, sessionUuid: "dead-poll" });
+  const deadPoll = await backend.pollSpawnHints({
+    headers: auth,
+    request: { socket: { destroyed: true, once() {}, off() {} } },
+  });
+  assert.deepEqual(deadPoll.hints, [], "a dead poll is handed nothing");
+  const livePoll = await backend.pollSpawnHints({
+    headers: auth,
+    request: { socket: { destroyed: false, once() {}, off() {} } },
+  });
+  assert.ok(livePoll.hints.some((hint) => hint.session_uuid === "dead-poll"),
+    "the placement is still there for the next live poll");
+  await backend.deleteSession({ sessionId: "dead-poll" });
+
   // The admin UI reads the secret back by pool id, not from the list.
   const secrets = await backend.poolSecrets({ poolId: primary.pool_id });
   assert.equal(secrets.pool_secret, primary.secret);
@@ -353,6 +371,121 @@ try {
   assert.equal((await backend.session(failsafe.session.id)).session.permission_mode,
     "default", "an explicit in-session switch to Manual still applies");
   await backend.deleteSession({ sessionId: failsafe.session.id });
+
+  // Stop. The Code surface has no interrupt route of its own: its Stop appends
+  // an SDK `interrupt` control request to the session's event log. The store
+  // must act on it — clear the runner's assignment (the shipped runner aborts
+  // on that), hand the id to the guest runner's poll (`cancellations`), and
+  // answer the control request so the Stop button settles.
+  const stoppable = await backend.createSession({
+    body: { self_hosted_runner_pool_id: primary.pool_id },
+  });
+  await backend.appendEvents({ sessionId: stoppable.session.id, body: { events: [
+    { payload: { type: "user", message: { role: "user", content: "long task" } } },
+  ] } });
+  await backend.pollSpawnHints({ headers: auth });
+  const stopToken = await backend.issueSessionToken({
+    headers: auth, sessionId: stoppable.session.id,
+  });
+  assert.equal((await backend.pollSpawnHints({ headers: auth })).cancellations
+    .some((entry) => entry.session_uuid === stoppable.session.id), false,
+  "a running session is not cancelled until a Stop arrives");
+
+  const stopAppend = await backend.appendEvents({
+    sessionId: stoppable.session.id,
+    body: { events: [{ payload: { type: "control_request", request_id: "interrupt-smoke",
+      request: { subtype: "interrupt" } } }] },
+  });
+  assert.equal(stopAppend.data.length, 2,
+    "the Stop lands with the control_response its button waits on");
+  const stopEvents = await backend.eventsAfter(stoppable.session.id, 0);
+  const stopAck = stopEvents.find((event) => (event.payload ?? event).type === "control_response");
+  assert.equal(stopAck.source, "worker", "the receipt is the worker's own voice");
+  assert.deepEqual(stopAck.payload.response,
+    { subtype: "success", request_id: "interrupt-smoke", response: {} },
+    "the receipt carries the request id the client registered");
+
+  const stopPoll = await backend.pollSpawnHints({ headers: auth });
+  const notice = stopPoll.cancellations.find(
+    (entry) => entry.session_uuid === stoppable.session.id);
+  assert.ok(notice, "the guest runner is told which turn to stop on its poll");
+  assert.equal(notice.reason, "interrupt");
+  assert.equal(notice.request_id, "interrupt-smoke");
+  const workPoll = await backend.pollWork({ headers: auth });
+  assert.equal(workPoll.assignment_ids.includes(stoppable.session.id), false,
+    "the assignment disappears, which is the shipped runner's abort signal");
+
+  // The turn releases as an interrupted turn would; the notice goes away.
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${stopToken.session_token}` },
+    sessionId: stoppable.session.id,
+  });
+  assert.equal(
+    (await backend.pollSpawnHints({ headers: auth })).cancellations
+      .some((entry) => entry.session_uuid === stoppable.session.id),
+    false, "a released turn is no longer cancelled");
+
+  // The next message starts a *new* turn, and the old Stop must not cancel it.
+  await backend.appendEvents({ sessionId: stoppable.session.id, body: { events: [
+    { payload: { type: "user", message: { role: "user", content: "next turn" } } },
+  ] } });
+  const afterStop = await backend.pollSpawnHints({ headers: auth });
+  assert.ok(afterStop.hints.some((hint) => hint.session_uuid === stoppable.session.id),
+    "the message after a Stop is offered to the pool");
+  assert.equal(afterStop.cancellations.some(
+    (entry) => entry.session_uuid === stoppable.session.id), false,
+  "the previous Stop does not cancel the next turn");
+
+  // The REST spelling the routine cancel and the mobile facade use.
+  const restStop = await backend.interruptSession({
+    sessionId: stoppable.session.id, requestId: "rest-stop",
+  });
+  assert.equal(restStop.session.id, stoppable.session.id);
+  assert.equal(await backend.interruptSession({ sessionId: "no-such-session" }), null,
+    "stopping an unknown session is not found");
+
+  // The composer's send-and-interrupt: a Stop and a new message in one batch.
+  // The cancelled turn must not swallow the message — the release puts the
+  // session back on the pool so the next turn answers it.
+  const interrupting = await backend.createSession({
+    body: { self_hosted_runner_pool_id: primary.pool_id },
+  });
+  await backend.appendEvents({ sessionId: interrupting.session.id, body: { events: [
+    { payload: { type: "user", message: { role: "user", content: "first" } } },
+  ] } });
+  await backend.pollSpawnHints({ headers: auth });
+  const interruptingToken = await backend.issueSessionToken({
+    headers: auth, sessionId: interrupting.session.id,
+  });
+  await backend.appendEvents({ sessionId: interrupting.session.id, body: { events: [
+    { payload: { type: "control_request", request_id: "interrupt-and-send",
+      request: { subtype: "interrupt" } } },
+    { payload: { type: "user", message: { role: "user", content: "second" } } },
+  ] } });
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${interruptingToken.session_token}` },
+    sessionId: interrupting.session.id,
+  });
+  const nextTurn = await backend.pollSpawnHints({ headers: auth });
+  assert.ok(nextTurn.hints.some((hint) => hint.session_uuid === interrupting.session.id),
+    "the message sent with the Stop starts the next turn");
+  assert.equal(nextTurn.cancellations.some(
+    (entry) => entry.session_uuid === interrupting.session.id), false,
+  "and the Stop does not cancel that new turn");
+  await backend.deleteSession({ sessionId: interrupting.session.id });
+
+  // Deleting a session that may still be running leaves a tombstone the
+  // runner's poll names — the record is gone, so nothing else can carry it.
+  const doomed = await backend.createSession({
+    body: { self_hosted_runner_pool_id: primary.pool_id },
+  });
+  await backend.issueSessionToken({ headers: auth, sessionId: doomed.session.id });
+  await backend.deleteSession({ sessionId: doomed.session.id });
+  const tombstoned = await backend.pollSpawnHints({ headers: auth });
+  assert.ok(tombstoned.cancellations.some((entry) =>
+    entry.session_uuid === doomed.session.id && entry.reason === "deleted"),
+  "a deleted running session is cancelled on the runner's next poll");
+  await backend.deleteSession({ sessionId: stoppable.session.id });
 
   // A routine fire's session names the routine it ran. The Code routine page
   // reads its history as `?trigger_id=`, the routines rollup as

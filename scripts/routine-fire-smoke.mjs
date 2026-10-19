@@ -89,6 +89,7 @@ function fakeDesktop(tasks, content) {
 }
 
 const created = [];
+const interrupted = [];
 let woke = 0;
 const codeRunners = {
   async primaryPool() {
@@ -97,6 +98,10 @@ const codeRunners = {
   async createSession({ body, source }) {
     created.push({ body, source });
     return { session: { id: "cse_created" } };
+  },
+  async interruptSession({ sessionId }) {
+    interrupted.push(sessionId);
+    return sessionId === "cse_created" ? { session: { id: sessionId } } : null;
   },
 };
 
@@ -528,6 +533,26 @@ assert.deepEqual(created.at(-1).body.config.mcp_servers, [{
 assert.equal(Object.hasOwn(created[0].body.config, "mcp_servers"), false,
   "a fire without connectors adds no MCP config");
 
+// Stopping a run — the routine detail's cancel button. A Code run is answered
+// from the runner store; a Cowork run has no store here, so it is stopped
+// through the Desktop's own session call. An unknown routine is still a 404.
+await service.cancelRun(codeId, "cse_created");
+assert.deepEqual(interrupted, ["cse_created"],
+  "a Code run is interrupted through the runner store");
+await service.cancelRun(coworkId, "local_run_1");
+assert.deepEqual(
+  desktop.calls.filter((call) => call.surface === "LocalAgentModeSessions"
+    && call.method === "stop").map((call) => call.args[0]),
+  ["local_run_1"], "a Cowork run is stopped through LocalAgentModeSessions");
+await assert.rejects(
+  () => service.cancelRun(routineIdForTaskId("no-such-task"), "cse_created"),
+  (error) => error.statusCode === 404,
+  "cancelling a run of an unknown routine is not found");
+await assert.rejects(
+  () => service.cancelRun(codeId, "  "),
+  (error) => error.statusCode === 400,
+  "a missing session id is a bad request");
+
 // A deployment whose models come from gateway discovery leaves the env list
 // empty; the fire asks the instance for the models it offers rather than
 // refusing every run.
@@ -615,6 +640,7 @@ try {
 // --- the HTTP routes --------------------------------------------------------
 
 const httpStarts = [];
+const httpStops = [];
 const stub = createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
@@ -644,6 +670,11 @@ const stub = createServer(async (request, response) => {
   if (body.surface === "LocalAgentModeSessions" && body.method === "start") {
     httpStarts.push(body.args[0]);
     send({ ok: true, value: { sessionId: body.args[0].sessionId } });
+    return;
+  }
+  if (body.surface === "LocalAgentModeSessions" && body.method === "stop") {
+    httpStops.push(body.args[0]);
+    send({ ok: true, value: null });
     return;
   }
   send({ ok: true, value: null });
@@ -718,6 +749,19 @@ try {
   assert.deepEqual(httpStarts.at(-1).images,
     [{ name: "image-1", mimeType: "image/png", base64: tinyPng }],
     "images in the HTTP body reach the started session");
+
+  // The routine detail's Stop on a run: the renderer posts
+  // `/runs/{sessionId}/cancel`, and the run is an ordinary Cowork session.
+  const cancelRun = await fetch(
+    `${base}/v1/code/triggers/${encodeURIComponent(coworkId)}/runs/`
+    + `${encodeURIComponent(fired.claude_code_session_id)}/cancel`, { method: "POST" });
+  assert.equal(cancelRun.status, 200, await cancelRun.clone().text());
+  assert.deepEqual(httpStops, [fired.claude_code_session_id],
+    "the HTTP cancel route stops the run's session through the Desktop");
+  const cancelUnknown = await fetch(
+    `${base}/v1/code/triggers/${encodeURIComponent(routineIdForTaskId("no-such-task"))}`
+    + "/runs/local_x/cancel", { method: "POST" });
+  assert.equal(cancelUnknown.status, 404, "an unknown routine is still a 404");
   // The route forwards `connectors` into the service (this is a Cowork routine,
   // so the service's own kind check is what answers).
   const connectorsFire = await fetch(

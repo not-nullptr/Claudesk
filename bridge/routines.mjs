@@ -955,6 +955,42 @@ export function createRoutineService({
       };
     },
 
+    /**
+     * POST /v1/code/triggers/:id/runs/:sessionId/cancel — Stop on a running
+     * routine run.
+     *
+     * A run is an ordinary session: a Code routine's fire lands in the
+     * code-runner store, while a Cowork routine starts a
+     * `LocalAgentModeSessions` session. Both are stopped through their own
+     * path. Cancelling is idempotent and best-effort — the page can press Stop
+     * on a run whose turn has already ended, and that is not an error.
+     */
+    async cancelRun(routineId, sessionId) {
+      // Validate the routine first, so an unknown trigger is still its 404.
+      await taskRecord(routineId);
+      const target = textOf(sessionId).trim();
+      if (!target) throw badRequest("session id is required");
+      if (codeRunners) {
+        const interrupted = await codeRunners
+          .interruptSession({ sessionId: target })
+          .catch(() => null);
+        if (interrupted) {
+          log.log(`[routines] cancelled run ${target} of ${routineId} (Code)`);
+          return {};
+        }
+      }
+      try {
+        await desktop.invoke("LocalAgentModeSessions", "stop", [target]);
+        log.log(`[routines] cancelled run ${target} of ${routineId} (Cowork)`);
+      } catch (error) {
+        // A session that already ended (or one this instance does not serve)
+        // should not fail the button; the page's refresh shows the real state.
+        (log.warn ?? log.log).call(log,
+          `[routines] could not cancel run ${target} of ${routineId}: ${error.message}`);
+      }
+      return {};
+    },
+
     /** GET /v1/code/triggers/:id/runs — the detail page's Recent fires. */
     async listRuns() {
       return { data: [], next_cursor: null, has_more: false };

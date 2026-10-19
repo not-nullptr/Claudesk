@@ -49,6 +49,10 @@ import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/prom
 import { join } from "node:path";
 
 const stateFileName = "code-runners.json";
+// How long a deleted session's id stays in the store's cancellation list: a
+// runner that is mid-turn polls again quickly, and the tombstone is what tells
+// it to stop. Ten minutes is many poll cycles, and the entries are tiny.
+const cancelTombstoneMs = 10 * 60 * 1000;
 
 // A pool id is opaque; the built bundle writes `ccpool_`-prefixed ids, so the
 // same spelling keeps anything that pattern-matches a pool id happy.
@@ -197,6 +201,43 @@ function sessionDocument(session) {
     ...(session.client_metadata ? { client_metadata: session.client_metadata } : {}),
     ...(session.unread ? { unread: true } : {}),
   };
+}
+
+/**
+ * Stop a session's running turn. The Code surface's Stop is not a REST verb on
+ * this deployment: the renderer appends an SDK control request
+ * (`{type:"control_request", request_id, request:{subtype:"interrupt"}}`) to
+ * the session's event log. Recording it on the session is what lets *both*
+ * runner kinds stop:
+ *
+ *   * the shipped runner's poll reader treats a held session's disappearance
+ *     from `assignment_ids` as the server taking it away and aborts the child,
+ *     so the assignment is cleared;
+ *   * the guest runner is handed the id in its poll's `cancellations` (see
+ *     `cancellationsFor`), because it has no assignment-list reader of its own.
+ *
+ * A session no runner has picked up yet is released instead: there is no child
+ * to kill, and the next user message requeues it.
+ */
+function markInterrupted(session, { requestId } = {}) {
+  const at = new Date().toISOString();
+  session.interrupt_requested_at = at;
+  if (typeof requestId === "string" && requestId) {
+    session.interrupt_request_id = requestId;
+  } else {
+    delete session.interrupt_request_id;
+  }
+  session.assigned_runner_id = undefined;
+  if (session.state === "pending" || session.state === "offered") {
+    session.state = "released";
+  }
+  return at;
+}
+
+/** Start a turn clean: an old Stop must not cancel the next message. */
+function clearInterrupted(session) {
+  delete session.interrupt_requested_at;
+  delete session.interrupt_request_id;
 }
 
 /** The `config` of a session document — see `sessionConfigKeys`. Sessions the
@@ -463,7 +504,7 @@ export function createRunnerBackend({
     return Math.min(asked * 1000, pollHoldCapMs);
   }
 
-  function waitForPool(poolId, holdMs) {
+  function waitForPool(poolId, holdMs, socket = null) {
     return new Promise((resolve) => {
       let set = pollWaiters.get(poolId);
       if (!set) {
@@ -474,15 +515,92 @@ export function createRunnerBackend({
         clearTimeout(timer);
         set.delete(finish);
         if (!set.size) pollWaiters.delete(poolId);
+        if (socket) socket.off?.("close", finish);
         resolve();
       };
       const timer = setTimeout(finish, holdMs);
       set.add(finish);
+      // A guest that suspended, restarted or lost the network leaves this
+      // request open on our side. Its waiter must go with the connection: a
+      // wake that completes it would otherwise let a dead client claim the
+      // session that was just placed (`offered`, delivered nowhere, no runner
+      // holding it). The socket's own close is the signal — `IncomingMessage`
+      // emits `close` on completion too, so it cannot be used for this.
+      if (socket) socket.once?.("close", finish);
     });
+  }
+
+  // Whether the request that asked for work is still able to receive the
+  // answer. A held poll that lost its client must not take a session out of
+  // the queue on the way out.
+  function requestAlive(request) {
+    if (!request) return true;
+    if (request.aborted === true) return false;
+    return request.socket?.destroyed !== true;
   }
 
   function wakePool(poolId) {
     for (const finish of [...(pollWaiters.get(poolId) ?? [])]) finish();
+  }
+
+  // Cancellation notices a poll carries. The guest runner cannot be dialled,
+  // so its held poll is also how a Stop reaches it: the bridge wakes the pool
+  // and lists the ids whose turn must end. Interrupts stay listed while the
+  // session is active (idempotent — the runner sets an event), and a deleted
+  // session's id stays a short while so a poll racing the delete still sees it.
+  function pruneCancellations(state, now = Date.now()) {
+    if (!Array.isArray(state.cancellations)) {
+      state.cancellations = [];
+      return;
+    }
+    state.cancellations = state.cancellations.filter((entry) =>
+      Number.isFinite(entry?.at_ms) && now - entry.at_ms < cancelTombstoneMs);
+  }
+
+  function addCancellationTombstone(state, session) {
+    pruneCancellations(state);
+    if (!session?.session_uuid) return;
+    state.cancellations.push({
+      session_uuid: session.session_uuid,
+      pool_id: session.pool_id,
+      at_ms: Date.now(),
+    });
+  }
+
+  function emptyPoll(state, poolId) {
+    return {
+      hints: [],
+      requests: [],
+      cancellations: cancellationsFor(state, poolId),
+      warm_hints: [],
+      pending_count: 0,
+      backing_off_count: 0,
+      circuit_broken_count: 0,
+      pool_pending_session_count: 0,
+      pool_active_session_count: state.sessions.filter(
+        (session) => session.pool_id === poolId && session.state === "active",
+      ).length,
+    };
+  }
+
+  function cancellationsFor(state, poolId, now = Date.now()) {
+    pruneCancellations(state, now);
+    const notices = [];
+    for (const session of state.sessions) {
+      if (session.pool_id !== poolId) continue;
+      if (session.state !== "active" || !session.interrupt_requested_at) continue;
+      notices.push({
+        session_uuid: session.session_uuid,
+        reason: "interrupt",
+        ...(session.interrupt_request_id
+          ? { request_id: session.interrupt_request_id } : {}),
+      });
+    }
+    for (const entry of state.cancellations) {
+      if (entry.pool_id !== poolId) continue;
+      notices.push({ session_uuid: entry.session_uuid, reason: "deleted" });
+    }
+    return notices;
   }
 
   // Requests the guest runner answers for the web UI. A tenant's Code UI needs
@@ -655,9 +773,14 @@ export function createRunnerBackend({
         pools: Array.isArray(parsed?.pools) ? parsed.pools : [],
         runners: Array.isArray(parsed?.runners) ? parsed.runners : [],
         sessions: Array.isArray(parsed?.sessions) ? parsed.sessions : [],
+        // Ids of sessions that were deleted (or otherwise removed) while a
+        // runner might still be running them. A runner learns to stop from its
+        // poll; the record itself is already gone, so the tombstone is the
+        // only place to carry the id. Pruned by age (see pruneCancellations).
+        cancellations: Array.isArray(parsed?.cancellations) ? parsed.cancellations : [],
       };
     } catch {
-      cache = { pools: [], runners: [], sessions: [] };
+      cache = { pools: [], runners: [], sessions: [], cancellations: [] };
     }
     // Sessions the store held before ids spoke the wire's encoding get re-minted
     // here, once, from the uuid they already carry: a bare uuid is classified
@@ -1002,7 +1125,7 @@ export function createRunnerBackend({
     },
 
     /** POST /v1/code/runners/self-hosted/spawn-hints/poll */
-    async pollSpawnHints({ headers } = {}) {
+    async pollSpawnHints({ headers, request = null } = {}) {
       const state = await load();
       const pool = poolForSecret(state, headers);
       if (!pool) return { unauthorized: true };
@@ -1017,6 +1140,11 @@ export function createRunnerBackend({
         if (poller) runner.last_runner_poll_at = now;
       }
       await save();
+      // Nothing may be handed to a poll that can no longer receive an answer
+      // (a guest that suspended or restarted leaves its held request open on
+      // our side). Claiming a session or a UI request for it would strand
+      // them: the session would read `offered` with no runner holding it.
+      if (!requestAlive(request)) return emptyPoll(state, pool.pool_id);
       const mine = state.sessions.filter(
         (session) => session.pool_id === pool.pool_id && session.state === "pending",
       );
@@ -1033,8 +1161,9 @@ export function createRunnerBackend({
       // and "picked up now".
       const holdMs = mine.length || requests.length ? 0 : pollWait(headers);
       if (holdMs > 0) {
-        await waitForPool(pool.pool_id, holdMs);
+        await waitForPool(pool.pool_id, holdMs, request?.socket ?? null);
         const refreshed = await load();
+        if (!requestAlive(request)) return emptyPoll(refreshed, pool.pool_id);
         const later = refreshed.sessions.filter(
           (session) => session.pool_id === pool.pool_id && session.state === "pending",
         );
@@ -1044,6 +1173,8 @@ export function createRunnerBackend({
         return {
           hints: later.map(hintFor),
           requests,
+          // A Stop that landed while the poll was held (see appendEvents).
+          cancellations: cancellationsFor(refreshed, pool.pool_id),
           warm_hints: [],
           pending_count: later.length,
           backing_off_count: 0,
@@ -1057,6 +1188,7 @@ export function createRunnerBackend({
       return {
         hints: mine.map(hintFor),
         requests,
+        cancellations: cancellationsFor(state, pool.pool_id),
         warm_hints: [],
         pending_count: mine.length,
         backing_off_count: 0,
@@ -1126,6 +1258,9 @@ export function createRunnerBackend({
       return {
         assignment_ids: held,
         session_assignments: [],
+        // The shipped runner aborts on the assignment disappearing, but the
+        // same notice costs nothing and keeps both runner families honest.
+        cancellations: cancellationsFor(await load(), pool.pool_id),
         suggested_poll_interval: "5s",
         lease_expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       };
@@ -1164,6 +1299,12 @@ export function createRunnerBackend({
       }
       if (session.state === "pending" || session.state === "offered") session.state = "active";
       session.started_at = session.started_at ?? new Date().toISOString();
+      // A Stop marker is deliberately *not* cleared here. If it landed between
+      // the poll handing out the hint and this claim, the runner answers the
+      // token leg but reads the interrupt out of the event log before spawning
+      // (guest/runner.py's `interrupt_requested`) — clearing it here would let
+      // that turn run anyway. A stop for the next turn is cleared when the
+      // user's message requeues the session, and by release.
       // The runner taking the session is what "processed" means on the wire:
       // every client message the turn is about to answer is stamped and a
       // `delivery_update` frame goes down the session stream — the frame the
@@ -1378,6 +1519,7 @@ export function createRunnerBackend({
       if (session === null) return null;
       if (session.unauthorized) return session;
       session.state = "failed";
+      delete session.requeue_after_release;
       session.failure = {
         reason: typeof body?.reason === "string" ? body.reason : "",
         ...(body?.setup_failure_kind ? { setup_failure_kind: body.setup_failure_kind } : {}),
@@ -1407,14 +1549,46 @@ export function createRunnerBackend({
       return session.state === "failed" ? "disconnected" : "connected";
     },
 
+    /**
+     * POST /v1/code/sessions/{id}/interrupt (and `/stop`) — stop the session's
+     * running turn. The Code surface itself posts a control request through
+     * `appendEvents`; this leg serves the callers that use the REST spelling
+     * (the mobile facade's shape) and the routine run-cancel button. The
+     * session must exist, but the stop is best-effort: a turn that already
+     * ended is not an error.
+     */
+    async interruptSession({ sessionId, requestId } = {}) {
+      const state = await load();
+      const session = sessionById(state, sessionId);
+      if (!session) return null;
+      markInterrupted(session, { requestId });
+      await save();
+      wakePool(session.pool_id);
+      log.log(`[code-runners] session ${session.session_uuid} interrupted`
+        + ` (state ${session.state})`);
+      return { session: sessionDocument(session) };
+    },
+
     /** POST /v1/code/runners/self-hosted/sessions/{id}/release */
     async releaseSession({ headers, sessionId }) {
       const state = await load();
       const session = sessionFor(state, headers, sessionId);
       if (session === null) return null;
       if (session.unauthorized) return session;
-      session.state = "released";
+      // A message that arrived with the Stop starts the next turn straight
+      // away; otherwise the session just goes idle.
+      const requeue = session.requeue_after_release === true;
+      delete session.requeue_after_release;
+      session.state = requeue ? "pending" : "released";
+      if (requeue) {
+        session.attempt += 1;
+        session.assigned_runner_id = undefined;
+      }
+      // The turn is over; the notice has done its job. A later user message
+      // requeues the session, and that turn starts un-cancelled.
+      clearInterrupted(session);
       await save();
+      if (requeue) wakePool(session.pool_id);
       return { released: true };
     },
 
@@ -1537,8 +1711,6 @@ export function createRunnerBackend({
         });
       const appended = appendToSession(session, accepted,
         fromWorker ? "worker" : "client");
-      // One append to one session's log — never a rewrite of the store.
-      await appendEventsFile(session, appended);
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,
       // and the runner that claims it replays the conversation (the agent's
@@ -1550,11 +1722,23 @@ export function createRunnerBackend({
       // document kept reporting the start values after a mid-session
       // set_model / set_permission_mode and a reopen showed them again.
       let configChanged = false;
+      // Stop requests in this batch, by the request id the renderer will wait
+      // on. The Code surface does not call an interrupt endpoint: its Stop
+      // appends a control request here, and before this was acted on the turn
+      // simply kept running.
+      const interruptRequests = new Set();
       for (const item of accepted) {
         const payload = item?.payload ?? item;
         if (!payload || typeof payload !== "object" || payload.type !== "control_request") continue;
         const request = payload.request;
         if (!request || typeof request !== "object") continue;
+        // Only the renderer's Stop stops a turn; a worker never writes one.
+        if (!fromWorker && request.subtype === "interrupt") {
+          const requestId = payload.request_id ?? request.request_id;
+          markInterrupted(session, { requestId });
+          if (typeof requestId === "string" && requestId) interruptRequests.add(requestId);
+          continue;
+        }
         const next = { ...(session.session_config || {}) };
         if (request.subtype === "set_model"
           && typeof request.model === "string" && request.model
@@ -1579,6 +1763,22 @@ export function createRunnerBackend({
         session.session_config = next;
         configChanged = true;
       }
+      // The agent answers a control request with a `control_response`; this
+      // deployment closes the child's stdin after the prompt, so it never sees
+      // a mid-turn request. Synthesize the receipt the Stop button waits on —
+      // its resolvers key on `response.subtype === "success"` and the request
+      // id, so without this the button stays "interrupting" even after the
+      // turn has ended.
+      for (const requestId of interruptRequests) {
+        appended.push(...appendToSession(session, [{
+          payload: {
+            type: "control_response",
+            response: { subtype: "success", request_id: requestId, response: {} },
+          },
+        }], "worker"));
+      }
+      // One append to one session's log — never a rewrite of the store.
+      await appendEventsFile(session, appended);
       let requeued = false;
       if (appended.length && (session.state === "released" || session.state === "failed")
           && incoming.some(isUserMessage)) {
@@ -1586,13 +1786,25 @@ export function createRunnerBackend({
         session.attempt += 1;
         session.assigned_runner_id = undefined;
         session.failure = undefined;
+        clearInterrupted(session);
         requeued = true;
         log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
       }
+      // A message that arrived with the Stop (the composer's send-and-interrupt)
+      // is not answered by the turn being cancelled. Remember it so the release
+      // that follows puts the session back on the pool instead of leaving the
+      // message stranded behind an idle session.
+      let requeueOnRelease = false;
+      if (interruptRequests.size && carriesUserMessage
+          && (session.state === "active" || session.state === "offered")) {
+        session.requeue_after_release = true;
+        requeueOnRelease = true;
+      }
       if (appended.length || configChanged) saveSoon();
       // The runner holding the pool hears about it on its held poll, not on a
-      // later tick.
-      if (requeued) wakePool(session.pool_id);
+      // later tick — the same wake a placement gets. A stop must not wait out
+      // the poll's 20 s hold (see cancellationsFor).
+      if (requeued || interruptRequests.size || requeueOnRelease) wakePool(session.pool_id);
       return { data: appended };
     },
 
@@ -1814,6 +2026,15 @@ export function createRunnerBackend({
       const state = await load();
       const session = sessionById(state, sessionId);
       if (!session) return null;
+      // A deleted session must not keep running in the guest. Only a session a
+      // runner has actually taken (or been offered) can have a live turn; a
+      // merely pending one has no child to stop. The record is about to
+      // disappear, so leave a tombstone the runner's next poll names (see
+      // cancellationsFor), and wake a held poll to deliver it now.
+      if (session.state === "active" || session.state === "offered") {
+        addCancellationTombstone(state, session);
+        wakePool(session.pool_id);
+      }
       state.sessions.splice(state.sessions.indexOf(session), 1);
       await rm(eventsPathFor(session), { force: true }).catch(() => undefined);
       await save();

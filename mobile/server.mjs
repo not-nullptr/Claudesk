@@ -1582,6 +1582,24 @@ async function handleCodeRoutes(request, response, url) {
     sendJson(response, 200, { data: [], next_cursor: null });
     return true;
   }
+  // A routine run's Stop. Routines are not served by this facade yet, but the
+  // run it names is an ordinary session, and the button must behave the same
+  // as every other Stop: stop a Code turn, or abort the matching Chat turn.
+  // Cancelling is idempotent and best-effort — a run that already ended (or an
+  // id this facade does not know) is not an error the button should surface.
+  const routineRunCancel = path.match(
+    /^\/v1\/code\/triggers\/[^/]+\/runs\/([^/]+)\/cancel$/,
+  );
+  if (routineRunCancel && method === "POST") {
+    const sessionId = decodeURIComponent(routineRunCancel[1]);
+    await codeEngine.interrupt(sessionId).catch(() => {});
+    // Chat/Cowork turns are keyed by the conversation uuid; the session id on
+    // the wire is its `local_` spelling.
+    engine.abortActiveTurn(sessionId.replace(/^local_/, ""));
+    console.log(`[mobile-code]   routine run cancel -> ${sessionId}`);
+    sendJson(response, 200, {});
+    return true;
+  }
 
   // --- out-of-scope legs: real, clean empty states ----------------------------
   // Routines, git/PR and self-hosted pools are a follow-up; an empty envelope
