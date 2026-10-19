@@ -3619,6 +3619,27 @@ function stripGatewayUnsupported(payload) {
   return dropped;
 }
 
+// Claude Code's long-context spelling: a model id may carry a trailing `[1m]`
+// (Desktop lists the spelling as its own picker row). It is a context marker,
+// not a route the account's gateway serves — the CLI splits it off before a
+// normal turn. The one call that does not is Auto permission mode's safety
+// classifier: it builds its fallback id from ANTHROPIC_DEFAULT_OPUS_MODEL and
+// re-appends the suffix to match a 1M session model, so the gateway answers
+// "Claude discovery model alias is invalid" and auto mode decides it cannot
+// determine the safety of the tool it was reviewing. Resolve it here, at the
+// boundary that speaks to the gateway, the way the CLI already does for every
+// other model call.
+const longContextSuffix = /\[1m\]\s*$/i;
+
+function stripLongContextModel(payload) {
+  if (!payload || typeof payload !== "object" || typeof payload.model !== "string") return;
+  const requested = payload.model;
+  const bare = requested.replace(longContextSuffix, "").trim();
+  if (!bare || bare === requested) return;
+  payload.model = bare;
+  return requested;
+}
+
 // The model calls of the runner inside the VM, forwarded through the one
 // address the guest provably reaches: the guest dials the bridge on slirp's
 // host address for its own polling, and its egress is filtered by an allowlist
@@ -3644,9 +3665,15 @@ async function handleInferencePassthrough(request, response, url) {
     try {
       const payload = JSON.parse(body.toString("utf8"));
       const dropped = stripGatewayUnsupported(payload);
-      if (dropped.length > 0) {
+      const longContextModel = stripLongContextModel(payload);
+      if (dropped.length > 0 || longContextModel !== undefined) {
         forwardBody = Buffer.from(JSON.stringify(payload));
-        console.log(`[inference] dropped gateway-unsupported field(s): ${dropped.join(", ")}`);
+        if (dropped.length > 0) {
+          console.log(`[inference] dropped gateway-unsupported field(s): ${dropped.join(", ")}`);
+        }
+        if (longContextModel !== undefined) {
+          console.log(`[inference] model ${longContextModel} -> ${payload.model} for the gateway`);
+        }
       }
     } catch {
       // Not JSON this bridge recognizes: forward it untouched.

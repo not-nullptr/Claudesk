@@ -399,7 +399,9 @@ try {
     headers: { "content-type": "application/json", authorization: `Bearer ${secret}`,
       "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
-      model: "smoke", messages: [],
+      // The auto-mode classifier's fallback id carries the long-context
+      // spelling; the gateway route it names does not.
+      model: "smoke[1m]", messages: [],
       thinking: { type: "enabled", budget_tokens: 1024, display: "summarized" },
       context_management: { edits: [] },
     }),
@@ -418,7 +420,8 @@ try {
   assert.equal(forwarded.thinking.type, "enabled", "the rest of thinking survives");
   assert.equal("context_management" in forwarded, false,
     "context_management is dropped for the gateway");
-  assert.equal(forwarded.model, "smoke", "and the payload is otherwise itself");
+  assert.equal(forwarded.model, "smoke",
+    "the long-context spelling resolves to the route the gateway serves");
 
   const tokenCount = await tenantRequest("/v1/messages/count_tokens", {
     method: "POST",
@@ -427,6 +430,8 @@ try {
   });
   assert.equal(JSON.parse(tokenCount.body).input_tokens, 3, "count_tokens is forwarded too");
   assert.equal(gatewayHits.at(-1).url, "/v1/messages/count_tokens", "the path is preserved");
+  assert.equal(JSON.parse(gatewayHits.at(-1).body).model, "smoke",
+    "an id without the spelling is forwarded untouched");
 
   // The org's environment capabilities — asked for wherever a session can be
   // placed, and parsed strictly: `version` and `repositories` are required and
