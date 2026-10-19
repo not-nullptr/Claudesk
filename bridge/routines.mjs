@@ -37,6 +37,18 @@ const triggerPrefix = "trig_";
 const maxImages = 20;
 const maxImageBytes = 5 * 1024 * 1024;
 const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+// Claudesk extension: MCP servers attached to a single fire. Unlike `images`
+// these are not content — they are connection definitions the run's agent (or,
+// for a Cowork routine, the Desktop's MCP proxy) dials for that session only.
+// Nothing is persisted on the routine or in the account's connector list, so a
+// URL carrying a per-run id (`…/run/<id>/mcp`) is the normal case.
+const maxConnectors = 20;
+const maxConnectorUrlChars = 2000;
+const maxConnectorNameChars = 100;
+const maxConnectorHeaders = 20;
+const maxHeaderNameChars = 200;
+const maxHeaderValueChars = 4000;
+const headerNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 export class RoutineError extends Error {
   constructor(statusCode, type, message, { retryAfter } = {}) {
@@ -458,6 +470,85 @@ export function createRoutineService({
     });
   }
 
+  /**
+   * The fire body's connectors, normalized to the session's `mcp_servers`
+   * shape (`{name, type, url, headers?}`). An entry may be a URL string, a
+   * connector document (`{uuid?, name, url}` — the extra fields are ignored),
+   * or an explicit `{name?, type?, url, headers?}`. `type` is the MCP
+   * transport: `http` (streamable HTTP, the default) or `sse`.
+   */
+  function normalizeConnectors(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw badRequest("connectors must be an array");
+    if (raw.length > maxConnectors) {
+      throw badRequest(`at most ${maxConnectors} connectors are allowed`);
+    }
+    const names = new Set();
+    return raw.map((entry, index) => {
+      const record = typeof entry === "string" ? { url: entry }
+        : isRecord(entry) ? entry : null;
+      if (!record) {
+        throw badRequest(`connector ${index + 1} must be a URL or an object`);
+      }
+      const rawUrl = textOf(record.url).trim();
+      let parsedUrl = null;
+      try {
+        parsedUrl = rawUrl && rawUrl.length <= maxConnectorUrlChars
+          ? new URL(rawUrl) : null;
+      } catch { /* not a URL */ }
+      if (!parsedUrl || (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:")) {
+        throw badRequest(`connector ${index + 1} must carry an http(s) url`);
+      }
+      const typeValue = record.type ?? record.transport;
+      if (typeValue !== undefined && typeValue !== null && typeof typeValue !== "string") {
+        throw badRequest(`connector ${index + 1} type must be http or sse`);
+      }
+      const rawType = textOf(typeValue).trim().toLowerCase().replaceAll("_", "-");
+      const type = !rawType || rawType === "streamable-http" || rawType === "streamable"
+        ? "http" : rawType;
+      if (type !== "http" && type !== "sse") {
+        throw badRequest(`connector ${index + 1} type must be http or sse`);
+      }
+      let headers;
+      if (record.headers !== undefined && record.headers !== null) {
+        if (!isRecord(record.headers)) {
+          throw badRequest(`connector ${index + 1} headers must be an object`);
+        }
+        const entries = Object.entries(record.headers);
+        if (entries.length > maxConnectorHeaders) {
+          throw badRequest(`connector ${index + 1} has too many headers`);
+        }
+        headers = {};
+        for (const [name, value] of entries) {
+          if (name.length > maxHeaderNameChars || !headerNamePattern.test(name)) {
+            throw badRequest(`connector ${index + 1} has an invalid header name`);
+          }
+          if (typeof value !== "string" || value.length > maxHeaderValueChars
+            || /[\r\n]/.test(value)) {
+            throw badRequest(
+              `connector ${index + 1} header ${name} must be a single-line string`);
+          }
+          headers[name] = value;
+        }
+        if (!Object.keys(headers).length) headers = undefined;
+      }
+      // MCP tool names are prefixed with the server name, so keep it to the
+      // characters both the agent and the Desktop accept and make it unique.
+      let name = textOf(record.name).trim()
+        .replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "")
+        .slice(0, maxConnectorNameChars)
+        || parsedUrl.hostname.replace(/[^A-Za-z0-9_-]+/g, "-")
+        || `connector-${index + 1}`;
+      if (names.has(name)) {
+        let suffix = 2;
+        while (names.has(`${name}-${suffix}`)) suffix += 1;
+        name = `${name}-${suffix}`;
+      }
+      names.add(name);
+      return { name, type, url: rawUrl, ...(headers ? { headers } : {}) };
+    });
+  }
+
   function userEvent(message, images = []) {
     const content = [{ type: "text", text: message }];
     for (const image of images) {
@@ -477,7 +568,7 @@ export function createRoutineService({
   }
 
   async function startCodeSession(task, message, model, images = [], routineId = "",
-    effort = "", sourceBranch = "", useWorktree = false) {
+    effort = "", sourceBranch = "", useWorktree = false, connectors = []) {
     if (!codeRunners) throw unavailable("this instance has no Code runner");
     const pool = await codeRunners.primaryPool();
     if (!pool) throw unavailable("this instance has no self-hosted runner pool");
@@ -504,6 +595,9 @@ export function createRoutineService({
           // with the folder/branch/worktree strip does.
           ...(sourceBranch ? { source_branch: sourceBranch } : {}),
           ...(useWorktree ? { use_worktree: true } : {}),
+          // This fire's own MCP servers. The guest runner turns them into the
+          // agent's `--mcp-config`, so they are live for this session only.
+          ...(connectors.length ? { mcp_servers: connectors } : {}),
         },
         events: [userEvent(message, images)],
       },
@@ -543,7 +637,7 @@ export function createRoutineService({
     return result?.sessionId || result?.session?.sessionId || sessionId;
   }
 
-  async function fire({ routineId, text, images, via = "api" }) {
+  async function fire({ routineId, text, images, connectors, via = "api" }) {
     if (text !== undefined && typeof text !== "string") {
       throw badRequest("text must be a string");
     }
@@ -551,6 +645,7 @@ export function createRoutineService({
       throw badRequest(`text must be at most ${maxTextChars} characters`);
     }
     const attached = normalizeImages(images);
+    const attachedConnectors = normalizeConnectors(connectors);
     const { task, taskId } = await taskRecord(routineId);
     // A caller may address the task by its raw id; everything the record keys
     // on — the fire budget, the run attribution — uses the routine id the
@@ -571,6 +666,14 @@ export function createRoutineService({
 
     const message = mergeText(prompt, text);
     const kind = taskKind(task);
+    // A Cowork session's MCP servers are account-level connector rows the
+    // Desktop proxies through claude.ai, which this deployment does not serve;
+    // there is no per-session URL field to carry a fire's own. Refuse rather
+    // than accept connectors that would silently never be dialed.
+    if (kind === "cowork" && attachedConnectors.length) {
+      throw badRequest(
+        "connectors are supported on Code routines only; this is a Cowork routine");
+    }
     const taskContext = taskSessionContext(task);
     const effort = textOf(state.configs?.[canonicalId]?.effort)
       || textOf(taskContext.effort_level) || textOf(taskContext.effort);
@@ -582,7 +685,7 @@ export function createRoutineService({
       : taskContext.use_worktree === true;
     const sessionId = kind === "code"
       ? await startCodeSession(task, message, model, attached, canonicalId, effort,
-        sourceBranch, useWorktree)
+        sourceBranch, useWorktree, attachedConnectors)
       : await startCoworkSession(task, taskId, message, model, attached);
 
     // The run is already live; a read-only state directory must not turn it
@@ -590,7 +693,8 @@ export function createRoutineService({
     await mutate((current) => recordFire(current, canonicalId, via)).catch((error) => {
       log.warn(`[routines] could not record the fire of ${canonicalId}: ${error?.message || error}`);
     });
-    log.log(`[routines] fired ${canonicalId} (${kind}) as ${sessionId}`);
+    log.log(`[routines] fired ${canonicalId} (${kind}) as ${sessionId}`
+      + (attachedConnectors.length ? ` with ${attachedConnectors.length} connector(s)` : ""));
     return { sessionId, kind };
   }
 
@@ -832,9 +936,9 @@ export function createRoutineService({
     },
 
     /** POST /v1/code/triggers/:id/run — Run now, over the same path as a fire. */
-    async runTrigger(routineId, text, images) {
+    async runTrigger(routineId, text, images, connectors) {
       const { task, taskId } = await taskRecord(routineId);
-      const fired = await fire({ routineId, text, images, via: "run" });
+      const fired = await fire({ routineId, text, images, connectors, via: "run" });
       return {
         trigger: triggerDocument(await load(), task, taskId),
         session_id: fired.sessionId,
@@ -887,8 +991,8 @@ export function createRoutineService({
     },
 
     /** POST /v1/claude_code/routines/:id/fire */
-    async fireRoutine(routineId, { text, images } = {}) {
-      return fire({ routineId, text, images, via: "api" });
+    async fireRoutine(routineId, { text, images, connectors } = {}) {
+      return fire({ routineId, text, images, connectors, via: "api" });
     },
 
     /** Whether a routine id names a task this instance can fire. */

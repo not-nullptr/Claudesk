@@ -3814,8 +3814,14 @@ async function handleRoutineApi(request, response, url) {
       if (body?.text !== undefined && typeof body.text !== "string") {
         throw new RoutineError(400, "invalid_request_error", "text must be a string");
       }
-      const fired = await routines.fireRoutine(routineId,
-        { text: body?.text, images: body?.images });
+      // `connectors` is the Claudesk extension that scopes MCP servers to this
+      // fire (see docs/routines.md); `mcp_servers` is accepted as its alias,
+      // the spelling the session create config uses.
+      const fired = await routines.fireRoutine(routineId, {
+        text: body?.text,
+        images: body?.images,
+        connectors: body?.connectors ?? body?.mcp_servers,
+      });
       const origin = routinePublicOrigin(request, url);
       sendRoutineJson(response, 200, {
         type: "routine_fire",
@@ -3860,7 +3866,8 @@ async function handleRoutineApi(request, response, url) {
       if (rest === "run" && method === "POST") {
         const body = await readJson(request, routineFireBodyLimit).catch(() => ({}));
         sendRoutineJson(response, 200,
-          await routines.runTrigger(routineId, body?.text, body?.images));
+          await routines.runTrigger(routineId, body?.text, body?.images,
+            body?.connectors ?? body?.mcp_servers));
         return;
       }
       if (rest === "runs" && method === "GET") {
