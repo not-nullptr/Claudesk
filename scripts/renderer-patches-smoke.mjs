@@ -1897,6 +1897,9 @@ const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:
   + 'poolId:d.type==="pool"?d.id:void 0,repos:yZ(r,n,i)}}'
   + 'let d=r?.get(o.key),f=d||u?.length?{kind:"remote",environmentId:d,repos:u??[]}:void 0;'
   + 'a.set(o.key,f)}return a}';
+const selfHostedLandingKeep = 'function landing(x){'
+  + 'let{worker:e,setSelectedFolder:t}=U.getState();'
+  + 'e.type==="environment"&&St(e.id)||t(null)}';
 const selfHostedFolderSetter = 'var draftStore={selectedFolder:null,'
   + 'setSelectedFolder:t=>e({selectedFolder:t,trustedSelectedFolder:null})};';
 const selfHostedPlusTrace = 'function plusHandler(e){return function(t){'
@@ -1926,7 +1929,7 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedFolderSetter, selfHostedPlusTrace,
+  selfHostedBucketPrefill, selfHostedLandingKeep, selfHostedFolderSetter, selfHostedPlusTrace,
   selfHostedRemotePrefill, selfHostedListFields,
   selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
@@ -1967,8 +1970,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-folder-prefill").length, 8,
-  "both row builders, sanitizer fields, prefill, setter and traces must fit");
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 9,
+  "row builders, sanitizer fields, prefill, landing keep, setter and traces must fit");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -2021,16 +2024,16 @@ assert.ok(selfHostedOut.includes('type:r?"bridge":"remote",sessionGroupingId:'
   + 'e.session_grouping_id??void 0,repoInfo:repoInfo(e),environmentId:e.environment_id,'
   + '_originalSession:e,cwd:e.cwd??e.session_context?.cwd??e.config?.cwd}'),
   "the main remote row builder must carry the folder too");
-assert.ok(selfHostedOut.includes('if(globalThis.__claudeskTrace)globalThis.__claudeskTrace'
-  + '("bucket-row",{key:o.key,type:r.type,cwd:r.cwd,environmentId:r.environmentId,'
-  + 'repo:r.repoInfo&&r.repoInfo.name?{owner:r.repoInfo.owner,name:r.repoInfo.name}:null});'
-  + 'if(r.cwd){a.set(o.key,{kind:"remote",'
+assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
   + 'environmentId:r.environmentId,repos:yZ(r,n,i),folder:r.cwd});break;}'
   + 'if(r.isAgentOwned||!d)'),
   "a folder bucket must prefill its new session with the folder");
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
+assert.ok(selfHostedOut.includes('e.type==="environment"&&'
+  + '(St(e.id)||String(e.id).startsWith("ccpool_"))||t(null)'),
+  "the new-session page must keep a folder placed on a self-hosted pool");
 assert.ok(selfHostedOut.includes('setSelectedFolder:t=>(globalThis.__claudeskTrace&&'
   + 'globalThis.__claudeskTrace("set-folder",{value:t,stack:(new Error).stack}),'
   + 'e({selectedFolder:t,trustedSelectedFolder:null}))'),

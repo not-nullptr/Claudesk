@@ -2797,6 +2797,39 @@ function folderPlusTraceTarget(node, ancestors) {
   return undefined;
 }
 
+// The new-session page's mount effect clears the draft folder unless the
+// worker is a local/ssh/wsl environment (`St`/`ZI`): a cloud place has no local
+// folder on claude.ai. A tenant's place is a self-hosted pool (`ccpool_…`),
+// which does run in a folder, so the effect erased the folder the folder
+// group's plus had just placed. Widen that one test to treat a self-hosted
+// pool as folder-capable. Pinned by the `x.type === "environment" && St(x.id)`
+// conjunction.
+function poolWorkerFolderKeepTarget(node, ancestors) {
+  if (node.type !== "CallExpression" || node.arguments?.length !== 1) return undefined;
+  if (!identifier(node.callee)) return undefined;
+  const argument = unwrap(node.arguments[0]);
+  if (argument?.type !== "MemberExpression" || argument.property?.name !== "id") {
+    return undefined;
+  }
+  const worker = identifier(argument.object);
+  if (!worker) return undefined;
+  const parent = ancestors[ancestors.length - 1];
+  if (parent?.type !== "LogicalExpression" || parent.operator !== "&&"
+    || unwrap(parent.right) !== node) return undefined;
+  let kindTest = false;
+  walk(parent.left, [], (child) => {
+    if (child.type === "BinaryExpression" && child.operator === "===") {
+      const left = unwrap(child.left);
+      const right = unwrap(child.right);
+      if (left?.type === "MemberExpression" && left.property?.name === "type"
+        && literal(right, "environment")) {
+        kindTest = identifier(left.object) === worker;
+      }
+    }
+  });
+  return kindTest ? { call: node, worker } : undefined;
+}
+
 // The draft store's folder setter, traced so a later clear can be attributed
 // to its caller while the live renderer is being diagnosed.
 function sessionStoreFolderTraceTarget(node) {
@@ -3843,6 +3876,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const remotePrefills = [];
     const plusTraces = [];
     const folderSetterTraces = [];
+    const poolFolderKeeps = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -3876,6 +3910,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (plusTrace) plusTraces.push(plusTrace);
       const folderSetter = sessionStoreFolderTraceTarget(node);
       if (folderSetter) folderSetterTraces.push(folderSetter);
+      const poolFolderKeep = poolWorkerFolderKeepTarget(node, ancestors);
+      if (poolFolderKeep) poolFolderKeeps.push(poolFolderKeep);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const contextFields = sessionContextFieldsTarget(node);
@@ -3995,12 +4031,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const repos = source.slice(reposCall.start, reposCall.end);
       patches.push({ id: folderPrefillPatchId, start: branch.start, end: branch.start,
         original: "",
-        replacement: `if(globalThis.__claudeskTrace)globalThis.__claudeskTrace("bucket-row",`
-          + `{key:${bucket}.key,type:${row}.type,cwd:${row}.cwd,`
-          + `environmentId:${row}.environmentId,`
-          + `repo:${row}.repoInfo&&${row}.repoInfo.name`
-          + `?{owner:${row}.repoInfo.owner,name:${row}.repoInfo.name}:null});`
-          + `if(${row}.cwd){${map}.set(${bucket}.key,`
+        replacement: `if(${row}.cwd){${map}.set(${bucket}.key,`
           + `{kind:"remote",environmentId:${row}.environmentId,`
           + `repos:${repos},folder:${row}.cwd});break;}` });
     }
@@ -4010,6 +4041,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         replacement: `globalThis.__claudeskTrace&&globalThis.__claudeskTrace("plus",`
           + `{groupKind:${JSON.stringify(kind)},hasPrefill:!!${prefill},`
           + `prefill:${prefill}}),` });
+    }
+    if (poolFolderKeeps.length === 1) {
+      const { call, worker } = poolFolderKeeps[0];
+      patches.push({ id: folderPrefillPatchId, start: call.start, end: call.end,
+        original: source.slice(call.start, call.end),
+        replacement: `(${source.slice(call.start, call.end)}`
+          + `||String(${worker}.id).startsWith("ccpool_"))` });
     }
     if (folderSetterTraces.length === 1) {
       const { body, param } = folderSetterTraces[0];
