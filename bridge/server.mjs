@@ -617,6 +617,10 @@ function applyWebShellAccountPolicy(account) {
   return { ...account, settings: { ...settings, dramatic_shrimp_enabled: false } };
 }
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
+// Temporary diagnosis channel for the web renderer: it POSTs named traces
+// here and the operator reads them back with the same session. Bounded, and
+// removed once the sidebar prefill behavior is settled.
+const rendererTraces = [];
 // The account avatar accepts a browser URL (http(s)/data:) or a path to an image
 // on this container. A path is served by the bridge itself, same-origin, at one
 // fixed route that returns only this configured file — the route takes no path
@@ -4673,6 +4677,19 @@ async function handleApi(request, response, url) {
           error?.message || "the guest runner did not answer");
       });
     sendJson(response, 200, { ok: true, value });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/remote/renderer-trace") {
+    const body = await readJson(request);
+    if (typeof body?.name === "string" && body.name.length <= 80) {
+      rendererTraces.push({ at: new Date().toISOString(), name: body.name, data: body.data });
+      while (rendererTraces.length > 60) rendererTraces.shift();
+    }
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/remote/renderer-trace") {
+    sendJson(response, 200, { ok: true, value: rendererTraces });
     return;
   }
   if (tenantCodeReadsEnabled && request.method === "POST"

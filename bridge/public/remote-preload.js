@@ -24,6 +24,20 @@
     });
   }
 
+  // Temporary diagnosis channel for the sidebar prefill work; the bridge
+  // bounds and serves these at /api/remote/renderer-trace.
+  globalThis.__claudeskTrace = (name, data) => {
+    try {
+      fetch("/api/remote/renderer-trace", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, data }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {}
+  };
+
   // SubtleCrypto is also restricted to secure contexts. The official UI only
   // needs digest during its common HTTP bootstrap path; keep the compatibility
   // surface deliberately narrow and execute the allowlisted hash on the server.
