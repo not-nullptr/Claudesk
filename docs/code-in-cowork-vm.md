@@ -201,7 +201,9 @@ about it, and an entry that is already there (`blocked_by_*` included) is never
 overridden.
 
 A session's events are served too: `GET …/sessions/{id}/events` (paged,
-`after_sequence_num` resumes), `POST` to append — `{events:[{payload}]}` from the
+`after_sequence_num` resumes, and `cursor` walks in the direction `sort_order`
+names — ascending continues above the page's last sequence, newest-first
+continues below its oldest), `POST` to append — `{events:[{payload}]}` from the
 renderer, a bare `{payload}` from a runner — and `GET …/events/stream`, which
 replays the history as `client_event` frames (each frame's `id:` is its
 `sequence_num` — the cursor the reader resumes by, via `Last-Event-ID` or
@@ -213,7 +215,12 @@ hand-written idea of the shape. Whether the page *uses* that stream is itself
 gated: the session view reads `ccr_v2_subscribe_sse_web` and falls back to a
 WebSocket subscribe this bridge does not speak when it is off — drawing history
 from one-shot reads and never streaming — so the bridge grants the gate for a
-tenant (`grantCcrSubscribeSse`). A stream whose session does not exist yet opens
+tenant (`grantCcrSubscribeSse`). How much of the transcript that first read
+covers is gated too: `ccr_pewter_heron` makes the view load only the newest
+window and backfill the rest later, which over this bridge paints a session with
+no (or only the latest) history and then lands the older rows in a burst, so a
+tenant forces it off (`disableCcrTailFirstTranscript`) and the whole transcript
+is part of the initial read. A stream whose session does not exist yet opens
 empty rather than 404ing (that 404 is the "Connecting" loop), and a `result`
 message written back by the runner is the turn terminal the reader closes a
 turn on. Envelopes carry `source` — `client` for the renderer's own writes,

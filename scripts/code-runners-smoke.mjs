@@ -302,6 +302,45 @@ try {
   const tail = await backend.listEvents({ sessionId: placed.session.id, searchParams: new URLSearchParams() });
   assert.equal(tail.data.length, 3);
   assert.equal((await backend.eventsAfter(placed.session.id, 1)).length, 2);
+
+  // The renderer pages the transcript with `cursor`, not `after_sequence_num`:
+  // an ascending walk (the full-transcript load) continues above the page's
+  // last sequence, and a newest-first scrollback read continues below its
+  // oldest. The cursor has to move the window or the reader sees the same page
+  // again and stops.
+  const firstAsc = await backend.listEvents({
+    sessionId: placed.session.id,
+    searchParams: new URLSearchParams({ sort_order: "asc", limit: "2" }),
+  });
+  assert.deepEqual(firstAsc.data.map((event) => event.sequence_num), ["1", "2"]);
+  assert.equal(firstAsc.next_cursor, "2", "an ascending page points past its last event");
+  const nextAsc = await backend.listEvents({
+    sessionId: placed.session.id,
+    searchParams: new URLSearchParams({ sort_order: "asc", limit: "2", cursor: firstAsc.next_cursor }),
+  });
+  assert.deepEqual(nextAsc.data.map((event) => event.sequence_num), ["3"],
+    "an ascending cursor resumes strictly above the page edge");
+  assert.equal(nextAsc.next_cursor, null);
+
+  const firstDesc = await backend.listEvents({
+    sessionId: placed.session.id,
+    searchParams: new URLSearchParams({ sort_order: "desc", limit: "2" }),
+  });
+  assert.deepEqual(firstDesc.data.map((event) => event.sequence_num), ["3", "2"]);
+  assert.equal(firstDesc.next_cursor, "2", "a newest-first page points at its oldest event");
+  const nextDesc = await backend.listEvents({
+    sessionId: placed.session.id,
+    searchParams: new URLSearchParams({ sort_order: "desc", limit: "2", cursor: firstDesc.next_cursor }),
+  });
+  assert.deepEqual(nextDesc.data.map((event) => event.sequence_num), ["1"],
+    "a newest-first cursor resumes strictly below the page edge");
+  assert.equal(nextDesc.next_cursor, null);
+  await assert.rejects(
+    backend.listEvents({ sessionId: placed.session.id,
+      searchParams: new URLSearchParams({ sort_order: "asc", cursor: "not-a-sequence" }) }),
+    (error) => error.statusCode === 400,
+    "a cursor that is not a sequence is refused rather than ignored",
+  );
   assert.equal(await backend.appendEvents({ sessionId: "no-such-session", body: {} }), null);
 
   // The create body may carry the session's first events; they land in the
@@ -721,6 +760,44 @@ assert.deepEqual(subscribed(false), {},
   "the operator's instance keeps the upstream transport choice");
 assert.equal(subscribed(true, { [sseKey]: { value: false } })[sseKey]?.defaultValue, true,
   "an evaluated false is replaced — off means a WebSocket the bridge does not answer");
+
+// And how the transcript hydrates: `ccr_pewter_heron` on makes the view read
+// only the newest window and backfill the rest later (which, over this bridge,
+// is the page drawing with nothing and then all of the older history landing
+// at once). The desktop's table carries it on, so a tenant forces it off and
+// the full transcript is part of the initial read.
+const tailFirstGate = section(serverSource, "const ccrTailFirstTranscriptGate",
+  "// The renderer's whole remote-place machinery hangs on one flag");
+function tailFirst(codeRunners, initial = {}) {
+  const sandbox = { codeRunnersEnabled: codeRunners };
+  vm.runInNewContext(
+    `const codeRunnersEnabled = ${codeRunners};
+     ${gateKey}
+     ${tailFirstGate}
+     const document = { growthbook: { features: ${JSON.stringify(initial)} } };
+     disableCcrTailFirstTranscript(document);
+     result = document.growthbook.features;`,
+    sandbox,
+  );
+  return JSON.parse(JSON.stringify(sandbox.result));
+}
+let tailFirstKey = null;
+{
+  const sandbox = {};
+  vm.runInNewContext(`${gateKey}\nresult = growthbookKey("ccr_pewter_heron")`, sandbox);
+  tailFirstKey = sandbox.result;
+}
+assert.equal(tailFirst(true)[tailFirstKey]?.defaultValue, false,
+  "a tenant hydrates the whole transcript on load, not just the newest window");
+assert.deepEqual(tailFirst(false), {},
+  "the operator's instance keeps the upstream hydration choice");
+assert.equal(tailFirst(true, { [tailFirstKey]: { defaultValue: true } })[tailFirstKey]?.defaultValue,
+  false, "the desktop's custom-3p table carries it on; here it is forced off");
+assert.ok(
+  /bootstrapResponsePath\.test\(url\.pathname\) && disableCcrTailFirstTranscript\(parsed\)/
+    .test(serverSource),
+  "and the gate is rewritten on the bootstrap the Code page reads",
+);
 
 // The one flag the renderer's whole remote-place machinery reads from the page:
 // `shared-50`'s `RM` turns `appFeatures.selfHostedSessions.status` into the

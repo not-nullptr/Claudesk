@@ -290,6 +290,32 @@ try {
     `/v1/code/sessions/${placedSession.id}/events?after_sequence_num=1`);
   assert.equal(JSON.parse(resumed.body).data.length, 1, "after_sequence_num resumes");
 
+  // The renderer's pager uses `cursor` with either sort. Both directions must
+  // move the window — the full-transcript walk (ascending) and the scrollback
+  // read (newest first) — or the transcript stops at the first page.
+  const newestPage = await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events?sort_order=desc&limit=1`);
+  const newest = JSON.parse(newestPage.body);
+  assert.deepEqual(newest.data.map((event) => event.sequence_num), ["2"]);
+  assert.equal(newest.next_cursor, "2", "a newest-first page points at its oldest event");
+  const olderPage = await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events?sort_order=desc&limit=1&cursor=2`);
+  const older = JSON.parse(olderPage.body);
+  assert.deepEqual(older.data.map((event) => event.sequence_num), ["1"],
+    "a newest-first cursor resumes below the page edge");
+  assert.equal(older.next_cursor, null);
+  const firstAsc = await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events?sort_order=asc&limit=1`);
+  const oldest = JSON.parse(firstAsc.body);
+  assert.equal(oldest.next_cursor, "1");
+  const continued = await tenantRequest(
+    `/v1/code/sessions/${placedSession.id}/events?sort_order=asc&limit=1&cursor=1`);
+  assert.deepEqual(JSON.parse(continued.body).data.map((event) => event.sequence_num), ["2"],
+    "an ascending cursor resumes above the page edge");
+  assert.equal(
+    (await tenantRequest(`/v1/code/sessions/${placedSession.id}/events?cursor=bogus`)).status,
+    400, "a cursor that is not a sequence is refused rather than ignored");
+
   // The stream replays the history as `client_event` frames, then tails it.
   const frames = await readStream(tenantPort, `/v1/code/sessions/${placedSession.id}/events/stream`, 2);
   assert.ok(frames.includes("event: client_event"), "the stream names its frames client_event");

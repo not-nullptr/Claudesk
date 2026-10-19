@@ -1860,6 +1860,14 @@ export function createRunnerBackend({
      * GET /v1/code/sessions/{id}/events — the history, paged. `after_sequence_num`
      * resumes (that is the parameter the stream and the app's pager both use),
      * `limit` caps one page.
+     *
+     * `cursor` is the page edge the pager hands back as `next_cursor`, and its
+     * direction follows the sort: an ascending walk continues strictly above
+     * it (that is how the renderer's full-transcript walk advances), while a
+     * newest-first read continues strictly below it (the next older page).
+     * Ignoring it made every follow-up request answer the same page, so a
+     * transcript longer than one page either stopped at 500 events or re-read
+     * the newest window forever.
      */
     async listEvents({ sessionId, searchParams } = {}) {
       const state = await load();
@@ -1867,11 +1875,25 @@ export function createRunnerBackend({
       if (!session) return null;
       const after = Number(searchParams?.get?.("after_sequence_num") ?? 0) || 0;
       const limit = Number(searchParams?.get?.("limit") ?? 0) || 0;
-      const events = (session.events ?? [])
+      const descending = searchParams?.get?.("sort_order") === "desc";
+      const cursorRaw = searchParams?.get?.("cursor") ?? "";
+      let cursor = 0;
+      if (cursorRaw) {
+        cursor = Number(cursorRaw);
+        if (!Number.isSafeInteger(cursor) || cursor < 0) {
+          throw Object.assign(new Error("invalid cursor"), { statusCode: 400 });
+        }
+      }
+      let events = (session.events ?? [])
         .filter((event) => Number(event.sequence_num) > after);
-      // `sort_order=desc` is the scrollback read (the app's transcript pages
-      // ask for it): newest first, so a `limit` takes the newest that many.
-      if (searchParams?.get?.("sort_order") === "desc") events.reverse();
+      if (descending) {
+        // Newest first, so a `limit` takes the newest that many, and a cursor
+        // takes the window just below its sequence.
+        events = events.filter((event) => !cursorRaw || Number(event.sequence_num) < cursor)
+          .reverse();
+      } else if (cursorRaw) {
+        events = events.filter((event) => Number(event.sequence_num) > cursor);
+      }
       const page = limit > 0 ? events.slice(0, limit) : events;
       return {
         data: page,

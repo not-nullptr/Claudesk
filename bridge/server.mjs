@@ -2379,6 +2379,30 @@ function grantCcrSubscribeSse(value) {
   return true;
 }
 
+// How the transcript hydrates. `ccr_pewter_heron` turns the session view's
+// `tailFirstTranscript` on: `fetchTranscript` then reads only the newest
+// window (desc, limit 200) and kicks off an unawaited backfill walk for the
+// rest, so the page draws with a handful of rows and the older history appears
+// whenever that background read resolves — over this bridge that is a separate
+// paged HTTP walk, which is exactly the "no history, then it all lands at
+// once" behaviour a tenant sees. The desktop's hardcoded custom-3p table
+// carries the gate on; this bridge serves the full log from one in-memory read,
+// so it is forced off and the view hydrates the whole transcript as part of
+// the initial read (the renderer's full walk, whose pages `listEvents` serves
+// by cursor).
+const ccrTailFirstTranscriptGate = "ccr_pewter_heron";
+function disableCcrTailFirstTranscript(value) {
+  if (!codeRunnersEnabled) return false;
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  const key = growthbookKey(ccrTailFirstTranscriptGate);
+  const entry = features[key];
+  const off = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === false;
+  if (off) return false;
+  features[key] = { defaultValue: false };
+  return true;
+}
+
 // The renderer's whole remote-place machinery hangs on one flag that comes from
 // the page, not from any access document: `shared-50`'s `RM` turns
 // `appFeatures.selfHostedSessions.status === "supported"` into the module flag
@@ -2928,6 +2952,10 @@ async function forwardOfficialProtocol(request, response, url) {
     // The live transcript transport the Code surface picks between SSE and a
     // WebSocket (see grantCcrSubscribeSse).
     if (bootstrapResponsePath.test(url.pathname) && grantCcrSubscribeSse(parsed)) {
+      rewrote = true;
+    }
+    // The transcript's hydration strategy (see disableCcrTailFirstTranscript).
+    if (bootstrapResponsePath.test(url.pathname) && disableCcrTailFirstTranscript(parsed)) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
