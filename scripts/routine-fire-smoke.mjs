@@ -362,6 +362,34 @@ assert.equal("source_branch" in createRuns.at(-1).body.config, false,
 assert.equal("use_worktree" in createRuns.at(-1).body.config, false,
   "a cleared worktree flag is not sent to the runner");
 
+// The Desktop store refuses a write by answering null, not by throwing. That
+// must not be reported as a successful save: the page would show "saved" while
+// the old values were still stored.
+const refusing = createRoutineService({
+  stateDir: join(home, "refusing"),
+  desktop: {
+    async invoke(surface, method) {
+      if (method === "getAllScheduledTasks") return [codeTask];
+      if (method === "getScheduledTaskFileContent") return files["code-1"];
+      return null; // includes updateScheduledTask
+    },
+    async inspect() {
+      return {
+        CCDScheduledTasks: [
+          "getAllScheduledTasks", "getScheduledTaskFileContent", "updateScheduledTask",
+        ],
+      };
+    },
+  },
+  configuredModels: ["model-a"],
+  defaultModel: "model-a",
+  log: { log() {}, warn() {} },
+});
+await assert.rejects(
+  () => refusing.updateTrigger(codeId, { name: "renamed" }),
+  (error) => error.statusCode === 502 && /did not apply/.test(error.message),
+  "a store that refuses an update is not reported as success");
+
 // Membership: a token names one routine, and rotation replaces the old hash.
 const minted = await service.mintToken(coworkId, {});
 assert.match(minted.token, /^sk-ant-oat01-/);

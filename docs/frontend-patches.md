@@ -400,10 +400,13 @@ scheduled task on the deployment's own VM in both cases:
   The state hook also probes the selected folder through the renderer's own git
   IPC (`LocalSessions.getGitInfo`/`getLocalBranches`, answered by the guest
   runner on a tenant) and exposes the branch list, loading and
-  `isGitRepo` to the rows. The bridge maps `cwd`, `permission_mode`,
-  `source_branch` and `use_worktree` onto the scheduled task's own fields;
-  effort has no task field and lives in the bridge's routine state (see
-  `docs/routines.md`).
+  `isGitRepo` to the rows. The new state is appended to the dependency arrays
+  of the form's memoized job-config builder and its `hasChanges` guard: without
+  that a save posts the values captured at the memo's last computation (the
+  initial ones), so the request succeeded and carried none of the picks. The
+  bridge maps `cwd`, `permission_mode`, `source_branch` and `use_worktree` onto
+  the scheduled task's own fields; effort has no task field and lives in the
+  bridge's routine state (see `docs/routines.md`).
 - `routine-form-start-option-rows` adds four rows to the unified form: a
   working-directory button (the renderer's `FileSystem.browseCodeFolder`, so
   the in-page picker lists the instance's workspace), the composer's own branch
