@@ -349,6 +349,27 @@ try {
     /event: delivery_update\ndata: \{"event_id":"[0-9a-f-]{36}","status":"PROCESSING","timestamp":"[^"]+"\}\n\n/,
     "the stream acknowledges the client event, which clears the composer's Sending state");
 
+  // Stop, over the REST spelling the mobile facade and routine cancel use. The
+  // Code surface posts a control request through the events leg instead (pinned
+  // in the backend smoke); both must reach the runner that is holding the turn.
+  const interrupted = await tenantRequest(`/v1/code/sessions/${placedSession.id}/interrupt`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(interrupted.status, 200, interrupted.body);
+  const cancelledPoll = await tenantRequest(
+    "/v1/code/runners/self-hosted/spawn-hints/poll",
+    { method: "POST", headers: auth, body: "{}" });
+  assert.ok(JSON.parse(cancelledPoll.body).cancellations
+    .some((entry) => entry.session_uuid === placedSession.id),
+  "the poll the guest runner is holding names the session to stop");
+  // Idempotent: the button is pressed exactly when a turn is believed live.
+  assert.equal((await tenantRequest(`/v1/code/sessions/${placedSession.id}/stop`, {
+    method: "POST", body: "{}",
+  })).status, 200, "stop is the same leg, and a second stop is still fine");
+  assert.equal((await tenantRequest("/v1/code/sessions/no-such-session/interrupt", {
+    method: "POST", body: "{}",
+  })).status, 404, "an unknown session is a 404, not a silent success");
+
   // A session for an environment this instance does not run is refused, not
   // quietly run locally.
   const elsewhere = await tenantRequest("/v1/code/sessions", {

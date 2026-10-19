@@ -349,6 +349,22 @@ Both routine-form implementations get them: the unified form used by the
 Cowork scheduled-task surface, and the Code surface's own create page and edit
 dialog (`routine-epitaxy-start-options`). See `docs/frontend-patches.md`.
 
+## Stopping a run
+
+The routine detail's **Stop** posts to the local route the renderer composes:
+
+```http
+POST /v1/code/triggers/{routine_id}/runs/{session_id}/cancel
+```
+
+A run is an ordinary session. A **Code** run is stopped through the runner
+store (exactly as the session's own Stop is — see
+[Code in the Cowork VM](code-in-cowork-vm.md)); a **Cowork** run is stopped
+through `LocalAgentModeSessions.stop`, the same call the Chat surface's Stop
+makes. Cancelling is idempotent and best-effort: a run whose turn already ended
+— or an id this instance does not serve — answers `200`, because the page can
+press Stop against a stale row.
+
 ## Not supported
 
 - The literal `api.anthropic.com` URL and its claude.ai-issued tokens: upstream

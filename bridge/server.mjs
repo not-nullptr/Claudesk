@@ -3901,6 +3901,16 @@ async function handleRoutineApi(request, response, url) {
         sendRoutineJson(response, 200, await routines.listRuns(routineId));
         return;
       }
+      // The routine detail's Stop on a running run.
+      const runCancel = /^runs\/([^/]+)\/cancel$/.exec(rest);
+      if (runCancel) {
+        if (method !== "POST") {
+          throw new RoutineError(405, "invalid_request_error", "method not allowed");
+        }
+        sendRoutineJson(response, 200,
+          await routines.cancelRun(routineId, decodeURIComponent(runCancel[1])));
+        return;
+      }
       if (rest === "api-token") {
         if (method === "POST") {
           sendRoutineJson(response, 200,
@@ -4022,6 +4032,9 @@ async function handleCodeRunnerApi(request, response, url) {
   // Anything the secret does not name is refused here rather than served empty,
   // so a mis-pointed runner is visible in its own logs.
   const answer = (result, ok = 200) => {
+    // A held poll whose guest went away is answered into a closed socket; that
+    // is expected (see pollSpawnHints), not an error to write through.
+    if (response.destroyed || response.writableEnded) return;
     if (result && result.unauthorized) return sendJson(response, 401, { error: "unknown pool secret" });
     if (result === null) throw new ApiError(404, "not found");
     return sendJson(response, ok, result);
@@ -4198,6 +4211,22 @@ async function handleCodeRunnerApi(request, response, url) {
     throw new ApiError(405, "method not allowed");
   }
 
+  // Stop. The Code surface posts an `interrupt` control request through the
+  // events leg above; these two REST spellings serve the callers that stop a
+  // session directly (the mobile facade's shape, and routine run-cancel). A
+  // stop is idempotent — an already-finished turn is still a 200 — because the
+  // button is pressed exactly when the client believes a turn is in flight.
+  const interruptSessionPath = pathname.match(
+    /^\/v1\/code\/sessions\/([^/]+)\/(?:interrupt|stop)$/,
+  );
+  if (interruptSessionPath) {
+    if (method !== "POST") throw new ApiError(405, "method not allowed");
+    const sessionId = decodeURIComponent(interruptSessionPath[1]);
+    const interrupted = await codeRunners.interruptSession({ sessionId });
+    if (!interrupted) missingSession();
+    return sendJson(response, 200, {});
+  }
+
   // The session's edit legs: rename/tags/metadata arrive as one PUT, then the
   // per-session actions the page has buttons for. Each answers the app's
   // `{session}` document; an unknown session is a 404 (the archive reader
@@ -4305,7 +4334,9 @@ async function handleCodeRunnerApi(request, response, url) {
     case "POST /v1/code/runners/self-hosted/deregister":
       return answer(await codeRunners.deregisterRunner({ headers, body }));
     case "POST /v1/code/runners/self-hosted/spawn-hints/poll":
-      return answer(await codeRunners.pollSpawnHints({ headers }));
+      // The request itself rides along: a held poll whose guest went away
+      // must not claim the session (or the UI request) it was woken for.
+      return answer(await codeRunners.pollSpawnHints({ headers, request }));
     case "POST /v1/code/runners/self-hosted/spawn-hints/nack":
       return answer(await codeRunners.nackSpawnHint({ headers, body }));
     case "POST /v1/code/runners/self-hosted/requests/result":

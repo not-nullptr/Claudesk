@@ -62,6 +62,37 @@ function runRunner({ secret, once = true, env = {} }) {
   });
 }
 
+// A long-lived runner, for the one behaviour that needs the poll loop and a
+// turn to be live at the same time: a Stop is delivered on that loop.
+function startRunner({ secret, binDir = stub_dir }) {
+  const child = spawn("python3", ["-I", `${root}guest/runner.py`], {
+    env: {
+      ...process.env,
+      CLAUDESK_RUNNER_BASE: `http://127.0.0.1:${port}`,
+      CLAUDESK_RUNNER_SECRET: secret,
+      CLAUDESK_RUNNER_CLAUDE_BIN: binDir,
+      CLAUDESK_RUNNER_CHECKOUT: work,
+      CLAUDESK_RUNNER_HOME: join(work, "home-live"),
+      // Ask for the held poll, the protocol's event-driven pickup.
+      CLAUDESK_RUNNER_POLL_WAIT: "20",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  return { child, output: () => output };
+}
+
+async function waitFor(check, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
 try {
   child = spawn(process.execPath, [server], {
     env: {
@@ -518,6 +549,92 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   await new Promise((resolve) => busyRunner.once("exit", resolve));
   rmSync(hostRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 
+  // Stop. The Code surface's Stop is an `interrupt` control request appended
+  // to the event log — the renderer has no REST verb for it. The guest cannot
+  // be dialled, so the bridge hands the id to the runner on the poll it is
+  // already holding; the runner signals the child the way Ctrl-C would, writes
+  // the terminal the reader closes the turn on, and releases the session. The
+  // stub below never reaches its "late" result.
+  const interruptDir = join(work, "interrupt-bin");
+  mkdirSync(interruptDir, { recursive: true });
+  const interruptStub = join(interruptDir, "claude");
+  writeFileSync(interruptStub, `#!/bin/sh
+prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working: %s"}]},"session_id":"44444444-4444-4444-8444-444444444444"}\\n' "$prompt"
+trap 'exit 130' INT TERM
+sleep 60 >/dev/null 2>&1 &
+wait
+printf '{"type":"result","subtype":"success","session_id":"44444444-4444-4444-8444-444444444444","is_error":false,"result":"late"}\\n'
+`);
+  chmodSync(interruptStub, 0o755);
+  const interruptRunner = startRunner({ secret, binDir: interruptDir });
+  try {
+    assert.equal(await waitFor(
+      () => interruptRunner.output().includes("registered as"), 10000),
+    true, `the interrupt runner did not register: ${interruptRunner.output()}`);
+    const slowPlaced = await request("/v1/code/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "interrupt smoke", environment_id: poolId }),
+    });
+    const slowSession = JSON.parse(slowPlaced.body).session;
+    await request(`/v1/code/sessions/${slowSession.id}/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ events: [{ payload: { type: "user",
+        message: { role: "user", content: "work forever" } } }] }),
+    });
+    assert.equal(await waitFor(async () => {
+      const history = JSON.parse((await request(
+        `/v1/code/sessions/${slowSession.id}/events`)).body);
+      return decodeClientEventsResponse(history)
+        .some((entry) => entry.message.type === "assistant");
+    }, 10000), true, `the slow agent must start: ${interruptRunner.output()}`);
+
+    // Exactly what the Code surface posts for Stop.
+    const interrupted = await request(`/v1/code/sessions/${slowSession.id}/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ events: [{ payload: { type: "control_request",
+        request_id: "interrupt-smoke", request: { subtype: "interrupt" } } }] }),
+    });
+    assert.equal(interrupted.status, 200, interrupted.body);
+
+    assert.equal(await waitFor(async () => {
+      const history = JSON.parse((await request(
+        `/v1/code/sessions/${slowSession.id}/events`)).body);
+      return decodeClientEventsResponse(history)
+        .some((entry) => entry.message.type === "result");
+    }, 10000), true, `the interrupted turn must close: ${interruptRunner.output()}`);
+    const stopped = decodeClientEventsResponse(JSON.parse((await request(
+      `/v1/code/sessions/${slowSession.id}/events`)).body));
+    const terminal = stopped.filter((entry) => entry.message.type === "result").at(-1).message;
+    assert.equal(terminal.is_error, true, "an interrupt is an error result, not a success");
+    assert.equal(terminal.subtype, "error_during_execution");
+    assert.equal(terminal.interrupted, true);
+    assert.equal(terminal.result, "Request interrupted by user",
+      "the agent was stopped before its own result could land");
+    assert.equal(stopped.some(
+      (entry) => entry.message.type === "result" && entry.message.result === "late"),
+    false, "the killed agent's own terminal never arrives");
+    const receipt = stopped.find((entry) => entry.message.type === "control_response");
+    assert.equal(receipt?.message.response.request_id, "interrupt-smoke",
+      "the Stop's control_response reaches the reader that is waiting on it");
+    assert.equal(receipt.message.response.subtype, "success");
+
+    assert.equal(await waitFor(async () => {
+      const document = JSON.parse((await request(
+        `/v1/code/sessions/${slowSession.id}`)).body).session;
+      return document.worker_status === "idle";
+    }, 5000), true, "an interrupted turn leaves the session idle, not running");
+    assert.equal(await waitFor(
+      () => interruptRunner.output().includes("(interrupted)"), 3000), true,
+    "the runner reports the turn as interrupted");
+  } finally {
+    interruptRunner.child.kill("SIGTERM");
+    await new Promise((resolve) => interruptRunner.child.once("exit", resolve));
+  }
+
   // A runner with no secret must refuse to poll rather than guess.
   const refused = spawnSync("python3", ["-I", `${root}guest/runner.py`, "--once"], {
     encoding: "utf8",
@@ -587,7 +704,7 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
     "spec.loader.exec_module(runner)",
     "done = []",
     "entered = threading.Barrier(2)",
-    "def fake(hint):",
+    "def fake(hint, interrupt=None):",
     "    entered.wait(timeout=5)",
     "    done.append(hint.get('i'))",
     "runner.run_session = fake",
@@ -602,6 +719,32 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   assert.equal(probe.status, 0, probe.stderr);
   assert.match(probe.stdout, /^OK$/m,
     `two session turns must be in flight at once, got: ${probe.stdout}`);
+}
+
+// A Stop that lands between the poll handing out the hint and the runner's
+// claim must prevent the turn from starting. That decision is read from the
+// event log: an `interrupt` after the last client user message. The cases pin
+// the boundaries — an earlier stop is not this turn's, a worker's tool result
+// is not a user message, and a newer message supersedes an older stop.
+{
+  const probe = spawnSync("python3", ["-I", "-c", [
+    "import importlib.util, sys",
+    "spec = importlib.util.spec_from_file_location('runner', sys.argv[1])",
+    "runner = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(runner)",
+    "u = {'source': 'client', 'payload': {'type': 'user', 'message': {'role': 'user', 'content': 'hi'}}}",
+    "a = {'source': 'worker', 'payload': {'type': 'assistant', 'message': {'role': 'assistant', 'content': []}}}",
+    "stop = {'source': 'client', 'payload': {'type': 'control_request', 'request_id': 'r', 'request': {'subtype': 'interrupt'}}}",
+    "other = {'source': 'client', 'payload': {'type': 'control_request', 'request': {'subtype': 'set_model', 'model': 'm'}}}",
+    "tool = {'source': 'worker', 'payload': {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'content': 'x'}]}}}",
+    "cases = [([u, a], False), ([u, stop], True), ([stop, u], False),",
+    "          ([u, other, stop], True), ([u, a, tool], False), ([u, stop, u], False)]",
+    "bad = [i for i, (events, want) in enumerate(cases)",
+    "       if runner.interrupt_requested(events) != want]",
+    "print('OK' if not bad else 'FAIL %s' % bad)",
+  ].join("\n"), `${root}guest/runner.py`], { encoding: "utf8" });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.match(probe.stdout, /^OK$/m, `interrupt detection: ${probe.stdout}`);
 }
 
 process.stdout.write("guest-runner-smoke: the guest runner registers, runs an agent and reports\n");

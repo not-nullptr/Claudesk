@@ -32,6 +32,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -40,7 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.4"
+# 2.3.0: Stop reaches the guest. A session's interrupt is delivered on the
+# runner's held poll (`cancellations`), the child is signalled the way Ctrl-C
+# would, and the turn ends with a result event so the reader closes it.
+VERSION = "2.3.0"
 
 
 def env(name, default=""):
@@ -363,6 +367,45 @@ def latest_control_request(events, subtype):
             continue
         found = request
     return found
+
+
+def interrupt_requested(events):
+    """Did a Stop arrive after the user message this turn would answer?
+
+    A Stop is an `interrupt` control request in the session's own event log.
+    One that follows the last client user message (and no newer message has
+    come since) means the turn was cancelled before the runner got to it — the
+    bridge may have released the session between the poll handing out the hint
+    and this claim, and the agent must not start.
+    """
+    def is_client_turn(event):
+        if not isinstance(event, dict) or event.get("source") == "worker":
+            return False
+        payload = event.get("payload") or {}
+        if payload.get("type") != "user":
+            return False
+        content = (payload.get("message") or {}).get("content")
+        if isinstance(content, str):
+            return bool(content.strip())
+        if isinstance(content, list):
+            return any(
+                isinstance(part, dict) and part.get("type") == "text"
+                and isinstance(part.get("text"), str) and part["text"].strip()
+                for part in content)
+        return False
+
+    last_user = -1
+    for index, event in enumerate(events or []):
+        if is_client_turn(event):
+            last_user = index
+    for event in (events or [])[last_user + 1:]:
+        payload = (event or {}).get("payload") or {}
+        request = payload.get("request")
+        if payload.get("type") != "control_request" or not isinstance(request, dict):
+            continue
+        if request.get("subtype") == "interrupt":
+            return True
+    return False
 
 
 def run_git(directory, *arguments):
@@ -830,12 +873,68 @@ def handle_runner_request(item):
         respond_to_request(request_id, result=result)
 
 
-def run_agent(argv, cwd, content, write):
+# Sessions whose turn is running right now, each with the Event that tells it
+# to stop. Nothing can dial into the guest (QEMU forwards no port in), so the
+# runner's held poll is the only inbound channel: the bridge answers a Stop
+# with a `cancellations` list, and the main loop applies it here.
+RUNNING_TURNS = {}
+RUNNING_TURNS_LOCK = threading.Lock()
+
+
+def register_turn(session_id):
+    turn = threading.Event()
+    if isinstance(session_id, str) and session_id:
+        with RUNNING_TURNS_LOCK:
+            RUNNING_TURNS[session_id] = turn
+    return turn
+
+
+def unregister_turn(session_id):
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with RUNNING_TURNS_LOCK:
+        RUNNING_TURNS.pop(session_id, None)
+
+
+def apply_cancellations(items):
+    """Signal every running turn the bridge asked to stop."""
+    applied = 0
+    for item in items or []:
+        session_id = item.get("session_uuid") if isinstance(item, dict) else item
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        reason = item.get("reason") if isinstance(item, dict) else None
+        with RUNNING_TURNS_LOCK:
+            turn = RUNNING_TURNS.get(session_id)
+        if turn is not None:
+            turn.set()
+            applied += 1
+            log("cancelling session %s" % session_id)
+            continue
+        if reason != "interrupt":
+            continue
+        # No turn on this runner holds it: the stop is for a turn that ended
+        # while this service was restarting, so the session would otherwise
+        # read "running" forever with nothing behind it. Put it back idle; a
+        # deleted session answers 404 and needs no more than that.
+        status, _ = request(
+            "/v1/code/runners/self-hosted/sessions/%s/release"
+            % urllib.parse.quote(session_id), {}, token=RUNNER_TOKEN)
+        if status == 200:
+            log("session %s: released after a stop with no running turn" % session_id)
+    return applied
+
+
+def run_agent(argv, cwd, content, write, interrupt=None):
     """Run one turn, streaming its events back to the bridge.
 
     `write` puts one event on the turn's open stream (see open_event_stream):
     each token is written to the connection as it arrives, with no request of
     its own and no coalescing delay.
+
+    `interrupt` is an event set by the poll loop when the bridge carries a
+    Stop. The child is signalled the way the terminal would (SIGINT) so it can
+    flush and unwind; a child that ignores that is terminated, then killed.
     """
     """One headless turn of the agent: the prompt in, the event stream out.
 
@@ -856,10 +955,15 @@ def run_agent(argv, cwd, content, write):
     # account's Cowork VM. Without this, a session placed in bypass mode is
     # clamped to Accept edits.
     environment.setdefault("IS_SANDBOX", "1")
+    # Its own session, so a Stop can signal the whole process group. A tool the
+    # agent spawned (a shell, a server) is a grandchild: stopping only the
+    # agent would leave it running, and — because it inherits the stdout pipe —
+    # would also keep the turn's reader from seeing EOF.
     process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, bufsize=1,
-                               encoding="utf-8", errors="replace")
+                               encoding="utf-8", errors="replace",
+                               start_new_session=True)
     errors = []
 
     def drain_errors():
@@ -891,6 +995,53 @@ def run_agent(argv, cwd, content, write):
     timed_out = []
     watchdog = threading.Timer(TURN_TIMEOUT, lambda: (timed_out.append(True), process.kill()))
     watchdog.start()
+
+    interrupted = []
+
+    def wait_exit(seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if process.poll() is not None:
+                return True
+            time.sleep(0.1)
+        return process.poll() is not None
+
+    def signal_group(number):
+        # The child leads its own session (see Popen above), so its pid is the
+        # group id and tools it spawned are in the group.
+        try:
+            os.killpg(process.pid, number)
+        except (OSError, AttributeError):
+            try:
+                process.send_signal(number)
+            except (OSError, ValueError):
+                pass
+
+    def abort():
+        # SIGINT first — the agent treats it the way Ctrl-C stops a turn, so it
+        # can flush its stream. A group that ignores it is terminated, then
+        # killed: a Stop must never leave a process behind.
+        if interrupted:
+            return
+        interrupted.append(True)
+        signal_group(signal.SIGINT)
+        if wait_exit(3.0):
+            return
+        signal_group(signal.SIGTERM)
+        if wait_exit(2.0):
+            return
+        signal_group(signal.SIGKILL)
+
+    interrupt_done = threading.Event()
+
+    def watch_interrupt():
+        while not interrupt_done.wait(0.2):
+            if interrupt is not None and interrupt.is_set():
+                abort()
+                return
+
+    if interrupt is not None:
+        threading.Thread(target=watch_interrupt, daemon=True).start()
 
     def end_after_result():
         # A build that keeps waiting for more input after its result must not
@@ -947,9 +1098,10 @@ def run_agent(argv, cwd, content, write):
         code = process.wait()
     finally:
         watchdog.cancel()
+        interrupt_done.set()
         pending.put(None)
         writer_thread.join(timeout=60)
-    return code, result, bool(timed_out), forwarded, failures, errors
+    return code, result, bool(timed_out), bool(interrupted), forwarded, failures, errors
 
 
 def mcp_config_of(servers):
@@ -998,20 +1150,37 @@ def mcp_config_of(servers):
     return {"mcpServers": mapping} if mapping else None
 
 
-def run_session(hint):
+def run_session(hint, interrupt=None):
     session = hint["session_uuid"]
     quoted = urllib.parse.quote(session)
     token = expect(request("/v1/code/runners/self-hosted/sessions/%s/token" % quoted,
                            {}), "token")["session_token"]
 
-    def finish(path, body):
-        expect(request("/v1/code/runners/self-hosted/sessions/%s/%s" % (quoted, path),
-                       body, token), path)
+    def finish(path, body, strict=True):
+        answer = request("/v1/code/runners/self-hosted/sessions/%s/%s" % (quoted, path),
+                         body, token)
+        if answer[0] == 200:
+            return
+        # A session deleted while its turn ran is gone by the time the runner
+        # reports back; that is the expected outcome of deleting it, not a
+        # runner failure. Only the interrupted/released path asks for this.
+        if not strict and answer[0] in (404, 410):
+            log("session %s: %s answered %s after it was removed"
+                % (session, path, answer[0]))
+            return
+        expect(answer, path)
 
     status, history = request("/v1/code/sessions/%s/events" % quoted, token=token)
     events = (history or {}).get("data") if isinstance(history, dict) else []
     content = content_of(events)
     resume = resume_id(events)
+    if interrupt_requested(events):
+        # The Stop landed between the poll handing out this hint and the claim
+        # (the bridge releases the session in that window). Nothing has run
+        # yet, so there is no turn to abort — just put the session back idle.
+        log("session %s: stopped before the turn started" % session)
+        finish("release", {}, strict=False)
+        return session, 0
 
     # The session's own settings — the composer's model choice among them —
     # ride the session document; the agent must be asked with them or it
@@ -1103,11 +1272,12 @@ def run_session(hint):
         "/v1/code/sessions/%s/events/stream" % quoted, token)
 
     def turn(extra):
-        return run_agent(argv + extra, cwd, content, write)
+        return run_agent(argv + extra, cwd, content, write, interrupt)
 
-    code, result, timed_out, forwarded, failures, errors = turn(
+    code, result, timed_out, was_interrupted, forwarded, failures, errors = turn(
         ["--resume", resume] if resume else [])
-    if (resume and forwarded == 0 and failures == [] and result is not None
+    if (not was_interrupted and resume and forwarded == 0 and failures == []
+            and result is not None
             and result.get("is_error")
             and any("No conversation found" in line for line in errors)):
         # The agent's own transcripts are gone (rebuilt image, wiped home);
@@ -1115,7 +1285,22 @@ def run_session(hint):
         # not — start a fresh one rather than failing the turn.
         log("session %s: no conversation %s in the guest; starting a new one"
             % (session, resume))
-        code, result, timed_out, forwarded, failures, errors = turn([])
+        code, result, timed_out, was_interrupted, forwarded, failures, errors = turn([])
+    if was_interrupted and result is None and not failures:
+        # A child stopped by SIGINT may exit without a result message. The
+        # transcript reader closes a turn on `result`, so write the terminal
+        # the SDK itself uses for an interrupted turn.
+        result = {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "interrupted": True,
+            "result": "Request interrupted by user",
+            "session_id": resume or "",
+            "duration_ms": int((time.time() - started) * 1000),
+            "num_turns": 0,
+            "total_cost_usd": 0,
+        }
     duration = time.time() - started
     if result is not None:
         log("session %s: turn done in %.1fs (%s events, %s turns, cost %s)" % (
@@ -1143,6 +1328,11 @@ def run_session(hint):
     elif timed_out:
         finish("report-failure", {"reason": "agent ran longer than %ss" % int(TURN_TIMEOUT),
                                   "failure_kind": "timeout"})
+    elif was_interrupted:
+        # A Stop is not a failure: the session goes idle and the next message
+        # requeues it. A session that was deleted mid-turn is already gone, so
+        # the release is allowed to find nothing.
+        finish("release", {}, strict=False)
     elif code == 0 and result is not None and not result.get("is_error"):
         finish("release", {})
     else:
@@ -1156,7 +1346,8 @@ def run_session(hint):
         else:
             reason = "agent exited %s" % code
         finish("report-failure", {"reason": reason[:600], "failure_kind": "agent_failed"})
-    log("session %s: agent exited %s" % (session, code))
+    log("session %s: agent exited %s%s" % (
+        session, code, " (interrupted)" if was_interrupted else ""))
     return session, code
 
 
@@ -1200,10 +1391,14 @@ def prepare_home():
 
 def run_session_thread(hint):
     """One session turn on its own thread; failures stay with that session."""
+    session_id = hint.get("session_uuid")
+    interrupt = register_turn(session_id)
     try:
-        run_session(hint)
+        run_session(hint, interrupt)
     except Exception as error:  # noqa: BLE001 - keep serving the pool
-        log("session %s failed: %s" % (hint.get("session_uuid"), error))
+        log("session %s failed: %s" % (session_id, error))
+    finally:
+        unregister_turn(session_id)
 
 
 def run_sessions_forever(session_queue):
@@ -1256,6 +1451,10 @@ def main():
                 return 1
             time.sleep(POLL_SECONDS)
             continue
+        # A Stop is carried on the same held poll: the bridge wakes it and
+        # names the sessions whose turn must end. Apply it before the rest so
+        # a stop is never queued behind a folder lookup.
+        apply_cancellations(polled.get("cancellations") or [])
         # The web Code composer's folder/git lookups ride the same poll. They
         # are answered from inside the VM, before any session is started.
         requests = polled.get("requests") or []
