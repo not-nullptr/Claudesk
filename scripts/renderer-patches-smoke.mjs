@@ -1870,6 +1870,8 @@ const selfHostedRepoInfo = 'function repoInfo(e){'
 const selfHostedListFields = 'var listFields=["id","title","session_status",'
   + '"self_hosted_runner_pool_id","session_grouping_id","permission_mode"];'
   + 'function pickSession(e){return pickFields(e,listFields)}';
+const selfHostedContextFields = 'function pickContext(e){return{...pickFields(e,'
+  + '["model","effort_level"]),sources:[],outcomes:[]}}';
 const selfHostedNormalizer = 'function normalizeSession(e){let t=e,n=e.config??{};'
   + 'return{type:"session",id:e.id,title:e.title,'
   + 'session_grouping_id:t.session_grouping_id??void 0,'
@@ -1919,7 +1921,8 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedRemotePrefill, selfHostedListFields, selfHostedFolderGroups,
+  selfHostedBucketPrefill, selfHostedRemotePrefill, selfHostedListFields,
+  selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
 const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-needs-folder",
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
@@ -1958,8 +1961,8 @@ assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-folder-groups").length, 2,
   "the sidebar must fall back to the folder and accept its group id");
 assert.equal(tenantStartOptions.patches
-  .filter(patch => patch.id === "web-code-folder-prefill").length, 4,
-  "both row builders, the bucket prefill and the draft setter must carry the folder");
+  .filter(patch => patch.id === "web-code-folder-prefill").length, 5,
+  "both row builders, both sanitizer fields, the prefill and the setter must carry the folder");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-surface").length, 1,
   "the model-selector surface resolver must answer Code routes consistently");
@@ -2019,8 +2022,10 @@ assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
-assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info"]'),
-  "the session-list sanitizer must keep repo_info across serialization");
+assert.ok(selfHostedOut.includes('"session_grouping_id","permission_mode","repo_info","cwd"]'),
+  "the session-list sanitizer must keep repo_info and cwd across serialization");
+assert.ok(selfHostedOut.includes('pickFields(e,["model","effort_level","cwd"])'),
+  "the rebuilt session_context must keep the folder");
 assert.ok(selfHostedOut.includes('let t=e.source.data.sessionGroupingId'
   + '||(e.source.data.repoInfo&&e.source.data.repoInfo.name)||void 0;'),
   "a code row with no project id must group by its folder");

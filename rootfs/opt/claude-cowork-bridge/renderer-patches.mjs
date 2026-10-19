@@ -2837,6 +2837,24 @@ function sessionListFieldsTarget(node) {
   return { array };
 }
 
+// The sanitizer's rebuilt `session_context` (`IP` in shared-25) keeps only
+// these two fields before re-adding sources/outcomes. `cwd` is not one of
+// them, so the folder a session ran in vanished on this path even though the
+// bridge and the normalized document both carried it. Pinned by the exact
+// two-element literal array.
+function sessionContextFieldsTarget(node) {
+  if (node.type !== "ArrayExpression" || node.elements.length !== 2) return undefined;
+  const values = node.elements
+    .filter(entry => entry?.type === "Literal" && typeof entry.value === "string")
+    .map(entry => entry.value);
+  if (values.length !== 2) return undefined;
+  const fields = new Set(values);
+  if (!fields.has("model") || !fields.has("effort_level") || fields.has("cwd")) {
+    return undefined;
+  }
+  return { array: node };
+}
+
 // The unified sidebar's code-session branch: `if (session.source.kind ===
 // "code") { let group = session.source.data.sessionGroupingId; … }`. Returns
 // the declarator so the caller can add the folder fallback to the
@@ -3731,6 +3749,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const repoInfos = [];
     const sessionNormalizers = [];
     const sessionListFields = [];
+    const sessionContextFields = [];
     const remoteRows = [];
     const folderPrefills = [];
     const remotePrefills = [];
@@ -3765,6 +3784,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (remotePrefill) remotePrefills.push(remotePrefill);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
+      const contextFields = sessionContextFieldsTarget(node);
+      if (contextFields) sessionContextFields.push(contextFields);
       const codeGroup = codeSessionGroupTarget(node);
       if (codeGroup) codeGroups.push(codeGroup);
       const projectGate = codeProjectGateTarget(node);
@@ -3861,7 +3882,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       const { array } = sessionListFields[0];
       const at = array.end - 1;
       patches.push({ id: selfHostedRepoInfoPatchId, start: at, end: at,
-        original: "", replacement: ',"repo_info"' });
+        original: "", replacement: ',"repo_info","cwd"' });
+    }
+    if (sessionContextFields.length === 1) {
+      const { array } = sessionContextFields[0];
+      const at = array.end - 1;
+      patches.push({ id: folderPrefillPatchId, start: at, end: at,
+        original: "", replacement: ',"cwd"' });
     }
     for (const { object, session } of remoteRows) {
       const at = object.end - 1;
