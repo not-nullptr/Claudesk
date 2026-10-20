@@ -250,6 +250,11 @@ vm_vsock_port=""
 # desktop container pays at startup (see prepare-renderer.mjs);
 # scripts/deploy-bridge-only.sh sets the narrow set. The value is a deliberate
 # list of names, so it must split.
+recreate_services="${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}"
+# The inline environment below must stay a *prefix* of the compose command: a
+# stray assignment after its last backslash would turn the whole block into
+# plain shell variables and silently run compose with the deployment's `.env`
+# instead of this account's.
 # shellcheck disable=SC2086
 CLAUDESK_DATA_ROOT="$user_root" \
 CLAUDESK_ROOT_STATE="$user_root/root" \
@@ -276,8 +281,6 @@ CLAUDE_DESKTOP_MEMORY_LIMIT="${desktop_limit_gb}g" \
 CLAUDESK_VM_VSOCK_PORT="$vm_vsock_port" \
 CLAUDESK_VM_VSOCK_GUEST_SITES="${CLAUDESK_VM_VSOCK_GUEST_SITES:-0}" \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
-recreate_services="${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}"
-# shellcheck disable=SC2086
 compose_shared --project-name "claudesk-$slug" up -d --force-recreate $recreate_services
 
 # Record what this recreate actually applied, so the dashboard can show a saved

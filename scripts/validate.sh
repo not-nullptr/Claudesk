@@ -24,6 +24,7 @@ node scripts/greeting-smoke.mjs
 node scripts/account-smoke.mjs
 node scripts/account-settings-smoke.mjs
 node scripts/account-scope-smoke.mjs
+node scripts/provision-env-smoke.mjs
 node scripts/tenant-code-guard-smoke.mjs
 node scripts/code-runners-smoke.mjs
 node scripts/code-runners-http-smoke.mjs
