@@ -106,6 +106,18 @@ const localSessionPlacementPatchId = "web-local-session-placement";
 // bundle that no longer matches keeps the data-side policy alone. Spliced only
 // in web-shell mode.
 const wiggleUploadLanePatchId = "web-wiggle-upload-lane";
+// The upload URL's lane choice. It answers `dT(config) ? "wiggle" : …` — pure
+// gate, no look at whether the config can form a wiggle URL. That URL builder
+// requires both an org and a conversation uuid and *throws* when either is
+// missing; with the lane now forced on, a composer that has no conversation yet
+// (a new chat whose draft has not been bound, a session composer using the
+// shared upload pipeline) would fail the attachment client-side without sending
+// a request. Falling back to the org lane — `/api/<org>/upload`, which this
+// bridge also serves — keeps the upload possible; the file document is the same
+// shape either way. The function is pinned by its two literal lane names and the
+// gate call as the first test. Spliced only in web-shell mode, and not
+// required.
+const wiggleLaneFallbackPatchId = "web-upload-lane-fallback";
 // Code sessions and chat sessions are separate stores — Code lives in the local
 // Code session store (`LocalSessions`), chat and Cowork in the local-agent-mode
 // store (`LocalAgentModeSessions`) — but the renderer merges them into one
@@ -1301,6 +1313,33 @@ function wiggleUploadLaneTarget(node) {
     && propertyNode.kind === "init" && propertyNode.shorthand !== true
     && (propertyNode.key?.name ?? propertyNode.key?.value) === "wiggleEnabled");
   return entry?.value;
+}
+
+// The upload URL's lane choice (see wiggleLaneFallbackPatchId): a one-parameter
+// function returning `gate(config) ? "wiggle" : config.projectUuid ? "project" :
+// "org"`. Returns the gate expression and the parameter name so the caller can
+// add the conversation precondition to the test.
+function wiggleLaneFallbackTarget(node) {
+  if (!functionTypes.has(node.type) || node.params.length !== 1) return undefined;
+  const parameter = identifier(node.params[0]);
+  if (!parameter) return undefined;
+  const body = node.body;
+  if (body?.type !== "BlockStatement" || body.body.length !== 1) return undefined;
+  const [statement] = body.body;
+  if (statement.type !== "ReturnStatement") return undefined;
+  const branch = statement.argument;
+  if (branch?.type !== "ConditionalExpression" || !literal(branch.consequent, "wiggle")) {
+    return undefined;
+  }
+  const test = branch.test;
+  if (test?.type !== "CallExpression" || test.arguments.length !== 1
+    || identifier(test.callee) === undefined) return undefined;
+  const alternate = branch.alternate;
+  if (alternate?.type !== "ConditionalExpression"
+    || !literal(alternate.consequent, "project") || !literal(alternate.alternate, "org")) {
+    return undefined;
+  }
+  return { test, parameter };
 }
 
 // The home-layout assignment object: an object literal carrying exactly the six
@@ -4589,14 +4628,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   // expression, and a chunk with none simply keeps the data-side policy.
   if (webShellEnabled) {
     const lanes = [];
+    const laneChoices = [];
     walk(ast, [], (node) => {
       const lane = wiggleUploadLaneTarget(node);
       if (lane) lanes.push(lane);
+      const choice = wiggleLaneFallbackTarget(node);
+      if (choice) laneChoices.push(choice);
     });
     if (lanes.length === 1) {
       const target = lanes[0];
       patches.push({ id: wiggleUploadLanePatchId, start: target.start, end: target.end,
         original: source.slice(target.start, target.end), replacement: "!0" });
+    }
+    if (laneChoices.length === 1) {
+      const { test, parameter } = laneChoices[0];
+      const original = source.slice(test.start, test.end);
+      patches.push({ id: wiggleLaneFallbackPatchId, start: test.start, end: test.end,
+        original,
+        replacement: `(${original}&&${parameter}.conversationUuid)` });
     }
   }
   // The routine surface's two web-shell patches (see their ids). Each target is

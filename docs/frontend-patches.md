@@ -316,6 +316,20 @@ only in web-shell mode. Because it changes the prepared renderer, it carries a
 `patchRelease` bump so the release-versioned asset URL cannot serve the
 previous generation from a cache.
 
+Forcing the lane raises the second half of the same problem: the upload URL is
+chosen by `gate(config) ? "wiggle" : config.projectUuid ? "project" : "org"`,
+and the wiggle URL builder *throws* unless the config names both an
+organization and a conversation. A composer with no bound conversation yet — a
+new chat whose draft has not been created, a session composer sharing this
+upload pipeline — would then fail the attachment client-side without a request,
+which is the same symptom with a different cause. The
+`web-upload-lane-fallback` patch adds `&& config.conversationUuid` to the gate
+test, so such an upload takes the org lane (`/api/<org>/upload`, which the
+bridge serves and which returns the same file document) instead. It is pinned
+by the function's two literal lane names (`"wiggle"`, then `"project"`/`"org"`)
+and the gate call as its first test, splices only that test, and is not
+required. Also web-shell only.
+
 Cowork tool permissions — the AskUserQuestion and tool-approval cards — are fed
 by the app's pending-permission store, and the only thing that wires that store
 (its subscription to the session event stream plus the

@@ -194,6 +194,12 @@ was created keeps its own value, so the renderer patch `web-wiggle-upload-lane`
 also forces the composer's resolved `wiggleEnabled` true in the web shell
 (see docs/frontend-patches.md); the data policy and the patch ship together.
 
+The wiggle URL builder requires a conversation uuid and throws without one, so
+`web-upload-lane-fallback` adds that precondition to the lane choice: an upload
+with no bound conversation takes the org lane (`/api/<org>/upload`, also served
+here) instead of failing client-side before any request. Both patches are
+web-shell only and both are needed for attachments to work on every surface.
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission

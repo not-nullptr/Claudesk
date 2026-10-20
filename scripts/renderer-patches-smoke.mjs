@@ -77,6 +77,13 @@ const wiggleLaneDecoy = 'function notTheLane({codeExecutionUnavailable:e,'
   + 'serverIsWiggleEnabled:n,wiggleEnabledForUser:r,conversationWiggleSetting:i,'
   + 'oocAttachmentsEnabled:a}){return e?{wiggleEnabled:!1}'
   + ':{wiggleEnabled:n??(r&&i!==!1),blobFileUploadsEnabled:a,anyFileTypeEnabled:!1}}';
+// The upload URL's lane choice: gate first, then project, then org. In web-shell
+// mode the gate gains a conversation precondition, so an upload with no bound
+// conversation falls back to the org lane instead of throwing in the wiggle URL
+// builder.
+const uploadLaneChoice = 'function uploadLane(e){return gate(e)?"wiggle":'
+  + 'e.projectUuid?"project":"org"}';
+const uploadLaneChoiceDecoy = 'function otherLane(e){return gate(e)?"wiggle":"org"}';
 const sessionPlacementDecoy = 'function notThePlacement(){'
   + 'let forceLocal=gate("dramatic_shrimp_force_local"),'
   + 'settings=(account)=>account.settings.dramatic_shrimp_disabled_at,'
@@ -615,6 +622,37 @@ const wiggleCompiled = await minify(wiggleLane, {
 assert.equal(inspectRenderer(wiggleCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-wiggle-upload-lane").length, 1,
   "a mangled upload-lane resolver must still be spliced once");
+// The lane choice: the wiggle test gains the conversation precondition, so a
+// config without one falls back to the org lane the bridge also serves.
+const laneChoicePatches = inspectRenderer(uploadLaneChoice, false, true).patches
+  .filter(patch => patch.id === "web-upload-lane-fallback");
+assert.equal(laneChoicePatches.length, 1, "the upload lane choice must be spliced once");
+assert.equal(laneChoicePatches[0].original, "gate(e)");
+assert.equal(laneChoicePatches[0].replacement, "(gate(e)&&e.conversationUuid)");
+assert.equal(inspectRenderer(uploadLaneChoice, false, false).patches
+  .filter(patch => patch.id === "web-upload-lane-fallback").length, 0,
+  "the lane fallback stays off without the web shell");
+assert.equal(inspectRenderer(uploadLaneChoiceDecoy, false, true).patches
+  .filter(patch => patch.id === "web-upload-lane-fallback").length, 0,
+  "a lane choice without the project/org arms is not a target");
+{
+  const patched = uploadLaneChoice.slice(0, laneChoicePatches[0].start)
+    + laneChoicePatches[0].replacement + uploadLaneChoice.slice(laneChoicePatches[0].end);
+  const context = {};
+  vm.runInNewContext(`function gate(c){return c.wiggle}${patched};result=[`
+    + `uploadLane({wiggle:!0,conversationUuid:"c"}),`
+    + `uploadLane({wiggle:!0}),uploadLane({wiggle:!1,projectUuid:"p"}),`
+    + `uploadLane({wiggle:!1})];`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)),
+    ["wiggle", "org", "project", "org"],
+    "a conversation-less upload uses the org lane; the project arm still wins next");
+}
+const laneChoiceCompiled = await minify(uploadLaneChoice, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(laneChoiceCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-upload-lane-fallback").length, 1,
+  "a mangled lane choice must still be spliced once");
 // The session list's Code gate is pinned by its destructured property names and
 // its single returned disjunction: a lookalike without the folded branch is not
 // a target, and the splice survives minification.
