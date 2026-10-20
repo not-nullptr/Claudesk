@@ -751,6 +751,16 @@ const previewMaxBytes = sessionFileReadLimit({
 const artifactsRoot = resolve(
   process.env.COWORK_REMOTE_ARTIFACTS_ROOT || "/config/Claude/Artifacts",
 );
+// A Cowork session's deliverables live under Desktop's userData, not the
+// workspace: `<sessionId>/<…>/outputs/…`. Desktop's own file-access consent
+// treats that outputs directory as part of the session, so the download and
+// preview routes serve it too — the model's file cards link straight to it.
+// Everything else in this tree (memory, transcripts, settings) stays outside
+// the readable roots; see resolveSessionOutputsPath.
+const sessionOutputsRoot = resolve(
+  process.env.COWORK_REMOTE_SESSION_OUTPUTS_ROOT
+    || "/config/.config/Claude-3p/local-agent-mode-sessions",
+);
 const internalFailureExitThreshold = Number(
   process.env.COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD || 3,
 );
@@ -1684,10 +1694,12 @@ const handleDownload = createDownloadHandler({
   artifactsRoot,
   mimeTypes,
   downloadRoots,
+  sessionOutputsRoot,
 });
 const handleFilePreview = createPreviewHandler({
   ApiError,
   downloadRoots,
+  sessionOutputsRoot,
   maxBytes: previewMaxBytes,
   converterUrl: officeConverterUrl,
 });
@@ -3176,6 +3188,7 @@ async function bridgeLocalSessionFile(body) {
     allowRoot: false,
     missingMessage: "session file was not found",
     outsideMessage: "session file path is outside the allowed read roots",
+    sessionOutputsRoot,
   });
   if (read.file) {
     console.log(
@@ -3205,6 +3218,7 @@ async function supplementSessionFileRead(body, value) {
       allowRoot: true,
       missingMessage: "session file was not found",
       outsideMessage: "session file path is outside the allowed read roots",
+      sessionOutputsRoot,
     });
     if (!filePath) return value;
     console.log(`[cowork-bridge] session-file resolve ${requested} -> ${filePath}`);
@@ -3217,6 +3231,7 @@ async function supplementSessionFileRead(body, value) {
     allowRoot: false,
     missingMessage: "session file was not found",
     outsideMessage: "session file path is outside the allowed read roots",
+    sessionOutputsRoot,
   });
   if (read.file) {
     console.log(
@@ -3250,6 +3265,7 @@ async function bridgeSessionFileWithStatus(args, argsEncoding) {
       allowRoot: false,
       missingMessage: "session file was not found",
       outsideMessage: "session file path is outside the allowed read roots",
+      sessionOutputsRoot,
     });
     if (read.file) {
       console.log(

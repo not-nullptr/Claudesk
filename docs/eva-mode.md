@@ -197,8 +197,12 @@ of these, and an `Admin` account keeps the deployment's own setting:
   UI rather than only by asking its agent.)
 - `COWORK_REMOTE_READ_ROOTS` — the extra roots the authenticated download route
   may serve. An account reads its own workspace and nothing else; the operator's
-  own `/config` is not a tenant's to fetch. (`CLAUDE_COWORK_HOST_BASH` is pinned
-  off for every account too: the image requires Cowork VM mode.)
+  own `/config` is not a tenant's to fetch. The one built-in exception is the
+  account's *own* Cowork session `outputs/` directory under its userData
+  (`COWORK_REMOTE_SESSION_OUTPUTS_ROOT`), where that account's deliverables and
+  the model's file cards live; the memory and transcript trees beside it are
+  still refused. (`CLAUDE_COWORK_HOST_BASH` is pinned off for every account too:
+  the image requires Cowork VM mode.)
 
 `provision-user.sh` reads the role from `authd --show` and decides;
 `CLAUDESK_ACCOUNT_GATEWAY_SETTINGS` / `_DEVELOPER_ACTIONS` /
