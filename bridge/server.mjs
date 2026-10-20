@@ -603,18 +603,42 @@ function syntheticAccount(identity) {
       enabled_geolocation: false,
       // Remote Cowork sessions are not served here; the web-shell account
       // policy sets this too, and making it explicit keeps the two in step.
+      // The local upload lane's switch (`enabled_monkeys_in_a_barrel`) is the
+      // policy's as well — see applyWebShellAccountPolicy.
       dramatic_shrimp_enabled: false,
     },
     ...(identity.avatar ? { avatar_image_url: identity.avatar } : {}),
   };
 }
 
+// The web shell's chat/Cowork attachments ride the renderer's local ("wiggle")
+// upload lane: its cloud files API is off in this deployment
+// (`session_files.files_api` is false), so the composer has no other way to
+// send a file. That lane is gated on the account's
+// `settings.enabled_monkeys_in_a_barrel`, and the renderer reads that gate
+// before it makes any request: with it off, every attachment is marked
+// "Upload failed" and a send is refused with "…couldn't be uploaded. Try
+// sending again.", while the network tab stays empty. The app also couples the
+// switch to unrelated feature toggles (turning off the "Files" preview clears
+// it), so an account can lose attachments without anyone meaning to turn off
+// code execution. This bridge serves the lane, so the web shell declares the
+// switch on for every account. `CLAUDE_REMOTE_WIGGLE_UPLOADS=0` restores the
+// stored value; a chat whose conversation pinned the setting off keeps it.
 function applyWebShellAccountPolicy(account) {
   if (!account || typeof account !== "object" || Array.isArray(account)) return account;
   const settings = account.settings === undefined ? {} : account.settings;
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return account;
-  if (settings.dramatic_shrimp_enabled === false) return account;
-  return { ...account, settings: { ...settings, dramatic_shrimp_enabled: false } };
+  const next = {
+    ...settings,
+    dramatic_shrimp_enabled: false,
+    ...(process.env.CLAUDE_REMOTE_WIGGLE_UPLOADS !== "0"
+      ? { enabled_monkeys_in_a_barrel: true } : {}),
+  };
+  if (settings.dramatic_shrimp_enabled === next.dramatic_shrimp_enabled
+    && settings.enabled_monkeys_in_a_barrel === next.enabled_monkeys_in_a_barrel) {
+    return account;
+  }
+  return { ...account, settings: next };
 }
 const workspaceRoot = resolve(process.env.COWORK_REMOTE_WORKSPACE_ROOT || "/workspace");
 // Temporary diagnosis channel for the web renderer: it POSTs named traces
@@ -2479,6 +2503,34 @@ function grantWebShellGates(value) {
   return changed;
 }
 
+// The two rollout gates the composer consults before it offers the local
+// ("wiggle") upload lane at all — `wiggle.useEnabledForUser()` is
+// `read("trials_and_tribulations_of_high_school_football")` and the default
+// for the account's own switch is `read("default_wiggle_on")`. A false/absent
+// value disables the lane, and with it every chat/Cowork attachment, before
+// the account policy above is consulted. Forced true rather than
+// added-if-absent because this deployment is the lane's only backend.
+// `CLAUDE_REMOTE_WIGGLE_UPLOADS=0` leaves the upstream table exactly as it came.
+const wiggleUploadGates = [
+  "trials_and_tribulations_of_high_school_football",
+  "default_wiggle_on",
+];
+function grantWiggleUploadGates(value) {
+  if (process.env.CLAUDE_REMOTE_WIGGLE_UPLOADS === "0") return false;
+  const features = value?.growthbook?.features;
+  if (!features || typeof features !== "object") return false;
+  let changed = false;
+  for (const name of wiggleUploadGates) {
+    const key = growthbookKey(name);
+    const entry = features[key];
+    const on = entry && (entry.value !== undefined ? entry.value : entry.defaultValue) === true;
+    if (on) continue;
+    features[key] = { defaultValue: true };
+    changed = true;
+  }
+  return changed;
+}
+
 // The routine feature's own rollout gate. The renderer's `mh()` is
 // `capabilities.routines.enabled && W("chilling_sloth_clocks", …)`, and `W`
 // answers false for a gate it carries as off — so an upstream false hides the
@@ -2959,6 +3011,11 @@ async function forwardOfficialProtocol(request, response, url) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantWebShellGates(parsed)) {
+      rewrote = true;
+    }
+    // The composer's only upload lane (see grantWiggleUploadGates).
+    if (webShellEnabled && bootstrapResponsePath.test(url.pathname)
+      && grantWiggleUploadGates(parsed)) {
       rewrote = true;
     }
     if (webShellEnabled && bootstrapResponsePath.test(url.pathname) && grantRoutineGate(parsed)) {

@@ -37,6 +37,7 @@ function load({ webShell = false, env = {} } = {}) {
     `${flags}${grantSection}
      result = { granted: webShellGrantedGates, grant: grantWebShellGates,
        grantComposer: grantWebShellComposerDesign, grantRoutine: grantRoutineGate,
+       grantWiggle: grantWiggleUploadGates,
        hash: growthbookKey,
        grantProjects: grantProjectsLimits, enabled: webShellEnabled };`,
     sandbox,
@@ -44,7 +45,7 @@ function load({ webShell = false, env = {} } = {}) {
   return sandbox.result;
 }
 
-const { granted, grant, grantComposer, grantRoutine, grantProjects, hash, enabled } = load();
+const { granted, grant, grantComposer, grantRoutine, grantWiggle, grantProjects, hash, enabled } = load();
 assert.deepEqual(plain(granted),
   ["bad_moon_rising", "yukon_silver_dramatic_shrimp_clocks", "yukon_silver_folders",
     "yukon_silver_dramatic_shrimp_atrium", "__gb__4205082553",
@@ -89,6 +90,50 @@ assert.deepEqual(plain(composerTrue.growthbook.features[composerKey]), { value: 
 assert.match(serverSource,
   /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWebShellComposerDesign\(parsed\)\) \{\s*rewrote = true;\s*\}/,
   "the composer override is limited to web-shell bootstrap responses");
+
+// The local upload lane's rollout gates. The composer consults these before
+// the account's own switch; a false or absent value marks every attachment
+// "Upload failed" with no request made at all, so the web shell forces both
+// on. The env opt-out leaves the upstream table untouched.
+const wiggleGateNames = [
+  "trials_and_tribulations_of_high_school_football",
+  "default_wiggle_on",
+];
+{
+  const wiggleAbsent = { growthbook: { features: { existing: { defaultValue: true } } } };
+  assert.equal(grantWiggle(wiggleAbsent), true, "absent upload-lane gates must be enabled");
+  for (const name of wiggleGateNames) {
+    assert.deepEqual(plain(wiggleAbsent.growthbook.features[hash(name)]), { defaultValue: true },
+      `${name} must be granted as true under its hashed key`);
+  }
+  assert.equal(grantWiggle(wiggleAbsent), false, "an enabled upload-lane table must be idempotent");
+  const wiggleFalse = {
+    growthbook: { features: {
+      [hash(wiggleGateNames[0])]: { defaultValue: false },
+      [hash(wiggleGateNames[1])]: { defaultValue: false },
+    } },
+  };
+  assert.equal(grantWiggle(wiggleFalse), true, "an explicit false upload-lane gate must be overridden");
+  for (const name of wiggleGateNames) {
+    assert.deepEqual(plain(wiggleFalse.growthbook.features[hash(name)]), { defaultValue: true });
+  }
+  const wiggleTrue = {
+    growthbook: { features: {
+      [hash(wiggleGateNames[0])]: { value: true },
+      [hash(wiggleGateNames[1])]: { defaultValue: true },
+    } },
+  };
+  assert.equal(grantWiggle(wiggleTrue), false, "already-enabled upload-lane gates are preserved");
+  const wiggleOptOut = load({ env: { CLAUDE_REMOTE_WIGGLE_UPLOADS: "0" } });
+  const untouched = { growthbook: { features: {} } };
+  assert.equal(wiggleOptOut.grantWiggle(untouched), false,
+    "CLAUDE_REMOTE_WIGGLE_UPLOADS=0 leaves the upstream table alone");
+  assert.deepEqual(plain(untouched.growthbook.features), {},
+    "the opt-out adds no upload-lane gate");
+  assert.match(serverSource,
+    /if \(webShellEnabled && bootstrapResponsePath\.test\(url\.pathname\)\s*&& grantWiggleUploadGates\(parsed\)\) \{\s*rewrote = true;\s*\}/,
+    "the upload-lane grant is limited to web-shell bootstrap responses");
+}
 
 // The routine availability gate is forced too: an explicit upstream false
 // would otherwise hide the Code frame's Routines entry even though the
