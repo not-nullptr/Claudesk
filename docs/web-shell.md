@@ -175,6 +175,23 @@ document unwrapped, and points `path` at the stored absolute path under
 `/v1/filestore/fs/createFile` are the same store's >30 MiB lane. No local path
 is available to a browser, so there is nothing else for the document to name.
 
+The renderer will only take that lane when its `wiggle` feature resolves on.
+`session_files.files_api` is false here (the capabilities document advertises
+`upload`/`download`, not a cloud file store), so with wiggle off the composer
+has no attachment pipeline at all: the file chip reads "Upload failed", the
+send is refused with "…couldn't be uploaded. Try sending again.", and *no
+request is made*, so the network tab stays empty. The switch is the account's
+`settings.enabled_monkeys_in_a_barrel`, which the app also clears when a user
+turns off the unrelated "Files" feature preview, and it is read before the
+upload route is ever called. Since this bridge is the lane's only backend, the
+web shell's account policy declares the switch on
+(`applyWebShellAccountPolicy`) and forces the two rollout gates the composer
+reads first (`grantWiggleUploadGates`:
+`trials_and_tribulations_of_high_school_football` and `default_wiggle_on`).
+`CLAUDE_REMOTE_WIGGLE_UPLOADS=0` restores the stored value and leaves the
+upstream gate table alone. A conversation that pinned the setting off when it
+was created keeps its own value; a new chat picks up the policy.
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission
@@ -263,6 +280,14 @@ dialog.showMessageBox(window, {
   detail: "<path>\n\nThis will allow Claude to preview the file.",
 });
 ```
+
+The bridge's download and preview routes follow the same rule. A session's
+deliverables are written under Desktop's userData
+(`<sessionId>/<…>/outputs/…`) rather than the workspace, and a model's file card
+links straight there, so a path whose real location is inside an `outputs/`
+directory under `COWORK_REMOTE_SESSION_OUTPUTS_ROOT` is served. The `memory/`,
+transcript and settings trees beside it are refused, and a symlink inside
+`outputs/` that resolves into one of them is refused too.
 
 An agent memory file is one of those paths: it lives under the Desktop's own
 userData (`~/.config/Claude-3p/local-agent-mode-sessions/…/memory/`), which no

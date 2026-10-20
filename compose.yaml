@@ -249,6 +249,10 @@ services:
       # Paths are resolved inside this container, so a host directory also
       # needs a bind mount above to exist here. Empty means /workspace only.
       COWORK_REMOTE_READ_ROOTS: "${COWORK_REMOTE_READ_ROOTS:-}"
+      # Cowork session deliverables (the model's file cards) live here, under
+      # Desktop's userData, and are readable by the download/preview routes;
+      # empty keeps the built-in path.
+      COWORK_REMOTE_SESSION_OUTPUTS_ROOT: "${COWORK_REMOTE_SESSION_OUTPUTS_ROOT:-}"
       # Largest file the bridge will hand the session file pane when Desktop's
       # own reader refuses it (Desktop caps at 10 MiB). Default 10485760.
       COWORK_REMOTE_SESSION_FILE_MAX_BYTES: "${COWORK_REMOTE_SESSION_FILE_MAX_BYTES:-10485760}"

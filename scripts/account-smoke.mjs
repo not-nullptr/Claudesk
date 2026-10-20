@@ -172,6 +172,11 @@ const upstreamAccount = {
   // with manual approvals died on it. The policy merges the flag in and
   // touches nothing else; unlike the identity overrides it applies without any
   // CLAUDE_REMOTE_ACCOUNT_* value.
+  //
+  // The same policy declares the local upload lane on: the composer's only
+  // attachment pipeline is gated on `settings.enabled_monkeys_in_a_barrel`
+  // (the cloud files API is off), and with it off every file is marked
+  // "Upload failed" before any request is made.
   const policy = load({});
   const account = policy.applyPolicy({
     uuid: "11111111-1111-1111-1111-111111111111",
@@ -179,15 +184,38 @@ const upstreamAccount = {
     settings: { enabled_web_search: false },
   });
   assert.equal(account.settings.dramatic_shrimp_enabled, false, "remote sessions are declared off");
+  assert.equal(account.settings.enabled_monkeys_in_a_barrel, true,
+    "the local upload lane is declared on");
   assert.equal(account.settings.enabled_web_search, false, "sibling settings survive");
   assert.equal(account.uuid, "11111111-1111-1111-1111-111111111111", "the rest of the account is untouched");
   assert.equal(account.display_name, "app");
   const withoutSettings = policy.applyPolicy({ uuid: "x" });
-  assert.deepEqual(withoutSettings.settings, { dramatic_shrimp_enabled: false },
+  assert.deepEqual(withoutSettings.settings,
+    { dramatic_shrimp_enabled: false, enabled_monkeys_in_a_barrel: true },
     "an account without a settings object gains one");
-  const alreadyOff = { uuid: "x", settings: { dramatic_shrimp_enabled: false } };
+  const alreadyOff = {
+    uuid: "x",
+    settings: { dramatic_shrimp_enabled: false, enabled_monkeys_in_a_barrel: true },
+  };
   assert.equal(policy.applyPolicyRaw(alreadyOff), alreadyOff,
-    "an already-disabled account returns the same reference");
+    "an already-settled account returns the same reference");
+  // A deliberate off value from the app (the Settings toggle or the "Files"
+  // preview clearing it) is overridden, because the bridge is the lane's only
+  // backend; the env opt-out restores it for an operator who wants the toggle
+  // to be the user's.
+  const storedOff = {
+    uuid: "x",
+    settings: { enabled_web_search: false, enabled_monkeys_in_a_barrel: false },
+  };
+  assert.equal(policy.applyPolicy(storedOff).settings.enabled_monkeys_in_a_barrel, true,
+    "a stored-off upload lane is turned back on for the web shell");
+  const optedOut = load({ CLAUDE_REMOTE_WIGGLE_UPLOADS: "0" });
+  const restored = optedOut.applyPolicy(storedOff);
+  assert.equal(restored.settings.enabled_monkeys_in_a_barrel, false,
+    "CLAUDE_REMOTE_WIGGLE_UPLOADS=0 keeps the account's own value");
+  assert.deepEqual(optedOut.applyPolicy({ uuid: "x" }).settings,
+    { dramatic_shrimp_enabled: false },
+    "the opt-out does not invent an upload-lane setting");
   const array = [1];
   assert.equal(policy.applyPolicyRaw(array), array, "an array body is ignored");
   assert.equal(policy.applyPolicyRaw(null), null, "a null account is ignored");

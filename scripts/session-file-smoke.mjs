@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readContainedFile, resolveDownloadTarget, sessionFileReadLimit } from "../bridge/downloads.mjs";
@@ -93,7 +93,64 @@ try {
   await assert.rejects(download("../../etc/passwd"), /outside the allowed read roots/,
     "a relative path that climbs out of the root is refused");
 
-  process.stdout.write("session-file-smoke: read limit, guard and download-path checks passed\n");
+  // A Cowork session's deliverables live under Desktop's userData rather than
+  // a configured root (`<sessionId>/<…>/outputs/…`), and a model's file card
+  // links straight to them. The outputs directory is part of the session by
+  // Desktop's own consent rule, so it is readable here too; the memory tree
+  // beside it, and a symlink aiming at it, are not.
+  const sessionsRoot = await mkdtemp(join(tmpdir(), "claudesk-sessions-smoke-"));
+  try {
+    const sessionJob = join(sessionsRoot, "23bfc495", "00000000", "d42a0257");
+    const outputsDir = join(sessionJob, "outputs");
+    const memoryDir = join(sessionJob, "memory");
+    await Promise.all([
+      mkdir(outputsDir, { recursive: true }),
+      mkdir(memoryDir, { recursive: true }),
+    ]);
+    const report = join(outputsDir, "Unit16_Assignment_A1_Report_Template.docx");
+    const memoryFile = join(memoryDir, "feedback.md");
+    await Promise.all([
+      writeFile(report, "docx bytes"),
+      writeFile(memoryFile, "remember"),
+    ]);
+    const outputsOptions = {
+      allowRoot: false,
+      sessionOutputsRoot: sessionsRoot,
+      missingMessage: "download file was not found",
+      outsideMessage: "path is outside the allowed read roots",
+    };
+    assert.equal(
+      await resolveDownloadTarget(roots, report, outputsOptions),
+      await realpath(report),
+      "a file card under the session's outputs directory is downloadable",
+    );
+    const outputRead = await readContainedFile(roots, report, {
+      maxBytes: MiB,
+      ...outputsOptions,
+    });
+    assert.equal(outputRead.file.contents, "docx bytes",
+      "the session-file reader serves an outputs file too");
+    await assert.rejects(
+      resolveDownloadTarget(roots, memoryFile, outputsOptions),
+      /outside the allowed read roots/,
+      "the memory tree beside outputs stays outside the readable roots",
+    );
+    await assert.rejects(
+      resolveDownloadTarget(roots, report, { allowRoot: false }),
+      /outside the allowed root/,
+      "outputs are not readable unless the sessions root is configured",
+    );
+    await symlink(memoryFile, join(outputsDir, "alias.md"));
+    await assert.rejects(
+      resolveDownloadTarget(roots, join(outputsDir, "alias.md"), outputsOptions),
+      /outside the allowed read roots/,
+      "a symlink in outputs cannot reach the memory tree",
+    );
+
+    process.stdout.write("session-file-smoke: read limit, guard, download-path and outputs checks passed\n");
+  } finally {
+    await rm(sessionsRoot, { force: true, recursive: true });
+  }
 } finally {
   await rm(fixtureRoot, { force: true, recursive: true });
 }
