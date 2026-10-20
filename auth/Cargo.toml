@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 axum = "0.7"
 axum-extra = { version = "0.9", features = ["cookie"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "io-util", "time"] }
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 argon2 = "0.5"

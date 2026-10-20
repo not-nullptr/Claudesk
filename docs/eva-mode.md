@@ -270,6 +270,41 @@ are the one field a space does not model, so they live in a small
 `project-stars.json` beside the connectors file. `scripts/projects-smoke.mjs`
 pins the document shape and each route's IPC call.
 
+### Per-account VM sizing and restart
+
+The `/admin` page carries a **VM** action per account. It edits the Cowork guest's
+memory (1–16 GB) and vCPU count (1–8); an empty field means "inherit the
+deployment's `CLAUDE_COWORK_VM_MEMORY_GB` / `_CPU_COUNT`". The values live on the
+account row in authd (`vm_memory_gb`, `vm_cpu_count`), and `--show` carries them
+so `scripts/provision-user.sh` can export them into the account's compose call —
+`CLAUDE_DESKTOP_MEMORY_LIMIT` is derived as `max(3g, memory + 1g)` so the Desktop
+container can hold a larger guest.
+
+Saving is not applying. A spec reaches the running instance only through the
+same recreate path every other image/env change uses: **Apply** writes a request
+into `<data-root>/auth-data/vm-apply-requests`, the reconciler's
+`claudesk-vm-apply.path` unit fires `scripts/converge-vm-applies.sh`, and that
+runs `provision-user.sh` — which force-recreates the account's Desktop, bridge
+and gateway relay. That stops the VM and interrupts any running turns, which is
+why the page asks first. After the recreate, provision-user records what it
+applied (`--set-vm-applied`) and the account's in-network alias
+(`--set-internal-upstream <slug>-desktop:8080`); the page shows desired versus
+applied and polls until the difference clears. Until it does, the next
+`deploy.sh` (which refreshes every account) would pick the saved spec up anyway.
+
+**Restart VM** is the non-destructive sibling: it restarts the qemu guest
+without touching the spec. authd proxies to the account's bridge over
+`gateway_net` at `internal_upstream`, the bridge forwards to the wrapper's
+internal server (127.0.0.1:9222), and the wrapper does an ACPI powerdown, waits
+for qemu to exit, and calls the Desktop's own `startVM`. The two sides share
+`CLAUDESK_INTERNAL_SECRET`; empty disables the action. The same hop serves
+**Status**, which reads the wrapper's VM monitor state. Both need one deploy
+after this field was introduced, because `internal_upstream` is written by
+`provision-user.sh`, not by the migration.
+
+The deployment's own instance is not an authd account, so it keeps its `.env`
+sizing; only provisioned accounts have the per-account controls.
+
 ### Deleting an account reclaims its instance
 
 Deleting a user in `/admin` is the mirror of creating one, and just as hands-off:

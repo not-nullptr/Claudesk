@@ -34,6 +34,18 @@ pub struct User {
     /// The key itself lives in `user_keys` and is never serialized. This doubles
     /// as the "has a key" flag the admin UI reads.
     pub api_key_updated_at: Option<i64>,
+    /// Desired Cowork VM sizing; NULL inherits the deployment's `.env`.
+    pub vm_memory_gb: Option<i64>,
+    pub vm_cpu_count: Option<i64>,
+    /// What the host reconciler actually wrote into the account's instance, and
+    /// when. NULL until the first Apply lands.
+    pub vm_applied_memory_gb: Option<i64>,
+    pub vm_applied_cpu_count: Option<i64>,
+    pub vm_applied_at: Option<i64>,
+    /// The instance's `gateway_net` alias (`<slug>-desktop:8080`), written by
+    /// `scripts/provision-user.sh`. Server-side admin actions reach the
+    /// instance there; the loopback `upstream` is for the reverse proxy.
+    pub internal_upstream: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -170,6 +182,61 @@ impl Store {
         sqlx::query("UPDATE users SET disabled = ?2, updated_at = ?3 WHERE id = ?1")
             .bind(user_id)
             .bind(if disabled { 1 } else { 0 })
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The admin's desired Cowork VM sizing. NULL inherits the deployment.
+    pub async fn set_vm_spec(
+        &self,
+        user_id: i64,
+        memory_gb: Option<i64>,
+        cpu_count: Option<i64>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE users SET vm_memory_gb = ?2, vm_cpu_count = ?3, updated_at = ?4
+             WHERE id = ?1",
+        )
+        .bind(user_id)
+        .bind(memory_gb)
+        .bind(cpu_count)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record the sizing the host reconciler actually applied.
+    pub async fn set_vm_applied(
+        &self,
+        user_id: i64,
+        memory_gb: i64,
+        cpu_count: i64,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE users SET vm_applied_memory_gb = ?2, vm_applied_cpu_count = ?3,
+             vm_applied_at = ?4, updated_at = ?4 WHERE id = ?1",
+        )
+        .bind(user_id)
+        .bind(memory_gb)
+        .bind(cpu_count)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The instance's in-network alias, used by server-side admin actions.
+    pub async fn set_internal_upstream(
+        &self,
+        user_id: i64,
+        upstream: Option<&str>,
+    ) -> AppResult<()> {
+        sqlx::query("UPDATE users SET internal_upstream = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(user_id)
+            .bind(upstream)
             .bind(now())
             .execute(&self.pool)
             .await?;

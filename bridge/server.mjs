@@ -154,6 +154,10 @@ const connectorsEnabled = process.env.CLAUDE_REMOTE_MCP_CONNECTORS === "1"
 // bootstrap answers an error, and it posts credentials straight to authd, which
 // the proxy already routes there. See docs/eva-mode.md, "The sign-in page".
 const loginShellEnabled = process.env.CLAUDE_REMOTE_LOGIN_SHELL === "1";
+// The admin dashboard's instance actions (VM restart/status) are called by
+// authd over the deployment network. This shared secret is the pass; unset
+// leaves the whole `/internal/*` family answering 404.
+const internalSecret = process.env.CLAUDESK_INTERNAL_SECRET || "";
 // Entitlements the web shell checks before offering Cowork and remote control.
 // `dramatic_shrimp` is the (secret) internal flag ion-dist's web-Cowork gate
 // reads; `cowork_remote_control` is its productized twin. Both sit beside the
@@ -4415,6 +4419,7 @@ async function handleCodeRunnerApi(request, response, url) {
     if (!sessionId) throw new ApiError(404, "not found");
     const call = { headers, sessionId, body };
     if (sub === "token") return answer(await codeRunners.issueSessionToken(call));
+    if (sub === "claim") return answer(await codeRunners.recordClaim(call));
     if (sub === "report-failure") return answer(await codeRunners.reportSessionFailure(call));
     if (sub === "release") return answer(await codeRunners.releaseSession(call));
     if (sub === "retry-spawn") return answer(await codeRunners.retrySpawn(call));
@@ -4427,8 +4432,10 @@ async function handleCodeRunnerApi(request, response, url) {
       return answer(await codeRunners.deregisterRunner({ headers, body }));
     case "POST /v1/code/runners/self-hosted/spawn-hints/poll":
       // The request itself rides along: a held poll whose guest went away
-      // must not claim the session (or the UI request) it was woken for.
-      return answer(await codeRunners.pollSpawnHints({ headers, request }));
+      // must not claim the session (or the UI request) it was woken for. The
+      // body carries the sessions that runner still holds, which the reaper
+      // reconciles an `active` session against.
+      return answer(await codeRunners.pollSpawnHints({ headers, request, body }));
     case "POST /v1/code/runners/self-hosted/spawn-hints/nack":
       return answer(await codeRunners.nackSpawnHint({ headers, body }));
     case "POST /v1/code/runners/self-hosted/requests/result":
@@ -4461,6 +4468,45 @@ async function handleCodeRunnerApi(request, response, url) {
   // documented anywhere, so a miss is logged where an operator can read it.
   console.warn(`[code-runners] unhandled Code request: ${method} ${pathname}`);
   throw new ApiError(404, "not found");
+}
+
+// The admin dashboard's instance actions. authd calls these over the
+// deployment network with `CLAUDESK_INTERNAL_SECRET`; the reverse proxy never
+// forwards `/internal/*`, and an unset secret makes the family 404 rather than
+// leaving VM control open to any container on the shared network.
+async function handleInternalAction(request, response, url) {
+  const supplied = request.headers["x-claudesk-internal-secret"];
+  if (!internalSecret || supplied !== internalSecret) {
+    sendJson(response, 404, { ok: false, error: "not found" });
+    return;
+  }
+  if (loginShellEnabled) {
+    sendJson(response, 403, { ok: false, error: "not signed in" });
+    return;
+  }
+  const method = String(request.method || "GET").toUpperCase();
+  const action = url.pathname === "/internal/vm/restart"
+    ? { method: "POST", path: "/vm/restart" }
+    : url.pathname === "/internal/vm/status"
+      ? { method: "GET", path: "/vm/status" }
+      : null;
+  if (!action || method !== action.method) {
+    sendJson(response, 404, { ok: false, error: "not found" });
+    return;
+  }
+  const upstream = await fetch(`${coworkInternalUrl}${action.path}`, {
+    method: action.method,
+    headers: { "content-type": "application/json" },
+    signal: AbortSignal.timeout(120000),
+  });
+  const body = await upstream.json().catch(() => null);
+  if (!upstream.ok || body?.ok === false) {
+    throw new ApiError(
+      upstream.status >= 400 ? upstream.status : 502,
+      body?.error || `the Desktop wrapper answered ${upstream.status}`,
+    );
+  }
+  sendJson(response, 200, { ok: true, value: body?.value ?? body });
 }
 
 // A session's event stream, in the shape the Desktop's own SSE readers expect:
@@ -4499,10 +4545,12 @@ async function sendCodeEventStream(request, response, sessionId, url) {
     + `(from_sequence_num=${fromSequence}, last-event-id=${request.headers["last-event-id"] ?? "none"}, `
     + `backlog=${backlog.length})`);
   const write = (event) => {
-    response.write(
-      `id: ${event.sequence_num}\nevent: client_event\ndata: ${JSON.stringify(event)}\n\n`);
+    const id = event.sequence_num != null ? `id: ${event.sequence_num}\n` : "";
+    const accepted = response.write(
+      `${id}event: client_event\ndata: ${JSON.stringify(event)}\n\n`);
     frames += 1;
     sequence = Math.max(sequence, Number(event.sequence_num) || 0);
+    return accepted;
   };
   // "This client event was processed" — a control frame (no id/sequence) that
   // names the event. The page holds its own unacknowledged echo out of the
@@ -4522,8 +4570,38 @@ async function sendCodeEventStream(request, response, sessionId, url) {
   // A session that does not exist yet still opens as connected (the phone's
   // facade settled the same way): the first message is what creates it.
   writeConnection((await codeRunners.connectionState({ sessionId })) ?? "connected");
-  for (const event of backlog) write(event);
+  // Subscribe before replaying the backlog and buffer until it is done: an
+  // event appended between the history read and the tail would otherwise fall
+  // through the gap. The replay advances `sequence`, which dedupes the buffer.
+  let replaying = true;
+  const buffered = [];
+  const unsubscribe = codeRunners.subscribeEvents(sessionId, (event) => {
+    if (replaying) {
+      buffered.push(event);
+      return;
+    }
+    const numeric = Number(event.sequence_num) || 0;
+    if (numeric && numeric <= sequence) return;
+    write(event);
+  });
+  for (const event of backlog) {
+    // A long transcript can outpace the socket; wait for the client rather
+    // than buffering the whole replay in the bridge's heap.
+    if (!write(event)) {
+      await new Promise((resolve) => {
+        response.once("drain", resolve);
+        response.once("close", resolve);
+      });
+    }
+  }
+  replaying = false;
+  for (const event of buffered) {
+    if ((Number(event.sequence_num) || 0) > sequence) write(event);
+  }
   await flushDeliveries();
+  // A safety net, not the live path: appended events are pushed by the
+  // emitter above. This catches anything written before the subscription (or
+  // by a writer that bypassed the backend).
   const timer = setInterval(async () => {
     try {
       const next = await codeRunners.eventsAfter(sessionId, sequence);
@@ -4536,7 +4614,7 @@ async function sendCodeEventStream(request, response, sessionId, url) {
       // Keep the stream up; the next tick retries and the reader resumes from
       // the sequence it already holds if the connection does drop.
     }
-  }, 500);
+  }, 1000);
   // The phone's facade keeps a 15-second comment cadence on this stream, and
   // it matters here too: a stream that goes silent through a thinking pause is
   // exactly what an idle timeout in the chain (the Desktop's relay, the
@@ -4546,6 +4624,7 @@ async function sendCodeEventStream(request, response, sessionId, url) {
     if (!response.writableEnded) response.write(`: keepalive ${Date.now()}\n\n`);
   }, 15000);
   const close = () => {
+    unsubscribe();
     clearInterval(timer);
     clearInterval(keepalive);
     response.end();
@@ -5902,6 +5981,11 @@ const server = http.createServer(async (request, response) => {
       await handleDustApi(request, response, dustMatch[1]);
     } else if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
+    }
+    // The admin dashboard's VM control, reached by authd on the deployment
+    // network — deliberately outside `/api/*`, like authd's own internal legs.
+    else if (url.pathname.startsWith("/internal/")) {
+      await handleInternalAction(request, response, url);
     }
     // The >30 MiB lane of the browser chat/Cowork composer: prepare-upload
     // names a path under this bridge's file store, then the file itself is

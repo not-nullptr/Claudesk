@@ -33,6 +33,7 @@ const stateDir = mkdtempSync(join(tmpdir(), "code-runners-http-"));
 const children = [];
 let gateway = null;
 let tenantWorkspace = null;
+let internalWrapper = null;
 
 // Read an SSE stream until it has carried `frames` client events (or it goes
 // quiet), then drop the connection — the stream tails forever by design.
@@ -337,6 +338,28 @@ try {
   assert.ok(frames.includes("id: 1\nevent: client_event"), "frames carry their sequence as the SSE id");
   assert.ok(frames.includes("id: 2\nevent: client_event"));
 
+  // Token-level stream events are live transport, not history. An open stream
+  // receives one as it is appended; a later read of the transcript does not,
+  // which is what keeps a reload (and the bridge's heap) proportional to the
+  // conversation rather than to every delta the model ever emitted.
+  const liveFrames = readStream(
+    tenantPort, `/v1/code/sessions/${placedSession.id}/events/stream`, 3);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const partial = await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "li" } } } }] }),
+  });
+  assert.equal(partial.status, 200, partial.body);
+  const liveText = await liveFrames;
+  assert.ok(liveText.includes('"type":"stream_event"'),
+    "a partial reaches the open stream immediately");
+  const afterPartial = JSON.parse(
+    (await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`)).body);
+  assert.deepEqual(afterPartial.data.map((event) => event.sequence_num), ["1", "2"],
+    "the live-only partial is never written to the transcript");
+
   // A stream for a session that does not exist yet opens empty rather than
   // 404ing — the app opens it to receive the turn it is about to send, and a
   // 404 here is the "Connecting" loop.
@@ -418,7 +441,9 @@ try {
       message: { role: "user", content: "sent over the v1 leg" } } }] }),
   });
   assert.equal(v1Append.status, 200, v1Append.body);
-  assert.equal(JSON.parse(v1Append.body).data[0].sequence_num, "3");
+  // 3 was the live-only partial above: durable and volatile events share one
+  // counter, so a reader's cursor never moves backwards.
+  assert.equal(JSON.parse(v1Append.body).data[0].sequence_num, "4");
   const v1History = JSON.parse((await tenantRequest(`/v1/sessions/${placedSession.id}/events`)).body);
   assert.equal(decodeClientEventsResponse(v1History).length, 3,
     "both events legs read and write one log");
@@ -637,6 +662,59 @@ try {
   assert.equal(missing.status, 400, "a folder that does not exist is refused");
 
   // --- the deployment's own instance --------------------------------------
+  // --- the admin dashboard's instance actions ------------------------------
+  // authd calls these over the deployment network; the bridge forwards them to
+  // the Desktop wrapper. A shared secret is the pass, and the family is closed
+  // without it (the reverse proxy never forwards /internal/*, but gateway_net
+  // is shared with the gateway stack).
+  const wrapperHits = [];
+  internalWrapper = http.createServer((request, response) => {
+    wrapperHits.push(`${request.method} ${request.url}`);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ok: true,
+      value: {
+        running: request.url === "/vm/status",
+        pid: 4242,
+        reason: "idle",
+        started: request.url === "/vm/restart",
+      },
+    }));
+  });
+  await new Promise((resolve) => internalWrapper.listen(0, "127.0.0.1", resolve));
+  const internalPort = 8155;
+  const internalRequest = await boot({
+    port: internalPort,
+    env: {
+      CLAUDESK_TENANT: "1",
+      CLAUDESK_INTERNAL_SECRET: "smoke-secret",
+      COWORK_INTERNAL_URL: `http://127.0.0.1:${internalWrapper.address().port}`,
+    },
+  });
+  const internalAuth = { "x-claudesk-internal-secret": "smoke-secret" };
+  const noSecret = await internalRequest("/internal/vm/status");
+  assert.equal(noSecret.status, 404, "the internal family is closed without the secret");
+  const wrongSecret = await internalRequest("/internal/vm/status", {
+    headers: { "x-claudesk-internal-secret": "not-the-secret" },
+  });
+  assert.equal(wrongSecret.status, 404, "a wrong secret is indistinguishable from no route");
+  const status = await internalRequest("/internal/vm/status", { headers: internalAuth });
+  assert.equal(status.status, 200, status.body);
+  assert.equal(JSON.parse(status.body).value.pid, 4242,
+    "the wrapper's status is passed through");
+  const restart = await internalRequest("/internal/vm/restart", {
+    method: "POST", headers: { ...internalAuth, "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(restart.status, 200, restart.body);
+  assert.equal(JSON.parse(restart.body).value.started, true,
+    "the restart action reaches the wrapper");
+  assert.deepEqual(wrapperHits, ["GET /vm/status", "POST /vm/restart"],
+    "only the two VM actions are proxied, method for method");
+  const wrongMethod = await internalRequest("/internal/vm/status", {
+    method: "POST", headers: internalAuth,
+  });
+  assert.equal(wrongMethod.status, 404, "an action answers only its own method");
+
   const ownerPort = 8157;
   const ownerRequest = await boot({ port: ownerPort, env: { CLAUDESK_TENANT: "0" } });
 
@@ -652,6 +730,10 @@ try {
     "and the model passthrough belongs to a tenant with runners, not to it");
 } finally {
   for (const child of children) child.kill("SIGTERM");
+  if (internalWrapper !== null) {
+    internalWrapper.closeAllConnections?.();
+    internalWrapper.close();
+  }
   if (gateway !== null) {
     // The bridges keep their upstream connection to the stub alive; close
     // those too or `close()` waits on them and the smoke never finishes.

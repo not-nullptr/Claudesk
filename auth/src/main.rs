@@ -48,9 +48,16 @@ pub struct Config {
     /// host reads it the account row is already gone, so it can no longer be
     /// re-derived from the database. The file holds the account's email/id/upstream.
     pub deprovision_spool: String,
+    /// Directory the VM-apply reconciler watches. An admin's Apply drops the
+    /// account's email here; the host re-runs `provision-user.sh`, which reads
+    /// the desired specs back out of this database and recreates the instance.
+    pub vm_apply_spool: String,
     /// Shared secret the box gateway presents to `/internal/gateway/resolve`.
     /// Unset disables that route (404), so authd is inert until an operator opts in.
     pub gateway_secret: Option<String>,
+    /// Shared secret for server-side instance actions (the VM restart/status
+    /// proxy). Unset disables those routes, so an older deployment is inert.
+    pub internal_secret: Option<String>,
 }
 
 impl Config {
@@ -79,7 +86,10 @@ impl Config {
                 .unwrap_or_else(|| "/data/provision-requests".into()),
             deprovision_spool: env("AXTD_DEPROVISION_SPOOL")
                 .unwrap_or_else(|| "/data/deprovision-requests".into()),
+            vm_apply_spool: env("AXTD_VM_APPLY_SPOOL")
+                .unwrap_or_else(|| "/data/vm-apply-requests".into()),
             gateway_secret: env("AXTD_GATEWAY_SECRET"),
+            internal_secret: env("AXTD_INTERNAL_SECRET"),
         }
     }
 }
@@ -118,6 +128,23 @@ impl AppState {
             tracing::warn!("deprovision nudge for user {} failed: {error}", user.id);
         }
     }
+
+    /// Ask the host's VM-apply reconciler to recreate this account's instance
+    /// with the specs saved on its row. The payload names the account because
+    /// an Apply is a request for exactly one instance, not a sweep.
+    pub fn nudge_vm_apply(&self, user: &User) {
+        let path = std::path::Path::new(&self.cfg.vm_apply_spool).join(user.id.to_string());
+        let payload = vm_apply_payload(&user.email);
+        if let Err(error) = std::fs::write(&path, payload) {
+            tracing::warn!("vm-apply nudge for user {} failed: {error}", user.id);
+        }
+    }
+}
+
+/// The line-oriented payload a VM-apply request carries. Free function so the
+/// wire format is pinned by a test, like `deprovision_payload`.
+fn vm_apply_payload(email: &str) -> String {
+    format!("email={email}\n")
 }
 
 /// The line-oriented payload a deprovision request carries. The account is gone
@@ -151,6 +178,17 @@ async fn main() {
         .position(|arg| arg == "--set-upstream")
         .and_then(|index| args.get(index + 2))
         .cloned();
+    let set_vm_applied_for = flag("--set-vm-applied");
+    let set_vm_applied_values = args
+        .iter()
+        .position(|arg| arg == "--set-vm-applied")
+        .map(|index| (args.get(index + 2).cloned(), args.get(index + 3).cloned()));
+    let set_internal_upstream_for = flag("--set-internal-upstream");
+    let set_internal_upstream_value = args
+        .iter()
+        .position(|arg| arg == "--set-internal-upstream")
+        .and_then(|index| args.get(index + 2))
+        .cloned();
 
     // An unrecognised option is a mistake, not a request to serve. Without this
     // an older binary handed a flag it does not know falls through and tries to
@@ -167,12 +205,16 @@ async fn main() {
                     | "--pending"
                     | "--provisioned"
                     | "--set-upstream"
+                    | "--set-vm-applied"
+                    | "--set-internal-upstream"
             )
     }) {
         eprintln!("authd: unknown option {unknown}");
         eprintln!(
             "usage: authd [--healthcheck | --invite EMAIL | --create-admin EMAIL \
-             | --show EMAIL | --pending | --provisioned | --set-upstream EMAIL HOST:PORT]"
+             | --show EMAIL | --pending | --provisioned | --set-upstream EMAIL HOST:PORT \
+             | --set-vm-applied EMAIL MEMORY_GB CPU_COUNT \
+             | --set-internal-upstream EMAIL HOST:PORT]"
         );
         std::process::exit(2);
     }
@@ -212,6 +254,14 @@ async fn main() {
         tracing::warn!(
             "cannot create deprovision spool {}: {error}",
             state.cfg.deprovision_spool
+        );
+    }
+    // The VM-apply spool, watched by its own `.path` unit. A missing directory
+    // turns an admin's Apply into a silent no-op, so say so.
+    if let Err(error) = std::fs::create_dir_all(&state.cfg.vm_apply_spool) {
+        tracing::warn!(
+            "cannot create VM-apply spool {}: {error}",
+            state.cfg.vm_apply_spool
         );
     }
 
@@ -284,6 +334,32 @@ async fn main() {
             }
         }
     }
+    if let Some(email) = set_vm_applied_for.as_deref() {
+        let (memory, cpu) = match set_vm_applied_values {
+            Some((Some(memory), Some(cpu))) => (memory, cpu),
+            _ => {
+                eprintln!("authd: --set-vm-applied needs EMAIL MEMORY_GB CPU_COUNT");
+                std::process::exit(2);
+            }
+        };
+        match cli_set_vm_applied(&state.store, email, &memory, &cpu).await {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(email) = set_internal_upstream_for.as_deref() {
+        let upstream = set_internal_upstream_value.as_deref().unwrap_or("");
+        match cli_set_internal_upstream(&state.store, email, upstream).await {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("authd: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if let Err(error) = bootstrap_admin(&state).await {
         tracing::error!("bootstrap admin failed: {error}");
@@ -349,6 +425,13 @@ async fn main() {
             "/api/admin/users/:id/avatar",
             put(api_admin::set_avatar).delete(api_admin::clear_avatar),
         )
+        // Per-account Cowork VM sizing and control. An Apply is a request to
+        // the host reconciler (authd never touches a container runtime); the
+        // restart and status actions proxy to the instance's bridge.
+        .route("/api/admin/users/:id/vm", put(api_admin::update_user_vm))
+        .route("/api/admin/users/:id/vm/apply", post(api_admin::apply_user_vm))
+        .route("/api/admin/users/:id/vm/restart", post(api_admin::restart_user_vm))
+        .route("/api/admin/users/:id/vm/status", get(api_admin::user_vm_status))
         // The SPA: every non-API path serves the app shell.
         .fallback_service(
             ServeDir::new(&state.cfg.web_dir)
@@ -482,6 +565,20 @@ async fn cli_show(store: &Store, email: &str) -> Result<String, String> {
             if user.avatar_updated_at.is_some() { "1" } else { "0" },
         ),
         line("upstream", user.upstream.as_deref().unwrap_or("")),
+        // Empty means "inherit the deployment's .env" for the VM sizing; the
+        // provisioner reads these into the account's compose environment.
+        line(
+            "vm_memory_gb",
+            &user.vm_memory_gb.map(|value| value.to_string()).unwrap_or_default(),
+        ),
+        line(
+            "vm_cpu_count",
+            &user.vm_cpu_count.map(|value| value.to_string()).unwrap_or_default(),
+        ),
+        line(
+            "internal_upstream",
+            user.internal_upstream.as_deref().unwrap_or(""),
+        ),
         line("gateway_key", &gateway_key),
         line(
             "has_password",
@@ -538,6 +635,68 @@ async fn cli_set_upstream(store: &Store, email: &str, upstream: &str) -> Result<
     Ok(())
 }
 
+/// `authd --set-vm-applied <email> <memory_gb> <cpu_count>`: record the sizing
+/// the host reconciler actually wrote into the account's instance. The
+/// dashboard shows this beside the desired spec, so a saved-but-not-applied
+/// change is visible instead of looking live.
+async fn cli_set_vm_applied(
+    store: &Store,
+    email: &str,
+    memory: &str,
+    cpu: &str,
+) -> Result<(), String> {
+    let memory: i64 = memory
+        .trim()
+        .parse()
+        .map_err(|_| "memory_gb must be an integer".to_string())?;
+    let cpu: i64 = cpu
+        .trim()
+        .parse()
+        .map_err(|_| "cpu_count must be an integer".to_string())?;
+    if !(1..=16).contains(&memory) {
+        return Err("memory_gb must be between 1 and 16".into());
+    }
+    if !(1..=8).contains(&cpu) {
+        return Err("cpu_count must be between 1 and 8".into());
+    }
+    let email = email.trim().to_lowercase();
+    let user = store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no account for {email}"))?;
+    store
+        .set_vm_applied(user.id, memory, cpu)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("{} -> {}GB / {} vCPU", user.email, memory, cpu);
+    Ok(())
+}
+
+/// `authd --set-internal-upstream <email> <host:port>`: the instance's
+/// `gateway_net` alias, which server-side admin actions reach. The loopback
+/// `upstream` remains the reverse proxy's address; an empty value clears this.
+async fn cli_set_internal_upstream(
+    store: &Store,
+    email: &str,
+    upstream: &str,
+) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    let user = store
+        .user_by_email(&email)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no account for {email}"))?;
+    let value = upstream.trim();
+    let value = if value.is_empty() { None } else { Some(value) };
+    store
+        .set_internal_upstream(user.id, value)
+        .await
+        .map_err(|error| error.to_string())?;
+    println!("{} internal -> {}", user.email, value.unwrap_or("(cleared)"));
+    Ok(())
+}
+
 /// `authd --create-admin <email>`: create (or promote) an admin and print a
 /// fresh invite link for it.
 async fn cli_create_admin(cfg: &Config, store: &Store, email: &str) -> Result<(), String> {
@@ -570,7 +729,16 @@ async fn cli_create_admin(cfg: &Config, store: &Store, email: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::deprovision_payload;
+    use super::{deprovision_payload, vm_apply_payload};
+
+    #[test]
+    fn vm_apply_payload_names_the_account() {
+        // scripts/converge-vm-applies.sh reads `email=` back out of the file.
+        assert_eq!(
+            vm_apply_payload("ada@example.com"),
+            "email=ada@example.com\n"
+        );
+    }
 
     #[test]
     fn deprovision_payload_carries_email_id_and_upstream() {

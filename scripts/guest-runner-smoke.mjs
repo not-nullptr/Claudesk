@@ -40,6 +40,18 @@ printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"te
 printf '{"type":"result","subtype":"success","session_id":"11111111-1111-4111-8111-111111111111","is_error":false,"result":"done"}\\n'
 `);
 chmodSync(stub, 0o755);
+// An agent that writes a partial answer and then dies without a result. The
+// runner must still close the turn — a failure with no terminal is exactly the
+// "spinner forever" the session view shows.
+const failing_dir = join(work, "claude-bin-failing");
+mkdirSync(failing_dir, { recursive: true });
+const failingStub = join(failing_dir, "claude");
+writeFileSync(failingStub, `#!/bin/sh
+cat >/dev/null
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial answer"}]},"session_id":"55555555-5555-4555-8555-555555555555"}\\n'
+exit 3
+`);
+chmodSync(failingStub, 0o755);
 let child;
 
 const request = async (path, init) => {
@@ -47,14 +59,14 @@ const request = async (path, init) => {
   return { status: response.status, body: await response.text() };
 };
 
-function runRunner({ secret, once = true, env = {} }) {
+function runRunner({ secret, once = true, binDir = stub_dir, env = {} }) {
   return spawnSync("python3", ["-I", `${root}guest/runner.py`, ...(once ? ["--once"] : [])], {
     encoding: "utf8",
     env: {
       ...process.env,
       CLAUDESK_RUNNER_BASE: `http://127.0.0.1:${port}`,
       CLAUDESK_RUNNER_SECRET: secret,
-      CLAUDESK_RUNNER_CLAUDE_BIN: stub_dir,
+      CLAUDESK_RUNNER_CLAUDE_BIN: binDir,
       CLAUDESK_RUNNER_CHECKOUT: work,
       CLAUDESK_RUNNER_HOME: join(work, "home"),
       ...env,
@@ -213,6 +225,35 @@ try {
     + " --resume 11111111-1111-4111-8111-111111111111"
     + " | prompt: and tighten the summary",
     "the runner resumed the conversation the agent's own events named");
+
+  // An agent that dies without a result still closes its turn: the runner
+  // writes a synthetic terminal, so the reader is not left spinning on a
+  // transcript whose last row is a partial answer.
+  const failingPlaced = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "guest smoke failing", environment_id: poolId }),
+  });
+  const failingId = JSON.parse(failingPlaced.body).session.id;
+  await request(`/v1/code/sessions/${failingId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "fail this turn" } } }] }),
+  });
+  const failedRun = runRunner({ secret, binDir: failing_dir });
+  assert.equal(failedRun.status, 0, failedRun.stderr);
+  const failedHistory = decodeClientEventsResponse(
+    JSON.parse((await request(`/v1/code/sessions/${failingId}/events`)).body));
+  assert.deepEqual(failedHistory.map((entry) => entry.message.type),
+    ["user", "assistant", "result"],
+    "a turn whose agent died without a result still ends with one");
+  const failureTerminal = failedHistory.at(-1).message;
+  assert.equal(failureTerminal.is_error, true);
+  assert.match(String(failureTerminal.result), /agent exited 3/,
+    "the synthetic result carries the reason");
+  const failedDoc = JSON.parse((await request(`/v1/code/sessions/${failingId}`)).body).session;
+  assert.equal(failedDoc.worker_status, "idle", "a failed turn reads idle to the session view");
 
   // A running session changes its model or permission mode by appending a
   // control request, not by rewriting the create config. The runner applies
@@ -622,11 +663,14 @@ printf '{"type":"result","subtype":"success","session_id":"44444444-4444-4444-84
       "the Stop's control_response reaches the reader that is waiting on it");
     assert.equal(receipt.message.response.subtype, "success");
 
+    let lastDocument = null;
     assert.equal(await waitFor(async () => {
-      const document = JSON.parse((await request(
+      lastDocument = JSON.parse((await request(
         `/v1/code/sessions/${slowSession.id}`)).body).session;
-      return document.worker_status === "idle";
-    }, 5000), true, "an interrupted turn leaves the session idle, not running");
+      return lastDocument.worker_status === "idle";
+    }, 5000), true,
+    `an interrupted turn leaves the session idle, not running: `
+    + `${JSON.stringify(lastDocument)} ${interruptRunner.output()}`);
     assert.equal(await waitFor(
       () => interruptRunner.output().includes("(interrupted)"), 3000), true,
     "the runner reports the turn as interrupted");

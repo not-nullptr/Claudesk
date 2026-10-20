@@ -35,7 +35,7 @@ fi
 [ -f "$checkout/.env" ] || { printf 'install-reconciler: no .env in %s\n' "$checkout" >&2; exit 1; }
 
 templates="$checkout/ops/systemd"
-for kind in provision deprovision; do
+for kind in provision deprovision vm-apply; do
     for unit in service timer path; do
         [ -f "$templates/claudesk-$kind.$unit.in" ] \
             || { printf 'install-reconciler: missing %s/claudesk-%s.%s.in\n' "$templates" "$kind" "$unit" >&2; exit 1; }
@@ -50,6 +50,7 @@ data_root="$(printf '%s' "$data_root" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" 
 [ -n "$data_root" ] || data_root=/opt/claudesk/data
 spool="$data_root/auth-data/provision-requests"
 deprovision_spool="$data_root/auth-data/deprovision-requests"
+vm_apply_spool="$data_root/auth-data/vm-apply-requests"
 
 stem="claudesk"
 [ -n "$name" ] && stem="claudesk-$name"
@@ -71,12 +72,15 @@ render() {
 }
 render provision "$spool"
 render deprovision "$deprovision_spool"
+render vm-apply "$vm_apply_spool"
 
 if [ "$(id -u)" = 0 ]; then
     systemctl daemon-reload
     systemctl enable --now "$stem-provision.path" "$stem-provision.timer" \
-        "$stem-deprovision.path" "$stem-deprovision.timer"
-    printf 'install-reconciler: enabled %s-provision.* and %s-deprovision.*\n' "$stem" "$stem"
+        "$stem-deprovision.path" "$stem-deprovision.timer" \
+        "$stem-vm-apply.path" "$stem-vm-apply.timer"
+    printf 'install-reconciler: enabled %s-provision.*, %s-deprovision.* and %s-vm-apply.*\n' \
+        "$stem" "$stem" "$stem"
 else
     printf 'install-reconciler: not root — wrote units but did not reload or enable them\n' >&2
 fi

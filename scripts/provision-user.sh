@@ -52,6 +52,7 @@ authd() { compose_shared exec -T authd /app/authd "$@"; }
 info="$(authd --show "$email")" || exit 1
 
 id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""; gateway_key=""
+vm_memory_override=""; vm_cpu_override=""
 while IFS='=' read -r key value; do
     case "$key" in
         id) id="$value" ;;
@@ -61,6 +62,8 @@ while IFS='=' read -r key value; do
         upstream) upstream="$value" ;;
         disabled) disabled="$value" ;;
         gateway_key) gateway_key="$value" ;;
+        vm_memory_gb) vm_memory_override="$value" ;;
+        vm_cpu_count) vm_cpu_override="$value" ;;
     esac
 done <<EOF
 $info
@@ -95,6 +98,54 @@ user_root="$data_root/users/$slug"
 # Its own directories, owned by the same user the containers run as.
 install -d -m 0755 -o "$puid" -g "$pgid" \
     "$user_root/config" "$user_root/workspace" "$user_root/bridge-data" "$user_root/root"
+
+# The account's Cowork VM sizing. An admin-set value wins; an empty one means
+# "inherit", which provision-user already sourced from the deployment's .env.
+vm_memory_gb="${vm_memory_override:-${CLAUDE_COWORK_VM_MEMORY_GB:-2}}"
+vm_cpu_count="${vm_cpu_override:-${CLAUDE_COWORK_VM_CPU_COUNT:-1}}"
+case "$vm_memory_gb" in
+    ''|*[!0-9]*) vm_memory_gb="${CLAUDE_COWORK_VM_MEMORY_GB:-2}" ;;
+esac
+case "$vm_cpu_count" in
+    ''|*[!0-9]*) vm_cpu_count="${CLAUDE_COWORK_VM_CPU_COUNT:-1}" ;;
+esac
+if [ "$vm_memory_gb" -lt 1 ] || [ "$vm_memory_gb" -gt 16 ]; then
+    printf 'provision-user: %s has an invalid vm_memory_gb=%s; using %s\n' \
+        "$user_email" "$vm_memory_gb" "${CLAUDE_COWORK_VM_MEMORY_GB:-2}" >&2
+    vm_memory_gb="${CLAUDE_COWORK_VM_MEMORY_GB:-2}"
+fi
+if [ "$vm_cpu_count" -lt 1 ] || [ "$vm_cpu_count" -gt 8 ]; then
+    printf 'provision-user: %s has an invalid vm_cpu_count=%s; using %s\n' \
+        "$user_email" "$vm_cpu_count" "${CLAUDE_COWORK_VM_CPU_COUNT:-1}" >&2
+    vm_cpu_count="${CLAUDE_COWORK_VM_CPU_COUNT:-1}"
+fi
+# The Desktop container holds the VM plus the app and its renderer. Derive the
+# limit from the guest's RAM unless the deployment already set a larger one; a
+# guest larger than its container limit cannot boot.
+deployment_limit="${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
+case "$deployment_limit" in
+    *g) deployment_limit_gb="${deployment_limit%g}" ;;
+    *m) deployment_limit_gb=$(( ${deployment_limit%m} / 1024 )) ;;
+    *) deployment_limit_gb=3 ;;
+esac
+case "$deployment_limit_gb" in
+    ''|*[!0-9]*) deployment_limit_gb=3 ;;
+esac
+desktop_limit_gb=$((vm_memory_gb + 1))
+[ "$desktop_limit_gb" -lt 3 ] && desktop_limit_gb=3
+[ "$desktop_limit_gb" -lt "$deployment_limit_gb" ] &&
+    desktop_limit_gb="$deployment_limit_gb"
+
+# Two reconcilers (provision and VM-apply) can reach the same account at once.
+# Serialize the compose work rather than racing two recreates of one instance.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$user_root/.provision.lock"
+    if ! flock -w 600 9; then
+        printf 'provision-user: another reconcile is still running for %s\n' \
+            "$user_email" >&2
+        exit 1
+    fi
+fi
 
 # Share the pristine VM bundle rather than downloading 10 GiB per account.
 # The bundle every account's copy is reflinked from. Point CLAUDESK_VM_MASTER at
@@ -219,11 +270,36 @@ CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \
 CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS="$ACCOUNT_INFRASTRUCTURE_ACTIONS" \
 COWORK_REMOTE_READ_ROOTS="$ACCOUNT_READ_ROOTS" \
 CLAUDE_COWORK_HOST_BASH=0 \
+CLAUDE_COWORK_VM_MEMORY_GB="$vm_memory_gb" \
+CLAUDE_COWORK_VM_CPU_COUNT="$vm_cpu_count" \
+CLAUDE_DESKTOP_MEMORY_LIMIT="${desktop_limit_gb}g" \
 CLAUDESK_VM_VSOCK_PORT="$vm_vsock_port" \
 CLAUDESK_VM_VSOCK_GUEST_SITES="${CLAUDESK_VM_VSOCK_GUEST_SITES:-0}" \
 AUTH_IDENTITY_URL="${CLAUDESK_ACCOUNT_IDENTITY_URL:-http://authd:8080}" \
-compose_shared --project-name "claudesk-$slug" \
-    up -d --force-recreate ${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}
+recreate_services="${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}"
+# shellcheck disable=SC2086
+compose_shared --project-name "claudesk-$slug" up -d --force-recreate $recreate_services
+
+# Record what this recreate actually applied, so the dashboard can show a saved
+# spec that has not landed yet. The in-network alias is what the admin's VM
+# restart/status use (authd cannot dial the host's loopback port); it is written
+# every run, which also backfills accounts provisioned before it existed.
+authd --set-internal-upstream "$user_email" "${slug}-desktop:8080" >/dev/null 2>&1 ||
+    printf 'provision-user: could not record the instance alias for %s\n' "$user_email" >&2
+# The VM spec is only applied by a Desktop recreate (its env and the container
+# memory limit are read at container creation). A bridge-only refresh must not
+# claim a spec the instance never received.
+case " $recreate_services " in
+    *" claude-desktop "*)
+        authd --set-vm-applied "$user_email" "$vm_memory_gb" "$vm_cpu_count" >/dev/null 2>&1 ||
+            printf 'provision-user: could not record the applied VM spec for %s\n' \
+                "$user_email" >&2
+        ;;
+    *)
+        printf 'provision-user: %s keeps its applied VM spec (Desktop not recreated)\n' \
+            "$user_email" >&2
+        ;;
+esac
 
 # Route the account to it; authd re-reads this on every request.
 if [ -z "$upstream" ]; then

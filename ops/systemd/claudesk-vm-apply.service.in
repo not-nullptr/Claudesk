@@ -1,0 +1,16 @@
+[Unit]
+Description=Recreate the @NAME@ Claudesk instances whose VM specs an admin applied
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it drives Docker. authd never does — it only records the desired spec
+# and drops a request file; this reconciler force-recreates that account's
+# Desktop, bridge and gateway relay, which stops the VM and applies the spec on
+# the next start. Rendered per deployment by install-reconciler.sh.
+ExecStart=@CHECKOUT@/scripts/converge-vm-applies.sh
+# Generous: each account's recreate includes an image-pinned container swap and
+# the Desktop's renderer preparation. A long run is not superseded — systemd
+# will not start the unit again while it is still active.
+TimeoutStartSec=30min

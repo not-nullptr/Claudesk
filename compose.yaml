@@ -234,6 +234,12 @@ services:
       # whether the Desktop behind this bridge is its own instance's or another
       # one's (the mobile facade does that on startup). See docs/eva-mode.md.
       CLAUDESK_NAME_PREFIX: "${CLAUDESK_NAME_PREFIX:-}"
+      # The pass for the admin dashboard's instance actions (VM restart/status).
+      # Must match authd's AXTD_INTERNAL_SECRET; empty disables /internal/*.
+      CLAUDESK_INTERNAL_SECRET: "${CLAUDESK_INTERNAL_SECRET:-}"
+      # Routine schedules are interpreted in this timezone, as the Desktop's own
+      # scheduler does. Without it the bridge would run in UTC.
+      TZ: "${TZ:-Asia/Shanghai}"
       # Model the title generator is asked to use. Empty falls back to the
       # session's own model; set it to a cheap model the gateway serves.
       CLAUDE_TITLE_MODEL: "${CLAUDE_TITLE_MODEL:-}"
@@ -482,6 +488,15 @@ services:
       # and survives a restart. The installer derives the path from
       # CLAUDESK_DATA_ROOT the same way it does the provision spool.
       AXTD_DEPROVISION_SPOOL: "${AXTD_DEPROVISION_SPOOL:-/data/deprovision-requests}"
+      # The VM-apply spool. An admin's Apply drops the account's email here; the
+      # host reconciler re-runs provision-user.sh, which reads the desired specs
+      # back out of this database and recreates the instance. See
+      # scripts/converge-vm-applies.sh.
+      AXTD_VM_APPLY_SPOOL: "${AXTD_VM_APPLY_SPOOL:-/data/vm-apply-requests}"
+      # Shared secret for the instance actions the admin dashboard performs
+      # (VM restart/status). authd calls the account's bridge over gateway_net;
+      # empty disables those routes rather than leaving VM control open.
+      AXTD_INTERNAL_SECRET: "${CLAUDESK_INTERNAL_SECRET:-}"
       # Shared secret for the internal gateway route that resolves an account's
       # gateway key to its own upstream key. Must match shitproxy's
       # GATEWAY_RESOLVER_SECRET (in /etc/shitproxy/gateway.env). Empty disables
