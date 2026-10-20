@@ -289,6 +289,33 @@ shell, and **required**: a managed account has no other sign-out, so a bundle
 that no longer matches must fail candidate preparation rather than silently drop
 it.
 
+Chat and Cowork attachments ride the composer's local upload lane, and the
+composer resolves one `wiggleEnabled` boolean before it will call the upload
+route at all: the resolver takes the account's code-execution preference, the
+conversation's pinned setting and the session's own `serverIsWiggleEnabled`
+verdict, and answers the first refusal. The bridge is that lane's only backend
+in this deployment (its capabilities advertise upload/download, not a cloud
+file store), so an answer of "off" has no fallback — the file chip reads "Upload
+failed" and the send is refused with no HTTP request made, which is what an
+operator sees as "uploads fail but the network tab is empty". The bridge's
+account policy already declares the switch and its rollout gates on (see
+`applyWebShellAccountPolicy` / `grantWiggleUploadGates`), but a conversation
+created while the switch was off keeps its pinned value, and a session doc can
+carry `isWiggleEnabled: false` of its own. The `web-wiggle-upload-lane` patch
+forces the property's value in the normal branch to `true`; the
+code-execution-unavailable branch is left alone, so a surface that declares the
+feature missing still refuses the lane. The resolver is selected by its six
+destructured parameter keys (`codeExecutionUnavailable`, `uploadAnyFileType`,
+`serverIsWiggleEnabled`, `wiggleEnabledForUser`, `conversationWiggleSetting`,
+`oocAttachmentsEnabled`, all non-mangled property keys) and its single returned
+conditional whose alternate object carries the `wiggleEnabled` value; a
+function with a different parameter set or body shape, or a second candidate in
+the same chunk, refuses rather than splicing over the closest-looking
+function. Not required — the data-side policy stands on its own — and spliced
+only in web-shell mode. Because it changes the prepared renderer, it carries a
+`patchRelease` bump so the release-versioned asset URL cannot serve the
+previous generation from a cache.
+
 Cowork tool permissions — the AskUserQuestion and tool-approval cards — are fed
 by the app's pending-permission store, and the only thing that wires that store
 (its subscription to the session event stream plus the

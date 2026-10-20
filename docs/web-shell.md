@@ -190,7 +190,9 @@ reads first (`grantWiggleUploadGates`:
 `trials_and_tribulations_of_high_school_football` and `default_wiggle_on`).
 `CLAUDE_REMOTE_WIGGLE_UPLOADS=0` restores the stored value and leaves the
 upstream gate table alone. A conversation that pinned the setting off when it
-was created keeps its own value; a new chat picks up the policy.
+was created keeps its own value, so the renderer patch `web-wiggle-upload-lane`
+also forces the composer's resolved `wiggleEnabled` true in the web shell
+(see docs/frontend-patches.md); the data policy and the patch ship together.
 
 ## Cowork tool permissions
 

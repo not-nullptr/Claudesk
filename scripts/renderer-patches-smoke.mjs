@@ -63,6 +63,20 @@ const sessionPlacement = 'function placeSession(){"use no memo";'
   + 'disabledAt=account?.settings.dramatic_shrimp_disabled_at,'
   + 'remote=resolveRemote(enabled,disabledAt);'
   + 'return isApp?{isRemote:remote}:{isRemote:!0,preferenceOverridden:forceLocal}}';
+// The composer's upload-lane resolver: the six feature inputs and one returned
+// conditional. In web-shell mode the normal branch's `wiggleEnabled` is forced
+// on (the bridge is always the lane's backend); the code-execution-unavailable
+// branch stays as it is, and a function with a different parameter set is not a
+// target.
+const wiggleLane = 'function resolveUploadLane({codeExecutionUnavailable:e,'
+  + 'uploadAnyFileType:t,serverIsWiggleEnabled:n,wiggleEnabledForUser:r,'
+  + 'conversationWiggleSetting:i,oocAttachmentsEnabled:a}){'
+  + 'return e?{wiggleEnabled:!1,blobFileUploadsEnabled:t,anyFileTypeEnabled:t}'
+  + ':{wiggleEnabled:n??(r&&i!==!1),blobFileUploadsEnabled:a,anyFileTypeEnabled:!1}}';
+const wiggleLaneDecoy = 'function notTheLane({codeExecutionUnavailable:e,'
+  + 'serverIsWiggleEnabled:n,wiggleEnabledForUser:r,conversationWiggleSetting:i,'
+  + 'oocAttachmentsEnabled:a}){return e?{wiggleEnabled:!1}'
+  + ':{wiggleEnabled:n??(r&&i!==!1),blobFileUploadsEnabled:a,anyFileTypeEnabled:!1}}';
 const sessionPlacementDecoy = 'function notThePlacement(){'
   + 'let forceLocal=gate("dramatic_shrimp_force_local"),'
   + 'settings=(account)=>account.settings.dramatic_shrimp_disabled_at,'
@@ -568,6 +582,39 @@ const placementCompiled = await minify(sessionPlacement, {
 assert.equal(inspectRenderer(placementCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-local-session-placement").length, 1,
   "a mangled placement helper must still be spliced once");
+// The upload-lane resolver is pinned by its six destructured keys: a lookalike
+// with five is not a target, the splice only happens in web-shell mode, and the
+// patched function still refuses the lane when code execution is unavailable.
+const lanePatches = inspectRenderer(wiggleLane, false, true).patches
+  .filter(patch => patch.id === "web-wiggle-upload-lane");
+assert.equal(lanePatches.length, 1, "the upload-lane resolver must be spliced once");
+assert.equal(lanePatches[0].original, "n??(r&&i!==!1)",
+  "only the normal branch's wiggle value is replaced");
+assert.equal(inspectRenderer(wiggleLane, false, false).patches
+  .filter(patch => patch.id === "web-wiggle-upload-lane").length, 0,
+  "the upload lane stays off without the web shell");
+assert.equal(inspectRenderer(wiggleLaneDecoy, false, true).patches
+  .filter(patch => patch.id === "web-wiggle-upload-lane").length, 0,
+  "a resolver with a different parameter set is not the upload-lane target");
+{
+  const patched = wiggleLane.slice(0, lanePatches[0].start)
+    + lanePatches[0].replacement + wiggleLane.slice(lanePatches[0].end);
+  const context = {};
+  vm.runInNewContext(`${patched};result=[resolveUploadLane({codeExecutionUnavailable:!1,`
+    + `uploadAnyFileType:!1,serverIsWiggleEnabled:!1,wiggleEnabledForUser:!1,`
+    + `conversationWiggleSetting:!1,oocAttachmentsEnabled:!1}),`
+    + `resolveUploadLane({codeExecutionUnavailable:!0,uploadAnyFileType:!0})];`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    { wiggleEnabled: true, blobFileUploadsEnabled: false, anyFileTypeEnabled: false },
+    { wiggleEnabled: false, blobFileUploadsEnabled: true, anyFileTypeEnabled: true },
+  ], "the patched lane ignores a pinned-off conversation but keeps the unavailable branch");
+}
+const wiggleCompiled = await minify(wiggleLane, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(wiggleCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-wiggle-upload-lane").length, 1,
+  "a mangled upload-lane resolver must still be spliced once");
 // The session list's Code gate is pinned by its destructured property names and
 // its single returned disjunction: a lookalike without the folded branch is not
 // a target, and the splice survives minification.

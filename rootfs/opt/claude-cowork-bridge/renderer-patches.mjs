@@ -90,6 +90,22 @@ const sessionViewerReason = "not_desktop_app";
 // declarator directly following the one reading the shrimp gate. Spliced only
 // in web-shell mode, like the other chrome patches.
 const localSessionPlacementPatchId = "web-local-session-placement";
+// The composer's upload-lane resolver. It answers `wiggleEnabled` from three
+// inputs — the account's code-execution switch (via `wiggleEnabledForUser`), a
+// conversation's pinned setting, and the session's `serverIsWiggleEnabled` —
+// and the composer reads that answer before it makes any upload request. In
+// the web shell the bridge is always the lane's backend (its capabilities
+// advertise upload/download, not a cloud file store), so an answer of "off"
+// has no fallback: every attachment is marked "Upload failed" with no request
+// at all. The bridge already declares the account switch and its rollout gates
+// on, but a conversation pinned off (or another surface's `isWiggleEnabled:
+// false`) still disables the only lane. Forcing this one property keeps the
+// upload path the Desktop client takes. The resolver is pinned by its six
+// destructured parameter keys and its single returned conditional, so a
+// renamed minifier output still matches; the splice is not required, and a
+// bundle that no longer matches keeps the data-side policy alone. Spliced only
+// in web-shell mode.
+const wiggleUploadLanePatchId = "web-wiggle-upload-lane";
 // Code sessions and chat sessions are separate stores — Code lives in the local
 // Code session store (`LocalSessions`), chat and Cowork in the local-agent-mode
 // store (`LocalAgentModeSessions`) — but the renderer merges them into one
@@ -1242,6 +1258,49 @@ function chatListNoCodeTarget(node) {
       || identifier(operand.right) === activeMode && literal(operand.left, "code")));
   if (modeClauses.length !== 1) return undefined;
   return operands.find(operand => identifier(operand) === requested);
+}
+
+// The composer's upload-lane resolver (see wiggleUploadLanePatchId). Exactly the
+// six feature inputs the composer hands it: the code-execution verdict, the
+// any-file-type grant, the session's server-side verdict, the user's own
+// preference, the conversation's pinned setting and the out-of-context flag.
+// Its body must be that single conditional; the spliced property is the
+// `wiggleEnabled` value in the normal branch. Any other parameter set or body
+// shape refuses rather than splice over the closest-looking function.
+const wiggleUploadLaneParams = [
+  "codeExecutionUnavailable",
+  "uploadAnyFileType",
+  "serverIsWiggleEnabled",
+  "wiggleEnabledForUser",
+  "conversationWiggleSetting",
+  "oocAttachmentsEnabled",
+];
+function wiggleUploadLaneTarget(node) {
+  if (!functionTypes.has(node.type) || node.params.length !== 1) return undefined;
+  const pattern = node.params[0];
+  if (pattern?.type !== "ObjectPattern") return undefined;
+  const names = new Set();
+  for (const entry of pattern.properties) {
+    if (entry.type !== "Property" || entry.computed === true) return undefined;
+    const name = entry.key?.type === "Identifier" ? entry.key.name
+      : entry.key?.type === "Literal" ? entry.key.value : undefined;
+    if (typeof name !== "string") return undefined;
+    names.add(name);
+  }
+  if (names.size !== wiggleUploadLaneParams.length) return undefined;
+  if (!wiggleUploadLaneParams.every(name => names.has(name))) return undefined;
+  const body = node.body;
+  if (body?.type !== "BlockStatement" || body.body.length !== 1) return undefined;
+  const [statement] = body.body;
+  if (statement.type !== "ReturnStatement") return undefined;
+  const branch = statement.argument;
+  if (branch?.type !== "ConditionalExpression"
+    || branch.alternate?.type !== "ObjectExpression") return undefined;
+  const entry = branch.alternate.properties.find(propertyNode =>
+    propertyNode.type === "Property" && propertyNode.computed !== true
+    && propertyNode.kind === "init" && propertyNode.shorthand !== true
+    && (propertyNode.key?.name ?? propertyNode.key?.value) === "wiggleEnabled");
+  return entry?.value;
 }
 
 // The home-layout assignment object: an object literal carrying exactly the six
@@ -4525,6 +4584,21 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   // delegates, so the app's own reporting still runs. A throw from the log line
   // or from the original handler must not replace the crash the boundary is
   // already rendering, hence the two `try`s.
+  // The composer's local upload lane (see wiggleUploadLanePatchId). One
+  // resolver per chunk; a chunk with two refuses rather than splice the wrong
+  // expression, and a chunk with none simply keeps the data-side policy.
+  if (webShellEnabled) {
+    const lanes = [];
+    walk(ast, [], (node) => {
+      const lane = wiggleUploadLaneTarget(node);
+      if (lane) lanes.push(lane);
+    });
+    if (lanes.length === 1) {
+      const target = lanes[0];
+      patches.push({ id: wiggleUploadLanePatchId, start: target.start, end: target.end,
+        original: source.slice(target.start, target.end), replacement: "!0" });
+    }
+  }
   // The routine surface's two web-shell patches (see their ids). Each target is
   // accepted only when exactly one candidate is in the chunk, so a second
   // refuses rather than splice the wrong expression.
