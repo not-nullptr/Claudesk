@@ -597,6 +597,10 @@ const allowedMethods = new Map([
     "setExtendedThinking",
     "setModel",
     "setPermissionMode",
+    // Composer attachments for a session on another host are staged by
+    // Desktop; the renderer only asks whether this method exists. See the same
+    // entry in bridge/server.mjs.
+    "stageRemoteSessionAttachmentsViaFilesApi",
     "start",
     "stop",
     "updateSession",
@@ -705,6 +709,10 @@ const allowedMethods = new Map([
     "listFilesInFolder",
     "openLocalFile",
     "readLocalFile",
+    // The composer's attachment materialization, needed by every account (the
+    // bridge's base FileSystem allowlist documents why); it takes bytes, not a
+    // path.
+    "savePastedFile",
     "showInFolder",
     "whichApplication",
     "writeFileDownload",
@@ -741,7 +749,6 @@ if (infrastructureActionsEnabled) {
   for (const method of [
     "exportLocalFileToGoogleDrive",
     "promoteScratchpadFile",
-    "savePastedFile",
     "writeLocalFile",
   ]) allowedMethods.get("FileSystem").add(method);
 }

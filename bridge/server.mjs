@@ -875,6 +875,15 @@ const allowedMethods = new Map([
     "setExtendedThinking",
     "setModel",
     "setPermissionMode",
+    // Attachments for a session that runs on another host (a tenant's
+    // Code/Cowork runner) are staged by Desktop itself: the renderer only asks
+    // whether this method exists (`ig()` in the composer) and then calls it with
+    // the session id and the file paths. Withholding it made that check false,
+    // so the staging plan left every file unstaged and the composer reported
+    // "Upload failed" / "…couldn't be uploaded. Try sending again." with no
+    // request at all. Its `paths` input is a bounded string array; Desktop's
+    // implementation validates the session and refuses oversized lists.
+    "stageRemoteSessionAttachmentsViaFilesApi",
     "start",
     "stop",
     "updateSession",
@@ -989,6 +998,15 @@ const allowedMethods = new Map([
     "listFilesInFolder",
     "openLocalFile",
     "readLocalFile",
+    // Not an operator action: this is how the composer materializes a file the
+    // browser has no path for. The renderer calls it when an attachment is
+    // staged to a session host ("remote" sessions — a tenant's Code/Cowork
+    // runner) and `claudeAppSettings.filePickers.getPathForFile` is absent.
+    // Without it the staging plan marks every file `ipc_unavailable`, which the
+    // composer reports as "Upload failed" and refuses the send with
+    // "…couldn't be uploaded. Try sending again." — before any request is made.
+    // It writes the given bytes into the workspace; it takes no path.
+    "savePastedFile",
     "showInFolder",
     "whichApplication",
     "writeFileDownload",
@@ -1026,10 +1044,13 @@ if (infrastructureActionsEnabled) {
   for (const method of ["migrate", "pickTarget", "reveal"]) {
     allowedMethods.get("CoworkUserFiles").add(method);
   }
+  // `savePastedFile` deliberately stays out of this group: it is the composer's
+  // attachment materialization (see the base FileSystem allowlist), needed by
+  // every account. The rest write to a caller-named path or an external store,
+  // which is the operator-only part.
   for (const method of [
     "exportLocalFileToGoogleDrive",
     "promoteScratchpadFile",
-    "savePastedFile",
     "writeLocalFile",
   ]) allowedMethods.get("FileSystem").add(method);
 }

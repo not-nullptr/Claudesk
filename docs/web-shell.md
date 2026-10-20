@@ -200,6 +200,18 @@ with no bound conversation takes the org lane (`/api/<org>/upload`, also served
 here) instead of failing client-side before any request. Both patches are
 web-shell only and both are needed for attachments to work on every surface.
 
+A session whose host is another machine — a tenant's Code/Cowork runner — is a
+separate path. The composer asks Desktop to stage the files
+(`LocalAgentModeSessions.stageRemoteSessionAttachmentsViaFilesApi`), and first
+materializes each browser `File` into a workspace path with
+`FileSystem.savePastedFile`. Both are ordinary account capabilities: the former
+is a bounded path list staged by Desktop itself, the latter writes bytes and
+returns a path. The bridge exposes both to every account, whatever its role;
+they used to sit behind `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`, which
+`scripts/lib/account-scope.sh` turns off for non-Admin accounts, so an Admin's
+attachments worked while a member's failed in the composer as `ipc_unavailable`
+("Upload failed", refused send, no request, nothing in the console).
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission

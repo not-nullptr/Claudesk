@@ -154,6 +154,23 @@ for (const [policy, source] of [["bridge", serverMethods], ["wrapper", wrapperMe
     assert.ok(methods.CoworkScheduledTasks.includes(method),
       `the ${policy} allowlist must keep ${method} without the operator surfaces`);
   }
+  // File attachments to a remote session are materialized with
+  // `FileSystem.savePastedFile` (the renderer has no local path for a browser
+  // file). Withholding it from a non-Admin account makes the composer fail the
+  // attachment client-side as `ipc_unavailable` — no request, no console, just
+  // "Upload failed" and a refused send. It writes bytes and returns a path, so
+  // it belongs to every account; `writeLocalFile`, which writes a caller-named
+  // path, stays operator-only.
+  assert.ok(methods.FileSystem.includes("savePastedFile"),
+    `the ${policy} allowlist must keep savePastedFile without the operator surfaces`);
+  assert.ok(!methods.FileSystem.includes("writeLocalFile"),
+    `the ${policy} allowlist must keep writeLocalFile behind the operator surfaces`);
+  // The staging leg itself: the renderer decides whether a remote session takes
+  // attachments by the presence of this method, and Desktop implements it
+  // (including for a custom session host). With it absent the composer leaves
+  // every file unstaged and fails the send before any request.
+  assert.ok(methods.LocalAgentModeSessions.includes("stageRemoteSessionAttachmentsViaFilesApi"),
+    `the ${policy} allowlist must expose remote-session attachment staging`);
 }
 
 const serverSettings = section(

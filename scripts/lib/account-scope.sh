@@ -22,7 +22,8 @@
 #                                   its editor for the app's own config files
 #   ACCOUNT_INFRASTRUCTURE_ACTIONS  the Projects/Spaces, Artifact, browser-file
 #                                   and Memory mutations (Cowork scheduled tasks
-#                                   are the account's own and are never scoped)
+#                                   and the composer's own savePastedFile are the
+#                                   account's and are never scoped)
 #   ACCOUNT_READ_ROOTS              extra roots the authenticated download route
 #                                   may serve, beyond the account's own workspace
 #
