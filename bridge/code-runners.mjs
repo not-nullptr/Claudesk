@@ -513,6 +513,9 @@ function isUserMessage(entry) {
 
 export function createRunnerBackend({
   stateDir, log = console, poolName = null, wakeRunner = null,
+  // The smoke drives wake attempts one after another; production leaves the
+  // default so a burst becomes one startVM call.
+  wakeCooldownMs = 15000,
 } = {}) {
   const statePath = join(stateDir, stateFileName);
   // A smoke (or an operator's tool) may pass only `log.log`; warnings must not
@@ -641,17 +644,21 @@ export function createRunnerBackend({
     for (const finish of [...(pollWaiters.get(poolId) ?? [])]) finish();
   }
 
-  // Start the VM a requeued session needs. `wakeRunner` is the Desktop's
-  // startVM; it is best-effort (a Desktop that refuses leaves the session
-  // waiting, exactly as before) and must not delay the state transition.
+  // Start the VM a queued or requeued session needs. `wakeRunner` is the
+  // Desktop's startVM; it is best-effort (a Desktop that refuses leaves the
+  // session waiting, exactly as before) and must not delay the state
+  // transition. One wake is not a guarantee: the VM may be mid-shutdown, the
+  // Desktop may refuse, or the guest may power down between the wake and its
+  // runner's first poll — which is why the reaper keeps asking while a session
+  // is still pending (see reapSessions).
   let lastWakeAt = 0;
   function wakeTurnRunner() {
     if (typeof wakeRunner !== "function") return;
     // A burst of messages (or a reaper pass) must not turn into a burst of
     // startVM calls. The VM only needs one wake; a failed one is retried by
-    // the next requeue after the cooldown.
+    // the next requeue or the pending watchdog after the cooldown.
     const now = Date.now();
-    if (now - lastWakeAt < 15000) return;
+    if (now - lastWakeAt < wakeCooldownMs) return;
     lastWakeAt = now;
     try {
       Promise.resolve(wakeRunner()).catch((error) => {
@@ -806,6 +813,20 @@ export function createRunnerBackend({
           "the runner stopped responding; this turn was interrupted");
         changed = true;
       }
+      // A session waiting for a runner is a standing reason for its pool's VM
+      // to be up. Placement asks the Desktop to start it, but that wake is
+      // one-shot and easy to lose: a VM caught mid-shutdown, a Desktop that
+      // refused while the renderer was busy, or a power-down between the wake
+      // and the guest's first poll used to leave the session on "Waiting for a
+      // runner…" forever, because nothing re-asked. Keep asking while one is
+      // queued and its pool has no live runner; wakeTurnRunner's cooldown paces
+      // it, and a runner that registers ends it.
+      const waiting = state.sessions.some((session) => {
+        if (session.state !== "pending" && session.state !== "offered") return false;
+        const pool = poolById(state, session.pool_id);
+        return Boolean(pool) && !runnerOnline(state, pool);
+      });
+      if (waiting) wakeTurnRunner();
       if (changed) await save();
     } catch (error) {
       warn(`[code-runners] session reaper failed: ${error?.message || error}`);
@@ -2189,6 +2210,11 @@ export function createRunnerBackend({
       // A runner already holding this pool's poll takes it on that same
       // request, not on its next tick.
       wakePool(pool.pool_id);
+      // And a pool with no runner needs its VM: every placement is a reason for
+      // the guest to be up, not just the composer's own create route. Waking
+      // here keeps a headless placement (a routine fire, an API create) from
+      // depending on its caller to remember.
+      wakeTurnRunner();
       log.log(`[code-runners] session ${session.session_uuid} placed on pool ${pool.pool_id}`);
       return { session: sessionDocument(session) };
     },

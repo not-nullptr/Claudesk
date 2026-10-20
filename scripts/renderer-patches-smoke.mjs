@@ -1032,6 +1032,54 @@ const routineTriggerCompiled = await minify(routineTriggerCards, {
 assert.equal(inspectRenderer(routineTriggerCompiled.code, false, true).patches
   .filter(patch => patch.id === "routine-api-trigger").length, 1,
   "a mangled availableCards memo must still be spliced once");
+// The routine schedule's frequency classifier: a minute field that is not a
+// plain number (`*`, `*/5`, `0,30`) answered "subHourly", which every routine
+// form renders as "Schedules must run at most once per hour." and refuses on
+// submit. This deployment owns its routine clock, so the cloud limit is lifted
+// by replacing the guard's test; the classifier still refuses a field that is
+// neither numeric nor cron punctuation, and the numeric range check and
+// cronstrue's parse that follow are untouched.
+const routineCronClassifier = 'function frequency(e){if(!e)return null;'
+  + 'let t=e.trim(),n=t.split(/\\s+/);if(n.length!==5||n.some(e=>e.startsWith("/")))'
+  + 'return"invalid";let[r]=n;if(!isPlain(r))return"subHourly";'
+  + 'let a=parseInt(r,10);if(a<0||a>59)return"invalid";'
+  + 'try{parse(t)}catch{return"invalid"}return null}';
+const routineCronGuard = 'if(!isPlain(r))return"subHourly";';
+const routineCronDecoys = 'function notTheGuard(e){if(!e)return"subHourly"}'
+  + 'function notTheClassifier(e){if(!isPlain(e))return"invalid";return null}';
+assert.equal(inspectRenderer(routineCronClassifier, false, false).patches.length, 0,
+  "the routine schedule limit is left alone outside the web shell and a tenant");
+assert.equal(inspectRenderer(routineCronDecoys, false, true).patches
+  .filter(patch => patch.id === "routine-any-interval").length, 0,
+  "only a unary-call guard returning subHourly is the classifier target");
+const routineCronPatches = inspectRenderer(routineCronClassifier, false, true).patches
+  .filter(patch => patch.id === "routine-any-interval");
+assert.equal(routineCronPatches.length, 1, "the once-per-hour guard must be spliced once");
+assert.equal(routineCronPatches[0].original, routineCronGuard,
+  "the whole guard is replaced, leaving the surrounding classifier intact");
+assert.equal(routineCronPatches[0].replacement,
+  'if(!/^[0-9*,/-]+$/.test(r))return"invalid";');
+{
+  const patched = routineCronClassifier.slice(0, routineCronPatches[0].start)
+    + routineCronPatches[0].replacement + routineCronClassifier.slice(routineCronPatches[0].end);
+  const context = {
+    isPlain: (value) => /^\d+$/.test(value),
+    parse: (value) => {
+      if (!/^\S+ \S+ \S+ \S+ \S+$/.test(value)) throw new Error("bad expression");
+    },
+  };
+  vm.runInNewContext(`${patched};result=[`
+    + `frequency("*/5 * * * *"),frequency("0,30 * * * *"),frequency("15-45 * * * *"),`
+    + `frequency("abc * * * *"),frequency("75 * * * *")];`, context);
+  assert.deepEqual(Array.from(context.result), [null, null, null, "invalid", "invalid"],
+    "sub-hourly minutes are schedules; junk and an out-of-range minute are still refused");
+}
+const routineCronCompiled = await minify(routineCronClassifier, {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(routineCronCompiled.code, false, true).patches
+  .filter(patch => patch.id === "routine-any-interval").length, 1,
+  "a mangled frequency classifier must still be spliced once");
 // The routine form's model picker wrapper, extended with an effort prop and the
 // routine's own state. Its `onStateChange` is called with `(nextState, event)`:
 // the model comes from the state (as upstream read it) and the effort from the

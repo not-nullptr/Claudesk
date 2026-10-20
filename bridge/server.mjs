@@ -4189,7 +4189,16 @@ async function handleRoutineAdminApi(request, response, url) {
 // a Desktop that refuses leaves the session waiting, exactly as before.
 async function wakeRunnerVm() {
   try {
-    await desktop.invoke("ClaudeVM", "startVM", []);
+    const started = await desktop.invoke("ClaudeVM", "startVM", []);
+    // The IPC reports a refused start as `{success:false, error}` rather than
+    // throwing (a VM mid-shutdown, a missing bundle, a platform check). Calling
+    // that a wake left the caller, and its one-shot retry, believing a runner
+    // was on the way.
+    if (started && typeof started === "object" && started.success === false) {
+      console.warn("[code-runners] the Desktop could not start the Cowork VM: "
+        + (started.error || "startup failed"));
+      return false;
+    }
     console.log("[code-runners] asked the Desktop to start the Cowork VM for the placed session");
     return true;
   } catch (error) {

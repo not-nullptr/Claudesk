@@ -2304,7 +2304,12 @@ async function codeSessionActivity() {
     if (!runner || typeof runner !== "object") return null;
     const active = Number(runner.active_sessions) || 0;
     const offered = Number(runner.offered_sessions) || 0;
-    return { active, offered };
+    // A pending session is a message waiting for the VM to come up — the
+    // bridge's own description of the field. Leaving it out let the idle
+    // monitor power the guest down underneath a session that had just been
+    // placed (a routine fire, an API fire) and was about to be picked up.
+    const pending = Number(runner.pending_sessions) || 0;
+    return { active, offered, pending };
   } catch {
     return null;
   }
@@ -2456,7 +2461,7 @@ async function coworkVmIdleCheck() {
     let workState = classifyCoworkVmWorkState(await readCoworkVmWorkState(), now);
     if (workState.safeToStop) {
       const code = await codeSessionActivity();
-      if (code && (code.active > 0 || code.offered > 0)) {
+      if (code && (code.active > 0 || code.offered > 0 || code.pending > 0)) {
         workState = { safeToStop: false, reason: "code-session-running" };
       }
     }
@@ -2469,8 +2474,12 @@ async function coworkVmIdleCheck() {
       };
       return;
     }
+    // Activity after the last idle check (a startVM call, a session start, a
+    // routed folder dialog) restarts the count. Keeping the older idleSince
+    // ignored `noteCoworkVmActivity` for a VM that was already idle-eligible
+    // and powered it down in the same tick as the wake that needed it.
     const idleSince = priorPid === vm.pid && coworkVmIdleState.idleSince
-      ? coworkVmIdleState.idleSince
+      ? Math.max(coworkVmIdleState.idleSince, coworkVmLastActivityAt)
       : Math.max(now, coworkVmLastActivityAt);
     coworkVmIdleState = {
       checkedAt: now,
@@ -2485,7 +2494,7 @@ async function coworkVmIdleCheck() {
     let confirmed = classifyCoworkVmWorkState(await readCoworkVmWorkState(), Date.now());
     if (confirmed.safeToStop) {
       const code = await codeSessionActivity();
-      if (code && (code.active > 0 || code.offered > 0)) {
+      if (code && (code.active > 0 || code.offered > 0 || code.pending > 0)) {
         confirmed = { safeToStop: false, reason: "code-session-running" };
       }
     }

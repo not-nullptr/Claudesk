@@ -792,6 +792,42 @@ try {
   await rm(stateDir, { recursive: true, force: true });
 }
 
+// A placement is the thing that wakes the VM. A headless caller — a routine
+// fire, the API hook — has no composer to do it, so the store asks itself; and
+// while the session is still waiting with no runner online, every reaper pass
+// asks again. That is what recovers a wake lost to an idle power-down or a
+// Desktop that refused, instead of leaving the run on "Waiting for a runner…"
+// until somebody opens a page. (The cooldown is zero here: the smoke drives the
+// passes back to back.)
+const headlessDir = await mkdtemp(join(tmpdir(), "code-runners-headless-"));
+try {
+  let headlessWakes = 0;
+  const headless = createRunnerBackend({
+    stateDir: headlessDir,
+    log,
+    poolName: "headless",
+    wakeCooldownMs: 0,
+    wakeRunner: () => { headlessWakes += 1; },
+  });
+  const headlessPool = await headless.primaryPool();
+  await headless.createSession({ body: { environment_id: headlessPool.pool_id } });
+  assert.equal(headlessWakes, 1,
+    "placing a session wakes the VM without a caller's help");
+  await headless.reapNow();
+  assert.equal(headlessWakes, 2,
+    "a pending session with no online runner keeps asking for its VM");
+  const headlessAuth = { authorization: `Bearer ${headlessPool.secret}` };
+  await headless.registerRunner({
+    headers: headlessAuth, body: { runner_version: "2.1.295" },
+  });
+  await headless.pollSpawnHints({ headers: headlessAuth });
+  await headless.reapNow();
+  assert.equal(headlessWakes, 2,
+    "once a runner is back, the waiting session stops waking the VM");
+} finally {
+  await rm(headlessDir, { recursive: true, force: true });
+}
+
 // The bridge must actually route this, and only for a tenant with the feature
 // on — a second instance of the substrate that nobody calls would be worse than
 // none.

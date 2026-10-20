@@ -869,6 +869,16 @@ read answers 503 rather than holding the request for the whole window. Without
 this, the picker and branch hooks failed until the user placed a session, the
 only other path that woke the VM.
 
+The other direction matters just as much: a **placed session** — the composer,
+a routine fire, an API fire — asks for the VM itself, and the session store
+keeps asking on every reaper pass while the session is still `pending` (or
+`offered`) and its pool has no live runner. One wake is not a guarantee: the VM
+can be mid-shutdown, a Desktop can refuse, or the guest can power down between
+the wake and its runner's first poll. Without the retry the run sat on
+"Waiting for a runner…" until somebody opened a page, which is what started the
+VM. The wrapper's idle monitor now counts pending sessions as work too, so a
+run that is about to be picked up does not have the guest powered down under it.
+
 The wake itself is bounded for the interactive reads (`CLAUDESK_RUNNER_WAKE_WAIT_MS`,
 5 s by default), because `startVM` on a cold VM can take a minute. That makes a
 cold Code read answer quickly — 503 while no runner is online — rather than

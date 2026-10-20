@@ -53,7 +53,7 @@ try {
     const manifest = JSON.parse(await readFile(join(state, "current.json"), "utf8"));
     assert.equal(manifest.desktopVersion, release.desktopVersion);
     assert.equal(manifest.patches.length,
-      webShell === "1" ? (tenant === "1" ? 104 : 73) : gateway === "1" ? 8 : 6);
+      webShell === "1" ? (tenant === "1" ? 108 : 77) : gateway === "1" ? 8 : 6);
     // A tenant keeps the route alias: `/code` must resolve to the surface this
     // bridge drives, exactly as on the deployment's own instance.
     assert.equal(
@@ -89,6 +89,10 @@ try {
       webShell === "1", "the shared model+effort wrapper is published for that page");
     assert.equal(manifest.patches.some(patch => patch.id === "routine-worktree-control-publish"),
       webShell === "1", "the composer's worktree checkbox is published for the routine forms");
+    // The routines run on this deployment's own clock, so the cloud service's
+    // once-per-hour schedule limit is lifted wherever the forms are served.
+    assert.equal(manifest.patches.some(patch => patch.id === "routine-any-interval"),
+      webShell === "1", "the routine schedule accepts sub-hourly cron expressions");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-permission-list"),
       webShell === "1", "the web shell's Code permission modes include bypass");
     assert.equal(manifest.patches.some(patch => patch.id === "code-bypass-availability"),

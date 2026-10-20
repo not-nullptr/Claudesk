@@ -226,6 +226,15 @@ const routineModelPickerPublishPatchId = "routine-model-picker-publish";
 // Checkbox on the global so both routine forms can render the composer's exact
 // control (the Switch is the fallback in the unified form).
 const routineWorktreeCheckboxPatchId = "routine-worktree-control-publish";
+// The routine schedule's frequency classifier refuses any cron whose minute
+// field is not a plain number — `*/5`, `0,30`, `15-45` — as "subHourly", which
+// every routine form (the unified dialog's custom field, the Code surface's
+// Epitaxy form and its schedule editor) renders as "Schedules must run at most
+// once per hour." and refuses on submit. That is the cloud service's limit:
+// this deployment keeps its own routines on its own clock, and the bridge's
+// cron parser fires any five-field expression. The classifier is shared by all
+// the forms, so this one splice lifts the limit everywhere.
+const routineAnyIntervalPatchId = "routine-any-interval";
 // A tenant's Code sessions run on `session_host`, whose permission-mode list is
 // hardcoded without bypass (the cloud service disallowed it). The deployment's
 // VM is the operator's own sandbox, so bypass is offered here; the entitlement
@@ -2339,6 +2348,10 @@ export const prefilterNeedles = [
   "Describe what Claude should do in each session",
   "routine-composer-status",
   "autofixOnPrCreate:void 0",
+  // The shared cron-frequency classifier's once-per-hour answer (see
+  // routine-any-interval). It lives in its own chunk, which no other needle
+  // selects.
+  "subHourly",
   // The shared Checkbox the composer's worktree toggle renders; its chunk
   // publishes it for the routine forms (routine-worktree-control-publish).
   '"data-cds":"Checkbox"',
@@ -3733,6 +3746,36 @@ function routineFormRowsReplacement(source, target) {
   return `,${cwdRow},${branchRow},${worktreeRow},${permissionRow}`;
 }
 
+// The routine schedule classifier's once-per-hour guard (see
+// routineAnyIntervalPatchId): the bundle's only `return "subHourly"`, behind
+// `!isPlainNumber(minuteField)`. The minute field is read back from the call so
+// the replacement keeps a syntax check on the same binding — `*/5`, `0,30` and
+// `15-45` continue to the classifier's numeric-range check and cronstrue's
+// parse, while a field that is neither numeric nor cron punctuation is still
+// refused. Pinned by the literal return and the unary-call test, so no other
+// `return "invalid"`-shaped classifier in the chunk can match.
+function routineAnyIntervalTarget(node) {
+  if (node.type !== "IfStatement") return undefined;
+  const consequent = unwrap(node.consequent);
+  const statement = consequent?.type === "BlockStatement"
+    ? consequent.body.length === 1 ? consequent.body[0] : null : consequent;
+  if (statement?.type !== "ReturnStatement"
+    || !literal(unwrap(statement.argument), "subHourly")) return undefined;
+  const test = unwrap(node.test);
+  if (test?.type !== "UnaryExpression" || test.operator !== "!") return undefined;
+  const call = unwrap(test.argument);
+  if (call?.type !== "CallExpression" || call.arguments.length !== 1) return undefined;
+  const field = unwrap(call.arguments[0]);
+  if (field?.type !== "Identifier") return undefined;
+  return { node, field: field.name };
+}
+
+function routineAnyIntervalReplacement(target) {
+  // The syntax test is the field's own alphabet; cronstrue still validates the
+  // ranges, and a plain number keeps the explicit 0–59 check that follows.
+  return `if(!/^[0-9*,/-]+$/.test(${target.field}))return"invalid";`;
+}
+
 // The Code surface's routine page is a second implementation of the same
 // create/edit form, with its own instructions composer. Its footer renders a
 // plain model combobox, and its layout has no start-option rows. The component
@@ -4743,6 +4786,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const jobConfigs = [];
     const formRows = [];
     const worktreeCheckboxes = [];
+    const anyIntervalGuards = [];
     walk(ast, [], (node, ancestors) => {
       const picker = routineModelPickerTarget(node);
       if (picker) modelPickers.push(picker);
@@ -4759,7 +4803,19 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           declaration: ancestors[ancestors.length - 1],
         });
       }
+      const guard = routineAnyIntervalTarget(node);
+      if (guard) anyIntervalGuards.push(guard);
     });
+    // The once-per-hour guard is its own splice and its own chunk (the shared
+    // frequency classifier), so a second candidate is a refusal rather than a
+    // guess; none leaves the cloud limit in place.
+    if (anyIntervalGuards.length === 1) {
+      const target = anyIntervalGuards[0];
+      patches.push({ id: routineAnyIntervalPatchId, start: target.node.start,
+        end: target.node.end,
+        original: source.slice(target.node.start, target.node.end),
+        replacement: routineAnyIntervalReplacement(target) });
+    }
     if (worktreeCheckboxes.length === 1) {
       const { declarator, declaration } = worktreeCheckboxes[0];
       // Insert after the whole declaration list, not the declarator: this one

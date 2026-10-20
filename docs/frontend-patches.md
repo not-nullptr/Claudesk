@@ -476,6 +476,14 @@ scheduled task on the deployment's own VM in both cases:
   `globalThis.__CLAUDESK_MODEL_PICKER__` by `routine-model-picker-publish`,
   because that page imports the wrapper's chunk for side effects only and has
   no binding to call.
+- `routine-any-interval` lifts the cloud service's "at most once per hour"
+  schedule limit. Every routine form reads the same shared frequency
+  classifier, which answers `"subHourly"` for a minute field that is not a
+  plain number (`*`, `*/5`, `0,30`); the forms show "Schedules must run at most
+  once per hour." and refuse the save. This deployment keeps its own routine
+  clock (`docs/routines.md`), so the guard's test is replaced with a syntax
+  check on the same field: non-cron punctuation is still refused, and the
+  numeric range check and cronstrue parse that follow still run.
 
 `code-bypass-permission-list`, `code-bypass-availability` and
 `code-bypass-self-hosted-modes` make bypass permissions selectable in the Code

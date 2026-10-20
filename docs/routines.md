@@ -373,6 +373,20 @@ the proven fire path, so it keeps the clock for **Code** routines:
   service asks the store to drop host runs (`setHostRunsSupported(false)`); if a
   build refuses that call, a slot whose store `lastRunAt` already covers it is
   skipped rather than duplicated.
+- A fired run waits for the guest runner inside the account's Cowork VM, and
+  the VM idle-stops. Placement asks the Desktop to start it (`ClaudeVM.startVM`)
+  and the runner backend asks again on every reaper pass while the session is
+  still `pending`/`offered` and its pool has no live runner. One wake is enough
+  normally; the retry is what recovers a wake lost to a VM caught mid-shutdown
+  or a Desktop that refused, instead of leaving the run on "Waiting for a
+  runner…" until a page is opened. The wrapper's idle monitor counts pending
+  sessions as work, so it does not power the guest down under a waiting run.
+
+Any five-field cron the bridge's parser accepts is a valid schedule, including
+sub-hourly ones (`*/5 * * * *`, `0,30 * * * *`). Upstream's cloud service caps
+routines at one run per hour and the renderer's schedule forms repeat that
+limit; the `routine-any-interval` renderer patch lifts it. The fire budget below
+still applies.
 
 Cowork's separate **Scheduled** folder stays with the Desktop's own scheduler;
 this clock is only the Code store. `CLAUDESK_ROUTINE_SCHEDULER=0` disables it
