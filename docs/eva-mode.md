@@ -290,8 +290,13 @@ into `<data-root>/auth-data/vm-apply-requests`, the reconciler's
 `claudesk-vm-apply.path` unit fires `scripts/converge-vm-applies.sh`, and that
 runs `provision-user.sh` — which force-recreates the account's Desktop, bridge
 and gateway relay. That stops the VM and interrupts any running turns, which is
-why the page asks first. After the recreate, provision-user records what it
-applied (`--set-vm-applied`) and the account's in-network alias
+why the page asks first. That `.path` unit is written only by
+`install-reconciler.sh`, not by `deploy.sh`: an existing deployment must rerun
+`sudo scripts/install-reconciler.sh <checkout> <name>` once after upgrading.
+Until it does, Apply queues a request nothing consumes (the page keeps saying
+"still queued") and `deploy.sh` prints a warning naming the command. After the
+recreate, provision-user records what it applied (`--set-vm-applied`) and the
+account's in-network alias
 (`--set-internal-upstream <slug>-desktop:8080`); the page shows desired versus
 applied and polls until the difference clears. Until it does, the next
 `deploy.sh` (which refreshes every account) would pick the saved spec up anyway.
