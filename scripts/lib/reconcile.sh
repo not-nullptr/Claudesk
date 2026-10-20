@@ -23,9 +23,17 @@ provision_one() {
     if "$project_dir/scripts/provision-user.sh" "$email" > "$results/log.$index" 2>&1; then
         : > "$results/ok.$index"
     else
+        status=$?
         : > "$results/fail.$index"
-        printf 'reconcile: %s failed:\n' "$email" >&2
-        sed 's/^/  /' "$results/log.$index" >&2
+        # The exit status matters: 128+n is a signal (137 killed, 143 stopped),
+        # and anything else is the script's own exit. An empty log is itself a
+        # defect, so name it rather than print nothing under the header.
+        printf 'reconcile: %s failed (exit %s):\n' "$email" "$status" >&2
+        if [ -s "$results/log.$index" ]; then
+            sed 's/^/  /' "$results/log.$index" >&2
+        else
+            printf '  (provision-user.sh produced no output)\n' >&2
+        fi
     fi
 }
 

@@ -49,7 +49,21 @@ authd() { compose_shared exec -T authd /app/authd "$@"; }
 # shellcheck source=scripts/lib/slug.sh
 . "$project_dir/scripts/lib/slug.sh"
 
-info="$(authd --show "$email")" || exit 1
+# A failure here used to exit with nothing on stdout or stderr, which the
+# reconciler reported as "EMAIL failed:" with an empty log. Keep the read's
+# stderr so a docker/compose failure is named, with its own status, instead of
+# vanishing. (The value carries the account's gateway key, so it is deliberately
+# never traced — only the command's error output is.)
+info_err="$(mktemp)"
+if info="$(authd --show "$email" 2>"$info_err")"; then
+    rm -f "$info_err"
+else
+    status=$?
+    printf 'provision-user: authd could not read %s (exit %s)\n' "$email" "$status" >&2
+    if [ -s "$info_err" ]; then sed 's/^/  /' "$info_err" >&2; fi
+    rm -f "$info_err"
+    exit 1
+fi
 
 id=""; user_email=""; first_name=""; role=""; upstream=""; disabled=""; gateway_key=""
 vm_memory_override=""; vm_cpu_override=""
