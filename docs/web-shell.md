@@ -835,14 +835,26 @@ consulted only on the New page: the renderer's reader refuses it unless
 `location.pathname === "/new"` and the element is un-hidden, which is true
 nowhere else. So the New page gets the marlin card from the stamp while every
 other surface — project pages, session pages — falls back to a latch no one
-writes, and draws the pre-marlin composer: the model control inside the card,
-the project and permission controls in a tray below it, and the pre-merge
-Chat/Cowork switch above. The remote preload seeds the latch with `"marlin"`
-(nothing is stored, or the stored value is unrecognised), so every surface
-resolves the design the New page does; an explicit `"classic"` — the app writes
-that key when a person picks a card — is left alone, and a storage that refuses
-writes is ignored rather than fatal. `scripts/composer-latch-smoke.mjs` pins all
-four.
+writes, and draws the pre-marlin composer: the model control inside the card and
+the project and permission controls in a tray below it. The remote preload seeds
+the latch with `"marlin"` (nothing is stored, or the stored value is
+unrecognised), so every surface resolves the design the New page does; an
+explicit `"classic"` — the app writes that key when a person picks a card — is
+left alone, and a storage that refuses writes is ignored rather than fatal.
+`scripts/composer-latch-smoke.mjs` pins all four.
+
+The latch is about the **card** only. The project/space hub also draws its own
+legacy **Composer mode** segmented control — Chat and Cowork — above the card,
+and that one reads none of the design resolvers: the hub host computes the
+unified design, hands it to the target helper whose answer it discards, and the
+control is switched on by `chatIn3p`, `chatTab` and Cowork's org status instead.
+So it survived both the latch and the design-predicate splices and looked like
+"the old composer design with the Chat/Cowork split" on a project page.
+`web-hub-composer-mode` hides it when the deployment's `desktopHome` decision is
+`"supported"` (the Unified Claude key, relayed in `desktopBootFeatures`),
+leaving the space's route flavor as the composer mode; a deployment that leaves
+the unified view unset keeps the control. See
+[frontend-patches.md](frontend-patches.md).
 
 Two decisions downstream of that arm are forced for the same reason, because a
 deployment that grants the arm has already made them:

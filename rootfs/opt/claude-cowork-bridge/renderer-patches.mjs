@@ -274,6 +274,24 @@ const homeVariantPatchId = "web-new-page-home-variant";
 const homeVariantReplacement = '"home"';
 const homeArrangementPatchId = "web-home-composer-arrangement";
 const homeArrangementReplacement = '"outside"';
+// The project/space hub composer's own "Composer mode" control — the legacy
+// Chat/Cowork segmented pair drawn above the card. It is not part of the card
+// design: the hub host reads the unified design (`Pt()`, the marlin predicate)
+// and hands it to a pure target helper whose answer it discards, and the control
+// itself reads none of the design resolvers. So the splices above and the
+// preload's device latch never reach it, and the split survives the unified
+// view. On a space page it is drawn whenever `chatIn3p` and `chatTab` are
+// supported and Cowork is not org-blocked — all true in this deployment.
+// Hide it when the deployment's `desktopHome` decision says the surfaces are
+// merged: that is the operator's key (`CLAUDE_REMOTE_DESKTOP_HOME=standard`),
+// relayed into the preload's `desktopBootFeatures`, and it is the same key that
+// removes the split on the New page. The control is pinned by its own i18n
+// message id and the `segments` prop beside it, which appear together nowhere
+// else. Spliced only in web-shell mode, and not required: a bundle that no
+// longer matches leaves the split in place rather than failing preparation.
+const hubComposerModePatchId = "web-hub-composer-mode";
+const hubComposerModeMessageId = "/p75N7ud08";
+const hubComposerModeUnified = 'globalThis.desktopBootFeatures?.desktopHome?.status!=="supported"';
 // "Projects" — the `/projects` and `/project/<id>` routes, and the composer's
 // project slot — is decided by one predicate: the GrowthBook feature
 // `claude_ai_projects_limits` (its `max_free_projects` field), the plan
@@ -1794,6 +1812,21 @@ function composerDesignOperands(ast) {
   return operands;
 }
 
+// The hub composer's "Composer mode" call: a component call whose props carry
+// both `segments` and an `aria-label` whose message id only this control
+// spells. The caller then finds the `&&` whose right operand draws it and
+// splices the test that decides whether it exists at all.
+function hubComposerModeCall(node) {
+  if (node.type !== "CallExpression") return false;
+  const props = node.arguments.map(unwrap)
+    .find(argument => argument?.type === "ObjectExpression");
+  if (!props) return false;
+  if (!props.properties.some(entry => key(entry, "segments"))) return false;
+  const label = props.properties.find(entry => key(entry, "aria-label"));
+  return label !== undefined
+    && contains(label.value, child => literal(child, hubComposerModeMessageId));
+}
+
 // The account view a component reads from the profile hook:
 // `let{name:i,src:a}=iQ()`. Only a destructuring of a zero-argument call
 // establishes it — an object literal that merely carries a `src` property (the
@@ -2290,6 +2323,7 @@ export const prefilterNeedles = [
   "subscribeSse", // Code session live transport (web-code-subscribe-sse)
   "codeFoldedIntoHome", // the session list's Code gate (web-chat-session-list-no-code)
   "voyage_composer_marlin", // unified-composer design predicates
+  "p75N7ud08", // the hub composer's Chat/Cowork mode control (web-hub-composer-mode)
   "claude_ai_projects_limits", // projects-allowed predicate
   "yukon_silver_dramatic_shrimp_atrium", // composer picker's atrium capability
   "chatProjectsError", // the projects page's list hook, which the report patch forces
@@ -4237,6 +4271,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     for (const operand of composerDesignOperands(ast)) {
       patches.push({ id: composerDesignPatchId, start: operand.start, end: operand.end,
         original: source.slice(operand.start, operand.end), replacement: "!0" });
+    }
+    // The space/cowork-project hub's own Chat/Cowork mode control (see
+    // hubComposerModePatchId). Singular candidates only, so a second copy
+    // refuses rather than hiding the wrong control.
+    const hubModes = [];
+    walk(ast, [], (node, ancestors) => {
+      if (hubComposerModeCall(node)) hubModes.push({ node, ancestors });
+    });
+    if (hubModes.length === 1) {
+      const { node, ancestors } = hubModes[0];
+      const guard = ancestors.map(ancestor => unwrap(ancestor)).reverse().find(candidate =>
+        candidate?.type === "LogicalExpression" && candidate.operator === "&&"
+        && unwrap(candidate.right) === unwrap(node));
+      if (guard) {
+        const original = source.slice(guard.left.start, guard.left.end);
+        patches.push({ id: hubComposerModePatchId, start: guard.left.start, end: guard.left.end,
+          original, replacement: `(${original}&&${hubComposerModeUnified})` });
+      }
     }
     // The layout variant and the surface kind that selects the home composer
     // arrangement are forced to the deployed answer, each from its own shape and

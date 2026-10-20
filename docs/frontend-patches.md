@@ -537,6 +537,23 @@ so moves the model and permission controls out of the card. Each is spliced only
 where its shape is unambiguous in the chunk, only in web-shell mode, and neither
 is required.
 
+`web-hub-composer-mode` hides the project/space hub's own legacy **Composer
+mode** control — the Chat/Cowork segmented pair drawn above the card — when the
+deployment's Unified Claude decision is on. It is not part of the card design:
+the hub host reads the unified design, passes it to the target helper that
+answers the unified target, and discards that answer; the control reads none of
+the design resolvers and is switched on by `chatIn3p`, `chatTab` and Cowork's
+org status instead. That is why the latch and the design-predicate splices could
+leave it behind. The patch keeps the control's own `_.length > 1` guard and
+appends `globalThis.desktopBootFeatures?.desktopHome?.status !== "supported"` —
+the operator's `CLAUDE_REMOTE_DESKTOP_HOME` decision, the same key that removes
+the split on the New page — so a deployment that leaves the unified view unset
+keeps the split and the route's own condition still applies. The control is
+pinned by its own i18n message id (`/p75N7ud08`) and the `segments` prop beside
+it; a second candidate in the chunk refuses rather than hide both. Spliced only
+in web-shell mode, and not required: a bundle that no longer matches leaves the
+control in place rather than failing renderer preparation.
+
 `web-projects-allowed` restores the **Projects** predicate — the `/projects`
 routes and the composer's project slot — which the Desktop build also compiles
 out. The bundle's predicate calls three plan-capability readers and then reads

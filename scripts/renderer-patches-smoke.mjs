@@ -1227,6 +1227,54 @@ const compiledIds = inspectRenderer(decisionsCompiled.code, false, true).patches
 assert.ok(compiledIds.includes("web-new-page-home-variant")
   && compiledIds.includes("web-home-composer-arrangement"),
   "a mangled pair of decisions must still be spliced");
+// The project/space hub's own "Composer mode" control. It is drawn beside the
+// card, not by it: the hub host computes the unified design and discards the
+// target helper's answer, and this control reads none of the design resolvers.
+// The patch only narrows its guard by the deployment's desktopHome decision, so
+// the route's own condition still applies when the surfaces are not merged.
+const hubComposerModeControl = (segments = "segments:_,value:C,onChange:S",
+  id = "/p75N7ud08", guard = "_.length>1", name = "hubComposer") =>
+  `function ${name}(){let _=segments();return b(v,{children:[`
+  + `${guard}&&h(Sr,{${segments},"aria-label":l.formatMessage({defaultMessage:"Composer mode",id:"${id}"}),`
+  + 'className:"self-start"}),h(fu,{projectUuid:e})]})}';
+assert.equal(inspectRenderer(hubComposerModeControl(), false, false).patches
+  .filter(patch => patch.id === "web-hub-composer-mode").length, 0,
+  "the hub mode control is left alone outside web-shell mode");
+const hubModePatches = inspectRenderer(hubComposerModeControl(), false, true).patches
+  .filter(patch => patch.id === "web-hub-composer-mode");
+assert.equal(hubModePatches.length, 1, "the hub mode control must be gated exactly once");
+assert.equal(hubModePatches[0].original, "_.length>1",
+  "only the guard that draws the control is spliced");
+assert.equal(hubModePatches[0].replacement,
+  '(_.length>1&&globalThis.desktopBootFeatures?.desktopHome?.status!=="supported")',
+  "the unified-view decision narrows the guard, and the route's own test survives");
+const hubModeOut = patchRendererSources(
+  new Map([["hub-mode.js",
+    `${webShellFixtures}\n${accountMenuName}\n${hubComposerModeControl()}`]]), false, true)
+  .sources.get("hub-mode.js");
+assert.ok(hubModeOut.includes('(_.length>1&&globalThis.desktopBootFeatures?.desktopHome?.status!=="supported")&&h(Sr,'),
+  "the patched call must keep the original guard behind the unified-view gate");
+assert.ok(hubModeOut.includes('"aria-label":l.formatMessage({defaultMessage:"Composer mode"'),
+  "the control itself must survive; only its guard changes");
+// A segmented control with a different label is another control, and a call
+// without the `segments` prop is not this one. Two candidates refuse rather
+// than hide both.
+assert.equal(inspectRenderer(hubComposerModeControl(undefined, "otherId"), false, true).patches
+  .filter(patch => patch.id === "web-hub-composer-mode").length, 0,
+  "a control carrying another message id is not a target");
+assert.equal(inspectRenderer(hubComposerModeControl("items:_,value:C"), false, true).patches
+  .filter(patch => patch.id === "web-hub-composer-mode").length, 0,
+  "a call without the segments prop is not a target");
+assert.equal(inspectRenderer(
+  `${hubComposerModeControl()}\n${hubComposerModeControl(undefined, undefined, undefined, "hubComposerB")}`,
+  false, true).patches.filter(patch => patch.id === "web-hub-composer-mode").length, 0,
+  "two candidates must refuse the splice");
+const hubModeCompiled = await minify(hubComposerModeControl(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+assert.equal(inspectRenderer(hubModeCompiled.code, false, true).patches
+  .filter(patch => patch.id === "web-hub-composer-mode").length, 1,
+  "a mangled hub mode control must still be gated");
 // The projects-allowed predicate. The Desktop build reads the plan capabilities
 // and the limits feature, then answers a module constant it never assigns, so
 // projects are shut however either would evaluate. In web-shell mode the body is
