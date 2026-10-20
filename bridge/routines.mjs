@@ -191,6 +191,109 @@ function taskKind(task) {
   return task?.sessionType === "code" || task?.kind === "code" ? "code" : "cowork";
 }
 
+// --- the routine clock ------------------------------------------------------
+//
+// A routine's schedule is a standard five-field cron expression in the
+// instance's timezone (`TZ` on the bridge, matching the Desktop's own
+// scheduler). The parser supports `*`, numbers, ranges, `a-b/n`, lists and the
+// three-letter month/day names — the forms the routine form emits and the ones
+// an operator types by hand. It is local to this file on purpose: the bridge
+// has no dependency tree.
+
+const cronMonths = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+const cronDays = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+function cronNumber(text, names) {
+  const lower = String(text ?? "").trim().toLowerCase();
+  if (names && Object.hasOwn(names, lower)) return names[lower];
+  if (!/^\d+$/.test(lower)) return null;
+  return Number(lower);
+}
+
+function parseCronField(raw, min, max, names = null) {
+  const values = new Set();
+  for (const part of String(raw ?? "").split(",")) {
+    const [rangeText, stepText] = part.split("/");
+    const step = stepText === undefined ? 1 : Number(stepText);
+    if (!Number.isInteger(step) || step < 1) return null;
+    let start;
+    let end;
+    if (rangeText === "*") {
+      start = min;
+      end = max;
+    } else if (rangeText.includes("-")) {
+      const [from, to] = rangeText.split("-");
+      start = cronNumber(from, names);
+      end = cronNumber(to, names);
+    } else {
+      start = cronNumber(rangeText, names);
+      end = stepText === undefined ? start : max;
+    }
+    if (start === null || end === null
+      || start < min || end > max || start > end) return null;
+    for (let value = start; value <= end; value += step) values.add(value);
+  }
+  return values.size ? values : null;
+}
+
+/** Parse a five-field cron expression, or null when it is not one. */
+export function parseCronExpression(expression) {
+  const fields = String(expression ?? "").trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const minute = parseCronField(fields[0], 0, 59);
+  const hour = parseCronField(fields[1], 0, 23);
+  const dom = parseCronField(fields[2], 1, 31);
+  const month = parseCronField(fields[3], 1, 12, cronMonths);
+  const dow = parseCronField(fields[4], 0, 7, cronDays);
+  if (!minute || !hour || !dom || !month || !dow) return null;
+  // 7 is Sunday in the spelling some crontabs accept.
+  if (dow.has(7)) {
+    dow.delete(7);
+    dow.add(0);
+  }
+  return {
+    minute,
+    hour,
+    dom,
+    month,
+    dow,
+    // Vixie cron: when both day fields are restricted, either may match.
+    domRestricted: fields[2] !== "*",
+    dowRestricted: fields[4] !== "*",
+  };
+}
+
+function cronMatches(parsed, date) {
+  if (!parsed.minute.has(date.getMinutes())) return false;
+  if (!parsed.hour.has(date.getHours())) return false;
+  if (!parsed.month.has(date.getMonth() + 1)) return false;
+  const domOk = parsed.dom.has(date.getDate());
+  const dowOk = parsed.dow.has(date.getDay());
+  if (parsed.domRestricted && parsed.dowRestricted) return domOk || dowOk;
+  return domOk && dowOk;
+}
+
+/** The first matching minute strictly after `afterMs`, or null within a year. */
+export function nextCronSlot(parsed, afterMs) {
+  const start = new Date(afterMs);
+  start.setSeconds(0, 0);
+  start.setMinutes(start.getMinutes() + 1);
+  const limit = afterMs + 366 * 24 * 60 * 60 * 1000;
+  for (let cursor = start.getTime(); cursor <= limit; cursor += 60_000) {
+    if (cronMatches(parsed, new Date(cursor))) return cursor;
+  }
+  return null;
+}
+
+/** Convenience for one call: the next slot of an expression, or null. */
+export function nextCronSlotFor(expression, afterMs) {
+  const parsed = parseCronExpression(expression);
+  return parsed ? nextCronSlot(parsed, afterMs) : null;
+}
+
 export function createRoutineService({
   stateDir,
   desktop,
@@ -205,6 +308,8 @@ export function createRoutineService({
   authIdentityUrl = "",
   wakeRunner = null,
   log = console,
+  // The smokes drive the clock by hand; the server leaves this on.
+  startScheduler = true,
 } = {}) {
   const statePath = join(stateDir, stateFileName);
   let cache = null;
@@ -224,9 +329,14 @@ export function createRoutineService({
         // the Desktop's task record only keeps model/permission/cwd. The bridge
         // stores it here and puts it on the fire body it starts.
         configs: isRecord(parsed.configs) ? parsed.configs : {},
-      } : { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {} };
+        // The bridge's own clock for Code routines: the next slot it intends
+        // to fire, per routine (see scheduleDueRoutines). The Desktop store's
+        // `nextRunAt` is kept in step separately, for the UI and for a build
+        // that still dispatches from a renderer.
+        schedule: isRecord(parsed.schedule) ? parsed.schedule : {},
+      } : { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {}, schedule: {} };
     } catch {
-      cache = { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {} };
+      cache = { version: 1, tokens: {}, fires: {}, api_fires: [], configs: {}, schedule: {} };
     }
     return cache;
   }
@@ -345,6 +455,15 @@ export function createRoutineService({
       ? task.sourceBranch : textOf(taskContext.source_branch);
     const taskWorktree = typeof task.useWorktree === "boolean"
       ? task.useWorktree : taskContext.use_worktree === true;
+    // The bridge schedules Code routines itself (see scheduleDueRoutines), so
+    // its own next slot is the truth the page shows; the store's field is the
+    // fallback until the scheduler has seen the task.
+    const scheduled = isRecord(state.schedule?.[routineId])
+      ? state.schedule[routineId] : null;
+    // A scheduler entry always owns `next`, including a fired one-shot's null:
+    // falling back to the store there would resurrect a past run time.
+    const nextRun = scheduled && Object.hasOwn(scheduled, "next")
+      ? scheduled.next : task.nextRunAt;
     return {
       id: routineId,
       name: task.displayName || task.name || taskId,
@@ -384,7 +503,7 @@ export function createRoutineService({
       enabled: taskEnabled(task),
       ...(textOf(task.cronExpression) ? { cron_expression: task.cronExpression } : {}),
       ...(isoTime(task.fireAt) ? { run_once_at: isoTime(task.fireAt) } : {}),
-      ...(isoTime(task.nextRunAt) ? { next_run_at: isoTime(task.nextRunAt) } : {}),
+      ...(isoTime(nextRun) ? { next_run_at: isoTime(nextRun) } : {}),
       ...(isoTime(task.lastRunAt) ? { last_fired_at: isoTime(task.lastRunAt) } : {}),
       ...(textOf(task.model) ? { model: task.model } : {}),
       ...(taskPermission ? { permission_mode: taskPermission } : {}),
@@ -742,7 +861,177 @@ export function createRoutineService({
     return { trigger: triggerDocument(state, task, taskId, await promptFor(task, taskId)) };
   }
 
+  // --- the bridge's routine clock -------------------------------------------
+  //
+  // Code routines used to fire only while a web renderer was open: the
+  // Desktop main process checks due tasks once a renderer declares itself
+  // ready, and in the web shell that renderer is somebody's browser tab. The
+  // bridge is always up and already owns the proven fire path (the same one
+  // Run now and the API trigger use), so it keeps the clock for Code-store
+  // routines. Cowork's separate Scheduled folder stays with the Desktop.
+  const schedulerTickMs = (() => {
+    const raw = Number(process.env.CLAUDESK_ROUTINE_SCHEDULER_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 30000;
+  })();
+  const schedulerEnabled = Boolean(codeRunners)
+    && process.env.CLAUDESK_ROUTINE_SCHEDULER !== "0";
+  const warnedSchedules = new Set();
+  let scheduling = false;
+
+  // What the task says it should run on: a cron expression, a one-shot time,
+  // or nothing. `null` is an expression that exists but does not parse.
+  function scheduleOf(task) {
+    const cron = textOf(task?.cronExpression);
+    if (cron) {
+      const parsed = parseCronExpression(cron);
+      return parsed ? { key: `cron:${cron}`, cron, parsed } : null;
+    }
+    const fireAt = isoTime(task?.fireAt);
+    if (fireAt) {
+      const at = Date.parse(fireAt);
+      return Number.isFinite(at) ? { key: `at:${fireAt}`, at } : null;
+    }
+    return undefined;
+  }
+
+  // Ask the Desktop store to recompute its own next run, so a task list that
+  // reads the store agrees with this clock. Best effort: the bridge's own
+  // `next_run_at` is what the routine page shows.
+  async function advanceStoreSchedule(task, taskId, cron) {
+    if (!cron) return;
+    const surface = task?._routineSurface ?? "CCDScheduledTasks";
+    try {
+      await desktop.invoke(surface, "updateScheduledTask",
+        [{ scheduledTaskId: taskId, cronExpression: cron }], "json-undefined-v1");
+    } catch (error) {
+      log.log(`[routines] could not advance the Desktop's next run for ${taskId}: `
+        + `${error?.message || error}`);
+    }
+  }
+
+  async function scheduleDueRoutines(nowOverride = null) {
+    if (!schedulerEnabled || scheduling) return;
+    scheduling = true;
+    try {
+      let listed;
+      try {
+        listed = await tasks();
+      } catch (error) {
+        log.warn(`[routines] scheduler cannot list tasks: ${error?.message || error}`);
+        return;
+      }
+      // A smoke advances the clock rather than sleeping out a cron slot.
+      const now = Number.isFinite(nowOverride) ? nowOverride : Date.now();
+      const codeTasks = listed.filter((task) => taskKind(task) === "code");
+      const live = new Set();
+      const planned = [];
+      // 1. Refresh each task's next slot, then collect the ones that are due.
+      //    No `fire` happens inside this mutation: `fire` records its own
+      //    budget through the same write chain, so calling it here would wait
+      //    on itself.
+      await mutate((state) => {
+        for (const task of codeTasks) {
+          const taskId = task?.id ?? task?.scheduledTaskId;
+          if (typeof taskId !== "string" || !taskId) continue;
+          const routineId = routineIdForTaskId(taskId);
+          live.add(routineId);
+          const schedule = scheduleOf(task);
+          if (schedule === undefined) {
+            if (state.schedule[routineId]) delete state.schedule[routineId];
+            continue;
+          }
+          if (schedule === null) {
+            if (state.schedule[routineId]) delete state.schedule[routineId];
+            if (!warnedSchedules.has(routineId)) {
+              warnedSchedules.add(routineId);
+              log.warn(`[routines] ${routineId}: the saved schedule is not a valid `
+                + "cron expression; it will not fire");
+            }
+            continue;
+          }
+          let entry = isRecord(state.schedule[routineId]) ? state.schedule[routineId] : null;
+          if (!entry || entry.expression !== schedule.key) {
+            if (schedule.cron) {
+              entry = {
+                expression: schedule.key,
+                next: nextCronSlot(schedule.parsed, now),
+              };
+            } else {
+              entry = schedule.at > now
+                ? { expression: schedule.key, next: schedule.at, once: true }
+                : { expression: schedule.key, next: null, once: true, fired: true };
+            }
+            state.schedule[routineId] = entry;
+          }
+          if (!taskEnabled(task) || entry.fired) continue;
+          if (!Number.isFinite(entry.next) || entry.next > now) continue;
+          planned.push({ task, taskId, routineId, entry, schedule });
+        }
+        // A routine that no longer exists (deleted) loses its entry.
+        for (const routineId of Object.keys(state.schedule)) {
+          if (!live.has(routineId)) delete state.schedule[routineId];
+        }
+      });
+
+      // 2. Fire every due slot, one at a time.
+      for (const { task, taskId, routineId, entry, schedule } of planned) {
+        const slot = entry.next;
+        const lastRun = Date.parse(task.lastRunAt ?? "") || 0;
+        try {
+          if (lastRun && lastRun >= slot - 60_000) {
+            // An open page's Desktop scheduler already ran this slot.
+            log.log(`[routines] ${routineId}: slot already ran at `
+              + `${new Date(lastRun).toISOString()}; not firing it again`);
+          } else {
+            const fired = await fire({ routineId, via: "scheduled" });
+            log.log(`[routines] scheduled ${routineId} fired as ${fired.sessionId}`);
+            void advanceStoreSchedule(task, taskId, schedule.cron);
+          }
+        } catch (error) {
+          log.warn(`[routines] scheduled fire of ${routineId} failed: `
+            + `${error?.message || error}`);
+        }
+        // Advance whether it fired, was skipped, or failed: a broken slot is
+        // not retried every tick. One catch-up after downtime is the most a
+        // restart fires; a long outage does not replay every missed slot.
+        await mutate((state) => {
+          const current = isRecord(state.schedule[routineId])
+            ? state.schedule[routineId] : null;
+          if (!current || current.expression !== schedule.key) return;
+          if (current.once) {
+            current.fired = true;
+            current.next = null;
+          } else {
+            current.next = nextCronSlot(schedule.parsed, Math.max(now, slot));
+          }
+        });
+      }
+    } catch (error) {
+      log.warn(`[routines] scheduler tick failed: ${error?.message || error}`);
+    } finally {
+      scheduling = false;
+    }
+  }
+
+  if (schedulerEnabled && startScheduler) {
+    // The Desktop's own dispatcher must not race this clock. `setHostRunsSupported`
+    // is the handshake its renderer hook uses; the store may refuse the call on
+    // a build that predates it, in which case the `lastRunAt` guard above keeps
+    // a page-open run from being duplicated.
+    setTimeout(() => {
+      desktop.invoke("CCDScheduledTasks", "setHostRunsSupported", [false])
+        .then(() => log.log("[routines] Code routines are scheduled by the bridge"))
+        .catch((error) => log.log(`[routines] could not take the Desktop's host-runs flag: `
+          + `${error?.message || error}`));
+    }, 4000).unref?.();
+    setTimeout(() => { void scheduleDueRoutines(); }, 5000).unref?.();
+    setInterval(() => { void scheduleDueRoutines(); }, schedulerTickMs).unref?.();
+  }
+
   return {
+    /** Run the routine clock now; the interval arm is what does this live. */
+    scheduleNow: scheduleDueRoutines,
+
     /** GET /v1/code/triggers */
     async listTriggers() {
       const state = await load();

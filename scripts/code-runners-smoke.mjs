@@ -23,7 +23,13 @@ const stateDir = await mkdtemp(join(tmpdir(), "code-runners-"));
 const log = { log() {} };
 
 try {
-  const backend = createRunnerBackend({ stateDir, log, poolName: "dev-box" });
+  let wakes = 0;
+  const backend = createRunnerBackend({
+    stateDir,
+    log,
+    poolName: "dev-box",
+    wakeRunner: () => { wakes += 1; },
+  });
 
   // The deployment names the pool, so a runner can be pointed at it without
   // anyone clicking through the admin UI.
@@ -624,6 +630,159 @@ try {
   assert.equal(status.live_version, "2.0.5",
     "the live runner is the one that polled, not every registration on the pool");
   assert.equal(status.request_lane, true);
+
+  // A turn whose runner vanished is closed by the bridge, not left `active`
+  // forever. The session's transcript gets the terminal its reader closes on,
+  // and the unanswered message goes back on the pool so the next runner picks
+  // it up instead of the page hanging on "Sending…".
+  const runnerAuth = { authorization: `Bearer ${relabelled.runner_token}` };
+  const lost = await backend.createSession({
+    body: {
+      environment_id: primary.pool_id,
+      events: [{ payload: { type: "user",
+        message: { role: "user", content: "run this and do not come back" } } }],
+    },
+  });
+  const lostId = lost.session.id;
+  const offeredLost = await backend.pollSpawnHints({
+    headers: runnerAuth, body: { running: [], claimed: [] },
+  });
+  assert.ok(offeredLost.hints.some((hint) => hint.session_uuid === lostId),
+    "the placed session is offered");
+  const lostToken = await backend.issueSessionToken({ headers: runnerAuth, sessionId: lostId });
+  assert.match(lostToken.session_token, /^ccsess_/);
+  // The runner polls again without holding it: the VM stopped, the guest
+  // restarted, or the process died mid-turn.
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  await backend.reapNow(Date.now() + 120000);
+  const lostDoc = await backend.session(lostId);
+  assert.equal(lostDoc.session.worker_status, undefined,
+    "a requeued turn waits for the pool (the renderer's pending state)");
+  const lostEvents = decodeClientEventsResponse(
+    await backend.listEvents({ sessionId: lostId, searchParams: new URLSearchParams() }));
+  assert.equal(lostEvents.at(-1).message.type, "result",
+    "the reaped turn still ends with the terminal the reader closes on");
+  assert.equal(lostEvents.at(-1).message.is_error, true);
+  assert.match(String(lostEvents.at(-1).message.result), /runner/,
+    "the terminal says the runner was lost");
+  const lostRow = (await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === lostId);
+  assert.equal(lostRow.state, "pending", "the unanswered message is put back on the pool");
+
+  // The same loss on a turn that already had its terminal releases it instead:
+  // there is nothing left to retry, and the session reads idle.
+  const finished = await backend.createSession({
+    body: {
+      environment_id: primary.pool_id,
+      events: [{ payload: { type: "user",
+        message: { role: "user", content: "this one answered" } } }],
+    },
+  });
+  const finishedId = finished.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const finishedToken = await backend.issueSessionToken({
+    headers: runnerAuth, sessionId: finishedId,
+  });
+  await backend.appendWorkerEvents({
+    headers: { authorization: `Bearer ${finishedToken.session_token}` },
+    sessionId: finishedId,
+    body: { events: [{ payload: { type: "result", subtype: "success",
+      is_error: false, result: "done", session_id: "" } }] },
+  });
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  await backend.reapNow(Date.now() + 120000);
+  assert.equal((await backend.session(finishedId)).session.worker_status, "idle",
+    "a turn that already ended is released, not retried");
+  const finishedRow = (await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === finishedId);
+  assert.equal(finishedRow.state, "released");
+
+  // A runner that still claims the session is believed, however old the turn
+  // is: a long tool call is not a lost runner.
+  const stillHeld = await backend.createSession({
+    body: { environment_id: primary.pool_id },
+  });
+  const heldId = stillHeld.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  await backend.issueSessionToken({ headers: runnerAuth, sessionId: heldId });
+  await backend.pollSpawnHints({
+    headers: runnerAuth, body: { running: [heldId], claimed: [heldId] },
+  });
+  await backend.reapNow(Date.now() + 120000);
+  assert.equal((await backend.session(heldId)).session.worker_status, "running",
+    "a claimed turn is never reaped");
+
+  // An offer whose claim never arrives (the poll's answer was lost) is
+  // re-offered once its lease expires.
+  const stranded = await backend.createSession({
+    body: { environment_id: primary.pool_id },
+  });
+  const strandedId = stranded.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  await backend.reapNow(Date.now() + 61000);
+  const strandedRow = (await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === strandedId);
+  assert.equal(strandedRow.state, "pending",
+    "an unclaimed offer returns to the pool after its lease");
+
+  // A message typed while a turn is running is answered by the *next* turn:
+  // it must not start a second runner beside the live one, and the release
+  // that ends the current turn puts the session back on the pool instead of
+  // leaving the message stranded on "Sending…".
+  const midTurn = await backend.createSession({ body: { environment_id: primary.pool_id } });
+  const midId = midTurn.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const midToken = await backend.issueSessionToken({ headers: runnerAuth, sessionId: midId });
+  // The guest reports how far its transcript read went right after claiming.
+  // Nothing is in the log yet, so the message below is unambiguously mid-turn.
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: midId, body: { through_sequence_num: 0 },
+  });
+  await backend.appendEvents({
+    sessionId: midId,
+    body: { events: [{ payload: { type: "user",
+      message: { role: "user", content: "sent while the turn was running" } } }] },
+  });
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === midId).state, "active",
+  "a mid-turn message does not start a second turn");
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${midToken.session_token}` },
+    sessionId: midId,
+  });
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === midId).state, "pending",
+  "the release requeues the mid-turn message");
+  assert.ok(wakes > 0, "a requeue asks the Desktop to start the VM");
+
+  // The same arrival that is *not* mid-turn: an opening message appended
+  // between the claim and the runner's transcript read. The read-through
+  // report names it as consumed, so the release stays idle instead of starting
+  // a duplicate turn with the same prompt.
+  const opening = await backend.createSession({ body: { environment_id: primary.pool_id } });
+  const openingId = opening.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const openingToken = await backend.issueSessionToken({ headers: runnerAuth, sessionId: openingId });
+  await backend.appendEvents({
+    sessionId: openingId,
+    body: { events: [{ payload: { type: "user",
+      message: { role: "user", content: "the opening message" } } }] },
+  });
+  const openingHistory = await backend.listEvents({
+    sessionId: openingId, searchParams: new URLSearchParams(),
+  });
+  const highest = Math.max(...openingHistory.data.map((event) => Number(event.sequence_num)));
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: openingId, body: { through_sequence_num: highest },
+  });
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${openingToken.session_token}` },
+    sessionId: openingId,
+  });
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === openingId).state, "released",
+  "a message the turn's read included is not requeued");
+  await backend.deleteSession({ sessionId: openingId });
 
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });

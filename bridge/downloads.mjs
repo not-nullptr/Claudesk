@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export async function resolveContainedRealPath(
   root,
@@ -76,6 +76,44 @@ export async function resolveWithinRoots(roots, target, options = {}) {
   );
 }
 
+const SESSION_OUTPUTS_DIR = "outputs";
+
+/**
+ * Serve a Cowork session's own outputs directory. Desktop's file-access consent
+ * already treats it as part of the session (`checkFileAccessConsent`), but it
+ * lives under Desktop's userData rather than the workspace, so a model's file
+ * card linked an `outputs/…` deliverable the download route answered 403 for.
+ * Only a path that still sits at or under an `outputs` directory *after*
+ * symlinks resolve is allowed; the memory, transcript and settings trees
+ * beside it in the same sessions root stay outside the readable roots.
+ */
+export async function resolveSessionOutputsPath(sessionsRoot, target, options = {}) {
+  const canonical = await resolveContainedRealPath(sessionsRoot, target, options);
+  const segments = relative(await realpath(resolve(sessionsRoot)), canonical).split(sep);
+  if (!segments.includes(SESSION_OUTPUTS_DIR)) {
+    const error = new Error(options.outsideMessage || "path is outside the allowed read roots");
+    error.statusCode = 403;
+    throw error;
+  }
+  return canonical;
+}
+
+/**
+ * Resolve a read target from `roots`, then — for an absolute path only — from
+ * the session outputs rule. Only a 403 falls through: a path inside a root that
+ * is merely absent keeps its 404 instead of being retried elsewhere.
+ */
+export async function resolveReadablePath(roots, target, options = {}) {
+  try {
+    return await resolveWithinRoots(roots, target, options);
+  } catch (error) {
+    if (error.statusCode !== 403 || !options.sessionOutputsRoot || !isAbsolute(target)) {
+      throw error;
+    }
+    return resolveSessionOutputsPath(options.sessionOutputsRoot, target, options);
+  }
+}
+
 /**
  * Read a session file that Desktop's own reader refused, from the roots this
  * bridge is allowed to serve. Mirrors Desktop's DTO exactly (UTF-8 contents, a
@@ -88,7 +126,7 @@ export async function resolveWithinRoots(roots, target, options = {}) {
 export async function readContainedFile(roots, target, { maxBytes, ...options } = {}) {
   let filePath;
   try {
-    filePath = await resolveWithinRoots(roots, target, options);
+    filePath = await resolveReadablePath(roots, target, options);
   } catch (error) {
     return { failure: error.statusCode === 404 ? "not_found" : "outside" };
   }
@@ -128,7 +166,7 @@ export async function readContainedFile(roots, target, { maxBytes, ...options } 
  * `resolveWithinRoots`, so containment and symlink checks are identical.
  */
 export async function resolveDownloadTarget(roots, target, options = {}) {
-  if (isAbsolute(target)) return resolveWithinRoots(roots, target, options);
+  if (isAbsolute(target)) return resolveReadablePath(roots, target, options);
   let missing;
   for (const root of roots) {
     try {
@@ -147,7 +185,7 @@ export async function resolveDownloadTarget(roots, target, options = {}) {
 /** Like resolveWithinRoots, but answers null instead of throwing. */
 export async function resolveContainedPath(roots, target, options = {}) {
   try {
-    return await resolveWithinRoots(roots, target, options);
+    return await resolveReadablePath(roots, target, options);
   } catch {
     return null;
   }
@@ -188,6 +226,7 @@ export function createDownloadHandler({
   artifactsRoot,
   mimeTypes,
   downloadRoots,
+  sessionOutputsRoot,
 }) {
   return async function handleDownload(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/remote/files/download") {
@@ -199,6 +238,7 @@ export function createDownloadHandler({
         allowRoot: false,
         missingMessage: "download file was not found",
         outsideMessage: "path is outside the allowed read roots",
+        sessionOutputsRoot,
       });
       const info = await stat(filePath);
       if (!info.isFile()) throw new ApiError(404, "download file was not found");

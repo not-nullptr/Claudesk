@@ -134,6 +134,22 @@ sudo docker compose -f compose.yaml up -d \
     claude-desktop cowork-bridge claude-gateway-loopback \
     claude-mobile claude-mobile-gateway-loopback authd
 
+# The VM Apply an admin triggers from /admin is a systemd `.path` unit that only
+# scripts/install-reconciler.sh writes; `docker compose up` never creates it.
+# Without it Apply queues a request nothing consumes: the page says it is still
+# queued, the applied values never move, and nothing logs an error. This script
+# is where the rest of the rollout happens, so it is the place to say so. The
+# NAME is deliberately not guessed — it has to match the deployment's existing
+# `claudesk-<name>-*` units (a shared-box checkout at /opt/claudesk-v2 uses v2).
+if ! systemctl list-unit-files --no-pager --no-legend --plain 'claudesk*vm-apply.path' \
+        2>/dev/null | grep -q .; then
+    printf '%s\n' \
+        'deploy: WARNING: no claudesk vm-apply .path unit is installed, so an admin' \
+        'deploy: VM Apply will queue work that nothing processes. Install the units' \
+        'deploy: once for this deployment, with NAME matching its existing units:' \
+        "deploy:   sudo $project_dir/scripts/install-reconciler.sh $project_dir <NAME>" >&2
+fi
+
 # Only after authd above is the rebuilt one, so --provisioned answers from the
 # new binary. Recreate the accounts that have an instance, then create any that
 # are still pending — a freshly invited account the reconciler has not reached

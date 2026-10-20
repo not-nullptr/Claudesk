@@ -344,6 +344,46 @@ th {
   font-size: 13px;
 }
 
+/* The per-account VM editor, expanded beneath its row. */
+.vm-row td {
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel));
+}
+
+.vm-editor {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.vm-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vm-editor input {
+  width: 110px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+
+.vm-applied {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.vm-note {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+}
+
 .invite {
   margin-top: 16px;
   border: 1px solid var(--accent);

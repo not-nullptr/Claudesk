@@ -17,6 +17,12 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// An upstream instance answered with an error (or not at all).
+    #[error("{0}")]
+    BadGateway(String),
+    /// The deployment has not configured this action.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("too many attempts")]
     RateLimited,
     #[error("internal error: {0}")]
@@ -55,6 +61,8 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m.clone()),
+            AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "too many attempts".to_string()),
             AppError::Internal(m) => {
                 tracing::error!("internal error: {m}");

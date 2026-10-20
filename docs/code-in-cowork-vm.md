@@ -820,11 +820,37 @@ earlier it looked for `authd` on the host, which does not exist there, so the
 whole refresh silently did nothing even though the container images were
 current.
 
-The service also runs session turns on a worker thread, not inline in the poll
+The service runs session turns on their own threads, not inline in the poll
 loop. A turn can last up to `TURN_TIMEOUT`; with the agent inline the runner
 stopped polling for its duration and the folder/git lookups timed out exactly
-while a session was active. Turns stay serialized (one worker), and the poll
-loop keeps answering lookups throughout.
+while a session was active. One thread per hint, with
+`CLAUDESK_RUNNER_MAX_TURNS` (default 4) bounding how many agents run at once —
+the protocol hands out every pending session, and one VM sized for a handful
+must not be stampeded. The poll loop keeps answering lookups throughout.
+
+Every turn now ends with a `result` message, including the paths where the agent
+did not produce one: a non-zero exit, `TURN_TIMEOUT`, a write failure, or an
+exception before the turn started. The runner writes a synthetic
+`error_during_execution` terminal (through the turn's stream, or a plain append
+when that stream is dead) before it reports the failure. The session view closes
+a turn on that message; without it the page kept its spinner up for a turn that
+was already over and a reload showed an idle session with no reason.
+
+The event stream reopens once on a broken write and resends the event that
+failed; a second failure falls back to the append leg for the terminal. The
+watchdog and the post-result idle path signal the agent's **process group**, not
+just its pid, so a tool that inherited the stdout pipe cannot keep the reader
+blocked forever.
+
+The poll also reports the sessions this runner has claimed (`running`,
+`claimed`). The bridge's reaper (see the transcript section) uses that set to
+tell a slow turn from a turn whose runner vanished, and to requeue or release it
+with a synthetic terminal instead of leaving it `active` forever. The runner
+also reports, right after reading a turn's transcript, the highest sequence it
+saw (`…/sessions/{id}/claim`): a user message appended after that point is a
+message for the next turn, while one at or below it was answered by this turn.
+That read-through is what keeps an opening message arriving between the claim
+and the read from starting a duplicate turn.
 
 A poll that carries UI requests returns immediately — that is how the requests
 are handed over — and the loop's old pacing rule (sleep `POLL_SECONDS` after an
@@ -891,6 +917,37 @@ appended to the transcript, not a rewritten session document; the guest runner
 reads the latest of each before spawning the turn and applies it to the agent's
 argv, so the change reaches the process the user is talking to (the CLI is
 spawned per turn, not kept alive).
+
+Only **durable** events are in that log. A token-level `stream_event` is live
+transport, not history: the CLI emits one per delta, and persisting every one
+made the transcript (and the bridge's heap, and a reload's replay) grow by
+orders of magnitude more than the conversation it describes. Partials are
+sequenced and fanned out to the open streams through an in-process emitter, but
+never written; the `assistant` event that follows carries the completed message
+and is what a reload rebuilds the transcript from. An older session's file is
+compacted once, when it is first read, by streaming it through a temp file and
+dropping those lines.
+
+Reads are lazy. The bridge no longer loads every session's transcript at
+startup: a file is read when a turn, a page or the reaper needs it, and only a
+bounded number of transcripts stay resident
+(`CLAUDESK_RUNNER_LOADED_SESSIONS`, default 16; a session with an open stream or
+a running turn is never evicted). The sequence counter is kept on the session
+and persisted with the metadata, so an append is O(1) rather than a scan of the
+whole history. The session stream subscribes to the emitter before replaying its
+backlog (buffering until the replay finishes, so nothing falls through the gap)
+and waits for `drain` when a long transcript outpaces the socket.
+
+The bridge also watches for a turn whose runner disappeared. A reaper (every
+15 s) re-offers an `offered` session whose 60 s lease expired with no claim, and
+for an `active` session it compares the runner's reported claims: no online
+runner at all (the VM powered down, the guest restarted) or a session absent
+from every live runner's claim set past a grace period means the turn is gone.
+The session gets a synthetic `result` terminal, and either goes back on the pool
+when it still has an unanswered message (up to three attempts) or reads idle.
+The same rule covers a message that arrives while a turn is running: the release
+puts the session back on the pool so the next turn answers it, instead of the
+message sitting on "Sending…" behind a turn that could never read it.
 
 One rule holds those 404s together, and it is worth stating on its own: **an
 API-shaped path (`/v1/…`) this bridge does not answer is answered with the

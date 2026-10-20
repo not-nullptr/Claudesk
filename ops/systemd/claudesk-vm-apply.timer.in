@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply saved VM specs to @NAME@ Claudesk instances
+
+[Timer]
+# A backstop, not the main path: the .path unit fires the moment authd drops a
+# request, so this only has to catch a missed event or a failed reconcile, whose
+# request stays queued for the next run.
+OnBootSec=60s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=@NAME@-vm-apply.service
+
+[Install]
+WantedBy=timers.target

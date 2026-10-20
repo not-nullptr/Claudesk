@@ -5,6 +5,7 @@ use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::api_auth::current_user;
 use crate::error::{AppError, AppResult};
@@ -394,6 +395,256 @@ pub async fn clear_avatar(
     Ok(Json(json!({ "user": state.store.user(user.id).await? })))
 }
 
+/// The bounds the container init enforces (`30-claude-config.sh`). Refusing the
+/// same values here keeps a bad spec out of the database: an out-of-range value
+/// would make the account's Desktop container fail its init on the next Apply.
+const VM_MEMORY_RANGE: std::ops::RangeInclusive<i64> = 1..=16;
+const VM_CPU_RANGE: std::ops::RangeInclusive<i64> = 1..=8;
+
+#[derive(Deserialize)]
+pub struct UpdateUserVmRequest {
+    /// `null` (or omitted) clears the override: the account inherits the
+    /// deployment's `.env` sizing again.
+    #[serde(default)]
+    pub memory_gb: Option<i64>,
+    #[serde(default)]
+    pub cpu_count: Option<i64>,
+}
+
+pub fn validate_vm_spec(memory_gb: Option<i64>, cpu_count: Option<i64>) -> AppResult<()> {
+    if let Some(value) = memory_gb {
+        if !VM_MEMORY_RANGE.contains(&value) {
+            return Err(AppError::BadRequest(
+                "memory_gb must be between 1 and 16".into(),
+            ));
+        }
+    }
+    if let Some(value) = cpu_count {
+        if !VM_CPU_RANGE.contains(&value) {
+            return Err(AppError::BadRequest(
+                "cpu_count must be between 1 and 8".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Save the desired Cowork VM sizing for one account. Nothing is recreated
+/// here — an Apply is the destructive, explicit step.
+pub async fn update_user_vm(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateUserVmRequest>,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    let user = state.store.user(id).await?;
+    validate_vm_spec(body.memory_gb, body.cpu_count)?;
+    state
+        .store
+        .set_vm_spec(user.id, body.memory_gb, body.cpu_count)
+        .await?;
+    Ok(Json(json!({ "user": state.store.user(user.id).await? })))
+}
+
+/// Queue the host reconcile that writes the saved sizing into the account's
+/// compose project and recreates its containers. Asynchronous by design: the
+/// reconciler owns the container runtime, and a recreate kills in-flight turns.
+pub async fn apply_user_vm(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    let user = state.store.user(id).await?;
+    if user.disabled != 0 {
+        return Err(AppError::Conflict(
+            "enable the account before applying VM specs".into(),
+        ));
+    }
+    if user.upstream.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(AppError::Conflict("this account has no instance yet".into()));
+    }
+    state.nudge_vm_apply(&user);
+    Ok(Json(json!({ "queued": true })))
+}
+
+/// Restart one account's Cowork VM. The instance's bridge owns the QMP/Desktop
+/// side; authd only forwards the admin's request over the deployment network.
+pub async fn restart_user_vm(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    let user = state.store.user(id).await?;
+    let value = instance_call(&state, &user, "POST", "/internal/vm/restart")
+        .await?;
+    Ok(Json(json!({ "vm": value })))
+}
+
+/// The VM monitor state the admin panel shows beside its controls.
+pub async fn user_vm_status(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Value>> {
+    require_admin(&state, &jar).await?;
+    let user = state.store.user(id).await?;
+    let value = instance_call(&state, &user, "GET", "/internal/vm/status")
+        .await?;
+    Ok(Json(json!({ "vm": value })))
+}
+
+/// Call one internal action on the account's instance. The shared secret is
+/// what the bridge checks; `internal_upstream` is the instance's `gateway_net`
+/// alias, which authd can reach without host networking.
+///
+/// Deliberately a minimal HTTP/1.1 exchange rather than an HTTP client crate:
+/// the route is plain HTTP on the deployment network, the answers are small
+/// JSON documents, and authd's dependency set stays what it is.
+async fn instance_call(
+    state: &AppState,
+    user: &User,
+    method: &str,
+    path: &str,
+) -> AppResult<Value> {
+    let secret = state.cfg.internal_secret.as_deref().ok_or_else(|| {
+        AppError::Unavailable("instance actions are not configured (AXTD_INTERNAL_SECRET)".into())
+    })?;
+    let base = user
+        .internal_upstream
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "this account has no in-network instance address yet; deploy or refresh it"
+                    .into(),
+            )
+        })?;
+    let (host, port) = match base.rsplit_once(':') {
+        Some((host, port)) => (
+            host.trim_matches(['[', ']']),
+            port.parse::<u16>().unwrap_or(80),
+        ),
+        None => (base, 80),
+    };
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         Accept: application/json\r\nx-claudesk-internal-secret: {secret}\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let exchange = async {
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .map_err(|error| {
+                AppError::BadGateway(format!(
+                    "could not reach the account's instance at {base}: {error}"
+                ))
+            })?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|error| AppError::BadGateway(format!("instance request failed: {error}")))?;
+        let mut raw = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .await
+                .map_err(|error| AppError::BadGateway(format!("instance response failed: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buffer[..read]);
+        }
+        Ok::<Vec<u8>, AppError>(raw)
+    };
+    let raw = tokio::time::timeout(std::time::Duration::from_secs(120), exchange)
+        .await
+        .map_err(|_| AppError::BadGateway("the account's instance did not answer in time".into()))??;
+    let (status, body) = parse_http_response(&raw)?;
+    let document: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let message = document
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the account's instance refused the action");
+        return Err(AppError::BadGateway(message.to_string()));
+    }
+    Ok(document.get("value").cloned().unwrap_or(document))
+}
+
+/// Split an HTTP/1.1 response into its status code and body, honouring
+/// `Content-Length` and chunked encoding. The routes this calls are Node's
+/// `sendJson`, which may answer either way depending on whether it precomputed
+/// a length.
+fn parse_http_response(raw: &[u8]) -> AppResult<(u16, Vec<u8>)> {
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| AppError::BadGateway("the instance answered an incomplete response".into()))?;
+    let head = std::str::from_utf8(&raw[..split])
+        .map_err(|_| AppError::BadGateway("the instance answered a malformed response".into()))?;
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| AppError::BadGateway("the instance answered no status".into()))?;
+    let mut chunked = false;
+    let mut length = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        match name.trim().to_ascii_lowercase().as_str() {
+            "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
+                chunked = true
+            }
+            "content-length" => length = value.trim().parse::<usize>().ok(),
+            _ => {}
+        }
+    }
+    let body = &raw[split + 4..];
+    if !chunked {
+        return Ok((
+            status,
+            match length {
+                Some(length) => body[..length.min(body.len())].to_vec(),
+                None => body.to_vec(),
+            },
+        ));
+    }
+    let mut decoded = Vec::new();
+    let mut rest = body;
+    loop {
+        let Some(line_end) = rest.windows(2).position(|window| window == b"\r\n") else {
+            break;
+        };
+        let size_text = std::str::from_utf8(&rest[..line_end]).unwrap_or("");
+        let Ok(size) = usize::from_str_radix(size_text.trim().split(';').next().unwrap_or("0"), 16)
+        else {
+            break;
+        };
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size {
+            decoded.extend_from_slice(rest);
+            break;
+        }
+        decoded.extend_from_slice(&rest[..size]);
+        rest = &rest[size..];
+        if rest.starts_with(b"\r\n") {
+            rest = &rest[2..];
+        }
+    }
+    Ok((status, decoded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +695,17 @@ mod tests {
         assert!(normalize_api_key(None).is_err());
         assert!(normalize_api_key(Some("   ")).is_err());
         assert!(normalize_api_key(Some(&"k".repeat(201))).is_err());
+    }
+
+    #[test]
+    fn vm_specs_are_bounded_like_the_container_init() {
+        assert!(validate_vm_spec(None, None).is_ok(), "unset inherits the deployment");
+        assert!(validate_vm_spec(Some(1), Some(1)).is_ok());
+        assert!(validate_vm_spec(Some(16), Some(8)).is_ok());
+        assert!(validate_vm_spec(Some(0), None).is_err());
+        assert!(validate_vm_spec(Some(17), None).is_err());
+        assert!(validate_vm_spec(None, Some(0)).is_err());
+        assert!(validate_vm_spec(None, Some(9)).is_err());
     }
 
     #[test]

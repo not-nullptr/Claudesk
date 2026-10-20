@@ -188,6 +188,14 @@ const coworkVmMemoryGB = boundedInteger(
   1,
   16,
 );
+// Reported for the admin panel; the guest itself gets the count from the app
+// preferences the container init writes.
+const coworkVmCpuCount = boundedInteger(
+  process.env.CLAUDE_COWORK_VM_CPU_COUNT,
+  1,
+  1,
+  8,
+);
 const coworkVmIdleMinutes = boundedInteger(
   process.env.CLAUDE_COWORK_VM_IDLE_MINUTES,
   30,
@@ -2221,6 +2229,8 @@ let coworkVmIdleState = {
   reason: "monitor-starting",
 };
 let coworkVmShutdownInProgress = false;
+// An admin's Restart is mid-flight: the idle monitor must not race it.
+let coworkVmRestartInProgress = false;
 
 async function findCoworkVmProcess() {
   const entries = await readdir("/proc", { withFileTypes: true });
@@ -2270,6 +2280,27 @@ async function readCoworkVmWorkState() {
     return JSON.stringify({ sessions, tasks });
   })()`;
   return JSON.parse(await evaluateInOfficialRenderer(expression));
+}
+
+// Code sessions run on the guest runner, not in `LocalAgentModeSessions`, so
+// the Cowork-session check below cannot see a turn that is answering right
+// now. Ask the bridge — it shares this container's network namespace — for its
+// runner/session counts. A bridge that cannot answer leaves the existing
+// renderer-based decision in place (fail open) rather than pinning every VM on.
+const codeActivityUrl = `http://127.0.0.1:${process.env.COWORK_BRIDGE_PORT || 8080}/api/health`;
+async function codeSessionActivity() {
+  try {
+    const response = await fetch(codeActivityUrl, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const runner = body?.codeRunner;
+    if (!runner || typeof runner !== "object") return null;
+    const active = Number(runner.active_sessions) || 0;
+    const offered = Number(runner.offered_sessions) || 0;
+    return { active, offered };
+  } catch {
+    return null;
+  }
 }
 
 function classifyCoworkVmWorkState(state, now) {
@@ -2345,8 +2376,63 @@ function qmpSystemPowerdown(socketPath) {
   });
 }
 
+// The guest RAM qemu was launched with, for the admin panel's status line.
+function qemuMemoryMb(args) {
+  const index = Array.isArray(args) ? args.indexOf("-m") : -1;
+  const raw = index >= 0 ? String(args[index + 1] || "") : "";
+  const match = /^(\d+)([MmGg]?)$/.exec(raw);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return match[2].toLowerCase() === "g" ? value * 1024 : value;
+}
+
+async function coworkVmStatus() {
+  const vm = await findCoworkVmProcess();
+  return {
+    running: Boolean(vm),
+    pid: vm?.pid ?? null,
+    reason: coworkVmIdleState.reason ?? null,
+    memory_mb: vm ? qemuMemoryMb(vm.args) : null,
+    policy: { memory_gb: coworkVmMemoryGB, cpu_count: coworkVmCpuCount },
+    monitor: coworkVmIdleState,
+    host_bash: coworkHostBashEnabled,
+  };
+}
+
+/**
+ * Restart the Cowork VM: an ACPI powerdown of the running guest (the same
+ * graceful stop the idle monitor uses), a bounded wait for qemu to exit, then
+ * the Desktop's own `startVM`. A restart rather than a QMP reset so it also
+ * recovers a wedged VM, and so a container recreated with new VM env boots the
+ * new sizing. Refusals are thrown, never swallowed.
+ */
+async function restartCoworkVm() {
+  if (coworkHostBashEnabled) throw new Error("host-bash mode has no Cowork VM");
+  if (coworkVmRestartInProgress) throw new Error("a VM restart is already in progress");
+  coworkVmRestartInProgress = true;
+  try {
+    const running = await findCoworkVmProcess();
+    if (running) {
+      if (!running.qmpSocket) throw new Error("the Cowork VM has no QMP socket");
+      await qmpSystemPowerdown(running.qmpSocket);
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        if (!(await findCoworkVmProcess())) break;
+        await wait(250);
+      }
+      if (await findCoworkVmProcess()) {
+        throw new Error("the Cowork VM did not stop within 30s");
+      }
+    }
+    await invoke("ClaudeVM", "startVM", []);
+    return { started: true, was_running: Boolean(running) };
+  } finally {
+    coworkVmRestartInProgress = false;
+  }
+}
+
 async function coworkVmIdleCheck() {
-  if (coworkVmShutdownInProgress) return;
+  if (coworkVmShutdownInProgress || coworkVmRestartInProgress) return;
   const now = Date.now();
   try {
     const vm = await findCoworkVmProcess();
@@ -2360,7 +2446,13 @@ async function coworkVmIdleCheck() {
       return;
     }
     const priorPid = coworkVmIdleState.pid;
-    const workState = classifyCoworkVmWorkState(await readCoworkVmWorkState(), now);
+    let workState = classifyCoworkVmWorkState(await readCoworkVmWorkState(), now);
+    if (workState.safeToStop) {
+      const code = await codeSessionActivity();
+      if (code && (code.active > 0 || code.offered > 0)) {
+        workState = { safeToStop: false, reason: "code-session-running" };
+      }
+    }
     if (!workState.safeToStop) {
       coworkVmIdleState = {
         checkedAt: now,
@@ -2383,7 +2475,13 @@ async function coworkVmIdleCheck() {
 
     // Re-read official session/task state immediately before requesting an ACPI
     // powerdown. Any renderer/API uncertainty fails closed and leaves the VM on.
-    const confirmed = classifyCoworkVmWorkState(await readCoworkVmWorkState(), Date.now());
+    let confirmed = classifyCoworkVmWorkState(await readCoworkVmWorkState(), Date.now());
+    if (confirmed.safeToStop) {
+      const code = await codeSessionActivity();
+      if (code && (code.active > 0 || code.offered > 0)) {
+        confirmed = { safeToStop: false, reason: "code-session-running" };
+      }
+    }
     if (!confirmed.safeToStop) {
       coworkVmIdleState = {
         checkedAt: Date.now(),
@@ -3242,6 +3340,17 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === "GET" && url.pathname === "/developer-artifact") {
       await serveDeveloperArtifact(response, url.searchParams.get("name"));
+      return;
+    }
+    // The instance's own VM control, called by the bridge for the admin
+    // dashboard (authd → bridge → here). Loopback only, in this container's
+    // network namespace, like every other route on this server.
+    if (request.method === "GET" && url.pathname === "/vm/status") {
+      sendJson(response, 200, { ok: true, value: await coworkVmStatus() });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/vm/restart") {
+      sendJson(response, 200, { ok: true, value: await restartCoworkVm() });
       return;
     }
     if (request.method === "GET" && url.pathname === "/events") {

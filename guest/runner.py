@@ -41,10 +41,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# 2.3.0: Stop reaches the guest. A session's interrupt is delivered on the
-# runner's held poll (`cancellations`), the child is signalled the way Ctrl-C
-# would, and the turn ends with a result event so the reader closes it.
-VERSION = "2.3.0"
+# 2.4.0: Every turn ends with a result. A failure, a timeout or a broken event
+# stream writes the terminal the transcript reader closes a turn on (reopening
+# the stream, or posting the result on its own when it cannot), the poll reports
+# the sessions this runner holds so the bridge can reap a turn whose runner
+# vanished, and the agent's process group — not just its pid — is signalled.
+VERSION = "2.4.0"
 
 
 def env(name, default=""):
@@ -111,6 +113,14 @@ RUNNER_HOME = env("CLAUDESK_RUNNER_HOME", "/var/lib/claudesk-runner/home")
 # One turn's wall clock. Long enough for real work, short enough that a wedged
 # agent does not hold the session forever.
 TURN_TIMEOUT = float(env("CLAUDESK_RUNNER_TIMEOUT_SECONDS", "1800") or 1800)
+# How many turns may run at once. The protocol hands out every hint it has, and
+# one VM sized for one agent cannot hold an unbounded number of them; excess
+# hints wait on this semaphore instead of stampeding the guest.
+MAX_TURNS = int(env("CLAUDESK_RUNNER_MAX_TURNS", "4") or 4)
+# Durable events read from the tail before a turn starts. The whole transcript
+# is not needed: the last user message, the conversation to resume and the
+# latest control requests all sit near the end.
+HISTORY_TAIL = int(env("CLAUDESK_RUNNER_HISTORY_TAIL", "500") or 500)
 ONCE = "--once" in sys.argv[1:]
 
 RE_SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -259,8 +269,11 @@ def poll():
     # immediate answer, not the held one.
     if wait > 0 and not ONCE:
         headers["x-claudesk-poll-wait"] = str(wait)
-    return expect(request("/v1/code/runners/self-hosted/spawn-hints/poll", {},
-                          headers=headers), "poll")
+    # The bridge reconciles sessions it believes are running against the turns
+    # a live runner actually holds. Sending the claim set is what lets it tell
+    # "this turn is slow" from "the runner that had it disappeared".
+    return expect(request("/v1/code/runners/self-hosted/spawn-hints/poll",
+                          claims_snapshot(), headers=headers), "poll")
 
 
 def prompt_of(events):
@@ -281,24 +294,40 @@ def prompt_of(events):
 
 
 def content_of(events):
-    """The last user message's content blocks — text and images.
+    """The user content this turn answers — text and images.
+
+    Everything the person sent since the last finished turn belongs to this
+    turn. A message typed while the previous turn was running was appended to
+    the transcript but never reached that agent process (its stdin closes after
+    the prompt), so taking only the *last* user message silently dropped every
+    earlier queued one. Collect all client messages after the last `result`
+    instead, and let the agent see them as one turn.
 
     The bridge's opening turn may carry image blocks beside the text (a fire
     with images). The agent's stream-json input takes the same block list, so
     the turn is forwarded as it arrived rather than flattened to text.
     """
-    for event in reversed(events or []):
-        payload = event.get("payload") or {}
+    start = 0
+    for index, event in enumerate(events or []):
+        payload = (event or {}).get("payload") or {}
+        if payload.get("type") == "result":
+            start = index + 1
+    blocks = []
+    for event in (events or [])[start:]:
+        if (event or {}).get("source") == "worker":
+            continue
+        payload = (event or {}).get("payload") or {}
         if payload.get("type") != "user":
             continue
         content = (payload.get("message") or {}).get("content")
         if isinstance(content, str):
             if content.strip():
-                return [{"type": "text", "text": content}]
+                if blocks:
+                    blocks.append({"type": "text", "text": "\n\n"})
+                blocks.append({"type": "text", "text": content})
             continue
         if not isinstance(content, list):
             continue
-        blocks = []
         for part in content:
             if not isinstance(part, dict):
                 continue
@@ -317,9 +346,7 @@ def content_of(events):
                         "media_type": source.get("media_type") or "image/png",
                         "data": source["data"],
                     }})
-        if blocks:
-            return blocks
-    return []
+    return blocks
 
 
 def resume_id(events):
@@ -339,6 +366,64 @@ def resume_id(events):
         if isinstance(candidate, str) and RE_SESSION_ID.match(candidate):
             return candidate
     return ""
+
+
+def synthetic_result(reason, resume="", started=None, interrupted=False):
+    """The `result` terminal for a turn the agent did not finish itself.
+
+    The session view closes a turn on a `result` message. Every failure path
+    used to report the failure only to the bridge, which left the page spinning
+    forever (and, on reload, an idle session whose transcript had no reason in
+    it). This is the same envelope the SDK emits for an interrupted turn.
+    """
+    duration = int((time.time() - started) * 1000) if started else 0
+    return {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "interrupted": interrupted,
+        "result": reason,
+        "session_id": resume or "",
+        "duration_ms": duration,
+        "num_turns": 0,
+        "total_cost_usd": 0,
+    }
+
+
+def post_event(session, payload, token=None):
+    """Write one event on its own request.
+
+    The turn's events ride one long-lived stream, so when that stream is dead
+    the terminal has no way home. This is the fallback: the same append leg the
+    renderer uses, authenticated with the runner's own credential (the bridge
+    does not require the session token there).
+    """
+    return request(
+        "/v1/code/sessions/%s/events" % urllib.parse.quote(session),
+        {"payload": payload},
+        token=token or RUNNER_TOKEN or SECRET,
+    )
+
+
+def fetch_history(session, token):
+    """The durable events a turn needs, from the tail of the transcript.
+
+    The whole log is not needed: the message(s) this turn answers, the
+    conversation to resume and the latest control requests all sit near the
+    end. A short session answers in one page; a tail that carries no user
+    message falls back to the full read so an unusual session still runs.
+    """
+    quoted = urllib.parse.quote(session)
+    status, document = request(
+        "/v1/code/sessions/%s/events?sort_order=desc&limit=%d" % (quoted, HISTORY_TAIL),
+        token=token)
+    events = (document or {}).get("data") if isinstance(document, dict) else []
+    events = list(reversed(events or []))
+    if any((((event or {}).get("payload") or {}).get("type") == "user")
+           and (event or {}).get("source") != "worker" for event in events):
+        return events
+    status, document = request("/v1/code/sessions/%s/events" % quoted, token=token)
+    return ((document or {}).get("data") or []) if isinstance(document, dict) else []
 
 
 def latest_control_request(events, subtype):
@@ -878,7 +963,24 @@ def handle_runner_request(item):
 # runner's held poll is the only inbound channel: the bridge answers a Stop
 # with a `cancellations` list, and the main loop applies it here.
 RUNNING_TURNS = {}
+# Sessions this runner has taken from its poll, including hints whose thread
+# has not started yet and turns waiting on the concurrency semaphore. The
+# bridge reaps an active/offered session it cannot find in any live runner's
+# claim set, so the window between "the poll handed it here" and "the turn
+# thread started" must be covered too.
+CLAIMED_SESSIONS = set()
 RUNNING_TURNS_LOCK = threading.Lock()
+
+
+def claim_session(session_id):
+    if isinstance(session_id, str) and session_id:
+        with RUNNING_TURNS_LOCK:
+            CLAIMED_SESSIONS.add(session_id)
+
+
+def claims_snapshot():
+    with RUNNING_TURNS_LOCK:
+        return {"running": sorted(RUNNING_TURNS), "claimed": sorted(CLAIMED_SESSIONS)}
 
 
 def register_turn(session_id):
@@ -886,6 +988,7 @@ def register_turn(session_id):
     if isinstance(session_id, str) and session_id:
         with RUNNING_TURNS_LOCK:
             RUNNING_TURNS[session_id] = turn
+            CLAIMED_SESSIONS.add(session_id)
     return turn
 
 
@@ -894,6 +997,7 @@ def unregister_turn(session_id):
         return
     with RUNNING_TURNS_LOCK:
         RUNNING_TURNS.pop(session_id, None)
+        CLAIMED_SESSIONS.discard(session_id)
 
 
 def apply_cancellations(items):
@@ -971,6 +1075,10 @@ def run_agent(argv, cwd, content, write, interrupt=None):
             line = line.rstrip()
             if line:
                 errors.append(line)
+                # A chatty agent must not grow the guest's heap without bound;
+                # only the tail is ever read back as the failure reason.
+                if len(errors) > 200:
+                    del errors[:100]
 
     threading.Thread(target=drain_errors, daemon=True).start()
 
@@ -993,7 +1101,12 @@ def run_agent(argv, cwd, content, write, interrupt=None):
     writer_thread.start()
 
     timed_out = []
-    watchdog = threading.Timer(TURN_TIMEOUT, lambda: (timed_out.append(True), process.kill()))
+    # The whole group, not just the pid: a tool the agent spawned is a
+    # grandchild, and a build that ignores the timeout while a grandchild holds
+    # the stdout pipe would leave the reader blocked forever. `signal_group` is
+    # defined below; the timer resolves it when it fires.
+    watchdog = threading.Timer(
+        TURN_TIMEOUT, lambda: (timed_out.append(True), signal_group(signal.SIGKILL)))
     watchdog.start()
 
     interrupted = []
@@ -1046,15 +1159,16 @@ def run_agent(argv, cwd, content, write, interrupt=None):
     def end_after_result():
         # A build that keeps waiting for more input after its result must not
         # hold the session; stdin has already ended, so give it a moment to
-        # exit on its own, then end it.
+        # exit on its own, then end the whole group (a grandchild can hold the
+        # stdout pipe open after the agent itself is gone).
         for _ in range(6):
             if process.poll() is not None:
                 return
             time.sleep(0.5)
-        process.terminate()
+        signal_group(signal.SIGTERM)
         time.sleep(2)
         if process.poll() is None:
-            process.kill()
+            signal_group(signal.SIGKILL)
 
     forwarded = 0
     result = None
@@ -1155,6 +1269,7 @@ def run_session(hint, interrupt=None):
     quoted = urllib.parse.quote(session)
     token = expect(request("/v1/code/runners/self-hosted/sessions/%s/token" % quoted,
                            {}), "token")["session_token"]
+    started = time.time()
 
     def finish(path, body, strict=True):
         answer = request("/v1/code/runners/self-hosted/sessions/%s/%s" % (quoted, path),
@@ -1170,10 +1285,45 @@ def run_session(hint, interrupt=None):
             return
         expect(answer, path)
 
-    status, history = request("/v1/code/sessions/%s/events" % quoted, token=token)
-    events = (history or {}).get("data") if isinstance(history, dict) else []
+    def fail(reason, exit_code, **body):
+        """End a turn that could not run, with the terminal the reader needs.
+
+        `report-failure` alone leaves the session's transcript without a
+        `result`, so the Code view keeps its spinner up for a turn that is
+        already over. Write the failure into the transcript first (on its own
+        request — there is no turn stream here), then report it.
+        """
+        try:
+            post_event(session, synthetic_result(reason, resume, started), token)
+        except Exception as error:  # noqa: BLE001 - report the turn, not this
+            log("session %s: could not write the failure result: %s" % (session, error))
+        try:
+            finish("report-failure", {"reason": reason, **body})
+        except Exception as error:  # noqa: BLE001 - the bridge may be down
+            log("session %s: could not report the failure: %s" % (session, error))
+        log("session %s: %s" % (session, reason))
+        return session, exit_code
+
+    # Only the tail is needed; the whole log is re-downloaded on every turn
+    # otherwise, which is both slow and (for a long session) a large burst into
+    # the bridge's heap.
+    events = fetch_history(session, token)
     content = content_of(events)
     resume = resume_id(events)
+    # Tell the bridge how far this turn's transcript read went. Anything a
+    # user appends after this point is a message for the *next* turn; anything
+    # at or before it is what this turn answers. Without it, an opening message
+    # that landed between the claim and this read looked like a mid-turn
+    # message and started a duplicate turn.
+    highest = max(
+        (int(event.get("sequence_num") or 0) for event in (events or [])),
+        default=0,
+    )
+    try:
+        request("/v1/code/runners/self-hosted/sessions/%s/claim" % quoted,
+                {"through_sequence_num": highest}, token)
+    except Exception as error:  # noqa: BLE001 - the turn can still run
+        log("session %s: could not record the read-through point: %s" % (session, error))
     if interrupt_requested(events):
         # The Stop landed between the poll handing out this hint and the claim
         # (the bridge releases the session in that window). Nothing has run
@@ -1226,15 +1376,11 @@ def run_session(hint, interrupt=None):
         # resolution above should have taken it, so what lands here is genuinely
         # absent or not executable — say which.
         reason = "%s is not an executable file in the guest" % CLAUDE_BIN
-        finish("report-failure", {"reason": reason, "setup_failure_kind": "missing_binary"})
-        log("session %s: %s" % (session, reason))
-        return session, 127
+        return fail(reason, 127, setup_failure_kind="missing_binary")
 
     if not content:
         reason = "the session's transcript carries no user message to answer"
-        finish("report-failure", {"reason": reason, "failure_kind": "bad_input"})
-        log("session %s: %s" % (session, reason))
-        return session, 2
+        return fail(reason, 2, failure_kind="bad_input")
 
     # The session's MCP servers: a routine fire's per-invocation connectors (or
     # the session MCP editor's saved set). This is what makes the URL a fire
@@ -1257,22 +1403,37 @@ def run_session(hint, interrupt=None):
     ensure_workspace_alias()
     cwd, workdir_error = session_workdir(session, config)
     if workdir_error is not None:
-        finish("report-failure", {"reason": workdir_error,
-                                  "failure_kind": "setup_failed"})
-        log("session %s: %s" % (session, workdir_error))
-        return session, 2
-    started = time.time()
+        return fail(workdir_error, 2, failure_kind="setup_failed")
     log("session %s: turn with %s (model %s, effort %s, permission %s, "
         "connectors %s, resume %s)" % (
             session, " ".join(AGENT_ARGS), model or "default", effort or "default",
             permission_mode or "default",
             ",".join(mcp_config["mcpServers"]) if mcp_config else "none",
             resume or "none"))
-    write, close_stream = open_event_stream(
-        "/v1/code/sessions/%s/events/stream" % quoted, token)
+    def open_stream():
+        return open_event_stream(
+            "/v1/code/sessions/%s/events/stream" % quoted, token)
+
+    # The stream is one long-lived chunked request. A dropped connection must
+    # not throw away the rest of the turn: reopen it once and resend the event
+    # that failed. Only a second failure falls back to the terminal POST below.
+    stream = {}
+    stream["write"], stream["close"] = open_stream()
+
+    def write_event(payload):
+        try:
+            stream["write"](payload)
+            return
+        except Exception:
+            try:
+                stream["close"]()
+            except Exception:  # noqa: BLE001 - it is already dead
+                pass
+            stream["write"], stream["close"] = open_stream()
+            stream["write"](payload)
 
     def turn(extra):
-        return run_agent(argv + extra, cwd, content, write, interrupt)
+        return run_agent(argv + extra, cwd, content, write_event, interrupt)
 
     code, result, timed_out, was_interrupted, forwarded, failures, errors = turn(
         ["--resume", resume] if resume else [])
@@ -1286,41 +1447,59 @@ def run_session(hint, interrupt=None):
         log("session %s: no conversation %s in the guest; starting a new one"
             % (session, resume))
         code, result, timed_out, was_interrupted, forwarded, failures, errors = turn([])
-    if was_interrupted and result is None and not failures:
-        # A child stopped by SIGINT may exit without a result message. The
-        # transcript reader closes a turn on `result`, so write the terminal
-        # the SDK itself uses for an interrupted turn.
-        result = {
-            "type": "result",
-            "subtype": "error_during_execution",
-            "is_error": True,
-            "interrupted": True,
-            "result": "Request interrupted by user",
-            "session_id": resume or "",
-            "duration_ms": int((time.time() - started) * 1000),
-            "num_turns": 0,
-            "total_cost_usd": 0,
-        }
+
+    # Every turn ends with a `result`: the session view closes the turn on it,
+    # and a failure that writes none leaves the page spinning forever. The
+    # agent's own terminal wins when it produced one (an error result included:
+    # its `result` field is the reason).
+    if result is None:
+        if was_interrupted:
+            result = synthetic_result("Request interrupted by user", resume, started,
+                                      interrupted=True)
+        elif timed_out:
+            result = synthetic_result(
+                "agent ran longer than %ss" % int(TURN_TIMEOUT), resume, started)
+        elif code == 0:
+            result = synthetic_result(
+                "agent exited 0 without a result message", resume, started)
+        else:
+            reason = errors[-1] if errors else "agent exited %s" % code
+            result = synthetic_result(reason, resume, started)
+
     duration = time.time() - started
-    if result is not None:
-        log("session %s: turn done in %.1fs (%s events, %s turns, cost %s)" % (
-            session, duration, forwarded, result.get("num_turns"),
-            result.get("total_cost_usd")))
+    log("session %s: turn done in %.1fs (%s events, %s turns, cost %s)" % (
+        session, duration, forwarded, result.get("num_turns"),
+        result.get("total_cost_usd")))
     # The turn's own `result` message belongs in the transcript too: it is the
     # terminal the reader closes the turn on (the SDK stream carries it, the
     # wire contract lists it as a transcript type, and a reader that never
     # sees one holds the turn open — rows around tool calls stay unplaced).
     # Written after the retry decision, so a discarded first attempt leaves
     # nothing behind.
-    if result is not None and not failures:
-        try:
-            write(result)
-        except Exception as error:  # noqa: BLE001 - recorded with the run
-            failures.append(str(error))
+    delivered = False
     try:
-        close_stream()
+        write_event(result)
+        delivered = True
+    except Exception as error:  # noqa: BLE001 - fall back to a plain append
+        failures.append("result stream: %s" % error)
+    try:
+        stream["close"]()
     except Exception as error:  # noqa: BLE001 - recorded with the run
-        failures.append(str(error))
+        if delivered:
+            log("session %s: event stream close failed after the result: %s"
+                % (session, error))
+        else:
+            failures.append("stream close: %s" % error)
+    if not delivered:
+        # The stream is gone; the append leg is authenticated with the same
+        # runner credential and does not need the turn's connection.
+        try:
+            post_event(session, result, token)
+            delivered = True
+        except Exception as error:  # noqa: BLE001 - nothing left to try
+            failures.append("result fallback: %s" % error)
+    if not delivered:
+        log("session %s: the turn's result could not be written" % session)
 
     if failures:
         finish("report-failure", {"reason": "could not write events: %s" % failures[0][:300],
@@ -1333,16 +1512,14 @@ def run_session(hint, interrupt=None):
         # requeues it. A session that was deleted mid-turn is already gone, so
         # the release is allowed to find nothing.
         finish("release", {}, strict=False)
-    elif code == 0 and result is not None and not result.get("is_error"):
+    elif code == 0 and not result.get("is_error"):
         finish("release", {})
     else:
         reason = ""
-        if result is not None and isinstance(result.get("result"), str) and result["result"].strip():
+        if isinstance(result.get("result"), str) and result["result"].strip():
             reason = result["result"].strip()
         elif errors:
             reason = errors[-1]
-        elif result is None and code == 0:
-            reason = "agent exited 0 without a result message"
         else:
             reason = "agent exited %s" % code
         finish("report-failure", {"reason": reason[:600], "failure_kind": "agent_failed"})
@@ -1389,20 +1566,56 @@ def prepare_home():
             log("could not write %s (%s)" % (config, error))
 
 
+# One agent process per active turn, and each holds the conversation in memory.
+# The VM is sized for a handful; the queue keeps excess hints claimed (so the
+# bridge does not reap them) until a slot frees.
+TURN_SLOTS = threading.Semaphore(max(1, MAX_TURNS))
+
+
+def report_unhandled(session_id, error):
+    """Close a turn whose thread failed before `run_session` could.
+
+    An exception in the setup path used to be logged only, leaving the bridge
+    believing the session was running and the page spinning. There is no turn
+    stream here, so both the terminal and the failure go on their own requests,
+    authenticated with the runner's credential (the bridge accepts it on both).
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return
+    reason = "the runner could not run this turn: %s" % error
+    try:
+        post_event(session_id, synthetic_result(reason),
+                   token=RUNNER_TOKEN or SECRET)
+    except Exception as write_error:  # noqa: BLE001 - nothing left to try
+        log("session %s: could not write the failure result: %s"
+            % (session_id, write_error))
+    try:
+        expect(request(
+            "/v1/code/runners/self-hosted/sessions/%s/report-failure"
+            % urllib.parse.quote(session_id),
+            {"reason": reason[:600], "failure_kind": "agent_failed"},
+            token=RUNNER_TOKEN or SECRET), "report-failure")
+    except Exception as report_error:  # noqa: BLE001 - the bridge may be down
+        log("session %s: could not report the failure: %s"
+            % (session_id, report_error))
+
+
 def run_session_thread(hint):
     """One session turn on its own thread; failures stay with that session."""
     session_id = hint.get("session_uuid")
     interrupt = register_turn(session_id)
     try:
-        run_session(hint, interrupt)
+        with TURN_SLOTS:
+            run_session(hint, interrupt)
     except Exception as error:  # noqa: BLE001 - keep serving the pool
         log("session %s failed: %s" % (session_id, error))
+        report_unhandled(session_id, error)
     finally:
         unregister_turn(session_id)
 
 
 def run_sessions_forever(session_queue):
-    """Spawn every session hint on its own thread, with no concurrency cap.
+    """Spawn every session hint on its own thread; the semaphore caps the turns.
 
     A turn can last as long as TURN_TIMEOUT, and the Code UI's folder and git
     lookups ride the same poll as work. Running the agent inline meant the
@@ -1414,7 +1627,7 @@ def run_sessions_forever(session_queue):
     independent (own id, transcript, event stream and, with the worktree
     option, own checkout); the only shared state is git setup on a repo, which
     `session_workdir` serializes with a per-repo lock. So one thread per hint,
-    no queue depth cap, no worker pool limit.
+    with `TURN_SLOTS` bounding how many agents run at once.
     """
     while True:
         hint = session_queue.get()
@@ -1477,12 +1690,28 @@ def main():
             continue
         for hint in hints:
             if not ONCE:
+                session_id = hint.get("session_uuid")
+                # A duplicate hint is possible when the bridge's offer lease
+                # expired while this runner held the session behind the turn
+                # cap. The claim already exists, so ignore the second copy
+                # rather than run the same session twice.
+                with RUNNING_TURNS_LOCK:
+                    duplicate = session_id in RUNNING_TURNS
+                if duplicate:
+                    log("session %s: duplicate hint ignored" % session_id)
+                    continue
+                # Claim before the thread exists: the next poll (issued
+                # immediately) is what tells the bridge this session is held,
+                # and the window before the thread starts is exactly where a
+                # reaper would otherwise call it lost.
+                claim_session(session_id)
                 session_queue.put(hint)
                 continue
             try:
                 run_session(hint)
             except Exception as error:  # noqa: BLE001 - keep serving the pool
                 log("session %s failed: %s" % (hint.get("session_uuid"), error))
+                report_unhandled(hint.get("session_uuid"), error)
         if ONCE:
             return 0
 

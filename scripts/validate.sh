@@ -24,6 +24,7 @@ node scripts/greeting-smoke.mjs
 node scripts/account-smoke.mjs
 node scripts/account-settings-smoke.mjs
 node scripts/account-scope-smoke.mjs
+node scripts/provision-env-smoke.mjs
 node scripts/tenant-code-guard-smoke.mjs
 node scripts/code-runners-smoke.mjs
 node scripts/code-runners-http-smoke.mjs
@@ -59,6 +60,7 @@ node scripts/start-permission-mode-smoke.mjs
 node scripts/cowork-skip-approvals-smoke.mjs
 node scripts/routine-task-file-link-smoke.mjs
 node scripts/routine-fire-smoke.mjs
+node scripts/routine-scheduler-smoke.mjs
 node scripts/web-shell-gates-smoke.mjs
 node scripts/model-selector-state-smoke.mjs
 node scripts/model-picker-smoke.mjs

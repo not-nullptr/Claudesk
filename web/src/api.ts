@@ -13,8 +13,27 @@ export interface User {
   /** When the account's own upstream API key last changed; null means it has
    *  none. The key itself is never sent to the browser. */
   api_key_updated_at: number | null;
+  /** The Cowork VM sizing the admin asked for; null inherits the deployment. */
+  vm_memory_gb: number | null;
+  vm_cpu_count: number | null;
+  /** What the host reconciler actually applied, and when (Unix seconds). */
+  vm_applied_memory_gb: number | null;
+  vm_applied_cpu_count: number | null;
+  vm_applied_at: number | null;
+  /** The instance's in-network address, written by the provisioner. Absent on
+   *  an account that has not been deployed since this field was added. */
+  internal_upstream: string | null;
   created_at: number;
   updated_at: number;
+}
+
+/** The VM monitor state an instance reports for the admin panel. */
+export interface VmStatus {
+  started?: boolean;
+  running?: boolean;
+  pid?: number | null;
+  reason?: string;
+  [key: string]: unknown;
 }
 
 /** A deployment-wide setting the admin page owns. Only the model picker's layout
@@ -105,6 +124,21 @@ export const api = {
       method: "POST",
     }),
   deleteUser: (id: number) => request<{ ok: true }>(`/api/admin/users/${id}`, { method: "DELETE" }),
+  /** Save the desired Cowork VM sizing. Nothing is recreated until Apply. */
+  updateUserVm: (id: number, spec: { memory_gb: number | null; cpu_count: number | null }) =>
+    request<{ user: User }>(`/api/admin/users/${id}/vm`, {
+      method: "PUT",
+      body: JSON.stringify(spec),
+    }),
+  /** Queue the host reconcile that recreates the instance with the saved spec. */
+  applyUserVm: (id: number) =>
+    request<{ queued: true }>(`/api/admin/users/${id}/vm/apply`, { method: "POST" }),
+  /** Restart the account's VM (its running turns are interrupted). */
+  restartUserVm: (id: number) =>
+    request<{ vm: VmStatus }>(`/api/admin/users/${id}/vm/restart`, { method: "POST" }),
+  /** The instance's current VM monitor state. */
+  userVmStatus: (id: number) =>
+    request<{ vm: VmStatus }>(`/api/admin/users/${id}/vm/status`),
   getSettings: () => request<{ settings: DeploymentSettings }>("/api/admin/settings"),
   /** Write the settings named in the patch; keys left out keep their value. */
   updateSettings: (patch: Partial<DeploymentSettings>) =>

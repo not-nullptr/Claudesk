@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply saved VM specs to a @NAME@ Claudesk instance the moment an admin asks
+
+[Path]
+# authd drops one file per account whose admin pressed Apply; the file carries
+# the account's email. systemd expands no variables in Path*=, so the directory
+# has to be a literal path — which is why the installer renders this per
+# deployment.
+DirectoryNotEmpty=@SPOOL@
+Unit=@NAME@-vm-apply.service
+
+[Install]
+WantedBy=paths.target

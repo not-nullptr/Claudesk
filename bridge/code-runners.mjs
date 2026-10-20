@@ -45,14 +45,55 @@
 // the instance's own state directory, like project-stars.json.
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 
 const stateFileName = "code-runners.json";
 // How long a deleted session's id stays in the store's cancellation list: a
 // runner that is mid-turn polls again quickly, and the tombstone is what tells
 // it to stop. Ten minutes is many poll cycles, and the entries are tiny.
 const cancelTombstoneMs = 10 * 60 * 1000;
+
+// A session handed to a poll is not handed to a live turn yet. The offer lease
+// re-offers one whose claim never landed (the HTTP answer was lost, the runner
+// died between the claim and the token); without it the session stays
+// `offered` forever and no later poll can take it.
+const offerLeaseMs = 60 * 1000;
+// How long an `active` session is believed while no runner is online at all.
+// The VM powering down or the guest restarting kills every turn with no
+// release; this is the grace before the bridge declares the turn lost.
+const offlineReapGraceMs = 30 * 1000;
+// How long an `active` session may be absent from every live runner's claim
+// set before it is treated as lost. Longer than a poll cycle plus the thread
+// start, so a healthy turn is never reaped.
+const claimReapGraceMs = 90 * 1000;
+const reapIntervalMs = (() => {
+  const raw = Number(process.env.CLAUDESK_SESSION_REAP_INTERVAL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 15000;
+})();
+// A turn whose runner was lost is retried this many times; a fresh user message
+// starts the count over, so a genuinely broken session goes idle instead of
+// requeueing forever.
+const reapAttemptLimit = 3;
+
+// The terminal a reaped turn leaves in the transcript. The session view closes
+// a turn on `result`; a turn whose runner vanished would otherwise spin
+// forever and read as "running" on every later load.
+function lostTurnResult(reason) {
+  return {
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    interrupted: true,
+    result: reason,
+    session_id: "",
+    duration_ms: 0,
+    num_turns: 0,
+    total_cost_usd: 0,
+  };
+}
 
 // A pool id is opaque; the built bundle writes `ccpool_`-prefixed ids, so the
 // same spelling keeps anything that pattern-matches a pool id happy.
@@ -367,14 +408,30 @@ function normalizeEventModel(payload, session) {
   return payload;
 }
 
+/**
+ * A token-level `stream_event` is live transport, not history. The CLI emits
+ * one per delta, and persisting every one made the durable log (and the
+ * bridge's heap) grow by orders of magnitude more than the conversation it
+ * describes. These are broadcast to open streams and never written to the
+ * session's log; the `assistant` event that follows carries the completed
+ * message, which is what a reload replays.
+ */
+function isVolatilePayload(payload) {
+  return isRecord(payload) && payload.type === "stream_event";
+}
+
 function appendToSession(session, incoming, source) {
   session.events = Array.isArray(session.events) ? session.events : [];
-  let sequence = session.events.reduce(
-    (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
+  // The running counter is the O(1) path; the scan only initialises it for a
+  // store that predates the counter (or a session loaded without events).
+  let sequence = Number.isFinite(session.last_sequence)
+    ? Number(session.last_sequence)
+    : session.events.reduce(
+      (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
   const appended = [];
   for (const entry of incoming) {
     const payload = isRecord(entry?.payload) ? entry.payload : entry;
-    if (!isRecord(payload)) continue;
+    if (!isRecord(payload) || isVolatilePayload(payload)) continue;
     normalizeEventModel(payload, session);
     sequence += 1;
     const envelope = {
@@ -395,8 +452,46 @@ function appendToSession(session, incoming, source) {
     session.events.push(envelope);
     appended.push(envelope);
   }
+  session.last_sequence = sequence;
   if (appended.length) session.last_event_at = appended[appended.length - 1].created_at;
   return appended;
+}
+
+/** A live-only envelope: sequenced for the stream's reader, never persisted. */
+function volatileEnvelope(session, entry, source) {
+  const payload = isRecord(entry?.payload) ? entry.payload : entry;
+  if (!isRecord(payload)) return null;
+  normalizeEventModel(payload, session);
+  session.last_sequence = (Number(session.last_sequence) || 0) + 1;
+  return {
+    event_id: randomUUID(),
+    sequence_num: String(session.last_sequence),
+    ...(source ? { source } : {}),
+    payload,
+    ...(typeof entry?.event_type === "string" && entry.event_type
+      ? { event_type: entry.event_type } : {}),
+    created_at: new Date().toISOString(),
+    // Readers that persist frames must be able to tell this one is ephemeral.
+    volatile: true,
+  };
+}
+
+/** Split one append into durable events and live-only ones, then append the
+ * durable half. Callers write the file and fan out both. */
+function appendIncoming(session, incoming, source) {
+  const durableEntries = [];
+  const volatile = [];
+  for (const entry of incoming) {
+    const payload = isRecord(entry?.payload) ? entry.payload : entry;
+    if (!isRecord(payload)) continue;
+    if (isVolatilePayload(payload)) {
+      const envelope = volatileEnvelope(session, entry, source);
+      if (envelope) volatile.push(envelope);
+    } else {
+      durableEntries.push(entry);
+    }
+  }
+  return { durable: appendToSession(session, durableEntries, source), volatile };
 }
 
 /**
@@ -420,6 +515,9 @@ export function createRunnerBackend({
   stateDir, log = console, poolName = null, wakeRunner = null,
 } = {}) {
   const statePath = join(stateDir, stateFileName);
+  // A smoke (or an operator's tool) may pass only `log.log`; warnings must not
+  // turn into a TypeError inside the watchdog.
+  const warn = typeof log.warn === "function" ? log.warn.bind(log) : log.log.bind(log);
   let cache = null;
   // UI reads (the folder browser, git info and branch lists behind the Code
   // composer's start options) reach the runner inside the account's Cowork VM,
@@ -543,6 +641,179 @@ export function createRunnerBackend({
     for (const finish of [...(pollWaiters.get(poolId) ?? [])]) finish();
   }
 
+  // Start the VM a requeued session needs. `wakeRunner` is the Desktop's
+  // startVM; it is best-effort (a Desktop that refuses leaves the session
+  // waiting, exactly as before) and must not delay the state transition.
+  let lastWakeAt = 0;
+  function wakeTurnRunner() {
+    if (typeof wakeRunner !== "function") return;
+    // A burst of messages (or a reaper pass) must not turn into a burst of
+    // startVM calls. The VM only needs one wake; a failed one is retried by
+    // the next requeue after the cooldown.
+    const now = Date.now();
+    if (now - lastWakeAt < 15000) return;
+    lastWakeAt = now;
+    try {
+      Promise.resolve(wakeRunner()).catch((error) => {
+        warn(`[code-runners] could not start the VM for a pending session: ${error?.message || error}`);
+      });
+    } catch (error) {
+      warn(`[code-runners] could not start the VM for a pending session: ${error?.message || error}`);
+    }
+  }
+
+  function runnerClaims(runner) {
+    const ids = new Set();
+    for (const key of ["running_sessions", "claimed_sessions"]) {
+      if (!Array.isArray(runner?.[key])) continue;
+      for (const id of runner[key]) if (typeof id === "string") ids.add(id);
+    }
+    return ids;
+  }
+
+  // Does a live runner that reports claims still hold this session? Used by the
+  // offer lease: a guest can hold a hint while it waits for a turn slot, and
+  // re-offering that hint would start the same session twice.
+  function sessionClaimedByReportingRunner(state, session) {
+    const pool = poolById(state, session.pool_id);
+    if (!pool) return false;
+    return onlineRunners(state, pool)
+      .filter((runner) => runner.claims_reported === true)
+      .some((runner) => runnerClaims(runner).has(session.session_uuid));
+  }
+
+  // Does a live runner still hold this session (for reaping an active turn)? A
+  // runner from before the claim report existed cannot say, so it is believed
+  // rather than reaped on a guess.
+  function sessionHeldByRunner(state, session) {
+    const pool = poolById(state, session.pool_id);
+    if (!pool) return false;
+    const reporters = onlineRunners(state, pool)
+      .filter((runner) => runner.claims_reported === true);
+    if (!reporters.length) return true;
+    return reporters.some((runner) => runnerClaims(runner).has(session.session_uuid));
+  }
+
+  // Was the last thing the transcript says a user message with no terminal?
+  // That is the one case where losing the runner should retry the turn.
+  function unansweredUserMessage(session) {
+    const events = Array.isArray(session.events) ? session.events : [];
+    let lastUser = -1;
+    let lastResult = -1;
+    events.forEach((event, index) => {
+      const payload = event?.payload ?? {};
+      if (payload.type === "result") lastResult = index;
+      else if (event?.source !== "worker" && isUserMessage(event)) lastUser = index;
+    });
+    return lastUser > lastResult;
+  }
+
+  function turnHasTerminal(session) {
+    const events = Array.isArray(session.events) ? session.events : [];
+    let lastUser = -1;
+    events.forEach((event, index) => {
+      if (event?.source !== "worker" && isUserMessage(event)) lastUser = index;
+    });
+    for (let index = Math.max(0, lastUser); index < events.length; index += 1) {
+      if ((events[index]?.payload ?? {}).type === "result") return true;
+    }
+    return false;
+  }
+
+  // End a turn whose runner disappeared. The transcript gets the terminal its
+  // reader closes the turn on; the session either goes back on the pool once
+  // more (an unanswered message is retried, up to `reapAttemptLimit`) or idle.
+  async function reapLostTurn(session, reason) {
+    await ensureEvents(session);
+    // Read the intent *before* the terminal lands: after the synthetic result,
+    // the transcript reads as answered and the retry decision would flip.
+    const unanswered = unansweredUserMessage(session);
+    if (!turnHasTerminal(session)) {
+      const appended = appendToSession(session,
+        [{ payload: lostTurnResult(reason) }], "worker");
+      await appendEventsFile(session, appended);
+      emitLive(session, appended);
+    }
+    const attempts = Number(session.reap_attempts) || 0;
+    const retry = unanswered && attempts < reapAttemptLimit;
+    session.state = retry ? "pending" : "released";
+    delete session.offered_at;
+    session.assigned_runner_id = undefined;
+    clearInterrupted(session);
+    session.failure = { reason, failure_kind: "runner_lost" };
+    if (retry) {
+      session.reap_attempts = attempts + 1;
+      session.attempt = (Number(session.attempt) || 0) + 1;
+      wakePool(session.pool_id);
+      wakeTurnRunner();
+    }
+    warn(`[code-runners] session ${session.session_uuid}: `
+      + `${retry ? "requeued" : "released"} after its runner was lost (${reason})`);
+  }
+
+  let reaping = false;
+  // `nowOverride` exists for deterministic tests: a smoke advances the clock
+  // instead of sleeping out a lease.
+  async function reapSessions(nowOverride = null) {
+    if (reaping) return;
+    reaping = true;
+    try {
+      const state = await load();
+      const now = Number.isFinite(nowOverride) ? nowOverride : Date.now();
+      let changed = false;
+      for (const session of [...state.sessions]) {
+        const pool = poolById(state, session.pool_id);
+        if (!pool) continue;
+        if (session.state === "offered") {
+          const since = Date.parse(session.offered_at || "") || 0;
+          if (!since || now - since < offerLeaseMs) continue;
+          // The guest can hold a hint while it waits for a turn slot (the
+          // concurrency cap). Re-offering it would start the same session on a
+          // second thread, so a live claim extends the lease.
+          if (sessionClaimedByReportingRunner(state, session)) {
+            session.offered_at = new Date(now).toISOString();
+            changed = true;
+            continue;
+          }
+          session.state = "pending";
+          session.attempt = (Number(session.attempt) || 0) + 1;
+          session.assigned_runner_id = undefined;
+          delete session.offered_at;
+          changed = true;
+          wakePool(session.pool_id);
+          warn(`[code-runners] session ${session.session_uuid}: `
+            + "offer expired with no claim; re-offered");
+          continue;
+        }
+        if (session.state !== "active") continue;
+        const started = Date.parse(session.started_at || session.offered_at || "") || 0;
+        if (!started) continue;
+        const online = onlineRunners(state, pool);
+        if (online.length === 0) {
+          if (now - started < offlineReapGraceMs) continue;
+          await reapLostTurn(session,
+            "the runner went offline; this turn was interrupted");
+          changed = true;
+          continue;
+        }
+        const reporters = online.filter((runner) => runner.claims_reported === true);
+        // An older runner cannot report claims; believe it rather than reap a
+        // healthy turn. The next deploy replaces it with one that can.
+        if (!reporters.length) continue;
+        if (sessionHeldByRunner(state, session)) continue;
+        if (now - started < claimReapGraceMs) continue;
+        await reapLostTurn(session,
+          "the runner stopped responding; this turn was interrupted");
+        changed = true;
+      }
+      if (changed) await save();
+    } catch (error) {
+      warn(`[code-runners] session reaper failed: ${error?.message || error}`);
+    } finally {
+      reaping = false;
+    }
+  }
+
   // Cancellation notices a poll carries. The guest runner cannot be dialled,
   // so its held poll is also how a Stop reaches it: the bridge wakes the pool
   // and lists the ids whose turn must end. Interrupts stay listed while the
@@ -601,6 +872,28 @@ export function createRunnerBackend({
       notices.push({ session_uuid: entry.session_uuid, reason: "deleted" });
     }
     return notices;
+  }
+
+  // Stamp the client messages a turn has taken, and queue the
+  // `delivery_update` frames the page clears "Sending…" on. `through` bounds
+  // it to the transcript the runner actually read (see recordClaim); the token
+  // leg stamps everything present at claim time.
+  function markProcessed(session, through = Infinity) {
+    const processedAt = new Date().toISOString();
+    session.delivery_updates = Array.isArray(session.delivery_updates)
+      ? session.delivery_updates : [];
+    for (const envelope of session.events ?? []) {
+      if (envelope.source !== "client") continue;
+      if ((envelope.payload ?? {}).type !== "user") continue;
+      if (envelope.processing_at !== undefined) continue;
+      if (Number(envelope.sequence_num) > through) continue;
+      envelope.processing_at = processedAt;
+      session.delivery_updates.push({
+        event_id: envelope.event_id,
+        status: "PROCESSING",
+        timestamp: processedAt,
+      });
+    }
   }
 
   // Requests the guest runner answers for the web UI. A tenant's Code UI needs
@@ -737,29 +1030,165 @@ export function createRunnerBackend({
     return join(eventsDir, `${name}.jsonl`);
   }
 
-  async function readEventsFile(session) {
-    try {
-      const text = await readFile(eventsPathFor(session), "utf8");
-      return text.split("\n").filter(Boolean)
-        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-        .filter(Boolean);
-    } catch {
-      return [];
+  // Per-session serialization for file work: a compaction must not race an
+  // append (or another compaction) on the same file.
+  const eventChains = new Map();
+  function eventChain(session, task) {
+    const key = String(session?.session_uuid ?? "");
+    const previous = eventChains.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    eventChains.set(key, next);
+    next.catch(() => undefined).then(() => {
+      if (eventChains.get(key) === next) eventChains.delete(key);
+    });
+    return next;
+  }
+
+  // Live subscribers: the session page's SSE response. Appended events are
+  // pushed straight to them, so the page's text advances with the agent instead
+  // of on the old 500 ms rescan.
+  const liveSubscribers = new Map();
+  function emitLive(session, events) {
+    if (!events?.length) return;
+    const listeners = liveSubscribers.get(session.session_uuid);
+    if (!listeners?.size) return;
+    for (const event of events) {
+      for (const listener of [...listeners]) {
+        try {
+          listener(event);
+        } catch {
+          // That response is gone; its own close handler unsubscribes.
+        }
+      }
     }
   }
 
-  async function appendEventsFile(session, appended) {
-    if (!appended.length) return;
-    await mkdir(eventsDir, { recursive: true });
-    await appendFile(eventsPathFor(session),
-      appended.map((event) => `${JSON.stringify(event)}\n`).join(""), { mode: 0o600 });
+  function subscribeEvents(sessionId, listener) {
+    const session = cache ? sessionById(cache, sessionId) : undefined;
+    const key = session?.session_uuid ?? String(sessionId ?? "");
+    let listeners = liveSubscribers.get(key);
+    if (!listeners) {
+      listeners = new Set();
+      liveSubscribers.set(key, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) liveSubscribers.delete(key);
+    };
+  }
+
+  // Keep only a bounded number of transcripts resident. A session with an open
+  // stream or a running turn stays; the rest are re-read from their file on the
+  // next request.
+  const loadedSessions = new Map();
+  const maxLoadedSessions = Math.max(
+    2,
+    Number(process.env.CLAUDESK_RUNNER_LOADED_SESSIONS) || 16,
+  );
+  function touchLoaded(session) {
+    loadedSessions.delete(session.session_uuid);
+    loadedSessions.set(session.session_uuid, Date.now());
+    for (const id of [...loadedSessions.keys()]) {
+      if (loadedSessions.size <= maxLoadedSessions) break;
+      const candidate = cache ? sessionById(cache, id) : undefined;
+      if (!candidate) {
+        loadedSessions.delete(id);
+        continue;
+      }
+      if (liveSubscribers.get(id)?.size) continue;
+      if (candidate.state === "active" || candidate.state === "offered") continue;
+      candidate.events = [];
+      candidate.eventsLoaded = false;
+      loadedSessions.delete(id);
+    }
+  }
+
+  /**
+   * Load one session's durable transcript, lazily.
+   *
+   * The old `load()` read every session's whole file at bridge start, which
+   * made boot time and resident memory a function of the account's entire Code
+   * history. This reads one file when a turn or a page actually needs it, and
+   * the same pass drops the live-only `stream_event` lines an older store
+   * persisted (atomic temp+rename), shrinking the file once.
+   */
+  async function ensureEvents(session) {
+    if (session.eventsLoaded === true) return session.events;
+    return eventChain(session, async () => {
+      if (session.eventsLoaded === true) return session.events;
+      const path = eventsPathFor(session);
+      const durable = [];
+      let highest = Number(session.last_sequence) || 0;
+      let dropped = 0;
+      let temporary = null;
+      try {
+        const input = createReadStream(path, { encoding: "utf8" });
+        const lines = createInterface({ input, crlfDelay: Infinity });
+        temporary = `${path}.${randomUUID()}.tmp`;
+        const output = createWriteStream(temporary, { mode: 0o600 });
+        try {
+          for await (const line of lines) {
+            if (!line || !line.trim()) continue;
+            let event;
+            try {
+              event = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            if (isVolatileEvent(event)) {
+              dropped += 1;
+              continue;
+            }
+            durable.push(event);
+            highest = Math.max(highest, Number(event.sequence_num) || 0);
+            if (!output.write(`${line}\n`)) {
+              await new Promise((resolve) => output.once("drain", resolve));
+            }
+          }
+        } finally {
+          await new Promise((resolve) => output.end(resolve));
+        }
+        if (dropped) {
+          await rename(temporary, path);
+          temporary = null;
+          log.log(`[code-runners] session ${session.session_uuid}: `
+            + `removed ${dropped} live-only event(s) from history`);
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          log.warn(`[code-runners] could not read the transcript of `
+            + `${session.session_uuid}: ${error?.message || error}`);
+        }
+      } finally {
+        if (temporary) await rm(temporary, { force: true }).catch(() => undefined);
+      }
+      session.events = durable;
+      session.last_sequence = Math.max(highest, Number(session.last_sequence) || 0);
+      session.eventsLoaded = true;
+      touchLoaded(session);
+      return session.events;
+    });
+  }
+
+  function isVolatileEvent(event) {
+    return isVolatilePayload(event?.payload ?? {});
+  }
+
+  function appendEventsFile(session, appended) {
+    if (!appended.length) return Promise.resolve();
+    return eventChain(session, async () => {
+      await mkdir(eventsDir, { recursive: true });
+      await appendFile(eventsPathFor(session),
+        appended.map((event) => `${JSON.stringify(event)}\n`).join(""), { mode: 0o600 });
+    });
   }
 
   function metadataOnly(state) {
     return {
       ...state,
       sessions: state.sessions.map((session) => {
-        const { events, ...rest } = session;
+        const { events, eventsLoaded, ...rest } = session;
         return rest;
       }),
     };
@@ -812,7 +1241,9 @@ export function createRunnerBackend({
       }
     }
     // Split an older store's inline transcripts into their per-session files
-    // once; the metadata document that remains no longer carries them.
+    // once; the metadata document that remains no longer carries them. The
+    // files themselves are read lazily (see ensureEvents), not here: boot time
+    // must not scale with every transcript the account ever produced.
     let eventsMigrated = false;
     for (const session of cache.sessions) {
       if (typeof session.session_uuid !== "string") continue;
@@ -825,9 +1256,15 @@ export function createRunnerBackend({
             session.events.map((event) => `${JSON.stringify(event)}\n`).join(""),
             { mode: 0o600 });
         }
+        const highest = session.events.reduce(
+          (high, event) => Math.max(high, Number(event.sequence_num) || 0), 0);
+        session.last_sequence = Math.max(Number(session.last_sequence) || 0, highest);
+        delete session.events;
         eventsMigrated = true;
-      } else {
-        session.events = await readEventsFile(session);
+      }
+      session.eventsLoaded = false;
+      if (session.last_sequence !== undefined) {
+        session.last_sequence = Number(session.last_sequence) || 0;
       }
     }
     if (eventsMigrated) migrated = true;
@@ -987,9 +1424,24 @@ export function createRunnerBackend({
     };
   }
 
+  // The watchdog for a turn whose runner vanished. Every transition it makes
+  // is one a live runner would otherwise have made with its release/failure
+  // report; without it a lost runner (VM idle-stop, guest OOM, restart) leaves
+  // the session `active` forever and every later message hangs on "Sending…".
+  if (reapIntervalMs > 0) {
+    setInterval(() => { void reapSessions(); }, reapIntervalMs).unref?.();
+  }
+
   return {
     // Flush a debounced event write before the process leaves (see saveSoon).
     flush,
+    // Run the lost-runner watchdog now. The interval arm is what does this in
+    // production; the smokes (and an operator debugging a wedged session) call
+    // it directly instead of waiting out the tick.
+    reapNow: reapSessions,
+    // Push appended events to a live reader (the session page's SSE response).
+    // Returns the unsubscribe function.
+    subscribeEvents,
 
     /**
      * Does this Authorization header name one of this instance's pool
@@ -1125,7 +1577,7 @@ export function createRunnerBackend({
     },
 
     /** POST /v1/code/runners/self-hosted/spawn-hints/poll */
-    async pollSpawnHints({ headers, request = null } = {}) {
+    async pollSpawnHints({ headers, request = null, body = null } = {}) {
       const state = await load();
       const pool = poolForSecret(state, headers);
       if (!pool) return { unauthorized: true };
@@ -1139,6 +1591,20 @@ export function createRunnerBackend({
         runner.last_poll_at = now;
         if (poller) runner.last_runner_poll_at = now;
       }
+      // The sessions this runner still holds. The reaper reconciles an
+      // `active` session against this set: absent from every live runner's
+      // claims means the turn died with the process (VM stop, OOM, restart),
+      // and nothing else will ever release it.
+      if (poller) {
+        const ids = (value) => (Array.isArray(value) ? value : [])
+          .filter((id) => typeof id === "string" && id).slice(0, 500);
+        if (Array.isArray(body?.running) || Array.isArray(body?.claimed)) {
+          poller.running_sessions = ids(body?.running);
+          poller.claimed_sessions = ids(body?.claimed);
+          poller.claims_reported = true;
+          poller.claims_at = now;
+        }
+      }
       await save();
       // Nothing may be handed to a poll that can no longer receive an answer
       // (a guest that suspended or restarted leaves its held request open on
@@ -1148,8 +1614,16 @@ export function createRunnerBackend({
       const mine = state.sessions.filter(
         (session) => session.pool_id === pool.pool_id && session.state === "pending",
       );
-      // A session is handed out once; the runner's nack puts it back.
-      for (const session of mine) session.state = "offered";
+      // A session is handed out once; the runner's nack puts it back. The
+      // offer timestamp is the lease the reaper uses when the answer never
+      // lands (or the runner dies before claiming it).
+      for (const session of mine) {
+        session.state = "offered";
+        session.offered_at = now;
+        // A new turn re-reads the transcript; until it reports how far it got
+        // (recordClaim), no message can be called mid-turn.
+        delete session.claimed_through;
+      }
       if (mine.length) await save();
       // UI requests queued for the guest (folder and git lookups) ride this
       // same poll: the runner answers them from inside the VM and posts the
@@ -1167,7 +1641,12 @@ export function createRunnerBackend({
         const later = refreshed.sessions.filter(
           (session) => session.pool_id === pool.pool_id && session.state === "pending",
         );
-        for (const session of later) session.state = "offered";
+        const offeredAt = new Date().toISOString();
+        for (const session of later) {
+          session.state = "offered";
+          session.offered_at = offeredAt;
+          delete session.claimed_through;
+        }
         if (later.length) await save();
         requests = takeRunnerRequests(pool.pool_id);
         return {
@@ -1298,7 +1777,10 @@ export function createRunnerBackend({
         session.session_token = `ccsess_${randomBytes(24).toString("base64url")}`;
       }
       if (session.state === "pending" || session.state === "offered") session.state = "active";
-      session.started_at = session.started_at ?? new Date().toISOString();
+      // Every turn gets its own start: the reaper's grace measures the turn
+      // that is running, not the first one this session ever ran.
+      session.started_at = new Date().toISOString();
+      delete session.offered_at;
       // A Stop marker is deliberately *not* cleared here. If it landed between
       // the poll handing out the hint and this claim, the runner answers the
       // token leg but reads the interrupt out of the event log before spawning
@@ -1306,24 +1788,12 @@ export function createRunnerBackend({
       // that turn run anyway. A stop for the next turn is cleared when the
       // user's message requeues the session, and by release.
       // The runner taking the session is what "processed" means on the wire:
-      // every client message the turn is about to answer is stamped and a
+      // every client message present at the claim is stamped and a
       // `delivery_update` frame goes down the session stream — the frame the
       // page clears its "Sending…" state on, and the one that releases the
       // held echo of the user's own message into the transcript.
-      const processedAt = new Date().toISOString();
-      session.delivery_updates = Array.isArray(session.delivery_updates)
-        ? session.delivery_updates : [];
-      for (const envelope of session.events ?? []) {
-        if (envelope.source !== "client") continue;
-        if ((envelope.payload ?? {}).type !== "user") continue;
-        if (envelope.processing_at !== undefined) continue;
-        envelope.processing_at = processedAt;
-        session.delivery_updates.push({
-          event_id: envelope.event_id,
-          status: "PROCESSING",
-          timestamp: processedAt,
-        });
-      }
+      await ensureEvents(session);
+      markProcessed(session);
       // Which runner got it, for the label the app shows once the wait is over
       // (`self_hosted_runner_state.assigned_runner_label` — the page's pool
       // wait card clears on it). Polls authenticate by the pool secret, so the
@@ -1336,6 +1806,42 @@ export function createRunnerBackend({
       await save();
       log.log(`[code-runners] session ${session.session_uuid} started on pool ${session.pool_id}`);
       return { session_token: session.session_token };
+    },
+
+    /**
+     * POST /v1/code/runners/self-hosted/sessions/{id}/claim — how far the
+     * turn's transcript read went. The guest reads the history, then reports
+     * the highest sequence it saw; anything appended after that point is a
+     * message for the next turn, and anything at or before it has been
+     * consumed. This is also what acknowledges a message that landed between
+     * the token and the read (stamping it and queueing its delivery update).
+     */
+    async recordClaim({ headers, sessionId, body } = {}) {
+      const state = await load();
+      const session = sessionFor(state, headers, sessionId);
+      if (session === null) return null;
+      if (session.unauthorized) return session;
+      const through = Number(body?.through_sequence_num);
+      if (!Number.isSafeInteger(through) || through < 0) return {};
+      await ensureEvents(session);
+      session.claimed_through = through;
+      markProcessed(session, through);
+      // A message the turn's read did not include is answered by the next one.
+      // Only a live turn can release into that retry; a session stopped in the
+      // meantime (or released) takes the next client message through the
+      // ordinary requeue path.
+      if (session.state === "active" || session.state === "offered") {
+        for (const envelope of session.events ?? []) {
+          if (envelope.source === "worker") continue;
+          if (!isUserMessage(envelope)) continue;
+          if (Number(envelope.sequence_num) > through) {
+            session.requeue_after_release = true;
+            break;
+          }
+        }
+      }
+      await save();
+      return {};
     },
 
     /**
@@ -1406,9 +1912,15 @@ export function createRunnerBackend({
       if (session.unauthorized) return session;
       const incoming = Array.isArray(body?.events) ? body.events
         : body && typeof body === "object" ? [body] : [];
-      const appended = appendToSession(session, incoming, "worker");
-      if (appended.length) await save();
-      return { data: appended };
+      await ensureEvents(session);
+      const { durable, volatile } = appendIncoming(session, incoming, "worker");
+      if (durable.length) {
+        await appendEventsFile(session, durable);
+        emitLive(session, durable);
+      }
+      emitLive(session, volatile);
+      if (durable.length || volatile.length) await save();
+      return { data: [...durable, ...volatile] };
     },
 
     /**
@@ -1579,6 +2091,7 @@ export function createRunnerBackend({
       // away; otherwise the session just goes idle.
       const requeue = session.requeue_after_release === true;
       delete session.requeue_after_release;
+      delete session.offered_at;
       session.state = requeue ? "pending" : "released";
       if (requeue) {
         session.attempt += 1;
@@ -1588,7 +2101,10 @@ export function createRunnerBackend({
       // requeues the session, and that turn starts un-cancelled.
       clearInterrupted(session);
       await save();
-      if (requeue) wakePool(session.pool_id);
+      if (requeue) {
+        wakePool(session.pool_id);
+        wakeTurnRunner();
+      }
       return { released: true };
     },
 
@@ -1600,10 +2116,13 @@ export function createRunnerBackend({
       if (session.unauthorized) return session;
       session.state = "pending";
       session.attempt += 1;
+      session.reap_attempts = 0;
       session.session_token = undefined;
       session.assigned_runner_id = undefined;
+      delete session.offered_at;
       await save();
       wakePool(session.pool_id);
+      wakeTurnRunner();
       return {};
     },
 
@@ -1651,13 +2170,20 @@ export function createRunnerBackend({
         ...(Array.isArray(body?.tags) && body.tags.length
           ? { tags: body.tags.filter((tag) => typeof tag === "string") } : {}),
         created_at: new Date().toISOString(),
+        // A session born in this process has no history to read.
+        events: [],
+        eventsLoaded: true,
+        last_sequence: 0,
       };
       state.sessions.push(session);
       // The create body may carry the session's first events (a schema init
       // control request, or an eager first message); they land in the same log
       // the runner reads and the stream replays.
       if (Array.isArray(body?.events)) {
-        await appendEventsFile(session, appendToSession(session, body.events, source));
+        const { durable, volatile } = appendIncoming(session, body.events, source);
+        await appendEventsFile(session, durable);
+        emitLive(session, durable);
+        emitLive(session, volatile);
       }
       await save();
       // A runner already holding this pool's poll takes it on that same
@@ -1709,7 +2235,10 @@ export function createRunnerBackend({
           const current = session.session_config?.permission_mode;
           return !current || current === "default";
         });
-      const appended = appendToSession(session, accepted,
+      // Partials from this leg (a runner using the plain append) are live-only
+      // too: the durable half goes to the log, both go to the open streams.
+      await ensureEvents(session);
+      const { durable: appended, volatile } = appendIncoming(session, accepted,
         fromWorker ? "worker" : "client");
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,
@@ -1779,33 +2308,57 @@ export function createRunnerBackend({
       }
       // One append to one session's log — never a rewrite of the store.
       await appendEventsFile(session, appended);
+      emitLive(session, appended);
+      emitLive(session, volatile);
       let requeued = false;
       if (appended.length && (session.state === "released" || session.state === "failed")
           && incoming.some(isUserMessage)) {
         session.state = "pending";
         session.attempt += 1;
+        session.reap_attempts = 0;
         session.assigned_runner_id = undefined;
         session.failure = undefined;
         clearInterrupted(session);
         requeued = true;
         log.log(`[code-runners] session ${session.session_uuid} requeued on pool ${session.pool_id}`);
       }
-      // A message that arrived with the Stop (the composer's send-and-interrupt)
-      // is not answered by the turn being cancelled. Remember it so the release
-      // that follows puts the session back on the pool instead of leaving the
-      // message stranded behind an idle session.
+      // A message typed while a turn is running. The guest's agent process
+      // reads its prompt from stdin, which closes after the prompt, so it
+      // cannot take a mid-turn message — the message is answered by the next
+      // turn instead. The release that ends the current turn puts the session
+      // back on the pool; without this the message was simply stranded and the
+      // page kept showing "Sending…" forever. This is also the send-and-
+      // interrupt case: the cancelled turn does not answer the new message.
+      // A message is "mid-turn" only if this turn's transcript read cannot
+      // have included it. The guest reports its read-through point (recordClaim)
+      // right after reading; a message at or below it was answered by this turn
+      // however close to the claim it landed, and one above it belongs to the
+      // next turn. Without this, the opening message — routinely appended
+      // between the claim and the runner's read — started a duplicate turn.
+      const claimedThrough = Number.isFinite(session.claimed_through)
+        ? session.claimed_through : null;
+      // The composer's send-and-interrupt is always next-turn work: the turn
+      // being cancelled will not answer the message, claim or no claim.
+      const midTurn = (claimedThrough !== null && appended.some((envelope) =>
+        envelope.source !== "worker"
+        && isUserMessage(envelope)
+        && Number(envelope.sequence_num) > claimedThrough))
+        || (interruptRequests.size > 0 && carriesUserMessage);
       let requeueOnRelease = false;
-      if (interruptRequests.size && carriesUserMessage
-          && (session.state === "active" || session.state === "offered")) {
+      if (midTurn && (session.state === "active" || session.state === "offered")) {
         session.requeue_after_release = true;
+        session.reap_attempts = 0;
         requeueOnRelease = true;
+        warn(`[code-runners] ${session.session_uuid}: message during `
+          + `${session.state}; will requeue on release`);
       }
-      if (appended.length || configChanged) saveSoon();
+      if (appended.length || volatile.length || configChanged) saveSoon();
       // The runner holding the pool hears about it on its held poll, not on a
       // later tick — the same wake a placement gets. A stop must not wait out
       // the poll's 20 s hold (see cancellationsFor).
       if (requeued || interruptRequests.size || requeueOnRelease) wakePool(session.pool_id);
-      return { data: appended };
+      if (requeued) wakeTurnRunner();
+      return { data: [...appended, ...volatile] };
     },
 
     /**
@@ -1825,6 +2378,9 @@ export function createRunnerBackend({
       if (!session) return null;
       const allowed = sessionFor(state, headers, sessionId);
       if (!allowed || allowed.unauthorized) return { unauthorized: true };
+      // The sequence counter must be seeded from the durable history before the
+      // first append; a session created in this process already carries it.
+      await ensureEvents(session);
       let buffer = "";
       let appendedCount = 0;
       const take = async (lines) => {
@@ -1841,9 +2397,14 @@ export function createRunnerBackend({
           incoming.push(entry);
         }
         if (!incoming.length) return;
-        const appended = appendToSession(session, incoming, "worker");
-        await appendEventsFile(session, appended);
-        appendedCount += appended.length;
+        const { durable, volatile } = appendIncoming(session, incoming, "worker");
+        if (durable.length) {
+          await appendEventsFile(session, durable);
+          emitLive(session, durable);
+        }
+        // Token deltas go straight to the open page and nowhere else.
+        emitLive(session, volatile);
+        appendedCount += durable.length + volatile.length;
       };
       for await (const chunk of request) {
         buffer += chunk.toString("utf8");
@@ -1873,6 +2434,7 @@ export function createRunnerBackend({
       const state = await load();
       const session = sessionById(state, sessionId);
       if (!session) return null;
+      await ensureEvents(session);
       const after = Number(searchParams?.get?.("after_sequence_num") ?? 0) || 0;
       const limit = Number(searchParams?.get?.("limit") ?? 0) || 0;
       const descending = searchParams?.get?.("sort_order") === "desc";
@@ -1907,6 +2469,7 @@ export function createRunnerBackend({
       const state = await load();
       const session = sessionById(state, sessionId);
       if (!session) return null;
+      await ensureEvents(session);
       return (session.events ?? []).filter((event) => Number(event.sequence_num) > sequence);
     },
 
@@ -2058,7 +2621,10 @@ export function createRunnerBackend({
         wakePool(session.pool_id);
       }
       state.sessions.splice(state.sessions.indexOf(session), 1);
-      await rm(eventsPathFor(session), { force: true }).catch(() => undefined);
+      loadedSessions.delete(session.session_uuid);
+      // Serialize with any append still in flight for this session.
+      await eventChain(session, () => rm(eventsPathFor(session), { force: true }))
+        .catch(() => undefined);
       await save();
       return {};
     },
@@ -2080,6 +2646,9 @@ export function createRunnerBackend({
         work_order_jwt: `${randomUUID()}.${randomBytes(16).toString("base64url")}`,
         sources,
         created_at: new Date().toISOString(),
+        events: [],
+        eventsLoaded: true,
+        last_sequence: 0,
       };
       state.sessions.push(session);
       await save();
@@ -2191,6 +2760,15 @@ export function createRunnerBackend({
         // still carry stale versions.
         attributed: online.some((runner) => typeof runner.last_runner_poll_at === "string"),
         request_lane: Boolean(live && versionAtLeast(live.runner_version, requestLaneVersion)),
+        // What the VM's idle monitor cannot see for itself: a Code turn runs on
+        // the guest runner, not in `LocalAgentModeSessions`. A pending session
+        // is a message waiting for the VM to come up.
+        active_sessions: state.sessions.filter(
+          (session) => session.pool_id === pool.pool_id && session.state === "active").length,
+        offered_sessions: state.sessions.filter(
+          (session) => session.pool_id === pool.pool_id && session.state === "offered").length,
+        pending_sessions: state.sessions.filter(
+          (session) => session.pool_id === pool.pool_id && session.state === "pending").length,
         // The last few placements in the shape the renderer sent them. This is
         // what answers "did my model/effort/permission pick reach the session?"
         // from /api/health: the values here are the create body's own, before

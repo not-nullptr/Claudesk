@@ -349,6 +349,35 @@ Both routine-form implementations get them: the unified form used by the
 Cowork scheduled-task surface, and the Code surface's own create page and edit
 dialog (`routine-epitaxy-start-options`). See `docs/frontend-patches.md`.
 
+## Scheduling without a page open
+
+The Desktop main process checks due scheduled tasks only once a renderer has
+declared itself ready (`markListenerReady`). In the web shell that renderer is
+somebody's browser tab, so a routine with no page open never fired — it only ran
+when a person pressed **Run now**. The bridge is always up, and it already owns
+the proven fire path, so it keeps the clock for **Code** routines:
+
+- Every 30 s it lists `CCDScheduledTasks` and computes each enabled task's next
+  slot from its `cronExpression` (five-field cron, in the instance's `TZ`; a
+  one-shot `fireAt` is a single slot). The slot map lives in
+  `routine-triggers.json` (`schedule: {routineId: {expression, next}}`).
+- When a slot is due it calls the same `fire()` path as Run now and the API
+  trigger, so the run gets the task's model, folder, branch, worktree,
+  permission mode, effort and per-fire connectors, and is attributed to the
+  routine (`trigger_id`, `origin: fire_routine`). A failed slot is skipped, not
+  retried every tick; after downtime at most one catch-up runs.
+- The routine page's `next_run_at` is the bridge's computed slot. After a fire
+  the bridge also re-sends the task's schedule to the Desktop store, so a task
+  list reading the store's `nextRunAt` agrees (best effort).
+- To stop a page-open Desktop from running the same slot beside the bridge, the
+  service asks the store to drop host runs (`setHostRunsSupported(false)`); if a
+  build refuses that call, a slot whose store `lastRunAt` already covers it is
+  skipped rather than duplicated.
+
+Cowork's separate **Scheduled** folder stays with the Desktop's own scheduler;
+this clock is only the Code store. `CLAUDESK_ROUTINE_SCHEDULER=0` disables it
+(`CLAUDESK_ROUTINE_SCHEDULER_MS` changes the tick).
+
 ## Stopping a run
 
 The routine detail's **Stop** posts to the local route the renderer composes:

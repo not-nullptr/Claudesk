@@ -283,6 +283,14 @@ dialog.showMessageBox(window, {
 });
 ```
 
+The bridge's download and preview routes follow the same rule. A session's
+deliverables are written under Desktop's userData
+(`<sessionId>/<…>/outputs/…`) rather than the workspace, and a model's file card
+links straight there, so a path whose real location is inside an `outputs/`
+directory under `COWORK_REMOTE_SESSION_OUTPUTS_ROOT` is served. The `memory/`,
+transcript and settings trees beside it are refused, and a symlink inside
+`outputs/` that resolves into one of them is refused too.
+
 An agent memory file is one of those paths: it lives under the Desktop's own
 userData (`~/.config/Claude-3p/local-agent-mode-sessions/…/memory/`), which no
 session is granted, even though the reader's own allowlist (`getAutoMemoryDir`)

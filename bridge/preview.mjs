@@ -149,6 +149,7 @@ async function pruneCache(cacheRoot) {
 export function createPreviewHandler({
   ApiError,
   downloadRoots,
+  sessionOutputsRoot,
   maxBytes,
   converterUrl,
   cacheRoot = join(tmpdir(), "claudesk-office-preview"),
@@ -164,6 +165,7 @@ export function createPreviewHandler({
       allowRoot: false,
       missingMessage: "preview file was not found",
       outsideMessage: "preview path is outside the allowed read roots",
+      sessionOutputsRoot,
     });
     const info = await stat(filePath);
     if (!info.isFile()) throw new ApiError(404, "preview file was not found");
