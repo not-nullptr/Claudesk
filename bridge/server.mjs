@@ -3953,10 +3953,21 @@ async function canonicalizePickerModelIds(document) {
   return true;
 }
 
+// The corrected-health probe is a real inference request (`max_tokens: 1`), and
+// the surface asks for config health on every page load. A `config_model_rejected`
+// answer would otherwise reach the gateway again each time, so a fresh answer is
+// reused briefly; a rejected route does not start working between two page loads.
+const gatewayProbeCache = new Map();
+const gatewayProbeTtlMs = 60 * 1000;
+const gatewayProbeCacheMax = 64;
+
 /** Probe one model over the Messages API, the same `max_tokens: 1` request the
  *  Desktop's config-health check sends. Returns `{status, ok, requestUrl,
  *  body}` or null when the gateway cannot be asked. */
 async function probeGatewayModel(model, base, key, scheme) {
+  const cacheKey = `${String(base).replace(/\/+$/, "")}\u0000${model}`;
+  const cached = gatewayProbeCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.probed;
   const requestUrl = `${String(base).replace(/\/+$/, "")}/v1/messages`;
   try {
     const response = await fetch(requestUrl, {
@@ -3974,7 +3985,12 @@ async function probeGatewayModel(model, base, key, scheme) {
       signal: AbortSignal.timeout(8000),
     });
     const body = await response.text().catch(() => "");
-    return { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
+    const probed = { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
+    gatewayProbeCache.set(cacheKey, { probed, expires: Date.now() + gatewayProbeTtlMs });
+    while (gatewayProbeCache.size > gatewayProbeCacheMax) {
+      gatewayProbeCache.delete(gatewayProbeCache.keys().next().value);
+    }
+    return probed;
   } catch (error) {
     console.warn(`[config-health] could not probe ${model}: ${error.message}`);
     return null;

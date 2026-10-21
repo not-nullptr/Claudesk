@@ -482,6 +482,31 @@ short-lived cancellation tombstone, since its record is already gone. A held
 poll whose connection died (the VM suspended or restarted) is dropped with its
 socket and no longer claims the placement it was woken for.
 
+**Steering and rewind (landed).** A message typed while a turn runs is
+appended to the transcript after that turn's read and *before* its `result`.
+The agent process never sees it (its stdin closes after the prompt), so the
+bridge records the turn's read-through point on the session
+(`delivered_through`) and the release puts the session back on its pool. The
+next hint carries that floor as `prompt_after_sequence_num`; the guest reads
+the events above it and answers every message there, including the one that
+sits before the previous `result` — the old "after the last result" read
+dropped it and left the page on "Sending…". Each client message is written to
+the agent as its own stream-json user message carrying the bridge event's
+uuid, so the conversation's own transcript names the messages the surface
+names.
+
+Rewind is a `rewind_conversation` control request (`target_message_uuid`,
+`interrupt_if_running`). The bridge answers it immediately with the
+`control_response` the page truncates its transcript on (a durable worker
+event, so a reopened session replays the `conversation_rewound` marker), keeps
+the target's text as the composer prefill, stops a running turn the way a Stop
+does, and records `pending_rewind`. The next turn hands that request to the
+agent over stdin *before* its prompt; the agent's own `rewind_conversation`
+truncates its transcript (what `--resume` would otherwise replay), and the
+guest reports it applied in its claim, which clears the hint. A rewind the
+agent cannot find (its transcript was rebuilt) is answered and cleared rather
+than retried forever.
+
 This bakes the payload in rather than reading it from the `claudeshared` share,
 because it does not depend on the still-open question of whether the host can
 write that share's directory. Once that is answered, the env — and the runner

@@ -281,6 +281,91 @@ function clearInterrupted(session) {
   delete session.interrupt_request_id;
 }
 
+/** The text of a user payload, for a rewind's composer prefill. */
+function userMessageText(payload) {
+  const content = (isRecord(payload?.message) ? payload.message : {}).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => isRecord(part) && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+/**
+ * Act on the renderer's `rewind_conversation` control request — the Code
+ * surface's rewind (the message menu, Esc Esc, `/rewind`). The cloud product's
+ * agent answers this itself because it keeps the conversation in a live child;
+ * this deployment ends the child with each turn, so the bridge answers the
+ * renderer (the response is the `conversation_rewound` marker a reopened page
+ * rebuilds its transcript from) and leaves `pending_rewind` for the guest to
+ * apply to the agent's own transcript at the next turn (see the hint's
+ * `pending_rewind` and guest/runner.py).
+ *
+ * The target is a message uuid from the transcript; its text is what the
+ * composer gets back. `interrupt_if_running` (default true, what the surface
+ * sends) stops the live turn the same way a Stop does; the rewound turn cannot
+ * answer anything anyway.
+ */
+function conversationRewind(session, request, requestId) {
+  const targetUuid = typeof request?.target_message_uuid === "string"
+    ? request.target_message_uuid : "";
+  const events = Array.isArray(session.events) ? session.events : [];
+  const target = targetUuid
+    ? events.find((event) => isRecord(event?.payload) && event.payload.uuid === targetUuid)
+    : undefined;
+  const response = (body) => ({
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: requestId,
+      response: body,
+    },
+  });
+  if (!target) {
+    return {
+      response: response({
+        rewound: false,
+        reason: "target_not_found",
+        targetMessageUuid: targetUuid,
+        precedingAssistantUuid: null,
+        prefillText: null,
+      }),
+    };
+  }
+  let precedingAssistantUuid = null;
+  for (let index = events.indexOf(target) - 1; index >= 0; index -= 1) {
+    const payload = events[index]?.payload;
+    if (isRecord(payload) && payload.type === "assistant"
+      && typeof payload.uuid === "string" && payload.uuid) {
+      precedingAssistantUuid = payload.uuid;
+      break;
+    }
+  }
+  // The agent has not seen anything past this message; the next turn answers
+  // only what was appended after it (see `delivered_through`).
+  const targetSequence = Number(target.sequence_num) || 0;
+  session.delivered_through = Math.max(Number(session.delivered_through) || 0, targetSequence);
+  session.pending_rewind = {
+    request_id: requestId,
+    target_message_uuid: targetUuid,
+    preceding_assistant_uuid: precedingAssistantUuid,
+  };
+  if (request?.interrupt_if_running !== false) {
+    // No request id: this is not the Stop the interrupt receipt is for, and
+    // synthesizing a second `interrupt` response would confuse the Stop button.
+    markInterrupted(session);
+  }
+  return {
+    response: response({
+      rewound: true,
+      targetMessageUuid: targetUuid,
+      precedingAssistantUuid,
+      prefillText: userMessageText(target.payload),
+    }),
+  };
+}
+
 /** The `config` of a session document — see `sessionConfigKeys`. Sessions the
  * store already held before this shape keep their sources at the top level,
  * so both spellings are read. */
@@ -1477,6 +1562,7 @@ export function createRunnerBackend({
   // `work_order_jwt` is the runner's opaque order token; nothing here verifies
   // it, but the field is non-optional so it must be a string.
   function hintFor(session) {
+    const delivered = Number(session.delivered_through);
     return {
       session_uuid: session.session_uuid,
       attempt: session.attempt,
@@ -1485,6 +1571,18 @@ export function createRunnerBackend({
       // sessions the store held before that keep them top-level, and both are
       // read (see sessionConfigOf).
       sources: sessionConfigOf(session).sources,
+      // The highest transcript sequence the agent has actually been given.
+      // A user message above it was typed while a turn ran — after that turn's
+      // read, so the agent never saw it — and is answered by this turn even
+      // though it sits before the previous turn's `result` in the log. Absent
+      // on a session that has not recorded a claim yet (see recordClaim), where
+      // the runner keeps its old "after the last result" read.
+      ...(Number.isSafeInteger(delivered) && delivered >= 0
+        ? { prompt_after_sequence_num: delivered } : {}),
+      // A rewind the bridge has answered but the agent has not applied yet;
+      // the runner sends it to the agent before this turn's prompt.
+      ...(session.pending_rewind
+        ? { pending_rewind: { ...session.pending_rewind } } : {}),
     };
   }
 
@@ -1905,6 +2003,19 @@ export function createRunnerBackend({
       if (!Number.isSafeInteger(through) || through < 0) return {};
       await ensureEvents(session);
       session.claimed_through = through;
+      // The delivery floor the *next* turn reads from. A message appended
+      // after this point was never handed to the agent (the runner closes the
+      // child's stdin after its prompt), however early it landed in the log
+      // before that turn's `result`; the next turn must answer it.
+      session.delivered_through = Math.max(Number(session.delivered_through) || 0, through);
+      // The guest applies a bridge-answered rewind to the agent's own
+      // transcript at the start of the next turn and names it here once the
+      // agent has seen it. Until then the hint keeps carrying it.
+      if (typeof body?.applied_rewind_request_id === "string"
+        && body.applied_rewind_request_id
+        && session.pending_rewind?.request_id === body.applied_rewind_request_id) {
+        delete session.pending_rewind;
+      }
       markProcessed(session, through);
       // A message the turn's read did not include is answered by the next one.
       // Only a live turn can release into that retry; a session stopped in the
@@ -2353,6 +2464,17 @@ export function createRunnerBackend({
           const requestId = payload.request_id ?? request.request_id;
           markInterrupted(session, { requestId });
           if (typeof requestId === "string" && requestId) interruptRequests.add(requestId);
+          continue;
+        }
+        // A rewind is answered here and applied to the agent's own transcript
+        // by the next turn (see conversationRewind). Its response is the marker
+        // the surface truncates its transcript on, and the one a reopened
+        // session replays, so it must be a durable worker event.
+        if (!fromWorker && request.subtype === "rewind_conversation") {
+          const requestId = payload.request_id ?? request.request_id;
+          const outcome = conversationRewind(session, request,
+            typeof requestId === "string" ? requestId : "");
+          appended.push(...appendToSession(session, [{ payload: outcome.response }], "worker"));
           continue;
         }
         const next = { ...(session.session_config || {}) };

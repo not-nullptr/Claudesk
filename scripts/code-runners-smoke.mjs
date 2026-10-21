@@ -828,6 +828,96 @@ try {
   "a message the turn's read included is not requeued");
   await backend.deleteSession({ sessionId: openingId });
 
+  // The next hint names the delivery floor. A mid-turn message lands above the
+  // running turn's claim but *before* its result, so a guest that read "after
+  // the last result" dropped it while the page kept showing "Sending…".
+  const floorSession = await backend.createSession({
+    body: { environment_id: primary.pool_id },
+  });
+  const floorId = floorSession.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const floorToken = await backend.issueSessionToken({ headers: runnerAuth, sessionId: floorId });
+  const firstUser = { payload: { type: "user",
+    uuid: "aaaaaaaa-1111-4111-8111-111111111111",
+    message: { role: "user", content: "the opening message" } } };
+  const midUser = { payload: { type: "user",
+    uuid: "bbbbbbbb-2222-4222-8222-222222222222",
+    message: { role: "user", content: "typed while it worked" } } };
+  await backend.appendEvents({ sessionId: floorId, body: { events: [firstUser] } });
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: floorId, body: { through_sequence_num: 1 },
+  });
+  await backend.appendEvents({ sessionId: floorId, body: { events: [midUser] } });
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${floorToken.session_token}` }, sessionId: floorId,
+  });
+  polled = await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const floorHint = polled.hints.find((hint) => hint.session_uuid === floorId);
+  assert.equal(floorHint.prompt_after_sequence_num, 1,
+    "the hint names the highest sequence the agent was actually given");
+  const aboveFloor = await backend.listEvents({
+    sessionId: floorId, searchParams: new URLSearchParams({ after_sequence_num: "1" }),
+  });
+  assert.deepEqual(aboveFloor.data.map((event) => event.payload.uuid).filter(Boolean),
+    [midUser.payload.uuid],
+    "the mid-turn message is above the floor and is answered by the next turn");
+
+  // Rewind. The surface posts a `rewind_conversation` control request; the
+  // bridge answers it with the durable worker marker a reopened page rebuilds
+  // its truncated transcript from, and leaves it for the guest to apply to the
+  // agent's own conversation at the next turn.
+  const rewound = await backend.appendEvents({ sessionId: floorId, body: { events: [{
+    payload: { type: "control_request", request_id: "rewind-smoke",
+      request: { subtype: "rewind_conversation",
+        target_message_uuid: firstUser.payload.uuid, interrupt_if_running: false } },
+  }] } });
+  const marker = rewound.data.find((event) => event.payload.type === "control_response");
+  assert.equal(marker.source, "worker", "the marker is the worker's answer");
+  assert.equal(marker.payload.response.request_id, "rewind-smoke");
+  assert.equal(marker.payload.response.response.rewound, true);
+  assert.equal(marker.payload.response.response.targetMessageUuid, firstUser.payload.uuid);
+  assert.equal(marker.payload.response.response.prefillText, "the opening message",
+    "the marker restores the rewound message's text to the composer");
+
+  // An unknown target is a decline, not a silent success.
+  const missing = await backend.appendEvents({ sessionId: floorId, body: { events: [{
+    payload: { type: "control_request", request_id: "rewind-missing",
+      request: { subtype: "rewind_conversation",
+        target_message_uuid: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        interrupt_if_running: false } },
+  }] } });
+  const declined = missing.data.find((event) => event.payload.type === "control_response");
+  assert.equal(declined.payload.response.response.rewound, false);
+  assert.equal(declined.payload.response.response.reason, "target_not_found");
+
+  // The pending rewind rides the next hint, and the guest clears it once the
+  // agent has answered it.
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${floorToken.session_token}` }, sessionId: floorId,
+  });
+  await backend.appendEvents({ sessionId: floorId, body: { events: [{ payload: {
+    type: "user", uuid: "dddddddd-4444-4444-8444-444444444444",
+    message: { role: "user", content: "after the rewind" } } }] } });
+  polled = await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const rewindHint = polled.hints.find((hint) => hint.session_uuid === floorId);
+  assert.equal(rewindHint.pending_rewind.request_id, "rewind-smoke");
+  assert.equal(rewindHint.pending_rewind.target_message_uuid, firstUser.payload.uuid);
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: floorId,
+    body: { through_sequence_num: 4, applied_rewind_request_id: "rewind-smoke" },
+  });
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${floorToken.session_token}` }, sessionId: floorId,
+  });
+  await backend.appendEvents({ sessionId: floorId, body: { events: [{ payload: {
+    type: "user", uuid: "eeeeeeee-5555-4555-8555-555555555555",
+    message: { role: "user", content: "one more" } } }] } });
+  polled = await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const clearedHint = polled.hints.find((hint) => hint.session_uuid === floorId);
+  assert.equal(clearedHint.pending_rewind, undefined,
+    "an applied rewind is not carried to a later turn");
+  await backend.deleteSession({ sessionId: floorId });
+
   // Removing the pool takes its runners and stops handing out work.
   await backend.removePool({ poolId: primary.pool_id });
   assert.equal((await backend.listPools()).pools.length, 0);
