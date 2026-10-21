@@ -28,6 +28,7 @@ node scripts/provision-env-smoke.mjs
 node scripts/tenant-code-guard-smoke.mjs
 node scripts/code-runners-smoke.mjs
 node scripts/code-runners-http-smoke.mjs
+node scripts/health-probe-smoke.mjs
 node scripts/code-runner-loop-smoke.mjs
 node scripts/guest-runner-smoke.mjs
 node scripts/slug-smoke.mjs

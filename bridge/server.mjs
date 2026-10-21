@@ -4009,7 +4009,7 @@ const gatewayProbeCacheMax = 64;
 /** Probe one model over the Messages API, the same `max_tokens: 1` request the
  *  Desktop's config-health check sends. Returns `{status, ok, requestUrl,
  *  body}` or null when the gateway cannot be asked. */
-async function probeGatewayModel(model, base, key, scheme) {
+async function probeGatewayModel(model, base, key, scheme, timeoutMs = 8000) {
   const cacheKey = `${String(base).replace(/\/+$/, "")}\u0000${model}`;
   const cached = gatewayProbeCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return cached.probed;
@@ -4027,7 +4027,7 @@ async function probeGatewayModel(model, base, key, scheme) {
         max_tokens: 1,
         messages: [{ role: "user", content: "." }],
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(Math.max(1000, Math.min(8000, timeoutMs))),
     });
     const body = await response.text().catch(() => "");
     const probed = { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
@@ -4041,6 +4041,15 @@ async function probeGatewayModel(model, base, key, scheme) {
     return null;
   }
 }
+
+// How many alternate routes one health check may try, and the wall-clock budget
+// for all of them. This runs when the page asks for config health, so it must
+// not become a fan-out: the chain needs one route that answers, not a report on
+// every seeded model. Probing all of them in parallel put a burst of
+// `max_tokens: 1` requests on the gateway on every page load (and multiplied
+// the load exactly when the upstreams were rate limited).
+const workingProbeLimit = 4;
+const workingProbeBudgetMs = 10000;
 
 /** The first gateway-listed model that answers a probe, for a health check
  *  whose preferred model is rate limited rather than missing. The chain names
@@ -4066,12 +4075,17 @@ async function workingGatewayModel(base, key, scheme, excluded) {
       && !id.startsWith("selfhosted/")
       && !id.startsWith("tw02/"))
     .sort((left, right) => Number(!cheap.test(left)) - Number(!cheap.test(right)))
-    .slice(0, 12);
-  const probed = await Promise.all(candidates.map(async (model) => ({
-    model, result: await probeGatewayModel(model, base, key, scheme),
-  })));
-  const working = probed.find((entry) => entry.result?.ok);
-  return working ? { model: working.model, ...working.result } : null;
+    .slice(0, workingProbeLimit);
+  // Sequential, first success wins: a healthy chain costs one request, and the
+  // per-model probe cache makes a page reload inside its TTL cost none.
+  const deadline = Date.now() + workingProbeBudgetMs;
+  for (const model of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const probed = await probeGatewayModel(model, base, key, scheme, remaining);
+    if (probed?.ok) return { model, ...probed };
+  }
+  return null;
 }
 
 /**
