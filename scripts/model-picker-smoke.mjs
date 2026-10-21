@@ -228,10 +228,12 @@ assert.equal(names.remember({}), undefined, "a document with no model config is 
 assert.equal(names.remember(null), undefined, "no document is ignored");
 
 // The layout is only ever applied to the bootstrap response the picker reads, and
-// the list comes from the auth service's narrow deployment route.
+// the list comes from the auth service's narrow deployment route. The same block
+// resolves a bare gateway alias to the prefixed route before the list is
+// remembered, because those ids are what every surface sends.
 assert.match(serverSource,
-  /if \(bootstrapResponsePath\.test\(url\.pathname\)\) \{\s*rememberPickerModels\(parsed\);\s*if \(applyModelPickerLayout\(parsed, await resolveMainModels\(\)\)\) rewrote = true;\s*\}/,
-  "the layout and the catalogue are limited to bootstrap responses");
+  /if \(bootstrapResponsePath\.test\(url\.pathname\)\) \{[\s\S]*?if \(applyModelPickerLayout\(parsed, await resolveMainModels\(\)\)\) rewrote = true;[\s\S]*?if \(await canonicalizePickerModelIds\(parsed\)\) rewrote = true;[\s\S]*?rememberPickerModels\(parsed\);[\s\S]*?\}/,
+  "the layout, alias resolution and catalogue are limited to bootstrap responses");
 assert.match(serverSource, /fetch\(`\$\{authIdentityUrl\}\/api\/auth\/deployment`/,
   "the operator's list is read from authd's deployment route");
 assert.match(serverSource, /const envMainModels = parseModelList\(process\.env\.CLAUDE_MODEL_PICKER_MAIN_MODELS\)/,

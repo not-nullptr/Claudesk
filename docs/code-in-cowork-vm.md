@@ -612,7 +612,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 | `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. The guest runner reads the list (it is also where a Code routine fire's per-invocation connectors land, see `docs/routines.md`) and passes its URL servers to the agent as `--mcp-config` for every turn of the session. |
 | `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. Answered under **both generations of the path**: `ccr_v2_send_events_web` decides whether the client posts to `/v1/code/sessions/{id}/events` or the original `/v1/sessions/{id}/events`, and the Desktop build's hardcoded feature table carries the gate false — so the original leg is the one the browser actually sends its first message over. |
 | `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
-| `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the streamed answer passes back untouched, and the request body is normalized for the chain: the newest fields the provider would reject without their beta headers (`context_management`, `thinking.display`) are dropped here, one log line per request that needed it, rather than pinning the CLI to the chain's vintage. A trailing `[1m]` on the model id is resolved to the bare id here as well: it is Claude Code's long-context marker — and what Auto permission mode's classifier appends to its fallback model for a 1M session — not a route the gateway serves. |
+| `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the streamed answer passes back untouched, and the request body is normalized for the chain: the newest fields the provider would reject without their beta headers (`context_management`, `thinking.display`) are dropped here, one log line per request that needed it, rather than pinning the CLI to the chain's vintage. A trailing `[1m]` on the model id is resolved to the bare id here as well: it is Claude Code's long-context marker — and what Auto permission mode's classifier appends to its fallback model for a 1M session — not a route the gateway serves. A bare Anthropic-family alias is resolved here too when the gateway lists exactly one provider-prefixed route ending in it (`claude-opus-5-5` → `anthropic/claude-opus-5-5`): discovery may advertise the alias while `/v1/messages` only routes the prefixed id. The same resolution rewrites the picker's ids in the bootstrap, and a false `config_model_rejected` health result from the app's main-process probe is re-checked against the prefixed route before it reaches a browser. |
 | `GET /v1/code/sessions/watch` | The list's SSE stream. Its reader treats 400/404 as **fatal for the whole surface**, so it is held open and quiet (a comment frame, keepalives) rather than 404ed. |
 | `POST /api/organizations/{org}/dust/generate_title_and_branch` | `{first_session_message, title_style, model?}` → `{title, branch_name?}`. The Desktop main answers this in-process with an on-device model; a browser fetches its own origin, so the bridge derives the title (first meaningful line, cleaned, capped) and the branch (its slug). `generate_session_title` (`{title}`) and `command_display_names` (`{results: []}`) are served the same way. |
 
@@ -821,16 +821,18 @@ whole refresh silently did nothing even though the container images were
 current.
 
 The service runs session turns on their own threads, not inline in the poll
-loop. A turn can last up to `TURN_TIMEOUT`; with the agent inline the runner
-stopped polling for its duration and the folder/git lookups timed out exactly
-while a session was active. One thread per hint, with
-`CLAUDESK_RUNNER_MAX_TURNS` (default 4) bounding how many agents run at once —
-the protocol hands out every pending session, and one VM sized for a handful
-must not be stampeded. The poll loop keeps answering lookups throughout.
+loop. A turn has no wall-clock cap by default — an agent working a real task may
+run far longer than half an hour — so a long turn keeps its thread while the
+poll loop stays free; a deployment that wants a hard stop sets
+`CLAUDESK_RUNNER_TIMEOUT_SECONDS` to a positive number of seconds (empty or zero
+leaves it uncapped). One thread per hint, with `CLAUDESK_RUNNER_MAX_TURNS`
+(default 4) bounding how many agents run at once — the protocol hands out every
+pending session, and one VM sized for a handful must not be stampeded. The poll
+loop keeps answering lookups throughout.
 
 Every turn now ends with a `result` message, including the paths where the agent
-did not produce one: a non-zero exit, `TURN_TIMEOUT`, a write failure, or an
-exception before the turn started. The runner writes a synthetic
+did not produce one: a non-zero exit, a configured `TURN_TIMEOUT`, a write
+failure, or an exception before the turn started. The runner writes a synthetic
 `error_during_execution` terminal (through the turn's stream, or a plain append
 when that stream is dead) before it reports the failure. The session view closes
 a turn on that message; without it the page kept its spinner up for a turn that
@@ -841,6 +843,12 @@ failed; a second failure falls back to the append leg for the terminal. The
 watchdog and the post-result idle path signal the agent's **process group**, not
 just its pid, so a tool that inherited the stdout pipe cannot keep the reader
 blocked forever.
+
+A claim that lands between the composer's placement and its first message reads
+an empty transcript. That is not a failed turn: the runner waits
+`CLAUDESK_RUNNER_PROMPT_GRACE_SECONDS` (default 3) for the send and otherwise
+releases the session back to the pool, and the bridge hands out only a session
+that carries an answerable user message.
 
 The poll also reports the sessions this runner has claimed (`running`,
 `claimed`). The bridge's reaper (see the transcript section) uses that set to

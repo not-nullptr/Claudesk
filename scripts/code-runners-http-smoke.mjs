@@ -103,7 +103,15 @@ try {
         authorization: request.headers.authorization || "",
         body: Buffer.concat(chunks).toString("utf8"),
       });
-      if (request.url === "/v1/messages") {
+      if (request.url.startsWith("/v1/models")) {
+        // The prefixed route the chain serves; the bare alias the app probes
+        // is what the bridge has to resolve to it.
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          data: [{ id: "anthropic/claude-opus-5-5" }],
+          has_more: false,
+        }));
+      } else if (request.url === "/v1/messages") {
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.write("event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
         response.end("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
@@ -243,11 +251,49 @@ try {
   assert.equal(detail.status, 200, detail.body);
   assert.equal(JSON.parse(detail.body).session.title, "from the smoke");
 
+  // The composer places the session and posts the first message as two
+  // requests. Nothing is offered in between: a runner claiming the empty
+  // transcript reported "the session's transcript carries no user message to
+  // answer" for a turn that had not been sent yet.
+  const unprompted = JSON.parse((await tenantRequest("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "placed, not sent yet", environment_id: poolId }),
+  })).body).session;
+  let waiting = JSON.parse((await tenantRequest(
+    "/v1/code/runners/self-hosted/spawn-hints/poll",
+    { method: "POST", headers: auth, body: "{}" })).body).hints;
+  assert.equal(waiting.some((hint) => hint.session_uuid === placedSession.id), false,
+    "a placed session is not offered before its first message");
+  assert.equal(waiting.some((hint) => hint.session_uuid === unprompted.id), false,
+    "and neither is a session that has none at all");
+  await tenantRequest(`/v1/code/sessions/${unprompted.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: [{
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "aGk=" },
+      }] } } }] }),
+  });
+  waiting = JSON.parse((await tenantRequest(
+    "/v1/code/runners/self-hosted/spawn-hints/poll",
+    { method: "POST", headers: auth, body: "{}" })).body).hints;
+  assert.ok(waiting.some((hint) => hint.session_uuid === unprompted.id),
+    "an image-only send is a prompt, and wakes the held poll");
+
+  // The send that completes the placed session.
+  await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [{ payload: { type: "user",
+      message: { role: "user", content: "over http" } } }] }),
+  });
   const offered = await tenantRequest("/v1/code/runners/self-hosted/spawn-hints/poll",
     { method: "POST", headers: auth, body: "{}" });
   const hints = JSON.parse(offered.body).hints;
   assert.ok(hints.some((hint) => hint.session_uuid === placedSession.id),
-    "the pool's runner is offered the session just placed");
+    "the pool's runner is offered the session once its message lands");
 
   // A runner that says how long it is willing to wait gets an empty poll held
   // open until work appears: the placement wakes it on that same request, so
@@ -260,7 +306,11 @@ try {
   const latePlaced = JSON.parse((await tenantRequest("/v1/code/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title: "woken by the hold", environment_id: poolId }),
+    // A routine fire carries its prompt in the create body; that is a session
+    // the pool may take at once, unlike a composer placement.
+    body: JSON.stringify({ title: "woken by the hold", environment_id: poolId,
+      events: [{ payload: { type: "user",
+        message: { role: "user", content: "routine prompt" } } }] }),
   })).body).session;
   const woken = JSON.parse((await heldPoll).body);
   assert.ok(Date.now() - holdStartedAt < 2000,
@@ -274,12 +324,12 @@ try {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ events: [
-      { payload: { type: "user", message: { role: "user", content: "over http" } } },
       { payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } } },
     ] }),
   });
   assert.equal(appended.status, 200, appended.body);
-  assert.equal(JSON.parse(appended.body).data.length, 2);
+  assert.equal(JSON.parse(appended.body).data.length, 1,
+    "the transcript already holds the user's message from the send above");
 
   const history = await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`);
   assert.equal(history.status, 200, history.body);
@@ -504,6 +554,25 @@ try {
   assert.equal(gatewayHits.at(-1).url, "/v1/messages/count_tokens", "the path is preserved");
   assert.equal(JSON.parse(gatewayHits.at(-1).body).model, "smoke",
     "an id without the spelling is forwarded untouched");
+
+  // A gateway can advertise an Anthropic-family alias the provider-prefixed
+  // route actually serves (the chain lists `claude-opus-5-5` under
+  // `/v1/models?limit=1000`, but `/v1/messages` only routes
+  // `anthropic/claude-opus-5-5`). Resolve the bare alias to the one listed
+  // route, so a model pick or the health probe's fallback does not fail.
+  const aliasCall = await tenantRequest("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}`,
+      "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: "claude-opus-5-5[1m]", messages: [] }),
+  });
+  assert.equal(aliasCall.status, 200, aliasCall.body);
+  assert.equal(JSON.parse(gatewayHits.at(-1).body).model, "anthropic/claude-opus-5-5",
+    "the bare alias resolves to the provider-prefixed route the gateway lists");
+  const modelListHit = gatewayHits.find((hit) => hit.url.startsWith("/v1/models"));
+  assert.ok(modelListHit, "the bridge read the gateway's model list once");
+  assert.equal(modelListHit.authorization, "Bearer smoke-gateway-key",
+    "and authenticated it with the account's own gateway credential");
 
   // The org's environment capabilities — asked for wherever a session can be
   // placed, and parsed strictly: `version` and `repositories` are required and

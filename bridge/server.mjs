@@ -3107,8 +3107,12 @@ async function forwardOfficialProtocol(request, response, url) {
     // Desktop window; with no operator list, the document is left exactly as
     // upstream wrote it.
     if (bootstrapResponsePath.test(url.pathname)) {
-      rememberPickerModels(parsed);
+      // Lay the list out against the ids the operator named (their list uses
+      // the gateway's own spelling) before resolving a bare alias to the route
+      // the gateway lists; the ids themselves are what every surface sends.
       if (applyModelPickerLayout(parsed, await resolveMainModels())) rewrote = true;
+      if (await canonicalizePickerModelIds(parsed)) rewrote = true;
+      rememberPickerModels(parsed);
     }
     if (rewrote) responseBody = Buffer.from(JSON.stringify(parsed), "utf8");
     if (containsSensitiveCredential(parsed)) {
@@ -3830,6 +3834,209 @@ function stripLongContextModel(payload) {
   return requested;
 }
 
+// A gateway may list Anthropic-family models under both a bare alias and the
+// provider-prefixed route it actually serves. This deployment's chain is one:
+// `GET /v1/models` (with the desktop's own paging parameters) advertises
+// `claude-opus-5-5`, while `/v1/messages` only routes
+// `anthropic/claude-opus-5-5` and answers the bare alias with
+// "Upstream /v1/responses ... only does openai/, grok/, deepseek/, opencode/,
+// and compatible aliases". The app's health probe and a model pick can both
+// carry the bare spelling, so resolve it to the one route the gateway lists
+// when exactly one prefixed id ends in that alias. The lookup is cached: a
+// model call must not pay a discovery round trip each time.
+const gatewayModelCache = {
+  ids: null, expires: 0, inFlight: null, failedAt: 0,
+};
+const gatewayModelTtlMs = 5 * 60 * 1000;
+const gatewayModelFailureTtlMs = 30 * 1000;
+
+function gatewayAuthHeaders(scheme, key) {
+  return scheme === "x-api-key" ? { "x-api-key": key } : { authorization: `Bearer ${key}` };
+}
+
+async function gatewayModelIds(base, key, scheme) {
+  const now = Date.now();
+  if (gatewayModelCache.ids && gatewayModelCache.expires > now) {
+    return gatewayModelCache.ids;
+  }
+  if (gatewayModelCache.failedAt && now - gatewayModelCache.failedAt < gatewayModelFailureTtlMs) {
+    return null;
+  }
+  if (gatewayModelCache.inFlight) return gatewayModelCache.inFlight;
+  gatewayModelCache.inFlight = (async () => {
+    try {
+      const response = await fetch(`${String(base).replace(/\/+$/, "")}/v1/models`, {
+        headers: { ...gatewayAuthHeaders(scheme, key), "anthropic-version": "2023-06-01" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      const ids = Array.isArray(body?.data)
+        ? body.data.map((entry) => entry?.id).filter((id) => typeof id === "string" && id)
+        : [];
+      if (!ids.length) throw new Error("no models listed");
+      gatewayModelCache.ids = ids;
+      gatewayModelCache.expires = Date.now() + gatewayModelTtlMs;
+      gatewayModelCache.failedAt = 0;
+      return ids;
+    } catch (error) {
+      gatewayModelCache.failedAt = Date.now();
+      console.warn(`[inference] could not read the gateway's model list: ${error.message}`);
+      return null;
+    } finally {
+      gatewayModelCache.inFlight = null;
+    }
+  })();
+  return gatewayModelCache.inFlight;
+}
+
+/** The gateway's own id for a bare Anthropic alias, when it lists exactly one
+ *  route ending in `/alias`; otherwise the requested id, unchanged. */
+async function resolveGatewayModelAlias(model, base, key, scheme) {
+  if (typeof model !== "string" || !/^claude-[a-z0-9.-]+$/i.test(model)) return model;
+  const ids = await gatewayModelIds(base, key, scheme);
+  if (!ids) return model;
+  const candidates = ids.filter((id) => id.endsWith(`/${model}`));
+  return candidates.length === 1 ? candidates[0] : model;
+}
+
+/** Rewrite the model ids in a bootstrap's picker documents to the gateway's
+ *  own prefixed routes, when an alias resolves. The picker sends these ids in
+ *  every Chat/Cowork/Code request; a gateway whose `/v1/messages` routes only
+ *  the prefixed id would reject the bare alias the discovery listed. Returns
+ *  whether anything changed. */
+async function canonicalizePickerModelIds(document) {
+  const base = process.env.CLAUDE_GATEWAY_BASE_URL || "";
+  const key = process.env.CLAUDE_GATEWAY_API_KEY || "";
+  const scheme = process.env.CLAUDE_GATEWAY_AUTH_SCHEME || "bearer";
+  if (!base || !key) return false;
+  const ids = new Set();
+  const collect = (value) => {
+    if (typeof value === "string") {
+      if (/^claude-[a-z0-9.-]+$/i.test(value)) ids.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) collect(entry);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [name, entry] of Object.entries(value)) {
+      if (name === "id" && typeof entry === "string") collect(entry);
+      else if (name === "model" && typeof entry === "string") collect(entry);
+      else collect(entry);
+    }
+  };
+  collect(document?.model_selector_config);
+  collect(document?.model_selector_state);
+  if (!ids.size) return false;
+  const resolved = new Map();
+  await Promise.all([...ids].map(async (id) => {
+    resolved.set(id, await resolveGatewayModelAlias(id, base, key, scheme));
+  }));
+  if (![...resolved].some(([id, canonical]) => canonical !== id)) return false;
+  const rewrite = (value) => {
+    if (typeof value === "string") return resolved.get(value) ?? value;
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (!value || typeof value !== "object") return value;
+    for (const [name, entry] of Object.entries(value)) {
+      if (name === "id" || name === "model") value[name] = rewrite(entry);
+      else rewrite(entry);
+    }
+    return value;
+  };
+  rewrite(document.model_selector_config);
+  rewrite(document.model_selector_state);
+  const changed = [...resolved].filter(([id, canonical]) => canonical !== id);
+  console.log(`[model-picker] resolved ${changed.length} alias(es) to the gateway's routes: `
+    + changed.map(([id, canonical]) => `${id} -> ${canonical}`).join(", "));
+  return true;
+}
+
+/** Probe one model over the Messages API, the same `max_tokens: 1` request the
+ *  Desktop's config-health check sends. Returns `{status, ok, requestUrl,
+ *  body}` or null when the gateway cannot be asked. */
+async function probeGatewayModel(model, base, key, scheme) {
+  const requestUrl = `${String(base).replace(/\/+$/, "")}/v1/messages`;
+  try {
+    const response = await fetch(requestUrl, {
+      method: "POST",
+      headers: {
+        ...gatewayAuthHeaders(scheme, key),
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "." }],
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await response.text().catch(() => "");
+    return { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
+  } catch (error) {
+    console.warn(`[config-health] could not probe ${model}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * The Desktop's config-health probe runs in its main process, against the bare
+ * model alias its discovery picked. A gateway that lists `claude-opus-5-5`
+ * under `/v1/models?limit=1000` but only routes `anthropic/claude-opus-5-5` on
+ * `/v1/messages` then shows "Configured model not available" on every page,
+ * although the route exists. Resolve the alias and re-probe the route the
+ * gateway does serve: a success clears the false rejection; a rejection of the
+ * canonical id is kept (and a rate limit/5xx is reported as a provider error,
+ * not as a missing model). Only a browser's settings call reaches this — the
+ * native window talks to its main process directly.
+ */
+async function correctedGatewayHealth(health) {
+  if (!health || typeof health !== "object" || health.state !== "config_model_rejected"
+    || typeof health.probedModel !== "string" || !health.probedModel) return health;
+  const base = process.env.CLAUDE_GATEWAY_BASE_URL || "";
+  const key = process.env.CLAUDE_GATEWAY_API_KEY || "";
+  const scheme = process.env.CLAUDE_GATEWAY_AUTH_SCHEME || "bearer";
+  if (!base || !key) return health;
+  const canonical = await resolveGatewayModelAlias(health.probedModel, base, key, scheme);
+  if (canonical === health.probedModel) return health;
+  const probed = await probeGatewayModel(canonical, base, key, scheme);
+  if (!probed) return health;
+  const checkedAt = new Date().toISOString();
+  if (probed.ok) {
+    console.log(`[config-health] model ${health.probedModel} is ${canonical} on this gateway;`
+      + " the rejection was the alias, not the route");
+    return {
+      ...health,
+      state: "healthy",
+      message: undefined,
+      checkedAt,
+      httpStatus: probed.status,
+      requestUrl: probed.requestUrl,
+      probedModel: canonical,
+      responseBody: undefined,
+    };
+  }
+  const modelRejected = probed.status === 400 || probed.status === 404;
+  if (!modelRejected) {
+    console.log(`[config-health] ${canonical} answered HTTP ${probed.status};`
+      + " reporting a provider error rather than a missing model");
+  }
+  return {
+    ...health,
+    state: modelRejected ? "config_model_rejected" : "provider_error",
+    message: modelRejected
+      ? `Gateway rejected model "${canonical}" (HTTP ${probed.status})`
+      : `Gateway returned HTTP ${probed.status}`,
+    checkedAt,
+    httpStatus: probed.status,
+    requestUrl: probed.requestUrl,
+    probedModel: canonical,
+    responseBody: probed.body || undefined,
+  };
+}
+
 // The model calls of the runner inside the VM, forwarded through the one
 // address the guest provably reaches: the guest dials the bridge on slirp's
 // host address for its own polling, and its egress is filtered by an allowlist
@@ -3856,13 +4063,20 @@ async function handleInferencePassthrough(request, response, url) {
       const payload = JSON.parse(body.toString("utf8"));
       const dropped = stripGatewayUnsupported(payload);
       const longContextModel = stripLongContextModel(payload);
-      if (dropped.length > 0 || longContextModel !== undefined) {
+      const requestedModel = payload.model;
+      const aliasModel = await resolveGatewayModelAlias(
+        payload.model, gatewayBase, gatewayKey, gatewayScheme);
+      if (aliasModel !== requestedModel) payload.model = aliasModel;
+      if (dropped.length > 0 || longContextModel !== undefined || aliasModel !== requestedModel) {
         forwardBody = Buffer.from(JSON.stringify(payload));
         if (dropped.length > 0) {
           console.log(`[inference] dropped gateway-unsupported field(s): ${dropped.join(", ")}`);
         }
         if (longContextModel !== undefined) {
           console.log(`[inference] model ${longContextModel} -> ${payload.model} for the gateway`);
+        }
+        if (aliasModel !== requestedModel) {
+          console.log(`[inference] model ${requestedModel} -> ${aliasModel} for the gateway`);
         }
       }
     } catch {
@@ -5546,6 +5760,10 @@ async function handleApi(request, response, url) {
     );
     if (body.surface === "Custom3pSetup" && body.method === "getLoginDesktop3pStatus") {
       value = sanitize3pLoginStatus(value);
+    }
+    if (body.surface === "Custom3pSetup"
+      && (body.method === "getConfigHealth" || body.method === "recheckConfigHealth")) {
+      value = await correctedGatewayHealth(value);
     }
     sendJson(response, 200, { ok: true, value });
     return;

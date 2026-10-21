@@ -351,6 +351,26 @@ print(json.dumps(module.content_of(events)))
     { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
   ], "the guest runner forwards image blocks beside the text");
 
+  // A turn has no wall-clock cap by default: killing an agent at half an hour
+  // threw away work that was still going. CLAUDESK_RUNNER_TIMEOUT_SECONDS can
+  // still impose one; zero, empty or a non-number all leave it uncapped.
+  for (const [value, expected] of [[undefined, 0], ["", 0], ["0", 0], ["1800", 1800],
+    ["not-a-number", 0]]) {
+    const env = { ...process.env };
+    if (value === undefined) delete env.CLAUDESK_RUNNER_TIMEOUT_SECONDS;
+    else env.CLAUDESK_RUNNER_TIMEOUT_SECONDS = value;
+    const timeoutProbe = spawnSync("python3", ["-I", "-c", `
+import importlib.util
+spec = importlib.util.spec_from_file_location("guest_runner", ${JSON.stringify(join(root, "guest/runner.py"))})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.TURN_TIMEOUT)
+`], { encoding: "utf8", env });
+    assert.equal(timeoutProbe.status, 0, timeoutProbe.stderr);
+    assert.equal(Number(timeoutProbe.stdout.trim()), expected,
+      `TURN_TIMEOUT for ${JSON.stringify(value)} must be ${expected}`);
+  }
+
   // The shared workspace is bound at /workspace in the guest (or symlinked in
   // this probe): a folderless session starts there, and a host `/workspace/…`
   // path keeps that spelling, matching the container and the folder picker.

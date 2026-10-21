@@ -511,6 +511,41 @@ function isUserMessage(entry) {
   return false;
 }
 
+/** Is this a user payload with anything the agent can answer? Text or an
+ *  image counts; a tool result does not (the runner's own `user` frames are
+ *  tool results, and are written with `source: "worker"`). */
+function hasAnswerableContent(entry) {
+  if (entry?.source === "worker") return false;
+  const payload = isRecord(entry?.payload) ? entry.payload : entry;
+  if (!isRecord(payload) || payload.type !== "user") return false;
+  const content = (payload.message ?? {}).content;
+  if (typeof content === "string") return content.trim() !== "";
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!isRecord(part)) return false;
+    if (part.type === "text") {
+      return typeof part.text === "string" && part.text.trim() !== "";
+    }
+    if (part.type !== "image") return false;
+    const source = part.source;
+    return isRecord(source) && source.type === "base64"
+      && typeof source.data === "string" && source.data !== "";
+  });
+}
+
+/**
+ * Has this session a prompt to run? A session is placed before the composer
+ * posts its first message, and the placement wakes the pool immediately — so
+ * without this test a runner claims the empty session, finds no user message
+ * and reports a turn failure ("the session's transcript carries no user
+ * message to answer") before the message that was about to arrive. Only a
+ * session with something to answer is offered; the append of the user message
+ * wakes the pool (see appendEvents), so pickup is still immediate.
+ */
+function sessionHasPrompt(session) {
+  return (Array.isArray(session?.events) ? session.events : []).some(hasAnswerableContent);
+}
+
 export function createRunnerBackend({
   stateDir, log = console, poolName = null, wakeRunner = null,
   // The smoke drives wake attempts one after another; production leaves the
@@ -1196,6 +1231,14 @@ export function createRunnerBackend({
     return isVolatilePayload(event?.payload ?? {});
   }
 
+  /** `sessionHasPrompt` for a session whose transcript may still be on disk —
+   *  `load()` keeps most sessions lazy (see ensureEvents), so reading the
+   *  in-memory array alone would miss a pending session after a restart. */
+  async function sessionHasPromptOnDisk(session) {
+    await ensureEvents(session);
+    return sessionHasPrompt(session);
+  }
+
   function appendEventsFile(session, appended) {
     if (!appended.length) return Promise.resolve();
     return eventChain(session, async () => {
@@ -1632,9 +1675,14 @@ export function createRunnerBackend({
       // our side). Claiming a session or a UI request for it would strand
       // them: the session would read `offered` with no runner holding it.
       if (!requestAlive(request)) return emptyPoll(state, pool.pool_id);
-      const mine = state.sessions.filter(
-        (session) => session.pool_id === pool.pool_id && session.state === "pending",
-      );
+      // A placement precedes the composer's first message; do not hand the
+      // empty session to a runner (see sessionHasPrompt). The transcript may
+      // be lazy after a restart, so this is asynchronous.
+      const mine = [];
+      for (const session of state.sessions) {
+        if (session.pool_id !== pool.pool_id || session.state !== "pending") continue;
+        if (await sessionHasPromptOnDisk(session)) mine.push(session);
+      }
       // A session is handed out once; the runner's nack puts it back. The
       // offer timestamp is the lease the reaper uses when the answer never
       // lands (or the runner dies before claiming it).
@@ -1659,9 +1707,11 @@ export function createRunnerBackend({
         await waitForPool(pool.pool_id, holdMs, request?.socket ?? null);
         const refreshed = await load();
         if (!requestAlive(request)) return emptyPoll(refreshed, pool.pool_id);
-        const later = refreshed.sessions.filter(
-          (session) => session.pool_id === pool.pool_id && session.state === "pending",
-        );
+        const later = [];
+        for (const session of refreshed.sessions) {
+          if (session.pool_id !== pool.pool_id || session.state !== "pending") continue;
+          if (await sessionHasPromptOnDisk(session)) later.push(session);
+        }
         const offeredAt = new Date().toISOString();
         for (const session of later) {
           session.state = "offered";
@@ -1725,7 +1775,7 @@ export function createRunnerBackend({
       // disappearance from `assignment_ids` as a server-side deassignment and
       // aborts the child on the spot. Fresh pending sessions are claimed for
       // whichever runner is asking.
-      const assignmentsFor = (current) => {
+      const assignmentsFor = async (current) => {
         const mine = current.sessions.filter(
           (session) => session.pool_id === pool.pool_id
             && session.state !== "released" && session.state !== "failed",
@@ -1733,11 +1783,20 @@ export function createRunnerBackend({
         const held = [];
         for (const session of mine) {
           if (runner && session.assigned_runner_id === runner.runner_id) {
-            if (session.state === "pending") session.state = "offered";
+            if (session.state === "pending") {
+              // A placement with no prompt yet is not work; forget the claim
+              // rather than hold an empty session (see sessionHasPrompt).
+              if (!(await sessionHasPromptOnDisk(session))) {
+                session.assigned_runner_id = undefined;
+                continue;
+              }
+              session.state = "offered";
+            }
             held.push(session.session_uuid);
             continue;
           }
-          if (session.assigned_runner_id === undefined && session.state === "pending") {
+          if (session.assigned_runner_id === undefined && session.state === "pending"
+            && await sessionHasPromptOnDisk(session)) {
             session.state = "offered";
             if (runner) session.assigned_runner_id = runner.runner_id;
             held.push(session.session_uuid);
@@ -1745,14 +1804,14 @@ export function createRunnerBackend({
         }
         return held;
       };
-      let held = assignmentsFor(state);
+      let held = await assignmentsFor(state);
       await save();
       // Nothing to hand out: hold the poll until a placement or requeue wakes
       // the pool (see wakePool), for runners that asked (see pollWait).
       const holdMs = held.length ? 0 : pollWait(headers);
       if (holdMs > 0) {
         await waitForPool(pool.pool_id, holdMs);
-        held = assignmentsFor(await load());
+        held = await assignmentsFor(await load());
         await save();
       }
       return {
@@ -2207,9 +2266,11 @@ export function createRunnerBackend({
         emitLive(session, volatile);
       }
       await save();
-      // A runner already holding this pool's poll takes it on that same
-      // request, not on its next tick.
-      wakePool(pool.pool_id);
+      // Wake the pool only for a session that already carries its prompt (a
+      // routine fire does). A composer places the session first and posts the
+      // first message next; that append is what wakes the pool then, so the
+      // runner cannot claim the empty session in between.
+      if (await sessionHasPromptOnDisk(session)) wakePool(pool.pool_id);
       // And a pool with no runner needs its VM: every placement is a reason for
       // the guest to be up, not just the composer's own create route. Waking
       // here keeps a headless placement (a routine fire, an API create) from
@@ -2318,6 +2379,10 @@ export function createRunnerBackend({
         session.session_config = next;
         configChanged = true;
       }
+      // The user message that completes a freshly placed session is the other
+      // half of the placement: the create did not wake the pool because there
+      // was nothing to answer, and this append is what makes the session work.
+      const promptAppended = appended.some(hasAnswerableContent);
       // The agent answers a control request with a `control_response`; this
       // deployment closes the child's stdin after the prompt, so it never sees
       // a mid-turn request. Synthesize the receipt the Stop button waits on —
@@ -2338,7 +2403,7 @@ export function createRunnerBackend({
       emitLive(session, volatile);
       let requeued = false;
       if (appended.length && (session.state === "released" || session.state === "failed")
-          && incoming.some(isUserMessage)) {
+          && promptAppended) {
         session.state = "pending";
         session.attempt += 1;
         session.reap_attempts = 0;
@@ -2381,8 +2446,12 @@ export function createRunnerBackend({
       if (appended.length || volatile.length || configChanged) saveSoon();
       // The runner holding the pool hears about it on its held poll, not on a
       // later tick — the same wake a placement gets. A stop must not wait out
-      // the poll's 20 s hold (see cancellationsFor).
-      if (requeued || interruptRequests.size || requeueOnRelease) wakePool(session.pool_id);
+      // the poll's 20 s hold (see cancellationsFor). The message that completes
+      // a fresh placement wakes it too, since the create intentionally did not.
+      if (requeued || interruptRequests.size || requeueOnRelease
+        || (promptAppended && session.state === "pending")) {
+        wakePool(session.pool_id);
+      }
       if (requeued) wakeTurnRunner();
       return { data: [...appended, ...volatile] };
     },
@@ -2660,7 +2729,7 @@ export function createRunnerBackend({
      * a session is placed on a self-hosted environment; until then it is the
      * seam a smoke drives and the next increment fills.
      */
-    async queueSession({ poolId, sessionUuid, sources = [] } = {}) {
+    async queueSession({ poolId, sessionUuid, sources = [], prompt = "" } = {}) {
       const state = await load();
       const pool = poolById(state, poolId);
       if (!pool) return null;
@@ -2676,6 +2745,14 @@ export function createRunnerBackend({
         eventsLoaded: true,
         last_sequence: 0,
       };
+      // A queued session is work only once it has a prompt (see
+      // sessionHasPrompt); the seam states one so the protocol tests can drive
+      // the poll without a separate create-then-send dance.
+      if (typeof prompt === "string" && prompt.trim()) {
+        await appendEventsFile(session, appendToSession(session, [{
+          payload: { type: "user", message: { role: "user", content: prompt } },
+        }], "client"));
+      }
       state.sessions.push(session);
       await save();
       return hintFor(session);

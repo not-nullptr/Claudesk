@@ -110,9 +110,27 @@ AGENT_ARGS = env("CLAUDESK_RUNNER_AGENT_ARGS",
 # guest image's own Claude settings (meant for the product's session-bound
 # binary) out of the plain binary this runner stages.
 RUNNER_HOME = env("CLAUDESK_RUNNER_HOME", "/var/lib/claudesk-runner/home")
-# One turn's wall clock. Long enough for real work, short enough that a wedged
-# agent does not hold the session forever.
-TURN_TIMEOUT = float(env("CLAUDESK_RUNNER_TIMEOUT_SECONDS", "1800") or 1800)
+# Optional wall clock for one turn. Zero — the default — means no cap: an
+# agent doing real work may run far longer than half an hour, and killing it
+# at an arbitrary mark threw away the turn. A deployment that wants a hard
+# stop sets CLAUDESK_RUNNER_TIMEOUT_SECONDS to a positive number of seconds;
+# an empty value or zero disables it.
+def env_seconds(name):
+    raw = env(name)
+    if not raw:
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.0
+    return value if value > 0 else 0.0
+
+
+TURN_TIMEOUT = env_seconds("CLAUDESK_RUNNER_TIMEOUT_SECONDS")
+# A placed session and its first message are two requests from the composer.
+# A claim that lands between them reads an empty transcript; wait this long for
+# the send to arrive before releasing the session back to the bridge.
+PROMPT_GRACE_SECONDS = float(env("CLAUDESK_RUNNER_PROMPT_GRACE_SECONDS", "3") or 0)
 # How many turns may run at once. The protocol hands out every hint it has, and
 # one VM sized for one agent cannot hold an unbounded number of them; excess
 # hints wait on this semaphore instead of stampeding the guest.
@@ -1101,13 +1119,15 @@ def run_agent(argv, cwd, content, write, interrupt=None):
     writer_thread.start()
 
     timed_out = []
-    # The whole group, not just the pid: a tool the agent spawned is a
-    # grandchild, and a build that ignores the timeout while a grandchild holds
-    # the stdout pipe would leave the reader blocked forever. `signal_group` is
-    # defined below; the timer resolves it when it fires.
-    watchdog = threading.Timer(
-        TURN_TIMEOUT, lambda: (timed_out.append(True), signal_group(signal.SIGKILL)))
-    watchdog.start()
+    watchdog = None
+    if TURN_TIMEOUT > 0:
+        # The whole group, not just the pid: a tool the agent spawned is a
+        # grandchild, and a build that ignores the timeout while a grandchild
+        # holds the stdout pipe would leave the reader blocked forever.
+        # `signal_group` is defined below; the timer resolves it when it fires.
+        watchdog = threading.Timer(
+            TURN_TIMEOUT, lambda: (timed_out.append(True), signal_group(signal.SIGKILL)))
+        watchdog.start()
 
     interrupted = []
 
@@ -1211,7 +1231,8 @@ def run_agent(argv, cwd, content, write, interrupt=None):
                     event.get("permissionMode")))
         code = process.wait()
     finally:
-        watchdog.cancel()
+        if watchdog is not None:
+            watchdog.cancel()
         interrupt_done.set()
         pending.put(None)
         writer_thread.join(timeout=60)
@@ -1309,6 +1330,20 @@ def run_session(hint, interrupt=None):
     # the bridge's heap.
     events = fetch_history(session, token)
     content = content_of(events)
+    # The composer places the session first and posts the user's message next.
+    # If this claim won the race, give the send a moment to land instead of
+    # failing a turn nobody has asked for yet. The bridge withholds a session
+    # with no prompt, so this is the stale-bridge path.
+    if not content and PROMPT_GRACE_SECONDS > 0:
+        deadline = time.time() + PROMPT_GRACE_SECONDS
+        while not content and time.time() < deadline:
+            time.sleep(0.25)
+            status, history = request("/v1/code/sessions/%s/events" % quoted,
+                                      token=token)
+            events = (history or {}).get("data") if isinstance(history, dict) else []
+            content = content_of(events)
+        if content:
+            log("session %s: the prompt arrived while the claim was waiting" % session)
     resume = resume_id(events)
     # Tell the bridge how far this turn's transcript read went. Anything a
     # user appends after this point is a message for the *next* turn; anything
@@ -1379,8 +1414,19 @@ def run_session(hint, interrupt=None):
         return fail(reason, 127, setup_failure_kind="missing_binary")
 
     if not content:
-        reason = "the session's transcript carries no user message to answer"
-        return fail(reason, 2, failure_kind="bad_input")
+        # The composer places a session and posts its first message next; a
+        # claim that slips between the two reads an empty transcript. That is
+        # not a failed turn — there is no turn yet. The bridge withholds a
+        # promptless session from the poll and wakes the pool when the message
+        # lands, so this is the second line of defence for a stale bridge (or
+        # one that handed the session out before the app's send). Release it:
+        # the message's own append requeues the session and the next poll runs
+        # it, instead of leaving a "couldn't process that message" turn in the
+        # transcript.
+        finish("release", {})
+        log("session %s: no prompt in the transcript yet; released for the send"
+            % session)
+        return session, 0
 
     # The session's MCP servers: a routine fire's per-invocation connectors (or
     # the session MCP editor's saved set). This is what makes the URL a fire

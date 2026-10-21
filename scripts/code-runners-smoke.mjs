@@ -85,7 +85,10 @@ try {
 
   // A queued session is offered exactly once, in the shape the runner's reader
   // requires (session_uuid, attempt, work_order_jwt, sources — all present).
-  const queued = await backend.queueSession({ poolId: primary.pool_id, sessionUuid: "session-1" });
+  // A session is work only once it has a prompt, so the seam states one.
+  const queued = await backend.queueSession({
+    poolId: primary.pool_id, sessionUuid: "session-1", prompt: "hello",
+  });
   assert.equal(queued.session_uuid, "session-1");
   assert.equal(queued.attempt, 1);
   assert.ok(queued.work_order_jwt.length > 20, "the order carries a work_order_jwt");
@@ -113,7 +116,9 @@ try {
   // suspend with its held poll still open on the bridge; when the pool was
   // then woken, the dead request used to take the session — leaving it
   // `offered` with no runner holding it and no client that received it.
-  await backend.queueSession({ poolId: primary.pool_id, sessionUuid: "dead-poll" });
+  await backend.queueSession({
+    poolId: primary.pool_id, sessionUuid: "dead-poll", prompt: "dead poll",
+  });
   const deadPoll = await backend.pollSpawnHints({
     headers: auth,
     request: { socket: { destroyed: true, once() {}, off() {} } },
@@ -217,6 +222,8 @@ try {
       self_hosted_runner_pool_id: primary.pool_id,
       config: {
         sources: [{ type: "git_repository", url: "https://example.invalid/r.git", revision: "refs/heads/main" }],
+        cwd: "/workspace/project",
+        source_branch: "main",
         model: "claude-sonnet-5-5[1m]",
         permission_mode: "bypassPermissions",
         effort_level: "max",
@@ -237,6 +244,10 @@ try {
   assert.equal(placed.session.session_context.model, "claude-sonnet-5-5[1m]",
     "the session document carries the started model in the renderer's shape");
   assert.equal(placed.session.session_context.effort_level, "max");
+  assert.equal(placed.session.session_context.cwd, "/workspace/project",
+    "the folder the session starts in travels in the renderer's own block");
+  assert.deepEqual(placed.session.repo_info, { owner: "", name: "project", branch: "main" },
+    "and the folder is the row's repository info, so the sidebar groups and prefills it");
   assert.equal(placed.session.permission_mode, "bypassPermissions",
     "and the started permission mode where the composer reads it");
   assert.equal(placed.session.self_hosted_runner_state.pool_name, "dev-box",
@@ -259,9 +270,43 @@ try {
     true,
     "and a pool worker naming a foreign pool is refused the same way",
   );
+  // Placement and the first message are two requests from the composer. A
+  // session with no prompt is not work: offering it made the runner claim an
+  // empty transcript and report "no user message to answer" before the send
+  // landed. It becomes work the moment the message is appended.
+  const unprompted = await backend.createSession({
+    body: { title: "placed, not sent yet", self_hosted_runner_pool_id: primary.pool_id },
+  });
+  let waiting = await backend.pollSpawnHints({ headers: auth });
+  assert.equal(
+    waiting.hints.some((hint) => hint.session_uuid === unprompted.session.id), false,
+    "a session with no user message is not offered",
+  );
+  assert.equal(
+    waiting.hints.some((hint) => hint.session_uuid === placed.session.id), false,
+    "nor is a placed session whose message has not arrived",
+  );
+  await backend.appendEvents({
+    sessionId: unprompted.session.id,
+    body: { events: [{ payload: { type: "user",
+      message: { role: "user", content: [{
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "aGk=" },
+      }] } } }] },
+  });
+  waiting = await backend.pollSpawnHints({ headers: auth });
+  assert.ok(waiting.hints.some((hint) => hint.session_uuid === unprompted.session.id),
+    "an image-only prompt is a prompt too, and wakes the pool");
+
+  // The placed session's own prompt is the send the composer posts next.
+  await backend.appendEvents({
+    sessionId: placed.session.id,
+    body: { events: [{ payload: { type: "user",
+      message: { role: "user", content: "hi" } } }] },
+  });
   const offered = await backend.pollSpawnHints({ headers: auth });
   assert.ok(offered.hints.some((hint) => hint.session_uuid === placed.session.id),
-    "a placed session is offered to the pool's runners");
+    "a placed session is offered once its message lands");
   assert.equal(
     offered.hints.find((hint) => hint.session_uuid === placed.session.id).sources.length,
     1,
@@ -282,7 +327,6 @@ try {
     sessionId: placed.session.id,
     body: {
       events: [
-        { payload: { type: "user", message: { role: "user", content: "hi" } } },
         { payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } } },
       ],
     },
