@@ -2212,9 +2212,10 @@ assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
-assert.ok(selfHostedOut.includes('e.type==="environment"&&'
-  + '(St(e.id)||String(e.id).startsWith("ccpool_"))||t(null)'),
-  "the new-session page must keep a folder placed on a self-hosted pool");
+assert.ok(selfHostedOut.includes('(e.type==="environment"&&St(e.id)'
+  + '||String(e.id).startsWith("ccpool_"))||t(null)'),
+  "the new-session page must keep a folder placed on a self-hosted place, "
+  + "whether it resolved as an environment or a pool");
 assert.ok(selfHostedOut.includes('setSelectedFolder:t=>(globalThis.__claudeskTrace&&'
   + 'globalThis.__claudeskTrace("set-folder",{value:t,stack:(new Error).stack}),'
   + 'e({selectedFolder:t,trustedSelectedFolder:null}))'),

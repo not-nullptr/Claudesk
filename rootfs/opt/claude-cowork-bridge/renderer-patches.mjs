@@ -2972,7 +2972,10 @@ function poolWorkerFolderKeepTarget(node, ancestors) {
       }
     }
   });
-  return kindTest ? { call: node, worker } : undefined;
+  // The conjunction itself, not only the kind test: a self-hosted place is
+  // spelled `environment` before the env list resolves and `pool` after, and
+  // both carry the same `ccpool_…` id. Keep the folder for either.
+  return kindTest ? { condition: parent, worker } : undefined;
 }
 
 // The draft store's folder setter, traced so a later clear can be attributed
@@ -4218,10 +4221,10 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           + `prefill:${prefill}}),` });
     }
     if (poolFolderKeeps.length === 1) {
-      const { call, worker } = poolFolderKeeps[0];
-      patches.push({ id: folderPrefillPatchId, start: call.start, end: call.end,
-        original: source.slice(call.start, call.end),
-        replacement: `(${source.slice(call.start, call.end)}`
+      const { condition, worker } = poolFolderKeeps[0];
+      patches.push({ id: folderPrefillPatchId, start: condition.start, end: condition.end,
+        original: source.slice(condition.start, condition.end),
+        replacement: `(${source.slice(condition.start, condition.end)}`
           + `||String(${worker}.id).startsWith("ccpool_"))` });
     }
     if (folderSetterTraces.length === 1) {

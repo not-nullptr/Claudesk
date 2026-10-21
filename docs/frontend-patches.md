@@ -931,9 +931,12 @@ its top-level allowlist keeps the normalized document's `cwd`; the prefill
 builder keeps the row's `cwd` and the place that ran it when it sees one; the
 draft setter (`uZ`) applies `folder` on a remote prefill instead of clearing
 the selection; and the new-session page's mount effect
-(`x.type === "environment" && St(x.id) || setSelectedFolder(null)`) treats a
-self-hosted pool (`ccpool_…`) as folder-capable instead of erasing the
-folder. Pinned by the two `_originalSession` row objects, the exact
+(`(x.type === "environment" && St(x.id) || String(x.id).startsWith("ccpool_"))
+|| setSelectedFolder(null)`) keeps the folder for a self-hosted place instead
+of erasing it. The id test is deliberately outside the kind test: the same
+`ccpool_…` place reaches the page as `environment` before the environment list
+resolves and is reclassified as `pool` once it does, and only the id is stable
+across both. Pinned by the two `_originalSession` row objects, the exact
 `["model","effort_level"]` context array, the prefill builder's
 `eZ({environmentId: row.environmentId})` declaration beside its
 `isAgentOwned` branch, the setter's ssh guard plus `setSelectedFolder`
