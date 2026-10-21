@@ -2801,6 +2801,11 @@ function sessionNormalizerRepoInfoTarget(node) {
 // object and its `eZ({environmentId: row.environmentId})` declaration; the
 // setter by the ssh guard and its `setSelectedFolder` binding.
 const folderPrefillPatchId = "web-code-folder-prefill";
+// The composer core reads the trusted folder, not the selected one — correct
+// for a local executor, wrong for a self-hosted place whose folder has no
+// local trust. The core's folder for a draft on a `ccpool_…` place is the
+// draft store's `selectedFolder`; see selfHostedCoreFolderTarget.
+const selfHostedCoreFolderPatchId = "web-code-selfhosted-core-folder";
 
 function objectProperties(node) {
   const properties = new Map();
@@ -2972,7 +2977,55 @@ function poolWorkerFolderKeepTarget(node, ancestors) {
       }
     }
   });
-  return kindTest ? { call: node, worker } : undefined;
+  // The conjunction itself, not only the kind test: a self-hosted place is
+  // spelled `environment` before the env list resolves and `pool` after, and
+  // both carry the same `ccpool_…` id. Keep the folder for either.
+  return kindTest ? { condition: parent, worker } : undefined;
+}
+
+// The composer core's folder (`af` in the bundle). It reads the draft store's
+// `trustedSelectedFolder`, the folder a *local* session has been granted to
+// run in; the store's `selectedFolder` is only what the chip draws. A
+// self-hosted place is not a local executor: its folder is a path in the
+// account workspace that the bridge and guest validate, and nothing in the
+// web shell grants it through the local trust store. So a folder picked or
+// prefilled for a `ccpool_…` place never became the core's `selectedFolder`,
+// and the start intent was built without `cwd` (and the branch hook without a
+// folder to read). From the start options' point of view this is a draft-only
+// fallback: a session page keeps reading the trusted folder as before.
+function selfHostedCoreFolderTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  const session = identifier(node.params?.[0]);
+  if (!session || node.params.length < 1) return undefined;
+  let trusted;
+  let worker;
+  let hook;
+  walk(node.body, [], (child) => {
+    if (child.type !== "VariableDeclarator" || child.id?.type !== "Identifier") return;
+    const init = unwrap(child.init);
+    if (init?.type !== "CallExpression" || !init.arguments?.length) return;
+    const argument = unwrap(init.arguments[0]);
+    if (argument?.type !== "ArrowFunctionExpression" || argument.params.length !== 1) return;
+    const body = unwrap(argument.body);
+    if (property(body, "trustedSelectedFolder")) {
+      trusted = child.id.name;
+      hook = identifier(init.callee);
+    } else if (property(body, "worker")) {
+      worker = child.id.name;
+    }
+  });
+  if (!trusted || !worker || !hook) return undefined;
+  // Only the function's own return; the component has nested arrows and
+  // callbacks with returns of their own.
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  // `return <effect call>, {…}` — the object is the sequence's last element.
+  const returned = renderedExpression(returns[0].argument);
+  const member = objectMember(returned, "selectedFolder");
+  if (!member || identifier(member.value) !== trusted) return undefined;
+  return { statement: returns[0], member, session, worker, trusted, hook };
 }
 
 // The draft store's folder setter, traced so a later clear can be attributed
@@ -4052,6 +4105,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const plusTraces = [];
     const folderSetterTraces = [];
     const poolFolderKeeps = [];
+    const coreFolders = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -4087,6 +4141,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (folderSetter) folderSetterTraces.push(folderSetter);
       const poolFolderKeep = poolWorkerFolderKeepTarget(node, ancestors);
       if (poolFolderKeep) poolFolderKeeps.push(poolFolderKeep);
+      const coreFolder = selfHostedCoreFolderTarget(node);
+      if (coreFolder) coreFolders.push(coreFolder);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const contextFields = sessionContextFieldsTarget(node);
@@ -4218,11 +4274,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           + `prefill:${prefill}}),` });
     }
     if (poolFolderKeeps.length === 1) {
-      const { call, worker } = poolFolderKeeps[0];
-      patches.push({ id: folderPrefillPatchId, start: call.start, end: call.end,
-        original: source.slice(call.start, call.end),
-        replacement: `(${source.slice(call.start, call.end)}`
+      const { condition, worker } = poolFolderKeeps[0];
+      patches.push({ id: folderPrefillPatchId, start: condition.start, end: condition.end,
+        original: source.slice(condition.start, condition.end),
+        replacement: `(${source.slice(condition.start, condition.end)}`
           + `||String(${worker}.id).startsWith("ccpool_"))` });
+    }
+    if (coreFolders.length === 1) {
+      const { statement, member, session, worker, trusted, hook } = coreFolders[0];
+      patches.push({ id: selfHostedCoreFolderPatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `let __claudeskSelectedFolder=`
+          + `${hook}(__claudeskState=>__claudeskState.selectedFolder);` });
+      patches.push({ id: selfHostedCoreFolderPatchId,
+        start: member.value.start, end: member.value.end,
+        original: source.slice(member.value.start, member.value.end),
+        replacement: `(!${session}&&(${worker}.type==="pool"`
+          + `||String(${worker}.id).startsWith("ccpool_"))`
+          + `?__claudeskSelectedFolder:${trusted})` });
     }
     if (folderSetterTraces.length === 1) {
       const { body, param } = folderSetterTraces[0];

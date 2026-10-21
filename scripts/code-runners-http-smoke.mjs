@@ -282,6 +282,33 @@ try {
   assert.ok(waiting.some((hint) => hint.session_uuid === unprompted.id),
     "an image-only send is a prompt, and wakes the held poll");
 
+  // A staged attachment arrives beside the message (`staged_files`), not in
+  // its text, and a file-only send has no text at all. The bridge must store
+  // the reminder the guest agent reads, or the attachment is staged but
+  // invisible — and the turn has nothing to answer. Paths outside the shared
+  // workspace never enter the transcript.
+  await tenantRequest(`/v1/code/sessions/${unprompted.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events: [
+      { payload: { type: "user", message: { role: "user", content: "" },
+        staged_files: [{ file_name: "fig-file.zip",
+          mount_path: "/workspace/.claudesk-attachments/cse_abc/fig-file.zip" }] } },
+      { payload: { type: "user", message: { role: "user", content: "" },
+        staged_files: [{ file_name: "host-file", mount_path: "/etc/passwd" }] } },
+    ] }),
+  });
+  const stagedHistory = JSON.parse((await tenantRequest(
+    `/v1/code/sessions/${unprompted.id}/events`)).body).data;
+  const reminders = stagedHistory.filter((event) =>
+    typeof event.payload?.message?.content === "string"
+    && event.payload.message.content.includes("<uploaded_files>"));
+  assert.equal(reminders.length, 1, "exactly the workspace path is announced");
+  assert.match(reminders[0].payload.message.content,
+    /<file_path>\/workspace\/\.claudesk-attachments\/cse_abc\/fig-file\.zip<\/file_path>/);
+  assert.equal(reminders[0].payload.message.content.includes("/etc/passwd"), false,
+    "a staged path outside the workspace is never handed to the agent");
+
   // The send that completes the placed session.
   await tenantRequest(`/v1/code/sessions/${placedSession.id}/events`, {
     method: "POST",

@@ -190,7 +190,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
 | `CLAUDE_INFERENCE_MODELS_JSON` | — | Desktop 接受的精确模型 ID JSON 数组 |
-| `CLAUDE_MODEL_PICKER_MAIN_MODELS` | — | 固定在选择器根部的模型 ID（逗号分隔或 JSON 数组），其余模型收进 “More models” 子菜单；在带 `AUTH_IDENTITY_URL` 的部署里只作兜底，通常改由 `/admin` 的 Model picker 卡片设置 |
+| `CLAUDE_MODEL_PICKER_MAIN_MODELS` | — | 固定在选择器根部的模型 ID（逗号分隔或 JSON 数组），其余模型收进 “More models” 子菜单；在带 `AUTH_IDENTITY_URL` 的部署里只作兜底，通常改由 `/admin/models` 设置 |
 | `CLAUDE_HEADLESS` | `1` | 无头启动官方 Desktop |
 | `CLAUDE_DISABLE_GPU` | `1` | 服务器环境默认关闭 GPU |
 
@@ -336,7 +336,7 @@ Bridge 的 `/api/remote/ipc` 请求也就永远不返回，面板一直转圈—
 ### Chat 回退与诊断接口
 
 - `GET /api/chat/models`
-- `GET /api/chat/model-catalog`（模型 ID 加选择器里显示的名字，供 `/admin` 的 Model picker 卡片使用）
+- `GET /api/chat/model-catalog`（模型 ID 加选择器里显示的名字，供 `/admin/models` 使用）
 - `GET|POST /api/chat/sessions`
 - `GET /api/chat/sessions/:id` 与 `/transcript`
 - `POST /api/chat/sessions/:id/messages` 与 `/stop`

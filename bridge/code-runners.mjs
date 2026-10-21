@@ -47,7 +47,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { createInterface } from "node:readline";
 
 const stateFileName = "code-runners.json";
@@ -594,6 +594,75 @@ function isUserMessage(entry) {
       && typeof part.text === "string" && part.text.trim() !== "");
   }
   return false;
+}
+
+// Attachments the composer staged for a session host arrive beside the message
+// text (`staged_files`, the renderer's own field), not inside it: the host is
+// expected to have put the bytes where its agent can read them and to tell the
+// agent where. A real session host does that itself; this deployment's guest
+// runner does not, so the bridge adds the same `<uploaded_files>` reminder the
+// app uses for local attachments. Only paths inside the shared workspace are
+// eligible — the guest sees that directory and nothing else of the container
+// at the same spelling.
+const stagedFileRoots = ["/workspace/", "/mnt/.virtiofs-root/workspace/"];
+const stagedFileLimit = 20;
+
+function stagedFilePaths(files) {
+  if (!Array.isArray(files)) return [];
+  const paths = [];
+  for (const file of files.slice(0, stagedFileLimit)) {
+    const mounted = isRecord(file) && typeof file.mount_path === "string"
+      ? file.mount_path : "";
+    if (!mounted.startsWith("/") || mounted.includes("\u0000")) continue;
+    const normalized = posix.normalize(mounted);
+    if (normalized.includes("/../") || normalized.endsWith("/..")) continue;
+    if (!stagedFileRoots.some((root) => normalized.startsWith(root))) continue;
+    if (!paths.includes(normalized)) paths.push(normalized);
+  }
+  return paths;
+}
+
+function xmlText(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** The reminder the agent reads to find the files a turn attached. */
+function stagedFilesReminder(paths) {
+  return [
+    "<system-reminder>",
+    "<uploaded_files>",
+    ...paths.map((path) => `<file><file_path>${xmlText(path)}</file_path></file>`),
+    "</uploaded_files>",
+    "</system-reminder>",
+  ].join("\n");
+}
+
+/**
+ * The entries to store for one client append: the caller's own, plus a
+ * reminder after each user message that carries staged files. A file-only
+ * send (no text) is a prompt too — the reminder is then the turn's only
+ * content, which is exactly what makes the runner run it.
+ */
+function withStagedFileReminders(entries, sessionId) {
+  const result = [];
+  for (const entry of entries) {
+    result.push(entry);
+    const payload = isRecord(entry?.payload) ? entry.payload : entry;
+    if (!isRecord(payload) || payload.type !== "user") continue;
+    const paths = stagedFilePaths(payload.staged_files);
+    if (paths.length === 0) continue;
+    result.push({
+      payload: {
+        type: "user",
+        uuid: randomUUID(),
+        session_id: sessionId,
+        parent_tool_use_id: null,
+        shouldQuery: false,
+        message: { role: "user", content: stagedFilesReminder(paths) },
+      },
+    });
+  }
+  return result;
 }
 
 /** Is this a user payload with anything the agent can answer? Text or an
@@ -2371,7 +2440,11 @@ export function createRunnerBackend({
       // control request, or an eager first message); they land in the same log
       // the runner reads and the stream replays.
       if (Array.isArray(body?.events)) {
-        const { durable, volatile } = appendIncoming(session, body.events, source);
+        // Placement may carry the first message (a routine or API fire), and a
+        // composer may place with attachments; the same reminder applies.
+        const events = source === "worker" ? body.events
+          : withStagedFileReminders(body.events, session.session_uuid);
+        const { durable, volatile } = appendIncoming(session, events, source);
         await appendEventsFile(session, durable);
         emitLive(session, durable);
         emitLive(session, volatile);
@@ -2433,10 +2506,15 @@ export function createRunnerBackend({
           const current = session.session_config?.permission_mode;
           return !current || current === "default";
         });
+      // A client send may carry attachments the composer staged for the
+      // session host. Store the reminder beside it so the guest agent can find
+      // them — see withStagedFileReminders.
+      const augmented = fromWorker ? accepted
+        : withStagedFileReminders(accepted, session.session_uuid);
       // Partials from this leg (a runner using the plain append) are live-only
       // too: the durable half goes to the log, both go to the open streams.
       await ensureEvents(session);
-      const { durable: appended, volatile } = appendIncoming(session, accepted,
+      const { durable: appended, volatile } = appendIncoming(session, augmented,
         fromWorker ? "worker" : "client");
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,

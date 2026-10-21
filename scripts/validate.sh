@@ -43,6 +43,7 @@ node scripts/folder-pick-smoke.mjs
 node scripts/file-consent-smoke.mjs
 node scripts/preload-file-open-smoke.mjs
 node scripts/attachment-mentions-smoke.mjs
+node scripts/session-attachment-staging-smoke.mjs
 node scripts/upload-stream-smoke.mjs
 node scripts/chat-attachment-upload-smoke.mjs
 node scripts/totp-smoke.mjs

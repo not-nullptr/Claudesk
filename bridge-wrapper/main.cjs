@@ -10,6 +10,8 @@ const { promisify } = require("node:util");
 const { gunzip, gzip } = require("node:zlib");
 const { app, BrowserWindow, ipcMain, Menu, net, webContents } = require("electron");
 
+const sessionAttachments = require("./session-attachments.cjs");
+
 // The official Desktop computes each notification's final title and body inside
 // its own (minified) notification service, so the relay below cannot re-derive
 // them from the service call arguments. Observe the native notification
@@ -566,6 +568,34 @@ const ionMimeTypes = {
   ".woff2": "font/woff2",
   ".webp": "image/webp",
 };
+
+// Desktop registers its renderer surfaces on each window's own IPC endpoint
+// (`webContents.ipc.handle`), not on the global `ipcMain`, so the override above
+// never sees them. Watch for new WebContents and wrap the staging channel as it
+// is registered.
+//
+// A Code session that runs on the guest runner has no reachable session host:
+// the app is in three-party (gateway) mode and no `selfHostedUrl` is configured
+// (configuring one would displace the inference provider), so Desktop's handler
+// answers every path with `disabled` and the composer reports "Couldn't attach
+// {name} to this session on your organization's session host. Try again."
+// The files are already in this container, though, and the guest sees the same
+// workspace at /workspace, so stage them there ourselves — see
+// session-attachments.cjs. Only Desktop's all-disabled answer is replaced; a
+// deployment whose handler stages through a real session host is untouched.
+app.on("web-contents-created", (_event, contents) => {
+  try {
+    sessionAttachments.wrapStagingIpc(contents?.ipc, {
+      enabled: codeSurfaceEnabled,
+      pendingUploadsRoot: join(app.getPath("userData"), "pending-uploads"),
+    });
+  } catch (error) {
+    console.warn(
+      "[cowork-wrapper] could not wrap this window's attachment staging:",
+      error?.message || error,
+    );
+  }
+});
 
 const allowedMethods = new Map([
   ["Account", new Set(["setAccountDetails"])],

@@ -931,13 +931,28 @@ its top-level allowlist keeps the normalized document's `cwd`; the prefill
 builder keeps the row's `cwd` and the place that ran it when it sees one; the
 draft setter (`uZ`) applies `folder` on a remote prefill instead of clearing
 the selection; and the new-session page's mount effect
-(`x.type === "environment" && St(x.id) || setSelectedFolder(null)`) treats a
-self-hosted pool (`ccpool_…`) as folder-capable instead of erasing the
-folder. Pinned by the two `_originalSession` row objects, the exact
+(`(x.type === "environment" && St(x.id) || String(x.id).startsWith("ccpool_"))
+|| setSelectedFolder(null)`) keeps the folder for a self-hosted place instead
+of erasing it. The id test is deliberately outside the kind test: the same
+`ccpool_…` place reaches the page as `environment` before the environment list
+resolves and is reclassified as `pool` once it does, and only the id is stable
+across both. Pinned by the two `_originalSession` row objects, the exact
 `["model","effort_level"]` context array, the prefill builder's
 `eZ({environmentId: row.environmentId})` declaration beside its
 `isAgentOwned` branch, the setter's ssh guard plus `setSelectedFolder`
 binding, and that environment-kind conjunction.
+
+`web-code-selfhosted-core-folder` closes the other half of that path. The
+composer core (`af`) reads the draft store's `trustedSelectedFolder` — the
+folder a *local* executor has been granted to run in — while the chip draws
+`selectedFolder`. A self-hosted place has no local executor and nothing grants
+its workspace folder through that trust store, so a folder picked or prefilled
+for a `ccpool_…` place never became the core's folder: the chip showed it, but
+the start intent was built without `cwd` and the branch hook had no folder to
+read. For a draft (`sessionRef` absent) on a `ccpool_…` place the core now
+reads the store's `selectedFolder`; a session page keeps the trusted folder as
+before. Pinned by the `worker`/`trustedSelectedFolder` selectors and the
+returned object's `selectedFolder` member.
 
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes
