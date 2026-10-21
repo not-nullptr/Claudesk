@@ -66,8 +66,8 @@ sudo docker compose logs "${CLAUDESK_NAME_PREFIX:-}claude-authd" | grep 'bootstr
 ```
 
 Open the printed `/accept-invite?token=…` link, set your name and a password, and
-you land in `/admin`. From there, **Create a user** takes just an email and a role
-and returns a one-time invite link (shown once) — send it to them; they set their
+you land in `/admin` on the users list. From there, **Invite someone** takes just
+an email and a role and returns a one-time invite link (shown once) — send it to them; they set their
 own first name, API key, password and (optionally) profile photo, and their browser
 timezone is captured then. The name, photo and API key are theirs: the admin only
 picks email + role at creation, though an admin can still correct them afterwards.
@@ -109,23 +109,24 @@ Two deployments on one box share `gateway_net`, so the name `authd` is ambiguous
 there; point `UPSTREAM_KEY_RESOLVER_URL` at the intended deployment's authd by a
 distinct alias or its host port (see "Two deployments on one box").
 
-An admin can replace or clear a person's key from `/admin` (the `API key…` action);
-the stored value is never sent back to the browser, so it is a blind write, and the
-table only shows whether a key is set.
+An admin can replace or clear a person's key from their page (`/admin/users/<id>`):
+the Details card's **API key** field sets a new one, and **Clear** removes it. The
+stored value is never sent back to the browser, so it is a blind write, and the page
+only shows whether a key is set.
 
 ### The model picker's layout
 
 The deployment's model list (`CLAUDE_INFERENCE_MODELS_JSON`, or what the gateway's
 `/v1/models` reports) can be long, and every model in it otherwise lands at the root
-of the composer's model menu. The **Model picker** card on `/admin` names the models
+of the composer's model menu. The **Models** page (`/admin/models`) names the models
 that should stay there and in what order; every other model is moved under a
 **More models** submenu, where it is still selectable — the layout claude.ai uses.
 
-The card lists the models the page's own instance serves, each by the name the menu
+The page lists the models the page's own instance serves, each by the name the menu
 shows and the id behind it (`GET /api/chat/model-catalog` — the picker's list, which
 is also how models the gateway discovered appear, since no env value names them). An
 instance that has not answered a page load yet falls back to the
-`CLAUDE_INFERENCE_MODELS_JSON` entries' labels, and with neither the card asks for an
+`CLAUDE_INFERENCE_MODELS_JSON` entries' labels, and with neither the page asks for an
 id by hand.
 
 The setting is deployment-wide and lives in `authd` (`settings` table, read back
@@ -280,9 +281,10 @@ pins the document shape and each route's IPC call.
 
 ### Per-account VM sizing and restart
 
-The `/admin` page carries a **VM** action per account. It edits the Cowork guest's
-memory (1–16 GB) and vCPU count (1–8); an empty field means "inherit the
-deployment's `CLAUDE_COWORK_VM_MEMORY_GB` / `_CPU_COUNT`". The values live on the
+Each account's page (`/admin/users/<id>`) carries a **Virtual Machine** section.
+It edits the Cowork guest's memory (1–16 GB) and vCPU count (1–8); **Use
+deployment default** clears the override and inherits the deployment's
+`CLAUDE_COWORK_VM_MEMORY_GB` / `_CPU_COUNT`. The values live on the
 account row in authd (`vm_memory_gb`, `vm_cpu_count`), and `--show` carries them
 so `scripts/provision-user.sh` can export them into the account's compose call —
 `CLAUDE_DESKTOP_MEMORY_LIMIT` is derived as `max(3g, memory + 1g)` so the Desktop
@@ -320,7 +322,7 @@ sizing; only provisioned accounts have the per-account controls.
 
 ### Deleting an account reclaims its instance
 
-Deleting a user in `/admin` is the mirror of creating one, and just as hands-off:
+Deleting a user from their page in `/admin` is the mirror of creating one, and just as hands-off:
 the same reconciler tears the instance down. `authd` cannot ask for it the way it
 does a provision — a provision request just names the account and the host
 re-reads it from the database, but by the time a deletion is reclaimed the row is
@@ -382,7 +384,7 @@ service owns goes to it directly; everything else is the user's workspace behind
 ```caddyfile
 claude.example.com {
 	# SPA routes, its assets, and the API all belong to authd.
-	@auth path /login /accept-invite /admin /auth-assets/* /api/auth/* /api/admin/*
+	@auth path /login /accept-invite /admin /admin/* /auth-assets/* /api/auth/* /api/admin/*
 	handle @auth {
 		reverse_proxy 127.0.0.1:15830
 	}
@@ -536,7 +538,7 @@ login HTML in place of a module or a stylesheet:
 	}
 
 	# Everything authd owns. /login is deliberately absent, above.
-	@authd path /accept-invite /admin /auth-assets/* /api/auth/* /api/admin/*
+	@authd path /accept-invite /admin /admin/* /auth-assets/* /api/auth/* /api/admin/*
 	handle @authd {
 		reverse_proxy 127.0.0.1:15832
 	}

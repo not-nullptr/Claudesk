@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import "./admin.css";
 import { AcceptInvitePage } from "./pages/AcceptInvite";
 import { AdminPage } from "./pages/Admin";
 import { LoginPage } from "./pages/Login";
