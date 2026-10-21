@@ -795,6 +795,20 @@ bounded (32 outstanding, a 15 s timeout, and no runner polling recently answers
 as unavailable). Guest-side git runs with `-c core.fsmonitor=false`, so a
 repo config written by the agent cannot make it execute a program.
 
+**Attachments take the same shared workspace.** The composer materializes a
+browser file with `FileSystem.savePastedFile`, then asks Desktop to stage it for
+the runner session. Desktop's handler has no reachable session host here (the
+app is in gateway mode and no `selfHostedUrl` is configured), so the wrapper's
+fallback copies the file to
+`/workspace/.claudesk-attachments/<session>/<name>` and returns that as the
+mount path (`bridge-wrapper/session-attachments.cjs`). The composer sends those
+paths beside the message as `staged_files`; the bridge stores an
+`<uploaded_files>` reminder after the user message (`withStagedFileReminders`),
+restricted to paths under the shared workspace, because the runner does not read
+`staged_files` itself. A file-only send therefore still carries a prompt. The
+guest needs no new request type: the file is already under `/workspace`, which
+the runner bind-mounts from the share.
+
 The request lane is guest runner **2.0.2+**. A 2.0.1 runner (the held-poll
 release before it) accepts the poll and silently ignores `requests`, so every
 lookup burns the full timeout and reads as a hang; the bridge now refuses such
