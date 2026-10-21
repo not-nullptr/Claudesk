@@ -2081,6 +2081,9 @@ const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:
 const selfHostedLandingKeep = 'function landing(x){'
   + 'let{worker:e,setSelectedFolder:t}=U.getState();'
   + 'e.type==="environment"&&St(e.id)||t(null)}';
+const selfHostedCoreFolder = 'function core(e,t){'
+  + 'let o=ht(e=>e.worker),c=ht(e=>e.trustedSelectedFolder);'
+  + 'return effect(),{worker:o,selectedFolder:c,selectedRepos:[]}}';
 const selfHostedFolderSetter = 'var draftStore={selectedFolder:null,'
   + 'setSelectedFolder:t=>e({selectedFolder:t,trustedSelectedFolder:null})};';
 const selfHostedPlusTrace = 'function plusHandler(e){return function(t){'
@@ -2110,7 +2113,8 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedLandingKeep, selfHostedFolderSetter, selfHostedPlusTrace,
+  selfHostedBucketPrefill, selfHostedLandingKeep, selfHostedCoreFolder,
+  selfHostedFolderSetter, selfHostedPlusTrace,
   selfHostedRemotePrefill, selfHostedListFields,
   selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
@@ -2118,7 +2122,8 @@ const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-ne
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
   "web-code-selfhosted-create", "web-code-selfhosted-create-params",
   "web-code-selfhosted-repo-info", "web-code-folder-groups", "web-code-surface",
-  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
+  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip",
+  "web-code-selfhosted-core-folder"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -2135,6 +2140,9 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-branch-read").length, 1,
   "the branch hook's local-only read must be widened exactly once");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-core-folder").length, 2,
+  "the composer core must read the draft's selected folder on a self-hosted place");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-intent").length, 3,
   "all three self-hosted intent arms must carry the start options");
@@ -2216,6 +2224,12 @@ assert.ok(selfHostedOut.includes('(e.type==="environment"&&St(e.id)'
   + '||String(e.id).startsWith("ccpool_"))||t(null)'),
   "the new-session page must keep a folder placed on a self-hosted place, "
   + "whether it resolved as an environment or a pool");
+assert.ok(selfHostedOut.includes('let __claudeskSelectedFolder='
+  + 'ht(__claudeskState=>__claudeskState.selectedFolder);'),
+  "the composer core must read the draft store's selected folder");
+assert.ok(selfHostedOut.includes('selectedFolder:(!e&&(o.type==="pool"'
+  + '||String(o.id).startsWith("ccpool_"))?__claudeskSelectedFolder:c)'),
+  "and use it, not the local trust store's folder, for a self-hosted draft");
 assert.ok(selfHostedOut.includes('setSelectedFolder:t=>(globalThis.__claudeskTrace&&'
   + 'globalThis.__claudeskTrace("set-folder",{value:t,stack:(new Error).stack}),'
   + 'e({selectedFolder:t,trustedSelectedFolder:null}))'),

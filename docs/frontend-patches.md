@@ -942,6 +942,18 @@ across both. Pinned by the two `_originalSession` row objects, the exact
 `isAgentOwned` branch, the setter's ssh guard plus `setSelectedFolder`
 binding, and that environment-kind conjunction.
 
+`web-code-selfhosted-core-folder` closes the other half of that path. The
+composer core (`af`) reads the draft store's `trustedSelectedFolder` — the
+folder a *local* executor has been granted to run in — while the chip draws
+`selectedFolder`. A self-hosted place has no local executor and nothing grants
+its workspace folder through that trust store, so a folder picked or prefilled
+for a `ccpool_…` place never became the core's folder: the chip showed it, but
+the start intent was built without `cwd` and the branch hook had no folder to
+read. For a draft (`sessionRef` absent) on a `ccpool_…` place the core now
+reads the store's `selectedFolder`; a session page keeps the trusted folder as
+before. Pinned by the `worker`/`trustedSelectedFolder` selectors and the
+returned object's `selectedFolder` member.
+
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes
 before its local-agent-context branch, which otherwise picks `cowork` on the
