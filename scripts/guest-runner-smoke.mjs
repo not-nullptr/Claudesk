@@ -117,6 +117,9 @@ try {
       BRIDGE_HOST: "127.0.0.1",
       COWORK_BRIDGE_STATE_DIR: stateDir,
       AUTH_IDENTITY_URL: "http://127.0.0.1:9",
+      // The gate is pinned by bridge-auth-smoke.mjs; this smoke drives the
+      // browser-shaped code-folder/IPC routes as its own client.
+      CLAUDESK_BRIDGE_AUTH: "0",
       COWORK_INTERNAL_URL: "http://127.0.0.1:9",
       CLAUDESK_TENANT: "1",
       CLAUDESK_CODE_RUNNERS: "1",

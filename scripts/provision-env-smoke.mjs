@@ -42,8 +42,13 @@ vm_vsock_port=
 CLAUDESK_ACCOUNT_CODE_ACTIONS=0
 CLAUDESK_ACCOUNT_CODE_RUNNERS=1
 CLAUDESK_RECREATE_SERVICES="claude-desktop cowork-bridge claude-gateway-loopback"
+# The real script mints this beside the account directories; the block under
+# test only forwards it.
+bridge_token=smoke-token
 compose_shared() {
   printf 'TENANT=%s\\n' "\${CLAUDESK_TENANT-}"
+  printf 'BRIDGEAUTH=%s\\n' "\${CLAUDESK_BRIDGE_AUTH-}"
+  printf 'TOKEN=%s\\n' "\${CLAUDESK_BRIDGE_TOKEN-}"
   printf 'RUNNERS=%s\\n' "\${CLAUDESK_CODE_RUNNERS-}"
   printf 'PREFIX=%s\\n' "\${CLAUDESK_NAME_PREFIX-}"
   printf 'PORT=%s\\n' "\${COWORK_WEB_PORT-}"
@@ -63,6 +68,8 @@ assert.equal(result.status, 0, result.stderr);
 const printed = new Set(result.stdout.trim().split("\n"));
 for (const expected of [
   "TENANT=1",
+  "BRIDGEAUTH=1",
+  "TOKEN=smoke-token",
   "RUNNERS=1",
   "PREFIX=ada-",
   "PORT=15901",

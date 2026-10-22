@@ -196,6 +196,14 @@ services:
       # inside its Cowork guest — so this withholds that surface whatever
       # CLAUDE_REMOTE_CODE_ACTIONS says. See docs/code-in-cowork-vm.md.
       CLAUDESK_TENANT: "${CLAUDESK_TENANT:-0}"
+      # Application-layer auth for the bridge's own API. Every tenant joins the
+      # shared gateway_net, so one account's container (or its VM, through
+      # slirp) can reach another's bridge directly; the reverse proxy is not in
+      # that path. A tenant always enforces it; the deployment's own instance
+      # opts in with =1. The token is the mobile facade's server-to-server pass,
+      # minted per instance by provision-user.sh / deploy.sh.
+      CLAUDESK_BRIDGE_AUTH: "${CLAUDESK_BRIDGE_AUTH:-}"
+      CLAUDESK_BRIDGE_TOKEN: "${CLAUDESK_BRIDGE_TOKEN:-}"
       # Answer the self-hosted pool API the runner speaks (bridge/code-runners.mjs).
       # Requires CLAUDESK_TENANT=1; off by default, so nothing is routed until the
       # deployment turns it on. The pool name is created on first use and a runner
@@ -368,6 +376,9 @@ services:
       CLAUDE_MOBILE_DESKTOP_HOST: "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
       # Dial this URL instead of the host above. Empty means the host.
       CLAUDE_MOBILE_DESKTOP_URL: "${CLAUDE_MOBILE_DESKTOP_URL:-}"
+      # The bridge's server-to-server pass (see CLAUDESK_BRIDGE_AUTH there).
+      # Required when the bridge gates its API; provision-user.sh mints it.
+      CLAUDESK_BRIDGE_TOKEN: "${CLAUDESK_BRIDGE_TOKEN:-}"
       # Our own prefix, compared against the bridge's on startup: a mismatch
       # means this facade is driving a Desktop that is not its instance's, which
       # is reported instead of served. See mobile/server.mjs.

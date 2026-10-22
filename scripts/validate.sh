@@ -16,6 +16,7 @@ find rootfs scripts -type f -name '*.sh' -exec sh -n {} \;
 node tools/frida/swift-string-harness.mjs
 
 node scripts/security-smoke.mjs
+node scripts/bridge-auth-smoke.mjs
 node scripts/session-file-smoke.mjs
 node scripts/office-preview-smoke.mjs
 node scripts/official-index-smoke.mjs

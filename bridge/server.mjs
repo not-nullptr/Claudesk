@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { lstat, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
@@ -409,6 +409,55 @@ async function fetchAuthIdentity(request) {
   if (authIdentityCache.size >= AUTH_IDENTITY_CACHE_MAX) authIdentityCache.clear();
   authIdentityCache.set(cookie, { identity, expires: Date.now() + AUTH_IDENTITY_TTL_MS });
   return identity;
+}
+
+// Application-layer auth for the bridge's own API.
+//
+// The deployment boundary assumes the reverse proxy is the only way in. That is
+// true for the host's published port, but not for a peer container: every
+// instance joins the same external `gateway_net`, and the bridge listens on
+// 0.0.0.0 there, so one tenant's container (or its Cowork VM, through slirp)
+// can reach every other tenant's API directly — no proxy, no session. That is a
+// cross-account read/write path, not a hypothetical one.
+//
+// A tenant therefore always enables this gate; the deployment's own instance
+// opts in with CLAUDESK_BRIDGE_AUTH=1 when it shares the network. The cookie is
+// the one authd already issued (the proxy's forward_auth uses the same
+// session), and it is scoped to this instance's account: a valid cookie for a
+// different account on the box is not this instance's session. The mobile
+// facade is server-to-server and has no browser cookie, so it carries a
+// per-instance token minted by provision-user.sh / deploy.sh instead.
+const bridgeAuthEnabled = process.env.CLAUDESK_BRIDGE_AUTH === "0"
+  ? false
+  : (process.env.CLAUDESK_BRIDGE_AUTH === "1"
+    || process.env.CLAUDESK_TENANT === "1");
+const bridgeToken = (process.env.CLAUDESK_BRIDGE_TOKEN || "").trim();
+const bridgeAccountEmail = (process.env.CLAUDE_REMOTE_ACCOUNT_EMAIL || "")
+  .trim().toLowerCase();
+
+function sha256(value) {
+  return createHash("sha256").update(String(value)).digest();
+}
+
+// Compare through fixed-length digests so a wrong token cannot be recovered by
+// timing, and a length difference cannot throw.
+function hasBridgeToken(request) {
+  if (!bridgeToken) return false;
+  const supplied = request?.headers?.["x-claudesk-bridge-token"];
+  if (typeof supplied !== "string" || !supplied) return false;
+  return timingSafeEqual(sha256(bridgeToken), sha256(supplied.trim()));
+}
+
+async function authorizeApiRequest(request) {
+  if (!bridgeAuthEnabled) return { ok: true };
+  if (hasBridgeToken(request)) return { ok: true, internal: true };
+  const identity = await fetchAuthIdentity(request);
+  if (!identity) return { ok: false, status: 401, error: "not signed in" };
+  if (bridgeAccountEmail
+    && String(identity.email || "").trim().toLowerCase() !== bridgeAccountEmail) {
+    return { ok: false, status: 403, error: "this instance belongs to a different account" };
+  }
+  return { ok: true, identity };
 }
 
 // The deployment's model-picker layout, as the admin page saved it. It lives in
@@ -4341,6 +4390,26 @@ async function handleRoutineApi(request, response, url) {
     return;
   }
 
+  // The routines UI is this account's own data, so it follows the bridge's
+  // session gate. The public fire leg verifies its own per-routine bearer token
+  // below and stays reachable without a browser session.
+  const routineFire = method === "POST"
+    && /^\/v1\/claude_code\/routines\/[^/]+\/fire\/?$/.test(pathname);
+  if (!routineFire) {
+    const authorization = await authorizeApiRequest(request)
+      .catch(() => ({ ok: false, status: 401, error: "not signed in" }));
+    if (!authorization.ok) {
+      sendRoutineJson(response, authorization.status || 401, {
+        type: "error",
+        error: {
+          type: "permission_error",
+          message: authorization.error || "not signed in",
+        },
+      });
+      return;
+    }
+  }
+
   try {
     const fire = /^\/v1\/claude_code\/routines\/([^/]+)\/fire\/?$/.exec(pathname);
     if (fire) {
@@ -4551,6 +4620,30 @@ async function handleCodeRunnerApi(request, response, url) {
   const method = String(request.method || "GET").toUpperCase();
   const pathname = url.pathname;
   const headers = request.headers;
+  // Browser/admin legs are this account's API and follow the bridge's session
+  // gate. The runner's own legs carry a pool/runner/session secret and verify it
+  // inside the handler; leave those to that check. The session event legs are
+  // shared — the browser reads them with a cookie, the guest reads and streams
+  // them with the session token — so a runner credential there is also a pass.
+  const runnerLeg = pathname.startsWith("/v1/code/runners/self-hosted/runners/")
+    || pathname.startsWith("/v1/code/runners/self-hosted/spawn-hints/")
+    || pathname.startsWith("/v1/code/runners/self-hosted/requests/")
+    || pathname.startsWith("/v1/code/runners/self-hosted/sessions/")
+    || pathname === "/v1/code/auth/refresh";
+  const sessionLeg = /^\/v1\/code\/sessions(?:\/|$)/.test(pathname);
+  const runnerCredential = sessionLeg
+    && await codeRunners.acceptsRunnerCredential({ headers }).catch(() => false);
+  if (!runnerLeg && !runnerCredential) {
+    const authorization = await authorizeApiRequest(request)
+      .catch(() => ({ ok: false, status: 401, error: "not signed in" }));
+    if (!authorization.ok) {
+      sendJson(response, authorization.status || 401, {
+        ok: false,
+        error: authorization.error || "not signed in",
+      });
+      return;
+    }
+  }
   // The runner's streaming leg must be read as it arrives, not buffered like a
   // JSON body: one chunked request carries the whole turn's events.
   const eventStream = pathname.match(/^\/v1\/code\/sessions\/([^/]+)\/events\/stream$/);
@@ -5216,6 +5309,21 @@ async function handleApi(request, response, url) {
       return;
     }
     sendJson(response, 403, { ok: false, error: "not signed in" });
+    return;
+  }
+  // Every route below reads this account's Desktop, files or sessions. The
+  // reverse proxy authenticates the browser, but a peer container on the shared
+  // network reaches this port directly, so the session is checked here too.
+  // Health stays reachable for liveness (the container healthcheck has no
+  // session) but answers only `{ok:true}` without one.
+  const healthRequest = request.method === "GET" && url.pathname === "/api/health";
+  const authorization = await authorizeApiRequest(request)
+    .catch(() => ({ ok: false, status: 401, error: "not signed in" }));
+  if (!authorization.ok && !healthRequest) {
+    sendJson(response, authorization.status || 401, {
+      ok: false,
+      error: authorization.error || "not signed in",
+    });
     return;
   }
   // Routine token administration, behind the same session gate as the rest of
@@ -5936,6 +6044,12 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/health") {
+    // A peer with no session gets liveness only: the full document names the
+    // instance (its account-derived prefix) and the surfaces it exposes.
+    if (!authorization.ok) {
+      sendJson(response, 200, { ok: true });
+      return;
+    }
     try {
       const [surfaces, desktopRuntime] = await Promise.all([
         desktop.inspect(),
@@ -6449,10 +6563,20 @@ const server = http.createServer(async (request, response) => {
       }
     }
     else if (request.method === "POST" && url.pathname === "/v1/filestore/fs/createFile") {
+      // The login shell refuses everything first, as it does in every branch.
       if (loginShellEnabled) {
         sendJson(response, 403, { ok: false, error: "not signed in" });
       } else {
-        sendJson(response, 200, await uploads.receiveFilestore(request, response));
+        const authorization = await authorizeApiRequest(request)
+          .catch(() => ({ ok: false, status: 401, error: "not signed in" }));
+        if (!authorization.ok) {
+          sendJson(response, authorization.status || 401, {
+            ok: false,
+            error: authorization.error || "not signed in",
+          });
+        } else {
+          sendJson(response, 200, await uploads.receiveFilestore(request, response));
+        }
       }
     }
     // Routine triggers: the public fire entry point (a bearer token, no session
@@ -6557,6 +6681,19 @@ server.requestTimeout = 0;
 server.listen(port, host, () => {
   console.log(`[cowork-bridge] listening on ${host}:${port}; internal=${coworkInternalUrl}`);
   console.log(`[cowork-bridge] download roots: ${downloadRoots.join(", ")}`);
+  if (bridgeAuthEnabled) {
+    if (!authIdentityUrl && !bridgeToken) {
+      console.warn("[cowork-bridge] API auth is on but neither AUTH_IDENTITY_URL nor "
+        + "CLAUDESK_BRIDGE_TOKEN is set; the API will refuse every request");
+    } else if (!bridgeToken) {
+      console.warn("[cowork-bridge] API auth is on without CLAUDESK_BRIDGE_TOKEN; "
+        + "the mobile facade will be refused");
+    }
+    if (authIdentityUrl && !bridgeAccountEmail) {
+      console.warn("[cowork-bridge] API auth is on without CLAUDE_REMOTE_ACCOUNT_EMAIL; "
+        + "any account the shared authd knows can use this instance's API");
+    }
+  }
   // Only the env-configured list is known this early; with an auth service the
   // operator's list is read (and re-read) per request, so it is logged then.
   if (envMainModels.length) {

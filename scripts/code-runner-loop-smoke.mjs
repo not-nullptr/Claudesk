@@ -38,6 +38,9 @@ try {
       BRIDGE_HOST: "127.0.0.1",
       COWORK_BRIDGE_STATE_DIR: stateDir,
       AUTH_IDENTITY_URL: "http://127.0.0.1:9",
+      // The gate is pinned by bridge-auth-smoke.mjs; this smoke drives the
+      // runner and session legs directly.
+      CLAUDESK_BRIDGE_AUTH: "0",
       COWORK_INTERNAL_URL: "http://127.0.0.1:9",
       // One account's own instance, answering its self-hosted pool API.
       CLAUDESK_TENANT: "1",

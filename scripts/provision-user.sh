@@ -113,6 +113,16 @@ user_root="$data_root/users/$slug"
 install -d -m 0755 -o "$puid" -g "$pgid" \
     "$user_root/config" "$user_root/workspace" "$user_root/bridge-data" "$user_root/root"
 
+# The server-to-server pass between this account's bridge and its mobile
+# facade. It lives with the account so a re-provision reuses it, and it is
+# deliberately per account: the bridge's API gate accepts it in place of the
+# browser session the facade never has.
+bridge_token_file="$user_root/bridge-token"
+if [ ! -s "$bridge_token_file" ]; then
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$bridge_token_file" )
+fi
+bridge_token="$(cat "$bridge_token_file")"
+
 # The account's Cowork VM sizing. An admin-set value wins; an empty one means
 # "inherit", which provision-user already sourced from the deployment's .env.
 vm_memory_gb="${vm_memory_override:-${CLAUDE_COWORK_VM_MEMORY_GB:-2}}"
@@ -283,6 +293,8 @@ CLAUDE_GATEWAY_ENV_AUTHORITATIVE=1 \
 CLAUDE_REMOTE_GATEWAY_SETTINGS="$ACCOUNT_GATEWAY_SETTINGS" \
 CLAUDE_REMOTE_CODE_ACTIONS="${CLAUDESK_ACCOUNT_CODE_ACTIONS:-0}" \
 CLAUDESK_TENANT=1 \
+CLAUDESK_BRIDGE_AUTH=1 \
+CLAUDESK_BRIDGE_TOKEN="$bridge_token" \
 CLAUDESK_CODE_RUNNERS="${CLAUDESK_ACCOUNT_CODE_RUNNERS:-1}" \
 CLAUDE_REMOTE_LOGIN_SHELL=0 \
 CLAUDE_REMOTE_DEVELOPER_ACTIONS="$ACCOUNT_DEVELOPER_ACTIONS" \

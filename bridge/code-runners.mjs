@@ -1756,6 +1756,25 @@ export function createRunnerBackend({
       return state.pools.some((pool) => pool.secret === token);
     },
 
+    /**
+     * Does this Authorization header carry any credential the guest runner
+     * holds? The pool secret and the runner token are the registration/poll
+     * pass; the per-session token is what the guest presents on the session
+     * legs it shares with the browser (read the event history, stream a turn).
+     * Used only to tell the runner's requests from a browser's, so the bridge's
+     * API gate can leave the former to the handler's own check.
+     */
+    async acceptsRunnerCredential({ headers } = {}) {
+      const token = bearerToken(headers);
+      if (!token) return false;
+      const state = await load();
+      if (state.pools.some((pool) => pool.secret === token)) return true;
+      if (state.runners.some((runner) => runner.runner_token === token)) return true;
+      return state.sessions.some(
+        (session) => Boolean(session.session_token) && session.session_token === token,
+      );
+    },
+
     /** GET /v1/code/runners/self-hosted/pools */
     async listPools() {
       const state = await load();

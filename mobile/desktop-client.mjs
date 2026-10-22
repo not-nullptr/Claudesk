@@ -72,8 +72,17 @@ export function createDesktopClient({
   baseUrl = desktopBaseUrl(),
   fetchImpl = globalThis.fetch,
   log = console,
+  token = process.env.CLAUDESK_BRIDGE_TOKEN,
 } = {}) {
   const root = baseUrl.replace(/\/$/, "");
+  // The facade is server-to-server and has no browser session cookie, so the
+  // bridge's API gate knows it by this per-instance token. Empty means the
+  // bridge is not gating its API (an older deployment or a smoke).
+  const bridgeToken = String(token || "").trim();
+  const bridgeHeaders = (extra = {}) => ({
+    ...(bridgeToken ? { "x-claudesk-bridge-token": bridgeToken } : {}),
+    ...extra,
+  });
 
   async function request(path, { method = "GET", body, timeoutMs = 60000, signal } = {}) {
     // AbortSignal.any needs Node 20; combine the caller's signal and a timeout by hand.
@@ -89,7 +98,7 @@ export function createDesktopClient({
     try {
       response = await fetchImpl(`${root}${path}`, {
         method,
-        headers: body === undefined ? {} : { "content-type": "application/json" },
+        headers: bridgeHeaders(body === undefined ? {} : { "content-type": "application/json" }),
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
@@ -138,7 +147,7 @@ export function createDesktopClient({
           `${root}/api/remote/files/upload?batch=${batch}&path=${encodeURIComponent(file.name)}`,
           {
             method: "POST",
-            headers: { "content-type": "application/octet-stream" },
+            headers: bridgeHeaders({ "content-type": "application/octet-stream" }),
             body: Buffer.from(file.data),
             signal: AbortSignal.timeout(600000),
           },
@@ -164,7 +173,10 @@ export function createDesktopClient({
   // environment list; a false answer is a normal state, not an error.
   async function health() {
     try {
-      const response = await fetchImpl(`${root}/api/health`, { signal: AbortSignal.timeout(5000) });
+      const response = await fetchImpl(`${root}/api/health`, {
+        headers: bridgeHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
       if (!response.ok) return false;
       const payload = await response.json();
       return Boolean(payload?.ok);
@@ -177,7 +189,10 @@ export function createDesktopClient({
   // bridge did not answer. The instance check needs the body, not the verdict.
   async function healthReport() {
     try {
-      const response = await fetchImpl(`${root}/api/health`, { signal: AbortSignal.timeout(5000) });
+      const response = await fetchImpl(`${root}/api/health`, {
+        headers: bridgeHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
       if (!response.ok) return null;
       return await response.json();
     } catch {
@@ -204,6 +219,7 @@ export function createDesktopClient({
   // entry can be handed to the phone under the id it already has.
   async function chatModels() {
     const response = await fetchImpl(`${root}/edge-api/bootstrap/${bootstrapOrg}/app_start`, {
+      headers: bridgeHeaders(),
       signal: AbortSignal.timeout(30000),
     }).catch((error) => {
       throw new DesktopError(`Claudesk bridge unreachable: ${error.message}`, 503);
@@ -255,7 +271,7 @@ export function createDesktopClient({
           const query = new URLSearchParams({ mode });
           if (sessionId) query.set("sessionId", sessionId);
           const response = await fetchImpl(`${root}/api/events?${query}`, {
-            headers: { accept: "text/event-stream" },
+            headers: bridgeHeaders({ accept: "text/event-stream" }),
             signal: controller.signal,
           });
           if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);

@@ -66,6 +66,9 @@ async function boot({ port, env }) {
       // Nothing is listening here: a request that reached for the auth service
       // or the Desktop fails loudly rather than quietly succeeding.
       AUTH_IDENTITY_URL: "http://127.0.0.1:9",
+      // This smoke drives the pool/environment routes as the browser would;
+      // the tenant API gate has its own smoke (bridge-auth-smoke.mjs).
+      CLAUDESK_BRIDGE_AUTH: "0",
       COWORK_INTERNAL_URL: "http://127.0.0.1:9",
       ...env,
     },
