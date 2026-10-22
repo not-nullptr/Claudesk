@@ -2089,16 +2089,20 @@ export function createRunnerBackend({
       // A message the turn's read did not include is answered by the next one.
       // Only a live turn can release into that retry; a session stopped in the
       // meantime (or released) takes the next client message through the
-      // ordinary requeue path.
-      if (session.state === "active" || session.state === "offered") {
-        for (const envelope of session.events ?? []) {
-          if (envelope.source === "worker") continue;
-          if (!isUserMessage(envelope)) continue;
-          if (Number(envelope.sequence_num) > through) {
-            session.requeue_after_release = true;
-            break;
-          }
+      // ordinary requeue path. A runner that later delivers the message to the
+      // live child (steering) reports it here with a higher `through`: with
+      // nothing left above the point, the next-turn requeue is dropped — the
+      // running agent is answering it now, and a requeue would run it twice.
+      const undelivered = (session.events ?? []).some((envelope) =>
+        envelope.source !== "worker"
+        && isUserMessage(envelope)
+        && Number(envelope.sequence_num) > through);
+      if (undelivered) {
+        if (session.state === "active" || session.state === "offered") {
+          session.requeue_after_release = true;
         }
+      } else {
+        delete session.requeue_after_release;
       }
       await save();
       return {};
@@ -2540,6 +2544,25 @@ export function createRunnerBackend({
         // Only the renderer's Stop stops a turn; a worker never writes one.
         if (!fromWorker && request.subtype === "interrupt") {
           const requestId = payload.request_id ?? request.request_id;
+          // Send now is a steer, not a Stop: the message it names is delivered
+          // to the running child by the guest runner, which then sends the
+          // CLI's own `send_now` interrupt. Cancelling the turn here would kill
+          // the process the message is meant to reach, so acknowledge it and
+          // leave the delivery to the runner (a message on a session with no
+          // runner still requeues and runs as the next turn).
+          if (request.send_now === true && request.cancel_queued !== true) {
+            if (typeof requestId === "string" && requestId) {
+              appended.push(...appendToSession(session, [{ payload: {
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: requestId,
+                  response: { still_queued: [], send_now: "delivering" },
+                },
+              } }], "worker"));
+            }
+            continue;
+          }
           markInterrupted(session, { requestId });
           if (typeof requestId === "string" && requestId) interruptRequests.add(requestId);
           continue;

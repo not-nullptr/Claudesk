@@ -42,6 +42,14 @@ import urllib.parse
 import urllib.request
 import uuid
 
+# 2.6.0: A message sent while a turn runs is steered into the live child. Its
+# stdin stays open and the runner watches the transcript: each new client
+# message is written to the agent, and a real prompt is followed by the CLI's
+# native `interrupt` request with `send_now`, which stops the running turn and
+# runs the message now. Each result is written as it arrives, so the stopped
+# turn and the steered one close separately. The delivery floor also answers
+# anything the watch missed at the next turn.
+#
 # 2.5.0: The turn answers every client message above the bridge's delivery
 # floor — including one typed while the previous turn ran, which used to sit
 # before that turn's `result` and be dropped — and each is sent to the agent
@@ -55,7 +63,7 @@ import uuid
 # the stream, or posting the result on its own when it cannot), the poll reports
 # the sessions this runner holds so the bridge can reap a turn whose runner
 # vanished, and the agent's process group — not just its pid — is signalled.
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 
 def env(name, default=""):
@@ -140,6 +148,16 @@ TURN_TIMEOUT = env_seconds("CLAUDESK_RUNNER_TIMEOUT_SECONDS")
 # start of a turn. It answers from its own transcript in-process; a build that
 # cannot answer must not hold the user's next message behind it.
 REWIND_TIMEOUT = float(env("CLAUDESK_RUNNER_REWIND_TIMEOUT_SECONDS", "10") or 0)
+# A turn holds the child open after its prompt so a message sent while the
+# agent works reaches it natively: the message goes on stdin and the CLI's
+# `interrupt` request with `send_now` stops the running turn for it (the same
+# protocol the Cloud Code surface uses). These pace that watch, and bound how
+# long an idle child is kept after its last result before the turn releases.
+STEER_POLL_SECONDS = float(env("CLAUDESK_RUNNER_STEER_POLL_SECONDS", "0.4") or 0)
+# After a steered turn's last result the child still has to drain the queries
+# its stdin already carried; its own EOF exit is prompt, and this only bounds a
+# build that keeps waiting after input ended.
+STEER_EXIT_GRACE_SECONDS = env_seconds("CLAUDESK_RUNNER_STEER_EXIT_GRACE_SECONDS") or 30.0
 # A placed session and its first message are two requests from the composer.
 # A claim that lands between them reads an empty transcript; wait this long for
 # the send to arrive before releasing the session back to the bridge.
@@ -324,6 +342,53 @@ def prompt_of(events):
     return ""
 
 
+def message_blocks(payload):
+    """The stream-json content blocks of a user payload, or [] when it has
+    nothing the agent can be asked (a tool result, an empty send).
+
+    The opening message may carry image blocks beside the text (a fire with
+    images). The agent's stream-json input takes the same block list, so each
+    message is forwarded as it arrived rather than flattened to text.
+    """
+    content = (payload.get("message") or {}).get("content")
+    blocks = []
+    if isinstance(content, str):
+        if content.strip():
+            blocks.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    blocks.append({"type": "text", "text": text})
+            elif part.get("type") == "image":
+                source = part.get("source")
+                if (isinstance(source, dict)
+                        and source.get("type") == "base64"
+                        and isinstance(source.get("data"), str)
+                        and source.get("data")):
+                    blocks.append({"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": source.get("media_type") or "image/png",
+                        "data": source["data"],
+                    }})
+    return blocks
+
+
+def is_steerable(payload, blocks):
+    """Is a delivered mid-turn message one the running turn should stop for?
+
+    A system reminder (`shouldQuery: false`) or an image-only attachment
+    carrier belongs to the turn but is not something the person just pressed
+    send on; only a real prompt escalates the CLI's send-now interrupt.
+    """
+    if payload.get("shouldQuery") is False:
+        return False
+    return bool(blocks)
+
+
 def content_of(events, after_sequence_num=None):
     """The client user messages this turn answers, each with its uuid.
 
@@ -367,30 +432,7 @@ def content_of(events, after_sequence_num=None):
         payload = event.get("payload") or {}
         if payload.get("type") != "user":
             continue
-        content = (payload.get("message") or {}).get("content")
-        blocks = []
-        if isinstance(content, str):
-            if content.strip():
-                blocks.append({"type": "text", "text": content})
-        elif isinstance(content, list):
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "text":
-                    text = part.get("text")
-                    if isinstance(text, str) and text.strip():
-                        blocks.append({"type": "text", "text": text})
-                elif part.get("type") == "image":
-                    source = part.get("source")
-                    if (isinstance(source, dict)
-                            and source.get("type") == "base64"
-                            and isinstance(source.get("data"), str)
-                            and source.get("data")):
-                        blocks.append({"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": source.get("media_type") or "image/png",
-                            "data": source["data"],
-                        }})
+        blocks = message_blocks(payload)
         if not blocks:
             continue
         message_uuid = payload.get("uuid")
@@ -1110,7 +1152,7 @@ def apply_cancellations(items):
     return applied
 
 
-def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
+def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None, steer=None):
     """One headless turn of the agent: the prompts in, the event stream out.
 
     `messages` is the ordered list of client user messages this turn answers
@@ -1132,8 +1174,17 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
     `interrupt` is an event set by the poll loop when the bridge carries a
     Stop. The child is signalled the way the terminal would (SIGINT) so it can
     flush and unwind; a child that ignores that is terminated, then killed.
+
+    `steer` keeps stdin open for the life of the turn and polls the bridge for
+    client messages that landed after its floor. Each is written to the child
+    as a stream-json user message; a real prompt is followed by the CLI's
+    native `interrupt` control request with `send_now`, which stops the turn
+    under way and runs the message immediately — stock steering, not a queue
+    for the next turn (see watch_steering).
+
     Returns (exit code, result event or None, timed out, interrupted,
-    forwarded count, write failures, stderr lines, rewind answered).
+    forwarded count, write failures, stderr lines, rewind answered,
+    results written live).
     """
     environment = dict(os.environ)
     if os.path.isdir(RUNNER_HOME):
@@ -1246,17 +1297,67 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
     forwarded = 0
     result_count = 0
     result = None
-    expected_results = max(1, len(messages or []))
-    end_started = []
+    results_emitted = 0
+    # One result per user message the agent is given, including a steered one
+    # (the CLI answers each message as its own query). The watcher increments
+    # it; the list keeps the count shared without another lock.
+    expected_results = [max(1, len(messages or []))]
+    stdin_closed = []
+    stdin_lock = threading.Lock()
+    steer_stop = threading.Event()
+    steer_state = {
+        # The transcript sequence this turn has already handed the agent. The
+        # watcher reads above it; the initial prompts are at or below it.
+        "floor": 0,
+        "delivered": set(),
+        "steered": False,
+        "last_result_at": None,
+        "last_delivery_at": None,
+        "session": None,
+        "token": None,
+    }
+    if isinstance(steer, dict):
+        try:
+            steer_state["floor"] = max(0, int(steer.get("floor") or 0))
+        except (TypeError, ValueError):
+            steer_state["floor"] = 0
+        steer_state["session"] = steer.get("session")
+        steer_state["token"] = steer.get("token")
 
-    def end_after_result():
+    def write_stdin(payload):
+        """Write one stream-json line to the live agent, or False once its
+        input is complete (the turn is settling or the child is gone)."""
+        with stdin_lock:
+            if stdin_closed:
+                return False
+            try:
+                process.stdin.write(json.dumps(payload) + "\n")
+                process.stdin.flush()
+                return True
+            except OSError:
+                return False  # the agent died before reading; its exit says why
+
+    def close_stdin():
+        with stdin_lock:
+            if stdin_closed:
+                return
+            stdin_closed.append(True)
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
         # A build that keeps waiting for more input after its result must not
-        # hold the session; stdin has already ended, so give it a moment to
-        # exit on its own, then end the whole group (a grandchild can hold the
-        # stdout pipe open after the agent itself is gone). Only after the
-        # last message's result: the agent answers each message as its own
-        # query, and ending on the first would cut the rest off.
-        for _ in range(6):
+        # hold the session; give it a moment to exit on its own, then end the
+        # whole group (a grandchild can hold the stdout pipe open after the
+        # agent itself is gone). A steered turn may still be draining queries
+        # whose messages were written before the close, so it gets a longer
+        # grace than a plain turn.
+        grace = STEER_EXIT_GRACE_SECONDS if steer_state["steered"] else 3.0
+        threading.Thread(target=end_after_result, args=(grace,), daemon=True).start()
+
+    def end_after_result(grace_seconds=3.0):
+        deadline = time.time() + grace_seconds
+        while time.time() < deadline:
             if process.poll() is not None:
                 return
             time.sleep(0.5)
@@ -1273,7 +1374,7 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
         # queue, control responses set aside for a request the runner made,
         # and the turn's own `result` terminals. Read on a thread so the
         # runner can write a steer or a rewind while the agent is working.
-        nonlocal forwarded, result_count, result
+        nonlocal forwarded, result_count, result, results_emitted
         try:
             for line in process.stdout:
                 line = line.strip()
@@ -1298,9 +1399,14 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
                 elif kind == "result":
                     result_count += 1
                     result = event
-                    if result_count >= expected_results and not end_started:
-                        end_started.append(True)
-                        threading.Thread(target=end_after_result, daemon=True).start()
+                    steer_state["last_result_at"] = time.time()
+                    # A steered turn has more than one result: the interrupted
+                    # turn's, then the message's. Each closes its own turn in
+                    # the transcript, so they go out as they arrive; a plain
+                    # turn keeps its single result for run_turn to write.
+                    if steer_state["steered"]:
+                        pending.put(event)
+                        results_emitted += 1
                 elif kind == "system" and event.get("subtype") == "init":
                     log("agent %s initialized (model %s, permission %s)" % (
                         event.get("claude_code_version"), event.get("model"),
@@ -1311,8 +1417,137 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
             # land behind the sentinel and never be written.
             pending.put(None)
 
+    def steer_message(event):
+        """Deliver one client message above the floor to the live child.
+
+        Returns (written, uuid, answerable). The message goes on stdin first;
+        the caller sends the `send_now` interrupt once every message in the
+        batch is queued, because one interrupt releases the whole queue — an
+        interrupt per message would stop the turn again under the message
+        that just started.
+        """
+        payload = event.get("payload") or {}
+        if payload.get("type") != "user":
+            return (False, "", False)
+        blocks = message_blocks(payload)
+        if not blocks:
+            return (False, "", False)
+        message_uuid = payload.get("uuid")
+        if not isinstance(message_uuid, str) or not message_uuid:
+            message_uuid = event.get("event_id")
+        if not isinstance(message_uuid, str) or not message_uuid:
+            message_uuid = str(uuid.uuid4())
+        if message_uuid in steer_state["delivered"]:
+            return (False, "", False)
+        steer_state["delivered"].add(message_uuid)
+        outbound = {"type": "user", "uuid": message_uuid,
+                    "message": {"role": "user", "content": blocks},
+                    "parent_tool_use_id": None, "session_id": ""}
+        if not write_stdin(outbound):
+            return (False, "", False)
+        steer_state["last_delivery_at"] = time.time()
+        expected_results[0] += 1
+        return (True, message_uuid, is_steerable(payload, blocks))
+
+    def send_steer_interrupt(message_uuid):
+        """The CLI's native Send now: stop the running turn for the message
+        already queued on stdin and run it immediately. The CLI advertises the
+        capability as `interrupt_send_now_v1`; without it the request is a
+        plain interrupt and the message runs at the next turn."""
+        nonlocal results_emitted
+        if not steer_state["steered"]:
+            steer_state["steered"] = True
+            # A turn that ended just before this message did not close on the
+            # page (a plain turn's result is held for run_turn); release it so
+            # the steered turn opens on its own.
+            if result is not None and results_emitted == 0:
+                pending.put(result)
+                results_emitted += 1
+        write_stdin({
+            "type": "control_request",
+            "request_id": "steer-%s" % message_uuid,
+            "request": {"subtype": "interrupt",
+                        "message_uuid": message_uuid,
+                        "send_now": True},
+        })
+        log("session %s: steered the running turn for %s"
+            % (steer_state["session"], message_uuid[:8]))
+
+    def watch_steering():
+        # The bridge is the only way the guest learns about a message typed
+        # while the turn runs (nothing forwards into the VM). Poll its
+        # transcript tail and hand each new client message to the child as it
+        # appears; the held poll's separate loop cannot do this because the
+        # child's stdin belongs to this turn.
+        session_id = steer_state["session"]
+        token = steer_state["token"]
+        if not isinstance(session_id, str) or not session_id:
+            return
+        quoted_session = urllib.parse.quote(session_id)
+        floor = steer_state["floor"]
+        while not steer_stop.is_set() and process.poll() is None:
+            events = []
+            try:
+                cursor = None
+                for _ in range(5):
+                    query = "after_sequence_num=%d&limit=200" % floor
+                    if cursor is not None:
+                        query += "&cursor=%s" % urllib.parse.quote(str(cursor))
+                    status, document = request(
+                        "/v1/code/sessions/%s/events?%s" % (quoted_session, query),
+                        token=token)
+                    if status != 200 or not isinstance(document, dict):
+                        break
+                    events.extend(document.get("data") or [])
+                    cursor = document.get("next_cursor")
+                    if not cursor:
+                        break
+            except Exception as error:  # noqa: BLE001 - steering is best-effort
+                log("session %s: steer poll failed: %s" % (session_id, error))
+                events = []
+            delivered = False
+            steer_uuid = None
+            for event in events:
+                if not isinstance(event, dict) or event.get("source") == "worker":
+                    continue
+                try:
+                    sequence = int(event.get("sequence_num") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if sequence <= floor:
+                    continue
+                # The watch is a tail cursor: every client event moves it, so
+                # a control request does not make the next poll re-read it.
+                floor = max(floor, sequence)
+                payload = event.get("payload") or {}
+                if payload.get("type") != "user":
+                    continue
+                written, message_uuid, answerable = steer_message(event)
+                if written:
+                    delivered = True
+                    if answerable and steer_uuid is None:
+                        steer_uuid = message_uuid
+            if steer_uuid is not None:
+                # Every message in the batch is queued now; one send_now stops
+                # the turn and releases them all, in order.
+                send_steer_interrupt(steer_uuid)
+            if delivered:
+                steer_state["floor"] = floor
+                # The bridge stamps the message and, with nothing left above
+                # the point, drops the next-turn requeue it queued when the
+                # message landed mid-turn (see recordClaim).
+                try:
+                    request("/v1/code/runners/self-hosted/sessions/%s/claim"
+                            % quoted_session,
+                            {"through_sequence_num": floor}, token)
+                except Exception as error:  # noqa: BLE001 - the next turn retries
+                    log("session %s: could not record steered messages: %s"
+                        % (session_id, error))
+            steer_stop.wait(max(0.1, STEER_POLL_SECONDS))
+
     reader_thread = threading.Thread(target=stdout_reader, daemon=True)
     reader_thread.start()
+    watch_thread = None
 
     rewind_done = False
     rewind_request_id = ""
@@ -1340,11 +1575,7 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
             last_seen = rewind.get("last_seen_user_message_uuid")
             if isinstance(last_seen, str) and last_seen:
                 control["request"]["last_seen_user_message_uuid"] = last_seen
-            try:
-                process.stdin.write(json.dumps(control) + "\n")
-                process.stdin.flush()
-            except OSError:
-                pass  # the agent died before reading; its exit says why
+            write_stdin(control)
             answer = None
             deadline = time.time() + REWIND_TIMEOUT
             while REWIND_TIMEOUT > 0 and time.time() < deadline:
@@ -1376,28 +1607,38 @@ def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None):
             message_uuid = message.get("uuid")
             if isinstance(message_uuid, str) and message_uuid:
                 payload["uuid"] = message_uuid
-            try:
-                process.stdin.write(json.dumps(payload) + "\n")
-                process.stdin.flush()
-            except OSError:
+            if not write_stdin(payload):
                 break  # the agent died before reading; its exit says why
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
+        # Only now may the watcher hand over new messages: anything it sees
+        # must follow the prompts this turn was started for.
+        if isinstance(steer, dict):
+            watch_thread = threading.Thread(target=watch_steering, daemon=True)
+            watch_thread.start()
+        # Input stays open while the turn runs: that is what lets a message
+        # typed now reach the live child (see watch_steering). The turn ends
+        # once every message it has been given has a result; then EOF lets the
+        # child drain and exit.
+        while process.poll() is None:
+            if result_count >= expected_results[0]:
+                close_stdin()
+            time.sleep(0.15)
         code = process.wait()
     finally:
+        steer_stop.set()
         if watchdog is not None:
             watchdog.cancel()
         interrupt_done.set()
+        close_stdin()
         # The reader closes the writer queue itself at EOF (see stdout_reader);
         # this join only bounds a child whose grandchild keeps stdout open.
         reader_thread.join(timeout=60)
         if reader_thread.is_alive():
             pending.put(None)
         writer_thread.join(timeout=60)
+        if watch_thread is not None:
+            watch_thread.join(timeout=5)
     return (code, result, bool(timed_out), bool(interrupted), forwarded,
-            failures, errors, rewind_done)
+            failures, errors, rewind_done, results_emitted)
 
 
 def mcp_config_of(servers):
@@ -1654,11 +1895,14 @@ def run_session(hint, interrupt=None):
     rewind = hint.get("pending_rewind")
     rewind = rewind if isinstance(rewind, dict) else None
 
+    steer = {"session": session, "token": token, "floor": highest}
+
     def turn(extra):
-        return run_agent(argv + extra, cwd, messages, write_event, interrupt, rewind)
+        return run_agent(argv + extra, cwd, messages, write_event, interrupt, rewind,
+                         steer)
 
     (code, result, timed_out, was_interrupted, forwarded, failures, errors,
-     rewind_done) = turn(["--resume", resume] if resume else [])
+     rewind_done, results_emitted) = turn(["--resume", resume] if resume else [])
     if (not was_interrupted and resume and forwarded == 0 and failures == []
             and result is not None
             and result.get("is_error")
@@ -1669,7 +1913,7 @@ def run_session(hint, interrupt=None):
         log("session %s: no conversation %s in the guest; starting a new one"
             % (session, resume))
         (code, result, timed_out, was_interrupted, forwarded, failures, errors,
-         rewind_done) = turn([])
+         rewind_done, results_emitted) = turn([])
     if rewind is not None and rewind_done:
         # The agent answered (applied or declined); stop carrying it in the
         # hint. A timeout — no answer — keeps it for the next turn.
@@ -1685,7 +1929,9 @@ def run_session(hint, interrupt=None):
     # and a failure that writes none leaves the page spinning forever. The
     # agent's own terminal wins when it produced one (an error result included:
     # its `result` field is the reason).
+    synthesized = False
     if result is None:
+        synthesized = True
         if was_interrupted:
             result = synthetic_result("Request interrupted by user", resume, started,
                                       interrupted=True)
@@ -1709,12 +1955,17 @@ def run_session(hint, interrupt=None):
     # sees one holds the turn open — rows around tool calls stay unplaced).
     # Written after the retry decision, so a discarded first attempt leaves
     # nothing behind.
-    delivered = False
-    try:
-        write_event(result)
-        delivered = True
-    except Exception as error:  # noqa: BLE001 - fall back to a plain append
-        failures.append("result stream: %s" % error)
+    # A plain turn's single result was held by run_agent and is written here.
+    # A steered turn already wrote each result as it arrived (the interrupted
+    # turn's and the message's own), so writing the last one again would
+    # duplicate the terminal the page closes a turn on.
+    delivered = results_emitted > 0 and not synthesized
+    if not delivered:
+        try:
+            write_event(result)
+            delivered = True
+        except Exception as error:  # noqa: BLE001 - fall back to a plain append
+            failures.append("result stream: %s" % error)
     try:
         stream["close"]()
     except Exception as error:  # noqa: BLE001 - recorded with the run

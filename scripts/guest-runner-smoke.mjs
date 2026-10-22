@@ -31,7 +31,10 @@ const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
 writeFileSync(stub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+# The runner holds stdin open for steering, so read the one message this
+# process answers instead of waiting for EOF.
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 # The argv is echoed inside a JSON string, so escape it — a --mcp-config value
 # carries JSON of its own.
 args=$(printf '%s' "$*" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
@@ -47,7 +50,7 @@ const failing_dir = join(work, "claude-bin-failing");
 mkdirSync(failing_dir, { recursive: true });
 const failingStub = join(failing_dir, "claude");
 writeFileSync(failingStub, `#!/bin/sh
-cat >/dev/null
+IFS= read -r line
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial answer"}]},"session_id":"55555555-5555-4555-8555-555555555555"}\\n'
 exit 3
 `);
@@ -462,7 +465,8 @@ print(json.dumps({
   // directory and branch off the transcript.
   const pwdStub = join(work, "pwd-stub");
   writeFileSync(pwdStub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 branch=$(git branch --show-current 2>/dev/null)
 printf '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}\\n'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"cwd: %s | branch: %s | prompt: %s"}]},"session_id":"22222222-2222-4222-8222-222222222222"}\\n' "$PWD" "$branch" "$prompt"
@@ -583,6 +587,7 @@ printf '{"type":"result","subtype":"success","session_id":"22222222-2222-4222-82
   mkdirSync(slowDir, { recursive: true });
   const slowStub = join(slowDir, "claude");
   writeFileSync(slowStub, `#!/bin/sh
+IFS= read -r line
 sleep 6
 printf '{"type":"system","subtype":"init","session_id":"33333333-3333-4333-8333-333333333333"}\\n'
 printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-8333-333333333333","is_error":false,"result":"done"}\\n'
@@ -654,7 +659,8 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   mkdirSync(interruptDir, { recursive: true });
   const interruptStub = join(interruptDir, "claude");
   writeFileSync(interruptStub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working: %s"}]},"session_id":"44444444-4444-4444-8444-444444444444"}\\n' "$prompt"
 trap 'exit 130' INT TERM
 sleep 60 >/dev/null 2>&1 &
@@ -743,12 +749,46 @@ printf '{"type":"result","subtype":"success","session_id":"44444444-4444-4444-84
   const interactiveDir = join(work, "interactive-bin");
   mkdirSync(interactiveDir, { recursive: true });
   const interactiveStub = join(interactiveDir, "claude");
+  // The stub answers the way the real CLI does: a long turn runs on a worker
+  // while the main loop keeps reading stdin, so a message sent mid-turn is
+  // already queued when the runner's `interrupt` with `send_now` arrives. That
+  // interrupt aborts the running turn (a terminal result) and the queued
+  // message runs as the next query — stock steering, not a next-turn requeue.
   writeFileSync(interactiveStub, `#!/usr/bin/env python3
-import json, sys, time
+import json, sys, time, threading, queue
+SESSION = "66666666-6666-4666-8666-666666666666"
 def emit(payload):
     sys.stdout.write(json.dumps(payload) + "\\n")
     sys.stdout.flush()
-count = 0
+def assistant(text):
+    emit({"type": "assistant", "session_id": SESSION,
+          "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+def result(subtype, text, error=False, interrupted=False):
+    emit({"type": "result", "subtype": subtype, "is_error": error,
+          "interrupted": interrupted, "session_id": SESSION, "result": text})
+queue_ = queue.Queue()
+cancel = threading.Event()
+def worker():
+    while True:
+        item = queue_.get()
+        if item is None:
+            return
+        text, uid, delay = item
+        cancel.clear()
+        assistant("working: %s | uuid: %s" % (text, uid))
+        deadline = time.time() + delay
+        stopped = False
+        while time.time() < deadline:
+            if cancel.wait(0.05):
+                stopped = True
+                break
+        if stopped:
+            result("error_during_execution", "Request interrupted by user",
+                   error=True, interrupted=True)
+        else:
+            assistant("done: %s | uuid: %s" % (text, uid))
+            result("success", "done")
+threading.Thread(target=worker, daemon=True).start()
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -759,27 +799,28 @@ for line in sys.stdin:
         continue
     if event.get("type") == "control_request":
         request = event.get("request") or {}
-        if request.get("subtype") == "rewind_conversation":
+        subtype = request.get("subtype")
+        if subtype == "rewind_conversation":
             emit({"type": "control_response", "response": {
                 "subtype": "success", "request_id": event.get("request_id"),
                 "response": {"rewound": True,
                              "targetMessageUuid": request.get("target_message_uuid"),
                              "precedingAssistantUuid": None,
                              "prefillText": "taken back"}}})
+        elif subtype == "interrupt" and request.get("send_now") is True:
+            cancel.set()
+            emit({"type": "control_response", "response": {
+                "subtype": "success", "request_id": event.get("request_id"),
+                "response": {"still_queued": [],
+                             "send_now": "stopped"}}})
         continue
     if event.get("type") != "user":
         continue
-    count += 1
     text = "".join(part.get("text", "") for part in
                    (event.get("message") or {}).get("content") or []
                    if isinstance(part, dict) and part.get("type") == "text")
-    if "steer me" in text:
-        time.sleep(4)
-    emit({"type": "assistant", "session_id": "66666666-6666-4666-8666-666666666666",
-          "message": {"role": "assistant", "content": [{"type": "text",
-              "text": "turn %d: %s | uuid: %s" % (count, text, event.get("uuid", ""))}]}})
-    emit({"type": "result", "subtype": "success", "is_error": False,
-          "session_id": "66666666-6666-4666-8666-666666666666", "result": "done"})
+    queue_.put((text, event.get("uuid", ""),
+                30 if "steer me" in text else 0))
 `);
   chmodSync(interactiveStub, 0o755);
   const interactiveRunner = startRunner({ secret, binDir: interactiveDir });
@@ -810,18 +851,31 @@ for line in sys.stdin:
     // The turn is sleeping in the agent; this lands after its transcript read.
     await new Promise((resolve) => setTimeout(resolve, 800));
     const secondUuid = "88888888-8888-4888-8888-888888888888";
+    const steerStarted = Date.now();
     await post(steerSession.id, [{ payload: { type: "user", uuid: secondUuid,
       message: { role: "user", content: "sent while it worked" } } }]);
+    // The stub's first turn sleeps 30 s. Native steering stops it and runs the
+    // new message now, so the answer must land long before that.
     assert.equal(await waitFor(async () => (await messagesOf(steerSession.id))
       .filter((message) => message.type === "assistant")
       .some((message) => message.message.content[0].text.includes("sent while it worked")),
-    20000), true,
-    `the mid-turn message must be answered by the next turn: `
+    8000), true,
+    `the mid-turn message must steer the running turn: `
     + `${JSON.stringify(await messagesOf(steerSession.id))} ${interactiveRunner.output()}`);
+    assert.ok(Date.now() - steerStarted < 8000,
+      "the running turn was stopped for the message, not left to finish");
+    assert.equal(await waitFor(
+      () => interactiveRunner.output().includes("steered the running turn"), 3000), true,
+    "the runner hands the message to the live child with send_now");
     const steered = (await messagesOf(steerSession.id))
       .filter((message) => message.type === "assistant");
     assert.ok(steered[1].message.content[0].text.includes(`uuid: ${secondUuid}`),
       "the agent is given the message's own uuid, so a rewind can name it");
+    const interruptedTerminal = (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "result" && message.interrupted === true);
+    assert.equal(interruptedTerminal.length, 1,
+      "the stopped turn's own terminal is in the transcript");
+    assert.match(String(interruptedTerminal[0].result), /Request interrupted by user/);
 
     // Rewind to the mid-turn message, exactly as the surface posts it. The
     // bridge answers for the page; the next turn hands the request to the

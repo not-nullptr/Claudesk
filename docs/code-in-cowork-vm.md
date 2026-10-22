@@ -483,17 +483,28 @@ poll whose connection died (the VM suspended or restarted) is dropped with its
 socket and no longer claims the placement it was woken for.
 
 **Steering and rewind (landed).** A message typed while a turn runs is
-appended to the transcript after that turn's read and *before* its `result`.
-The agent process never sees it (its stdin closes after the prompt), so the
-bridge records the turn's read-through point on the session
-(`delivered_through`) and the release puts the session back on its pool. The
-next hint carries that floor as `prompt_after_sequence_num`; the guest reads
-the events above it and answers every message there, including the one that
-sits before the previous `result` — the old "after the last result" read
-dropped it and left the page on "Sending…". Each client message is written to
-the agent as its own stream-json user message carrying the bridge event's
-uuid, so the conversation's own transcript names the messages the surface
-names.
+steered into the live agent, natively. The runner keeps the child's stdin
+open for the turn and polls the session's transcript; each client message
+above its delivery floor is written to the child as its own stream-json user
+message (carrying the bridge event's uuid, so the conversation's transcript
+names what the surface names). A real prompt is followed by the CLI's own
+`interrupt` control request with `send_now` — the capability it advertises as
+`interrupt_send_now_v1` — which stops the turn under way and runs the message
+immediately, the way Send now works in stock Claude Code. The interrupted
+turn's own terminal and the message's result are both written live, so the
+page closes the stopped turn and opens the new one. A surface that posts the
+same `send_now` interrupt itself is acknowledged as `delivering`, not acted on
+as a Stop: cancelling the turn at the bridge would kill the process the
+message is meant to reach.
+
+The floor (`delivered_through`, carried on the hint as
+`prompt_after_sequence_num`) is also the fallback: a message that lands after
+the child ended, or after the runner's watch missed it, is answered by the
+next turn even though it sits before the previous turn's `result` — the old
+"after the last result" read dropped it and left the page on "Sending…". The
+runner reports each steered message in its claim, which drops the bridge's
+next-turn requeue: the running agent is answering it, and a requeue would run
+it twice.
 
 Rewind is a `rewind_conversation` control request (`target_message_uuid`,
 `interrupt_if_running`). The bridge answers it immediately with the

@@ -525,6 +525,27 @@ try {
     (entry) => entry.session_uuid === stoppable.session.id), false,
   "the previous Stop does not cancel the next turn");
 
+  // Send now is a steer, not a Stop: the message it names goes to the live
+  // child (the guest sends the CLI its own send_now interrupt). Killing the
+  // turn here would kill the process the message is meant to reach.
+  const steerAppend = await backend.appendEvents({
+    sessionId: stoppable.session.id,
+    body: { events: [{ payload: { type: "control_request", request_id: "steer-smoke",
+      request: { subtype: "interrupt", send_now: true, message_uuid: "steer-message" } } }] },
+  });
+  const steerAck = steerAppend.data.find((event) => event.payload.type === "control_response");
+  assert.equal(steerAck.source, "worker");
+  assert.deepEqual(steerAck.payload.response.response,
+    { still_queued: [], send_now: "delivering" },
+    "Send now is acknowledged as delivery, not as an interrupt receipt");
+  const afterSteer = await backend.pollSpawnHints({ headers: auth });
+  assert.equal(afterSteer.cancellations.some(
+    (entry) => entry.session_uuid === stoppable.session.id), false,
+  "a steer does not cancel the running turn");
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === stoppable.session.id).state, "offered",
+  "the session is still held by its runner");
+
   // The REST spelling the routine cancel and the mobile facade use.
   const restStop = await backend.interruptSession({
     sessionId: stoppable.session.id, requestId: "rest-stop",
@@ -798,6 +819,40 @@ try {
     .data.find((row) => row.session_uuid === midId).state, "pending",
   "the release requeues the mid-turn message");
   assert.ok(wakes > 0, "a requeue asks the Desktop to start the VM");
+
+  // A mid-turn message the runner actually handed to the live child (native
+  // send-now steering) reports a higher read-through point. With nothing left
+  // above it, the release goes idle: requeueing would run the same message a
+  // second time in a fresh process.
+  const delivered = await backend.createSession({ body: { environment_id: primary.pool_id } });
+  const deliveredId = delivered.session.id;
+  await backend.pollSpawnHints({ headers: runnerAuth, body: { running: [], claimed: [] } });
+  const deliveredToken = await backend.issueSessionToken({
+    headers: runnerAuth, sessionId: deliveredId,
+  });
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: deliveredId, body: { through_sequence_num: 0 },
+  });
+  await backend.appendEvents({
+    sessionId: deliveredId,
+    body: { events: [{ payload: { type: "user",
+      message: { role: "user", content: "steered into the running turn" } } }] },
+  });
+  const deliveredThrough = Math.max(...(await backend.listEvents({
+    sessionId: deliveredId, searchParams: new URLSearchParams(),
+  })).data.map((event) => Number(event.sequence_num)));
+  await backend.recordClaim({
+    headers: runnerAuth, sessionId: deliveredId,
+    body: { through_sequence_num: deliveredThrough },
+  });
+  await backend.releaseSession({
+    headers: { authorization: `Bearer ${deliveredToken.session_token}` },
+    sessionId: deliveredId,
+  });
+  assert.equal((await backend.poolSessions({ poolId: primary.pool_id }))
+    .data.find((row) => row.session_uuid === deliveredId).state, "released",
+  "a message the runner delivered to the live child is not requeued");
+  await backend.deleteSession({ sessionId: deliveredId });
 
   // The same arrival that is *not* mid-turn: an opening message appended
   // between the claim and the runner's transcript read. The read-through
