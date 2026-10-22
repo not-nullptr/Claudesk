@@ -56,8 +56,12 @@ services:
     container_name: gateway
     restart: unless-stopped
     networks:
-      - default
-      - gateway_net
+      default: {}
+      gateway_net:
+        # Each account's `gateway-egress` relay forwards here. The name exists
+        # only on gateway_net, so no tenant network can resolve it.
+        aliases:
+          - gateway-upstream
     env_file:
       - /etc/litellm/litellm.env
     volumes:

@@ -63,18 +63,24 @@ flowchart LR
 | `https://claude-home.172906573.xyz:28443/` | 使用 WebUI、安装 PWA、跨网络访问 | 由现有 Nginx Proxy Manager + Authelia 保护 |
 
 WebUI（`15821`）与移动端（`8081`）端口只绑定宿主机回环地址（`127.0.0.1`），不直接暴露到网络：
-Bridge 没有应用层认证，只应经反向代理（TLS + Authelia）进入，因此不再提供局域网/Tailnet 直连入口。
-HTTPS 入口需要把主机名解析到服务器，并沿用现有 Authelia 两因素规则。标准 PWA 安装需要 HTTPS。
+入口应经反向代理（TLS + Authelia）。租户实例（`CLAUDESK_TENANT=1`）还会在 Bridge
+自身校验 authd 会话并把账户限定为 `CLAUDE_REMOTE_ACCOUNT_EMAIL`；移动端使用每账户的
+`CLAUDESK_BRIDGE_TOKEN`。网络层同样隔离租户：数据容器只接入本栈自己的网络，共享网络
+上只有固定用途的中继（见 `SECURITY.md` 的 "Network isolation"）。HTTPS 入口需要把主机名
+解析到服务器，并沿用现有 Authelia 两因素规则。标准 PWA 安装需要 HTTPS。
 
 ## 前置条件
 
 - Linux 主机、Docker Engine 与 Docker Compose v2。
 - 可用的 `/dev/kvm` 与 `/dev/vhost-vsock`，并允许当前用户访问 KVM 组。
-- 一个外部 Docker 网络 `gateway_net`：
+- 两个外部 Docker 网络：`gateway_net`（共享网关、authd 与每个账户的出口中继）和
+  `claudesk-control`（authd 与每个账户的控制面中继；租户数据容器不接入）：
 
   ```bash
   docker network inspect gateway_net >/dev/null 2>&1 || \
     docker network create gateway_net
+  docker network inspect claudesk-control >/dev/null 2>&1 || \
+    docker network create claudesk-control
   ```
 
 - 可访问 Anthropic 官方 APT 源；首次构建会编译校验固定版本的 `virtiofsd` 1.13.3。
@@ -116,7 +122,8 @@ sudo docker compose -f compose.gateway.yaml up -d
 # 每次部署
 sudo docker compose -f compose.yaml up -d --build --force-recreate \
     claude-desktop cowork-bridge claude-gateway-loopback \
-    claude-mobile claude-mobile-gateway-loopback authd
+    claude-mobile claude-mobile-gateway-loopback authd \
+    gateway-egress authd-egress internal-ingress
 ```
 
 查看状态或停止：

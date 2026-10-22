@@ -40,6 +40,14 @@ vm_vsock_base="${CLAUDESK_VM_VSOCK_PORT_BASE:-}"
 compose_shared() { docker compose -f compose.yaml "$@"; }
 authd() { compose_shared exec -T authd /app/authd "$@"; }
 
+# The control network: the shared auth service and each account's fixed
+# control-plane relays (authd-egress, internal-ingress). No tenant data
+# container joins it. Like gateway_net it is box-level and external; create it
+# when this is the first stack on the host.
+control_net="${CLAUDESK_CONTROL_NETWORK:-claudesk-control}"
+docker network inspect "$control_net" >/dev/null 2>&1 \
+    || docker network create "$control_net" >/dev/null
+
 # The role → account-scope decision, driven by a smoke.
 # shellcheck source=scripts/lib/account-scope.sh
 . "$project_dir/scripts/lib/account-scope.sh"
@@ -274,7 +282,7 @@ vm_vsock_port=""
 # desktop container pays at startup (see prepare-renderer.mjs);
 # scripts/deploy-bridge-only.sh sets the narrow set. The value is a deliberate
 # list of names, so it must split.
-recreate_services="${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback}"
+recreate_services="${CLAUDESK_RECREATE_SERVICES:-claude-desktop cowork-bridge claude-gateway-loopback gateway-egress authd-egress internal-ingress}"
 # The inline environment below must stay a *prefix* of the compose command: a
 # stray assignment after its last backslash would turn the whole block into
 # plain shell variables and silently run compose with the deployment's `.env`

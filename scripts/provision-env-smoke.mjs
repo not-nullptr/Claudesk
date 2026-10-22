@@ -41,7 +41,6 @@ desktop_limit_gb=5
 vm_vsock_port=
 CLAUDESK_ACCOUNT_CODE_ACTIONS=0
 CLAUDESK_ACCOUNT_CODE_RUNNERS=1
-CLAUDESK_RECREATE_SERVICES="claude-desktop cowork-bridge claude-gateway-loopback"
 # The real script mints this beside the account directories; the block under
 # test only forwards it.
 bridge_token=smoke-token
@@ -80,7 +79,7 @@ for (const expected of [
   "LIMIT=5g",
   "DATA=/data/users/ada",
   "HOSTBASH=0",
-  "ARGS=--project-name claudesk-ada up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback",
+  "ARGS=--project-name claudesk-ada up -d --force-recreate claude-desktop cowork-bridge claude-gateway-loopback gateway-egress authd-egress internal-ingress",
 ]) {
   assert.ok(printed.has(expected),
     `compose did not receive ${expected}; got:\n${result.stdout}`);

@@ -615,13 +615,14 @@ Two things are **not** per-checkout:
   `docker compose -f compose.gateway.yaml up -d`, and every deployment on the
   host reaches it over `gateway_net`. Neither deployment declares it, so neither
   fights the other for its name or its host port.
-- **Service aliases on the shared `gateway_net` are not project-scoped.** Compose
+- **Service aliases on a shared network are not project-scoped.** Compose
   registers a service's *name* as a network alias on every network the service
-  joins, and `gateway_net` carries the gateway stack, the deployment's own
-  instance and (since Stage 2) one instance per account. A lookup of
-  `claude-desktop` or `authd` therefore answers with *all* of them, and the
-  container that replies is whichever the client connected to — not necessarily
-  its own.
+  joins. `gateway_net` carries the gateway stack, the shared authd and each
+  account's `gateway-egress` relay, and a second *deployment*'s own stack joins
+  it too, so a lookup of `claude-desktop` or `authd` there can answer with more
+  than one container. Since the network isolation change below, tenant Desktops
+  are not on `gateway_net` at all: this is a deployment-vs-deployment concern,
+  not an account-vs-account one.
 
   For `authd` that degrades: the cookie does not validate against the other
   deployment's database, so the bridge falls back to the env identity. For
@@ -649,6 +650,36 @@ Two things are **not** per-checkout:
   port (`COWORK_WEB_PORT`, `CLAUDE_MOBILE_PORT`), which is already per-instance.
   An upstream that names `claude-desktop` directly — rather than the loopback port
   — should be pointed at the instance's alias instead.
+
+### Network isolation
+
+A tenant stack does **not** join `gateway_net`. Its Desktop, bridge, office
+preview and mobile facade live on the stack's own Docker network; only two
+fixed-purpose relays touch a shared one:
+
+| Relay | Shared network | Forwards |
+| --- | --- | --- |
+| `gateway-egress` | `gateway_net` | `:4000` → the box gateway (`gateway-upstream`) |
+| `authd-egress` | `claudesk-control` | `:8080` → the shared authd |
+| `internal-ingress` | `claudesk-control` | `/internal/*` → the account's bridge; everything else 404 |
+
+The names the stack already uses resolve to those relays on its own network:
+`gateway` and `authd` stay the same URLs in `.env`, and authd keeps dialing
+`${CLAUDESK_NAME_PREFIX}desktop:8080`, which now belongs to `internal-ingress` on
+the control network. Docker's inter-network isolation keeps one account's data
+containers off every other account's network, so the shared-network alias
+problem above no longer applies to accounts at all. Create both external
+networks before the first start (the deploy and provision scripts do this
+automatically when missing):
+
+```bash
+docker network inspect gateway_net >/dev/null 2>&1 || docker network create gateway_net
+docker network inspect claudesk-control >/dev/null 2>&1 || docker network create claudesk-control
+```
+
+The bridge still verifies the authd session on its own API (tenant mode pins
+`CLAUDESK_BRIDGE_AUTH=1`) as the second line for the host-published port, and the
+mobile facade carries the per-account `CLAUDESK_BRIDGE_TOKEN`.
 
 ## Stage 2 — per-user light instances
 

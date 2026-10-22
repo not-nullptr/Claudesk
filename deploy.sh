@@ -154,9 +154,18 @@ sudo "$project_dir/scripts/seed-renderer.sh"
 # merely wasteful: the reverse proxy calls its forward_auth on every request, so
 # a forced restart of an untouched authd is a 502 window in every tab on every
 # account, in exchange for nothing.
+# Each account's fixed control-plane relays and the box auth service meet on
+# the control network. It is external like gateway_net; create it on the first
+# deploy of this checkout.
+control_net="${CLAUDESK_CONTROL_NETWORK:-$(env_value CLAUDESK_CONTROL_NETWORK)}"
+control_net="${control_net:-claudesk-control}"
+sudo docker network inspect "$control_net" >/dev/null 2>&1 \
+    || sudo docker network create "$control_net" >/dev/null
+
 sudo docker compose -f compose.yaml up -d \
     claude-desktop cowork-bridge claude-gateway-loopback \
-    claude-mobile claude-mobile-gateway-loopback authd
+    claude-mobile claude-mobile-gateway-loopback authd \
+    gateway-egress authd-egress internal-ingress
 
 # The VM Apply an admin triggers from /admin is a systemd `.path` unit that only
 # scripts/install-reconciler.sh writes; `docker compose up` never creates it.

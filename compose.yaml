@@ -134,16 +134,15 @@ services:
       - /init
     shm_size: "2gb"
     mem_limit: "${CLAUDE_DESKTOP_MEMORY_LIMIT:-3g}"
+    # The stack's own network. Nothing here joins the shared gateway_net: an
+    # account's Desktop, bridge, office preview and mobile facade talk only to
+    # each other and to the fixed-purpose relays below. See "Network isolation"
+    # in SECURITY.md.
     networks:
-      gateway_net:
-        # A name only this instance answers to. A compose *service* name is
-        # registered as a network alias by every stack that joins the network,
-        # and gateway_net is shared with the box gateway and with each account's
-        # instance, so a lookup of `claude-desktop` resolves to all of them.
-        # Anything that must reach *this* Desktop — the mobile facade, the
-        # reverse proxy — addresses this alias instead. The default keeps a
-        # lone instance unique even with an empty CLAUDESK_NAME_PREFIX.
-        # See docs/eva-mode.md, "Two deployments on one box".
+      default:
+        # The mobile facade reaches this instance by this alias on the stack's
+        # own network. The authd-facing alias of the same name lives on
+        # `internal-ingress` (control net), never here.
         aliases:
           - "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
     healthcheck:
@@ -416,8 +415,11 @@ services:
       # conversations from before the Claudesk backend (legacy-conversations/).
       - ${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/mobile-data:/data
     mem_limit: "${CLAUDE_MOBILE_API_MEMORY_LIMIT:-256m}"
+    # The stack's own network, like the Desktop it drives. Its gateway relay
+    # (`claude-mobile-gateway-loopback`) reaches the gateway through
+    # `gateway-egress`, not gateway_net.
     networks:
-      gateway_net:
+      default:
         # This instance's own name for the phone's ingress, beside the shared
         # `claude-mobile` service alias (see the note on claude-desktop above).
         aliases:
@@ -522,7 +524,17 @@ services:
       - ${CLAUDESK_DATA_ROOT:-/opt/claudesk/data}/auth-data:/data
     mem_limit: "${AUTH_MEMORY_LIMIT:-128m}"
     networks:
-      - gateway_net
+      # gateway_net: the box proxy resolves this account's gateway key here,
+      # and shitproxy reaches the auth service by name.
+      # control_net: the only network authd shares with each account's
+      # internal-ingress / authd-egress relays. No tenant data container joins
+      # it, so /internal/* and the session lookup are not exposed to peers.
+      # `authd-upstream` is the name those relays forward to; their own `authd`
+      # alias lives on the stack network and must not resolve back to them.
+      gateway_net: {}
+      control_net:
+        aliases:
+          - authd-upstream
     healthcheck:
       test:
         - CMD
@@ -543,6 +555,80 @@ services:
     stop_grace_period: 3s
     restart: unless-stopped
 
+  # --- the only per-account containers on a shared network --------------------
+  # Each forwards one fixed destination. They are relays, not proxies: a tenant
+  # data container can reach them on the stack's own network, and no tenant
+  # container is attached to gateway_net or control_net itself.
+
+  # The gateway egress. The bridge, the Desktop and the mobile facade resolve
+  # `gateway` to this alias; socat carries :4000 to the shared Caddy, whose
+  # `gateway-upstream` alias exists only on gateway_net.
+  gateway-egress:
+    image: alpine/socat
+    container_name: "${CLAUDESK_NAME_PREFIX:-}claude-gateway-egress"
+    restart: unless-stopped
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      default:
+        aliases:
+          - gateway
+      gateway_net:
+    command:
+      - "TCP-LISTEN:4000,reuseaddr,fork"
+      - "TCP:gateway-upstream:4000"
+
+  # The authd egress. The bridge resolves `authd` for the session cookie; socat
+  # carries :8080 to the shared auth service over the control network, which no
+  # tenant data container joins.
+  authd-egress:
+    image: alpine/socat
+    container_name: "${CLAUDESK_NAME_PREFIX:-}claude-authd-egress"
+    restart: unless-stopped
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      default:
+        aliases:
+          - authd
+      control_net:
+    command:
+      - "TCP-LISTEN:8080,reuseaddr,fork"
+      - "TCP:authd-upstream:8080"
+
+  # The authd -> bridge lane. authd keeps dialing `${prefix}desktop:8080` for VM
+  # restart/status, but that name now belongs to this ingress on the control
+  # network. Only /internal/* is forwarded; the API, files and sessions never
+  # leave the stack's own network.
+  internal-ingress:
+    image: nginx:alpine
+    container_name: "${CLAUDESK_NAME_PREFIX:-}claude-internal-ingress"
+    restart: unless-stopped
+    depends_on:
+      claude-desktop:
+        condition: service_healthy
+    volumes:
+      - ./bridge/ingress/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      default: {}
+      control_net:
+        aliases:
+          - "${CLAUDESK_NAME_PREFIX:-claudesk-}desktop"
+
 networks:
   gateway_net:
     external: true
+  # Shared by the auth service and each account's two control-plane relays.
+  # External like gateway_net so the box-level authd and every account stack
+  # meet on it; deploy.sh / provision-user.sh create it when missing.
+  control_net:
+    external: true
+    name: "${CLAUDESK_CONTROL_NETWORK:-claudesk-control}"
