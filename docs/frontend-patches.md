@@ -140,18 +140,24 @@ optional chaining. Positive and negative protocol comparisons retain their
 polarity. The patch extends desktop eligibility when the existing remote
 Gateway setting is enabled; it preserves surrounding feature conditions.
 
-The native file preview — the component that draws Office and PDF previews into an
-Electron view over Desktop's own window — is selected by the one className its
-container renders (`h-full w-full relative overflow-hidden`) together with a
-`children` array; that className appears nowhere else in the renderer graph. The
-splice rewrites only that children array: for a `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/
-`.xlsx`/`.xls` file it renders an `<iframe>` at the bridge's
-`/api/remote/files/preview` route with a `#toolbar=0` fragment — the PDF open
-parameter Chrome's built-in viewer reads off the URL to hide its own toolbar, so
-the pane shows only the document rather than a second set of controls and
-download buttons (that viewer Download would save the converted `….docx.pdf`);
-Firefox and Safari ignore the parameter and keep their viewer chrome. Every other
-file keeps the original output, so html/svg stay on their existing native path. The component's chunk carries none
+The native file preview — the component that draws Office, PDF, HTML and SVG
+previews into an Electron view over Desktop's own window — is selected by the one
+className its container renders (`h-full w-full relative overflow-hidden`)
+together with a `children` array; that className appears nowhere else in the
+renderer graph. The splice rewrites only that children array: for a
+`.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls` file it renders an `<iframe>`
+at the bridge's `/api/remote/files/preview` route with a `#toolbar=0` fragment —
+the PDF open parameter Chrome's built-in viewer reads off the URL to hide its own
+toolbar, so the pane shows only the document rather than a second set of controls
+and download buttons (that viewer Download would save the converted `….docx.pdf`);
+Firefox and Safari ignore the parameter and keep their viewer chrome. For a
+`.html`/`.htm`/`.svg` file it renders an `<iframe>` at the same route without the
+fragment, in an opaque-origin `sandbox` (`allow-scripts`, forms, modals, popups
+and downloads, but never `allow-same-origin`): the document's own scripts still
+run, while a workspace file cannot drive the bridge's same-origin
+`/api/remote/*` IPC with the reader's cookies. The route repeats that sandbox in
+a CSP header so opening the preview URL directly is equally sandboxed. Every
+other file keeps the original output. The component's chunk carries none
 of the other selectors' tokens, so the string prefilter also accepts its own
 DeclineReason test id (`native-file-preview-error`) to reach it. Like the download
 button, the injected `iframe` names three mangled locals read back from the same
@@ -175,6 +181,26 @@ required patch (see below): if an upstream rewording changes the message ids, or
 the component is otherwise restructured, candidate preparation fails and the
 selector must be updated before the new Desktop is promoted, rather than the card
 returning silently.
+
+The "Skip all approvals" warning banner — drawn above the composer while a
+session's permission mode is `bypassPermissions`, with the copy "Skip all
+approvals is on. Claude never pauses, even for unsafe actions…" — is removed for
+that mode by `cowork-skip-approvals-banner`. The deployment offers the mode
+deliberately (see `CLAUDE_REMOTE_COWORK_SKIP_APPROVALS`), and every session runs
+inside the operator's own VM, so the warning describes a posture the operator
+chose and cannot escape; the component's Auto-mode arms and its scheduled-task
+notice are left alone. It is selected by the four i18n message ids of the bypass
+copy — one per variant (connectors only, plus Chrome, plus apps, all three) —
+each required as a parsed `{defaultMessage, id}` descriptor, together with the
+destructured `mode` and `surface` props whose `bypassPermissions` and `"session"`
+values select those arms. The splice inserts
+`if (mode === "bypassPermissions" && surface === "session") return null;`
+immediately before the component's final return, after every hook call, so
+switching between Auto and bypass cannot change the hook count of a mounted
+component. It is applied in every generation — a deployment that does not offer
+the mode never draws the banner, so the patch is inert there — and, like the
+titlebar picker, it is deliberately **not** required: a bundle that no longer
+matches leaves the warning visible rather than failing candidate preparation.
 
 The titlebar's compact mode switcher — the `Claude`/`Code` pills at the top right
 of the navbar — exists only to move between the home surface and the Code
@@ -931,13 +957,28 @@ its top-level allowlist keeps the normalized document's `cwd`; the prefill
 builder keeps the row's `cwd` and the place that ran it when it sees one; the
 draft setter (`uZ`) applies `folder` on a remote prefill instead of clearing
 the selection; and the new-session page's mount effect
-(`x.type === "environment" && St(x.id) || setSelectedFolder(null)`) treats a
-self-hosted pool (`ccpool_…`) as folder-capable instead of erasing the
-folder. Pinned by the two `_originalSession` row objects, the exact
+(`(x.type === "environment" && St(x.id) || String(x.id).startsWith("ccpool_"))
+|| setSelectedFolder(null)`) keeps the folder for a self-hosted place instead
+of erasing it. The id test is deliberately outside the kind test: the same
+`ccpool_…` place reaches the page as `environment` before the environment list
+resolves and is reclassified as `pool` once it does, and only the id is stable
+across both. Pinned by the two `_originalSession` row objects, the exact
 `["model","effort_level"]` context array, the prefill builder's
 `eZ({environmentId: row.environmentId})` declaration beside its
 `isAgentOwned` branch, the setter's ssh guard plus `setSelectedFolder`
 binding, and that environment-kind conjunction.
+
+`web-code-selfhosted-core-folder` closes the other half of that path. The
+composer core (`af`) reads the draft store's `trustedSelectedFolder` — the
+folder a *local* executor has been granted to run in — while the chip draws
+`selectedFolder`. A self-hosted place has no local executor and nothing grants
+its workspace folder through that trust store, so a folder picked or prefilled
+for a `ccpool_…` place never became the core's folder: the chip showed it, but
+the start intent was built without `cwd` and the branch hook had no folder to
+read. For a draft (`sessionRef` absent) on a `ccpool_…` place the core now
+reads the store's `selectedFolder`; a session page keeps the trusted folder as
+before. Pinned by the `worker`/`trustedSelectedFolder` selectors and the
+returned object's `selectedFolder` member.
 
 `web-code-surface` makes the model-selector surface resolver (`XO` in
 `shared-175`) answer `code` for `/code`, `/epitaxy` and `/artifact/` routes

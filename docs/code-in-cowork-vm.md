@@ -482,6 +482,42 @@ short-lived cancellation tombstone, since its record is already gone. A held
 poll whose connection died (the VM suspended or restarted) is dropped with its
 socket and no longer claims the placement it was woken for.
 
+**Steering and rewind (landed).** A message typed while a turn runs is
+steered into the live agent, natively. The runner keeps the child's stdin
+open for the turn and polls the session's transcript; each client message
+above its delivery floor is written to the child as its own stream-json user
+message (carrying the bridge event's uuid, so the conversation's transcript
+names what the surface names). A real prompt is followed by the CLI's own
+`interrupt` control request with `send_now` — the capability it advertises as
+`interrupt_send_now_v1` — which stops the turn under way and runs the message
+immediately, the way Send now works in stock Claude Code. The interrupted
+turn's own terminal and the message's result are both written live, so the
+page closes the stopped turn and opens the new one. A surface that posts the
+same `send_now` interrupt itself is acknowledged as `delivering`, not acted on
+as a Stop: cancelling the turn at the bridge would kill the process the
+message is meant to reach.
+
+The floor (`delivered_through`, carried on the hint as
+`prompt_after_sequence_num`) is also the fallback: a message that lands after
+the child ended, or after the runner's watch missed it, is answered by the
+next turn even though it sits before the previous turn's `result` — the old
+"after the last result" read dropped it and left the page on "Sending…". The
+runner reports each steered message in its claim, which drops the bridge's
+next-turn requeue: the running agent is answering it, and a requeue would run
+it twice.
+
+Rewind is a `rewind_conversation` control request (`target_message_uuid`,
+`interrupt_if_running`). The bridge answers it immediately with the
+`control_response` the page truncates its transcript on (a durable worker
+event, so a reopened session replays the `conversation_rewound` marker), keeps
+the target's text as the composer prefill, stops a running turn the way a Stop
+does, and records `pending_rewind`. The next turn hands that request to the
+agent over stdin *before* its prompt; the agent's own `rewind_conversation`
+truncates its transcript (what `--resume` would otherwise replay), and the
+guest reports it applied in its claim, which clears the hint. A rewind the
+agent cannot find (its transcript was rebuilt) is answered and cleared rather
+than retried forever.
+
 This bakes the payload in rather than reading it from the `claudeshared` share,
 because it does not depend on the still-open question of whether the host can
 write that share's directory. Once that is answered, the env — and the runner
@@ -612,7 +648,7 @@ stubs, then pinned by `code-runners-smoke` and `code-runners-http-smoke`:
 | `PUT …/{id}/mcp-servers` | The MCP editor's save, `{mcp_servers: […]}`. The guest runner reads the list (it is also where a Code routine fire's per-invocation connectors land, see `docs/routines.md`) and passes its URL servers to the agent as `--mcp-config` for every turn of the session. |
 | `POST …/{id}/events`, `GET …/events`, `GET …/events/stream` | The transcript — the renderer posts `{events:[{payload}]}` (the user's message is `payload.type === "user"`, `payload.message`), the runner writes single envelopes, the stream replays with `from_sequence_num`. Answered under **both generations of the path**: `ccr_v2_send_events_web` decides whether the client posts to `/v1/code/sessions/{id}/events` or the original `/v1/sessions/{id}/events`, and the Desktop build's hardcoded feature table carries the gate false — so the original leg is the one the browser actually sends its first message over. |
 | `POST /v1/code/sessions/heartbeat_check` | The list's liveness probe; answered `{results: [], checks_enabled: false}` — the protocol's own way of saying this deployment does not check, so the client stops asking instead of treating silence as broken sessions. |
-| `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the streamed answer passes back untouched, and the request body is normalized for the chain: the newest fields the provider would reject without their beta headers (`context_management`, `thinking.display`) are dropped here, one log line per request that needed it, rather than pinning the CLI to the chain's vintage. A trailing `[1m]` on the model id is resolved to the bare id here as well: it is Claude Code's long-context marker — and what Auto permission mode's classifier appends to its fallback model for a 1M session — not a route the gateway serves. A bare Anthropic-family alias is resolved here too when the gateway lists exactly one provider-prefixed route ending in it (`claude-opus-5-5` → `anthropic/claude-opus-5-5`): discovery may advertise the alias while `/v1/messages` only routes the prefixed id. The same resolution rewrites the picker's ids in the bootstrap, and a false `config_model_rejected` health result from the app's main-process probe is re-checked against the prefixed route before it reaches a browser. |
+| `POST /v1/messages`, `POST /v1/messages/count_tokens` | The runner's model calls, forwarded by the bridge to the account's gateway with the account's own credentials. The guest's egress is its own allowlist, so dialing the gateway from inside the VM is not reliable (a blocked call hangs rather than failing) — the bridge is the one address the guest provably reaches. The pool secret is the pass; the streamed answer passes back untouched, and the request body is normalized for the chain: the newest fields the provider would reject without their beta headers (`context_management`, `thinking.display`) are dropped here, one log line per request that needed it, rather than pinning the CLI to the chain's vintage. A trailing `[1m]` on the model id is resolved to the bare id here as well: it is Claude Code's long-context marker — and what Auto permission mode's classifier appends to its fallback model for a 1M session — not a route the gateway serves. A bare Anthropic-family alias is resolved here too when the gateway lists exactly one provider-prefixed route ending in it (`claude-opus-5-5` → `anthropic/claude-opus-5-5`): discovery may advertise the alias while `/v1/messages` only routes the prefixed id. The same resolution rewrites the picker's ids in the bootstrap, and a false `config_model_rejected` health result from the app's main-process probe is re-checked against the prefixed route before it reaches a browser. If that route exists but is rate limited (or otherwise answers a provider error), the bridge probes the other routes the gateway lists and reports the chain healthy when one answers — one exhausted model is not a broken configuration. That fallback is sequential (cheap routes first, at most four, one total budget) and stops at the first answer, and each probe is cached briefly: this runs from the settings surface on page loads, so it must not put a `max_tokens: 1` request on every model at once. |
 | `GET /v1/code/sessions/watch` | The list's SSE stream. Its reader treats 400/404 as **fatal for the whole surface**, so it is held open and quiet (a comment frame, keepalives) rather than 404ed. |
 | `POST /api/organizations/{org}/dust/generate_title_and_branch` | `{first_session_message, title_style, model?}` → `{title, branch_name?}`. The Desktop main answers this in-process with an on-device model; a browser fetches its own origin, so the bridge derives the title (first meaningful line, cleaned, capped) and the branch (its slug). `generate_session_title` (`{title}`) and `command_display_names` (`{results: []}`) are served the same way. |
 
@@ -795,6 +831,20 @@ bounded (32 outstanding, a 15 s timeout, and no runner polling recently answers
 as unavailable). Guest-side git runs with `-c core.fsmonitor=false`, so a
 repo config written by the agent cannot make it execute a program.
 
+**Attachments take the same shared workspace.** The composer materializes a
+browser file with `FileSystem.savePastedFile`, then asks Desktop to stage it for
+the runner session. Desktop's handler has no reachable session host here (the
+app is in gateway mode and no `selfHostedUrl` is configured), so the wrapper's
+fallback copies the file to
+`/workspace/.claudesk-attachments/<session>/<name>` and returns that as the
+mount path (`bridge-wrapper/session-attachments.cjs`). The composer sends those
+paths beside the message as `staged_files`; the bridge stores an
+`<uploaded_files>` reminder after the user message (`withStagedFileReminders`),
+restricted to paths under the shared workspace, because the runner does not read
+`staged_files` itself. A file-only send therefore still carries a prompt. The
+guest needs no new request type: the file is already under `/workspace`, which
+the runner bind-mounts from the share.
+
 The request lane is guest runner **2.0.2+**. A 2.0.1 runner (the held-poll
 release before it) accepts the poll and silently ignores `requests`, so every
 lookup burns the full timeout and reads as a hang; the bridge now refuses such
@@ -846,7 +896,7 @@ last turn) answers with an error instead of a made-up figure; the renderer
 keeps its last locally cached snapshot for that session and refreshes it after
 the next turn.
 
-The method is guest runner **2.5.0+**. The request lane itself is 2.0.2+
+The method is guest runner **2.7.0+**. The request lane itself is 2.0.2+
 (above); the bridge refuses an older runner for `get_context_usage` with a
 `501` naming its version, rather than forwarding a request the runner would
 answer "unknown request method".

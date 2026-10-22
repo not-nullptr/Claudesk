@@ -3847,6 +3847,13 @@ function stripLongContextModel(payload) {
 const gatewayModelCache = {
   ids: null, expires: 0, inFlight: null, failedAt: 0,
 };
+// The desktop's discovery pages with `limit=1000`; that view is the gateway's
+// route aliases (the ids the app actually places sessions with), while the
+// plain view lists the provider-prefixed ids. Both are useful when looking for
+// a model that can answer a health probe.
+const gatewayAliasCache = {
+  ids: null, expires: 0, inFlight: null, failedAt: 0,
+};
 const gatewayModelTtlMs = 5 * 60 * 1000;
 const gatewayModelFailureTtlMs = 30 * 1000;
 
@@ -3888,6 +3895,44 @@ async function gatewayModelIds(base, key, scheme) {
     }
   })();
   return gatewayModelCache.inFlight;
+}
+
+async function gatewayAliasIds(base, key, scheme) {
+  const now = Date.now();
+  if (gatewayAliasCache.ids && gatewayAliasCache.expires > now) {
+    return gatewayAliasCache.ids;
+  }
+  if (gatewayAliasCache.failedAt
+    && now - gatewayAliasCache.failedAt < gatewayModelFailureTtlMs) {
+    return null;
+  }
+  if (gatewayAliasCache.inFlight) return gatewayAliasCache.inFlight;
+  gatewayAliasCache.inFlight = (async () => {
+    try {
+      const response = await fetch(
+        `${String(base).replace(/\/+$/, "")}/v1/models?limit=1000`, {
+          headers: { ...gatewayAuthHeaders(scheme, key), "anthropic-version": "2023-06-01" },
+          signal: AbortSignal.timeout(5000),
+        });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      const ids = Array.isArray(body?.data)
+        ? body.data.map((entry) => entry?.id).filter((id) => typeof id === "string" && id)
+        : [];
+      if (!ids.length) throw new Error("no models listed");
+      gatewayAliasCache.ids = ids;
+      gatewayAliasCache.expires = Date.now() + gatewayModelTtlMs;
+      gatewayAliasCache.failedAt = 0;
+      return ids;
+    } catch (error) {
+      gatewayAliasCache.failedAt = Date.now();
+      console.warn(`[inference] could not read the gateway's alias list: ${error.message}`);
+      return null;
+    } finally {
+      gatewayAliasCache.inFlight = null;
+    }
+  })();
+  return gatewayAliasCache.inFlight;
 }
 
 /** The gateway's own id for a bare Anthropic alias, when it lists exactly one
@@ -3953,10 +3998,21 @@ async function canonicalizePickerModelIds(document) {
   return true;
 }
 
+// The corrected-health probe is a real inference request (`max_tokens: 1`), and
+// the surface asks for config health on every page load. A `config_model_rejected`
+// answer would otherwise reach the gateway again each time, so a fresh answer is
+// reused briefly; a rejected route does not start working between two page loads.
+const gatewayProbeCache = new Map();
+const gatewayProbeTtlMs = 60 * 1000;
+const gatewayProbeCacheMax = 64;
+
 /** Probe one model over the Messages API, the same `max_tokens: 1` request the
  *  Desktop's config-health check sends. Returns `{status, ok, requestUrl,
  *  body}` or null when the gateway cannot be asked. */
-async function probeGatewayModel(model, base, key, scheme) {
+async function probeGatewayModel(model, base, key, scheme, timeoutMs = 8000) {
+  const cacheKey = `${String(base).replace(/\/+$/, "")}\u0000${model}`;
+  const cached = gatewayProbeCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.probed;
   const requestUrl = `${String(base).replace(/\/+$/, "")}/v1/messages`;
   try {
     const response = await fetch(requestUrl, {
@@ -3971,14 +4027,65 @@ async function probeGatewayModel(model, base, key, scheme) {
         max_tokens: 1,
         messages: [{ role: "user", content: "." }],
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(Math.max(1000, Math.min(8000, timeoutMs))),
     });
     const body = await response.text().catch(() => "");
-    return { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
+    const probed = { status: response.status, ok: response.ok, requestUrl, body: body.slice(0, 500) };
+    gatewayProbeCache.set(cacheKey, { probed, expires: Date.now() + gatewayProbeTtlMs });
+    while (gatewayProbeCache.size > gatewayProbeCacheMax) {
+      gatewayProbeCache.delete(gatewayProbeCache.keys().next().value);
+    }
+    return probed;
   } catch (error) {
     console.warn(`[config-health] could not probe ${model}: ${error.message}`);
     return null;
   }
+}
+
+// How many alternate routes one health check may try, and the wall-clock budget
+// for all of them. This runs when the page asks for config health, so it must
+// not become a fan-out: the chain needs one route that answers, not a report on
+// every seeded model. Probing all of them in parallel put a burst of
+// `max_tokens: 1` requests on the gateway on every page load (and multiplied
+// the load exactly when the upstreams were rate limited).
+const workingProbeLimit = 4;
+const workingProbeBudgetMs = 10000;
+
+/** The first gateway-listed model that answers a probe, for a health check
+ *  whose preferred model is rate limited rather than missing. The chain names
+ *  the upstreams that can serve `/v1/messages` in its own error; prefer them
+ *  and skip the Anthropic-prefixed route a quota may have exhausted. */
+async function workingGatewayModel(base, key, scheme, excluded) {
+  const [ids, aliases] = await Promise.all([
+    gatewayModelIds(base, key, scheme),
+    gatewayAliasIds(base, key, scheme),
+  ]);
+  if (!ids && !aliases) return null;
+  const skip = new Set([excluded, ...(process.env.CLAUDE_TITLE_MODEL
+    ? [process.env.CLAUDE_TITLE_MODEL] : [])]);
+  // Cheap routes first: the chain's own error copy says `/v1/responses` serves
+  // the openai/grok/deepseek/opencode families, and the fable aliases are the
+  // ones this deployment's sessions actually run on. Skip the prefixed
+  // Anthropic route, which is the one a quota usually exhausts, and the
+  // self-hosted/tw02 entries that are not Messages routes at all.
+  const cheap = /fable|deepseek-flash|grok\/|glm-|haiku|minimax|beam|longcat/i;
+  const candidates = [...new Set([...(aliases ?? []), ...(ids ?? [])])]
+    .filter((id) => !skip.has(id)
+      && !id.startsWith("anthropic/")
+      && !id.startsWith("selfhosted/")
+      && !id.startsWith("tw02/"))
+    .sort((left, right) => Number(!cheap.test(left)) - Number(!cheap.test(right)))
+    .slice(0, workingProbeLimit);
+  // Sequential, first success wins: a healthy chain costs one request, and the
+  // per-model probe cache makes a page reload inside its TTL cost none.
+  const deadline = Date.now() + workingProbeBudgetMs;
+  for (const model of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const probed = await probeGatewayModel(model, base, key, scheme, remaining);
+    if (probed?.ok) return { model, ...probed };
+  }
+  return null;
 }
 
 /**
@@ -3988,9 +4095,10 @@ async function probeGatewayModel(model, base, key, scheme) {
  * `/v1/messages` then shows "Configured model not available" on every page,
  * although the route exists. Resolve the alias and re-probe the route the
  * gateway does serve: a success clears the false rejection; a rejection of the
- * canonical id is kept (and a rate limit/5xx is reported as a provider error,
- * not as a missing model). Only a browser's settings call reaches this — the
- * native window talks to its main process directly.
+ * canonical id is kept (and a rate limit/5xx is retried against another seeded
+ * model, so one exhausted route is not reported as a broken configuration).
+ * Only a browser's settings call reaches this — the native window talks to its
+ * main process directly.
  */
 async function correctedGatewayHealth(health) {
   if (!health || typeof health !== "object" || health.state !== "config_model_rejected"
@@ -4020,8 +4128,26 @@ async function correctedGatewayHealth(health) {
   }
   const modelRejected = probed.status === 400 || probed.status === 404;
   if (!modelRejected) {
+    // The route exists but this model cannot answer right now (an exhausted
+    // upstream quota, typically). One model's quota is not the deployment's
+    // configuration: if another seeded model answers, the chain is healthy.
+    const fallback = await workingGatewayModel(base, key, scheme, canonical);
+    if (fallback) {
+      console.log(`[config-health] ${canonical} answered HTTP ${probed.status};`
+        + ` ${fallback.model} answered ${fallback.status}, so the chain is healthy`);
+      return {
+        ...health,
+        state: "healthy",
+        message: undefined,
+        checkedAt,
+        httpStatus: fallback.status,
+        requestUrl: fallback.requestUrl,
+        probedModel: fallback.model,
+        responseBody: undefined,
+      };
+    }
     console.log(`[config-health] ${canonical} answered HTTP ${probed.status};`
-      + " reporting a provider error rather than a missing model");
+      + " no other seeded model answered, reporting a provider error");
   }
   return {
     ...health,

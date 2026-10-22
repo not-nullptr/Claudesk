@@ -190,7 +190,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `CLAUDE_GATEWAY_API_KEY` | — | Gateway 凭据，仅写入 `.env`/受管配置 |
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
 | `CLAUDE_INFERENCE_MODELS_JSON` | — | Desktop 接受的精确模型 ID JSON 数组 |
-| `CLAUDE_MODEL_PICKER_MAIN_MODELS` | — | 固定在选择器根部的模型 ID（逗号分隔或 JSON 数组），其余模型收进 “More models” 子菜单；在带 `AUTH_IDENTITY_URL` 的部署里只作兜底，通常改由 `/admin` 的 Model picker 卡片设置 |
+| `CLAUDE_MODEL_PICKER_MAIN_MODELS` | — | 固定在选择器根部的模型 ID（逗号分隔或 JSON 数组），其余模型收进 “More models” 子菜单；在带 `AUTH_IDENTITY_URL` 的部署里只作兜底，通常改由 `/admin/models` 设置 |
 | `CLAUDE_HEADLESS` | `1` | 无头启动官方 Desktop |
 | `CLAUDE_DISABLE_GPU` | `1` | 服务器环境默认关闭 GPU |
 
@@ -270,25 +270,35 @@ Cowork 自身的“Choose folder”授权卡（`mcp__cowork__request_cowork_dire
 该按钮由前端补丁注入，选择器只定位文件面板的顶栏动作片段，始终启用且只匹配一次；详见
 [Frontend 补丁维护](docs/frontend-patches.md)。面板自身的“Download file”菜单仍按官方行为保留。
 
-### 文件面板预览（Office 与 PDF）
+### 文件面板预览（Office、PDF、HTML 与 SVG）
 
 官方文件面板的富预览由 Desktop 主进程渲染：Office 文件在 Cowork VM 内调用 LibreOffice（`soffice`）转成 PDF，
 再放进一个贴在其自身窗口上的原生 Electron 视图显示；浏览器永远不会合成这个视图，所以远程面板里 `.docx`、`.pptx`、
-`.xlsx`、`.pdf` 等一直是空白（`CoworkFilePreview.show` 返回成功，但没有任何可见内容）。
+`.xlsx`、`.pdf`、`.html`、`.svg` 等一直是空白（`CoworkFilePreview.show` 返回成功，但没有任何可见内容）。
 
 现在改为在浏览器内渲染：前端补丁把文件面板预览组件的输出替换为一个指向
-`GET /api/remote/files/preview?path=...` 的 `<iframe>`，该路由内联返回 PDF——
-Office 文档由 `office-preview` sidecar 用 LibreOffice 转换（与 Desktop 同一引擎，因此观感一致），PDF 直接透传。
-只有 `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls` 会切到 iframe，其它文件（如 html/svg）保留官方原生行为。
-iframe 的 URL 末尾附加 `#toolbar=0`（Chrome 内置 PDF 阅读器支持的 PDF 打开参数），隐藏浏览器自带的 PDF 工具栏，
+`GET /api/remote/files/preview?path=...` 的 `<iframe>`。Office 文档由 `office-preview` sidecar 用 LibreOffice
+转换（与 Desktop 同一引擎，因此观感一致）后以 PDF 返回，PDF 直接透传；`.html`/`.htm`/`.svg` 则按原字节内联返回
+（`text/html` / `image/svg+xml`），由浏览器自己渲染。
+只有 `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls`/`.html`/`.htm`/`.svg` 会切到 iframe，其它文件保留官方原生行为。
+Office/PDF 的 iframe URL 末尾附加 `#toolbar=0`（Chrome 内置 PDF 阅读器支持的 PDF 打开参数），隐藏浏览器自带的 PDF 工具栏，
 面板里只显示文档本身，也去掉了阅读器自带的下载按钮（它会把转换结果存成 `xxx.docx.pdf`）；
 Firefox 与 Safari 忽略该参数，照常显示各自阅读器的界面。
+HTML/SVG 的 iframe 带 `sandbox`（`allow-scripts allow-forms allow-modals allow-popups allow-downloads`，
+但**不含** `allow-same-origin`），脚本可以运行，但文档处于不透明源（opaque origin），无法调用同源的
+`/api/remote/*` IPC；预览路由也对响应重复同样的 CSP `sandbox`，即使用户直接打开预览 URL 也不会获得 Bridge 的源。
 同时 preload 不再转发 `CoworkFilePreview` 的原生调用，避免 Desktop 再建一个原生视图、再跑一次 VM 转换。
 转换结果按内容哈希缓存；路径解析复用下载路由的读取根目录与包含规则，预览无法触达下载也读不到的文件。
 
+如果文件面板的 iframe 仍显示空白，或反向代理下出现 `frame-ancestors` 拒绝，请检查代理没有覆盖或剥离预览路由的
+`Content-Security-Policy`：应用与预览同源，`frame-ancestors 'self'` 已足够；不要添加 `X-Frame-Options: DENY`
+（`SAMEORIGIN` 可以）。代理也不应把 `/api/remote/files/preview` 重定向到登录页——iframe 会带着已登录的 Cookie
+请求它。若在代理上另加 CSP，请保留 `frame-ancestors 'self'`（或显式列出你的访问源）。
+
 保真度要点：Office 转换使用与 Desktop 相同的 LibreOffice，并安装 Calibri/Cambria 的等宽替代字体（Carlito/Caladea），
 尽量保持分页一致；`.xlsx`/`.xls` 采用与 Desktop 相同的“每个工作表一页”导出。大文件超过
-`COWORK_REMOTE_PREVIEW_MAX_BYTES` 时拒绝转换。补丁改动会同步 `patchRelease`，让不可变的渲染器资源 URL 重新加载。
+`COWORK_REMOTE_PREVIEW_MAX_BYTES` 时拒绝转换（HTML/SVG 为流式透传，不受此上限约束）。补丁改动会同步
+`patchRelease`，让不可变的渲染器资源 URL 重新加载。
 
 ### 文件读取授权（File Access Request）
 
@@ -336,7 +346,7 @@ Bridge 的 `/api/remote/ipc` 请求也就永远不返回，面板一直转圈—
 ### Chat 回退与诊断接口
 
 - `GET /api/chat/models`
-- `GET /api/chat/model-catalog`（模型 ID 加选择器里显示的名字，供 `/admin` 的 Model picker 卡片使用）
+- `GET /api/chat/model-catalog`（模型 ID 加选择器里显示的名字，供 `/admin/models` 使用）
 - `GET|POST /api/chat/sessions`
 - `GET /api/chat/sessions/:id` 与 `/transcript`
 - `POST /api/chat/sessions/:id/messages` 与 `/stop`

@@ -868,9 +868,10 @@ const bannerCompiled = await minify(bannerInputs.get("banner-chunk.js"), {
 assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), true).patches
   .some(patch => patch.id === "inference-banner"), "recompiled card must retain the patch");
 // The preview patch rewrites the native preview's children to an <iframe> at the
-// bridge route carrying a `#toolbar=0` fragment (Chrome's viewer reads it and
-// hides its own toolbar), reading the element factory and the filePath/cacheBuster
-// props back from the component. The preview chunk carries none of the other
+// bridge route. Office/PDF carry a `#toolbar=0` fragment (Chrome's viewer reads
+// it and hides its own toolbar); HTML/SVG are served as themselves in an
+// opaque-origin sandbox. The element factory and the filePath/cacheBuster props
+// are read back from the component. The preview chunk carries none of the other
 // anchors, so its own DeclineReason test id must be enough to trigger inspection.
 const previewProbe = `const id="native-file-preview-error";\n${previewComponent};`;
 assert.ok(inspectRenderer(previewProbe, false).patches.some(patch => patch.id === "native-file-preview-bridge"),
@@ -881,9 +882,18 @@ const previewOut = patchRendererSources(previewInputs, false).sources.get("previ
 assert.ok(previewOut.includes(
   's("iframe",{src:"/api/remote/files/preview?path="+encodeURIComponent(v)'
     + '+"&v="+encodeURIComponent(String(y??""))+"#toolbar=0"'),
-  "the preview gains an iframe built from the read-back factory and props");
-assert.ok(previewOut.includes("/(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
-  "only Office and PDF switch to the iframe; everything else keeps the native render");
+  "the preview gains a PDF iframe built from the read-back factory and props");
+assert.ok(previewOut.includes("/\\.(?:html?|svg)$/i.test(v)"),
+  "HTML and SVG switch to the document iframe");
+assert.ok(previewOut.includes("/\\.(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
+  "Office and PDF switch to the PDF iframe");
+assert.ok(previewOut.includes(
+  'sandbox:"allow-scripts allow-forms allow-modals allow-popups allow-downloads"'),
+  "HTML/SVG render in an opaque-origin sandbox");
+assert.ok(!previewOut.includes("allow-same-origin"),
+  "the preview iframe must not grant itself the bridge's origin");
+assert.ok(previewOut.includes("[ready==null?null:s(Spinner"),
+  "every other file keeps the native render path");
 // Two preview containers, or a container whose props are not the ones read back,
 // must refuse rather than splice a preview that would never fire.
 assert.throws(() => patchRendererSources(new Map([["dup-preview.js",
@@ -1949,6 +1959,69 @@ const mapperCompiled = await minify(draftMappers(), {
 assert.equal(inspectRenderer(mapperCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-draft-bypass-mode").length, 2,
   "mangled mappers must still be widened");
+// The "Skip all approvals" banner. While a session's mode is bypassPermissions
+// the renderer warns "Skip all approvals is on. Claude never pauses, even for
+// unsafe actions…". Every session here is inside the operator's own VM, so the
+// warning is noise; the patch exits the component for that mode and session
+// surface only, before its final return (after every hook) so switching modes
+// cannot change the hook order. It is pinned by the four i18n message ids of the
+// bypass variants, each required as a `{defaultMessage, id}` descriptor, plus
+// the `mode` and `surface` props.
+const unsupervisedBanner = (props = 'mode:e="bypassPermissions"') =>
+  'function UnsupervisedBanner({' + props + ',onDismiss:n,chromeSkipAllPermissionChecks:r,'
+  + 'surface:o="session"}){let C=e==="auto",w=useLocale(),T=useIntl(),E=w&&!T,'
+  + 'D=useStore(s=>s.hasBlockingWarning,"CoworkUnsupervisedBanner"),O=useFlag(),N=useIntl();'
+  + 'return D||o==="session"&&O?null:el(Banner,{variant:C?"neutral":"warning",onDismiss:n,'
+  + 'children:E?r'
+  + '?N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors, Claude in Chrome, and apps on your computer.",id:"czjJheYzVl"})'
+  + ':N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors and apps on your computer.",id:"zWwXOQjfS6"})'
+  + ':r?N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors and Claude in Chrome.",id:"6yQiJRpovh"})'
+  + ':N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors.",id:"WpCGgQYgl9"})})}';
+const skipBannerPatches = inspectRenderer(unsupervisedBanner(), false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner");
+assert.equal(skipBannerPatches.length, 1, "the skip-all-approvals banner must be spliced once");
+assert.equal(skipBannerPatches[0].replacement,
+  'if(e==="bypassPermissions"&&o==="session")return null;',
+  "the exit names the component's own mode and surface bindings");
+const skipBannerSource = unsupervisedBanner();
+const skipBannerOut = skipBannerSource.slice(0, skipBannerPatches[0].start)
+  + skipBannerPatches[0].replacement + skipBannerSource.slice(skipBannerPatches[0].end);
+assert.ok(skipBannerOut.includes('if(e==="bypassPermissions"&&o==="session")return null;'
+  + 'return D||o==="session"&&O?null:el(Banner'),
+  "the exit must sit immediately before the final return, after every hook call");
+assert.equal(inspectRenderer(unsupervisedBanner('mode:perm="bypassPermissions"'), false, false)
+  .patches.find(patch => patch.id === "cowork-skip-approvals-banner")?.replacement,
+  'if(perm==="bypassPermissions"&&o==="session")return null;',
+  "a renamed mode binding must be read back from the component's own parameter");
+// The four descriptors are the pin. A function that spells the ids as plain
+// strings, or a banner missing one of the four arms, is not the target; a
+// component without the `mode` prop cannot select the arms either.
+assert.equal(inspectRenderer('function stringOnly({mode:e="bypassPermissions"}){'
+  + 'return ["czjJheYzVl","zWwXOQjfS6","6yQiJRpovh","WpCGgQYgl9"].includes(e)}', false, false)
+  .patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "plain string literals must not establish the banner");
+assert.equal(inspectRenderer(unsupervisedBanner().replace('id:"WpCGgQYgl9"', 'id:"another"'),
+  false, false).patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a banner missing one bypass arm must survive untouched");
+assert.equal(inspectRenderer(unsupervisedBanner("hub:s"), false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a component without the mode prop must survive untouched");
+assert.equal(inspectRenderer(unsupervisedBanner().replace(',surface:o="session"', ''),
+  false, false).patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a component without the surface prop cannot select the session arms");
+assert.equal(inspectRenderer(`${unsupervisedBanner()}\n`
+  + unsupervisedBanner().replace("function UnsupervisedBanner(", "function OtherBanner("), false, false)
+  .patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a chunk with two candidates must refuse rather than splice the wrong component");
+const skipBannerCompiled = await minify(unsupervisedBanner(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+const compiledSkipBannerPatches = inspectRenderer(skipBannerCompiled.code, false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner");
+assert.equal(compiledSkipBannerPatches.length, 1, "a mangled banner must still be spliced once");
+assert.match(compiledSkipBannerPatches[0].replacement,
+  /^if\([A-Za-z_$][\w$]*==="bypassPermissions"&&[A-Za-z_$][\w$]*==="session"\)return null;$/,
+  "the mangled banner's exit must name its own mode and surface bindings");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only
@@ -2081,6 +2154,9 @@ const selfHostedBucketPrefill = 'function bucketPrefill(e,{sshConfigIdBySshHost:
 const selfHostedLandingKeep = 'function landing(x){'
   + 'let{worker:e,setSelectedFolder:t}=U.getState();'
   + 'e.type==="environment"&&St(e.id)||t(null)}';
+const selfHostedCoreFolder = 'function core(e,t){'
+  + 'let o=ht(e=>e.worker),c=ht(e=>e.trustedSelectedFolder);'
+  + 'return effect(),{worker:o,selectedFolder:c,selectedRepos:[]}}';
 const selfHostedFolderSetter = 'var draftStore={selectedFolder:null,'
   + 'setSelectedFolder:t=>e({selectedFolder:t,trustedSelectedFolder:null})};';
 const selfHostedPlusTrace = 'function plusHandler(e){return function(t){'
@@ -2110,7 +2186,8 @@ const selfHostedStrip = 'function composer({envType:e}){'
 const selfHostedFixtures = [selfHostedPlaceKinds, selfHostedBranchHook, selfHostedIntent,
   selfHostedCreate, selfHostedCreateParams, selfHostedPoolCreate, selfHostedWire,
   selfHostedRepoInfo, selfHostedNormalizer, selfHostedRemoteRow, selfHostedBridgeRow,
-  selfHostedBucketPrefill, selfHostedLandingKeep, selfHostedFolderSetter, selfHostedPlusTrace,
+  selfHostedBucketPrefill, selfHostedLandingKeep, selfHostedCoreFolder,
+  selfHostedFolderSetter, selfHostedPlusTrace,
   selfHostedRemotePrefill, selfHostedListFields,
   selfHostedContextFields, selfHostedFolderGroups,
   selfHostedSurface, selfHostedFolderPicker, selfHostedStrip].join("\n");
@@ -2118,7 +2195,8 @@ const selfHostedIds = ["web-code-selfhosted-place-kind", "web-code-selfhosted-ne
   "web-code-selfhosted-branch-read", "web-code-selfhosted-intent",
   "web-code-selfhosted-create", "web-code-selfhosted-create-params",
   "web-code-selfhosted-repo-info", "web-code-folder-groups", "web-code-surface",
-  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip"];
+  "web-code-selfhosted-folder-picker", "web-code-selfhosted-strip",
+  "web-code-selfhosted-core-folder"];
 assert.equal(inspectRenderer(selfHostedFixtures, false, true).patches
   .filter(patch => selfHostedIds.includes(patch.id)).length, 0,
   "the self-hosted start options are a tenant patch, not a web-shell one");
@@ -2135,6 +2213,9 @@ assert.equal(tenantStartOptions.patches
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-branch-read").length, 1,
   "the branch hook's local-only read must be widened exactly once");
+assert.equal(tenantStartOptions.patches
+  .filter(patch => patch.id === "web-code-selfhosted-core-folder").length, 2,
+  "the composer core must read the draft's selected folder on a self-hosted place");
 assert.equal(tenantStartOptions.patches
   .filter(patch => patch.id === "web-code-selfhosted-intent").length, 3,
   "all three self-hosted intent arms must carry the start options");
@@ -2212,9 +2293,16 @@ assert.ok(selfHostedOut.includes('if(r.cwd){a.set(o.key,{kind:"remote",'
 assert.ok(selfHostedOut.includes('else{n(e.folder??null),r();let t=eZ(e);'
   + 't&&i(t),o(e.repos)}'),
   "a remote prefill must apply its folder instead of clearing the selection");
-assert.ok(selfHostedOut.includes('e.type==="environment"&&'
-  + '(St(e.id)||String(e.id).startsWith("ccpool_"))||t(null)'),
-  "the new-session page must keep a folder placed on a self-hosted pool");
+assert.ok(selfHostedOut.includes('(e.type==="environment"&&St(e.id)'
+  + '||String(e.id).startsWith("ccpool_"))||t(null)'),
+  "the new-session page must keep a folder placed on a self-hosted place, "
+  + "whether it resolved as an environment or a pool");
+assert.ok(selfHostedOut.includes('let __claudeskSelectedFolder='
+  + 'ht(__claudeskState=>__claudeskState.selectedFolder);'),
+  "the composer core must read the draft store's selected folder");
+assert.ok(selfHostedOut.includes('selectedFolder:(!e&&(o.type==="pool"'
+  + '||String(o.id).startsWith("ccpool_"))?__claudeskSelectedFolder:c)'),
+  "and use it, not the local trust store's folder, for a self-hosted draft");
 assert.ok(selfHostedOut.includes('setSelectedFolder:t=>(globalThis.__claudeskTrace&&'
   + 'globalThis.__claudeskTrace("set-folder",{value:t,stack:(new Error).stack}),'
   + 'e({selectedFolder:t,trustedSelectedFolder:null}))'),

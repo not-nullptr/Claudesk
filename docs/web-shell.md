@@ -212,6 +212,30 @@ they used to sit behind `CLAUDE_REMOTE_INFRASTRUCTURE_ACTIONS`, which
 attachments worked while a member's failed in the composer as `ipc_unavailable`
 ("Upload failed", refused send, no request, nothing in the console).
 
+Being allowed to call the staging method is not enough in this deployment.
+Desktop's implementation picks a session host first: a configured
+`selfHostedUrl`, or the cloud Files API, and otherwise it refuses every path
+with `disabled` — which the renderer shows as *"Couldn't attach {name} to this
+session on your organization's session host. Try again."* This app runs in
+three-party (gateway) mode, and a `selfHostedUrl` cannot be configured because
+it displaces the inference provider keys, so before the wrapper fallback every
+runner-session attachment failed there, after `savePastedFile` had already
+succeeded. `bridge-wrapper/session-attachments.cjs` fixes the other half: the
+wrapper hooks the staging channel (the app registers it on each window's
+`webContents.ipc`, not the global `ipcMain`) and, only when Desktop's own answer
+is all-`disabled`, copies the materialized files into
+`/workspace/.claudesk-attachments/<session>/` — the shared workspace the guest
+runner sees — and returns those paths as the staged mount paths. A deployment
+with a working session host never reaches the fallback.
+
+The composer then sends the staged paths beside the message as
+`staged_files`, not inside its text. The bridge (`withStagedFileReminders`)
+stores the `<uploaded_files>` reminder the agent reads after any user message
+carrying them, restricted to paths under the shared workspace; a file-only send
+has no text, and that reminder is what makes the turn answerable. The guest
+runner needs no change: it already forwards every client text block of the turn
+to the agent.
+
 ## Cowork tool permissions
 
 Cowork's question and tool-approval cards are fed by the app's pending-permission

@@ -40,19 +40,37 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
-# 2.5.0: The Code surface's context meter asks the agent's own control protocol
+# 2.7.0: The Code surface's context meter asks the agent's own control protocol
 # (`get_context_usage`). Stream-json assistant messages carry zero usage on a
 # gateway that reports it only in `message_delta`, so the renderer's own
-# fallback reads 0; the runner asks at turn end, while the agent still holds the
-# conversation, and serves that answer over the UI request lane. Never
-# estimated here: the runner only relays what the agent published.
+# fallback reads 0; the runner asks at turn end, while the live child still
+# holds the conversation, and serves that answer over the UI request lane.
+# Never estimated here: the runner only relays what the agent published.
+#
+# 2.6.0: A message sent while a turn runs is steered into the live child. Its
+# stdin stays open and the runner watches the transcript: each new client
+# message is written to the agent, and a real prompt is followed by the CLI's
+# native `interrupt` request with `send_now`, which stops the running turn and
+# runs the message now. Each result is written as it arrives, so the stopped
+# turn and the steered one close separately. The delivery floor also answers
+# anything the watch missed at the next turn.
+#
+# 2.5.0: The turn answers every client message above the bridge's delivery
+# floor — including one typed while the previous turn ran, which used to sit
+# before that turn's `result` and be dropped — and each is sent to the agent
+# with its own bridge uuid. A rewind the bridge answered for the surface is
+# applied to the agent's transcript at the next turn (the agent's own
+# `rewind_conversation` control request), so the model forgets what the user
+# took back rather than just the page.
+#
 # 2.4.0: Every turn ends with a result. A failure, a timeout or a broken event
 # stream writes the terminal the transcript reader closes a turn on (reopening
 # the stream, or posting the result on its own when it cannot), the poll reports
 # the sessions this runner holds so the bridge can reap a turn whose runner
 # vanished, and the agent's process group — not just its pid — is signalled.
-VERSION = "2.5.0"
+VERSION = "2.7.0"
 
 
 def env(name, default=""):
@@ -133,6 +151,20 @@ def env_seconds(name):
 
 
 TURN_TIMEOUT = env_seconds("CLAUDESK_RUNNER_TIMEOUT_SECONDS")
+# How long the agent gets to answer a `rewind_conversation` request at the
+# start of a turn. It answers from its own transcript in-process; a build that
+# cannot answer must not hold the user's next message behind it.
+REWIND_TIMEOUT = float(env("CLAUDESK_RUNNER_REWIND_TIMEOUT_SECONDS", "10") or 0)
+# A turn holds the child open after its prompt so a message sent while the
+# agent works reaches it natively: the message goes on stdin and the CLI's
+# `interrupt` request with `send_now` stops the running turn for it (the same
+# protocol the Cloud Code surface uses). These pace that watch, and bound how
+# long an idle child is kept after its last result before the turn releases.
+STEER_POLL_SECONDS = float(env("CLAUDESK_RUNNER_STEER_POLL_SECONDS", "0.4") or 0)
+# After a steered turn's last result the child still has to drain the queries
+# its stdin already carried; its own EOF exit is prompt, and this only bounds a
+# build that keeps waiting after input ended.
+STEER_EXIT_GRACE_SECONDS = env_seconds("CLAUDESK_RUNNER_STEER_EXIT_GRACE_SECONDS") or 30.0
 # A placed session and its first message are two requests from the composer.
 # A claim that lands between them reads an empty transcript; wait this long for
 # the send to arrive before releasing the session back to the bridge.
@@ -317,41 +349,20 @@ def prompt_of(events):
     return ""
 
 
-def content_of(events):
-    """The user content this turn answers — text and images.
+def message_blocks(payload):
+    """The stream-json content blocks of a user payload, or [] when it has
+    nothing the agent can be asked (a tool result, an empty send).
 
-    Everything the person sent since the last finished turn belongs to this
-    turn. A message typed while the previous turn was running was appended to
-    the transcript but never reached that agent process (its stdin closes after
-    the prompt), so taking only the *last* user message silently dropped every
-    earlier queued one. Collect all client messages after the last `result`
-    instead, and let the agent see them as one turn.
-
-    The bridge's opening turn may carry image blocks beside the text (a fire
-    with images). The agent's stream-json input takes the same block list, so
-    the turn is forwarded as it arrived rather than flattened to text.
+    The opening message may carry image blocks beside the text (a fire with
+    images). The agent's stream-json input takes the same block list, so each
+    message is forwarded as it arrived rather than flattened to text.
     """
-    start = 0
-    for index, event in enumerate(events or []):
-        payload = (event or {}).get("payload") or {}
-        if payload.get("type") == "result":
-            start = index + 1
+    content = (payload.get("message") or {}).get("content")
     blocks = []
-    for event in (events or [])[start:]:
-        if (event or {}).get("source") == "worker":
-            continue
-        payload = (event or {}).get("payload") or {}
-        if payload.get("type") != "user":
-            continue
-        content = (payload.get("message") or {}).get("content")
-        if isinstance(content, str):
-            if content.strip():
-                if blocks:
-                    blocks.append({"type": "text", "text": "\n\n"})
-                blocks.append({"type": "text", "text": content})
-            continue
-        if not isinstance(content, list):
-            continue
+    if isinstance(content, str):
+        if content.strip():
+            blocks.append({"type": "text", "text": content})
+    elif isinstance(content, list):
         for part in content:
             if not isinstance(part, dict):
                 continue
@@ -371,6 +382,74 @@ def content_of(events):
                         "data": source["data"],
                     }})
     return blocks
+
+
+def is_steerable(payload, blocks):
+    """Is a delivered mid-turn message one the running turn should stop for?
+
+    A system reminder (`shouldQuery: false`) or an image-only attachment
+    carrier belongs to the turn but is not something the person just pressed
+    send on; only a real prompt escalates the CLI's send-now interrupt.
+    """
+    if payload.get("shouldQuery") is False:
+        return False
+    return bool(blocks)
+
+
+def content_of(events, after_sequence_num=None):
+    """The client user messages this turn answers, each with its uuid.
+
+    Every message belongs to its own turn. The agent's uuid on the message is
+    the bridge event's uuid, so the Code surface's rewind (which names a target
+    message by uuid) can be handed to the agent unchanged.
+
+    `after_sequence_num` is the bridge's delivery floor: the highest transcript
+    sequence the agent was actually given. A message above it was typed while
+    a turn ran but arrived after that turn's read, so the agent never saw it —
+    it is answered by this turn even though it appears *before* the previous
+    turn's `result` in the log. Callers pass the events from that floor (see
+    fetch_events_after); without a floor, the tail is read the old way, after
+    the last `result`, for a bridge that predates the floor.
+
+    The opening message may carry image blocks beside the text (a fire with
+    images). The agent's stream-json input takes the same block list, so each
+    message is forwarded as it arrived rather than flattened to text.
+    """
+    if after_sequence_num is None:
+        start = 0
+        for index, event in enumerate(events or []):
+            payload = (event or {}).get("payload") or {}
+            if payload.get("type") == "result":
+                start = index + 1
+        events = (events or [])[start:]
+    else:
+        in_range = []
+        for event in events or []:
+            try:
+                sequence = int((event or {}).get("sequence_num") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sequence > after_sequence_num:
+                in_range.append(event)
+        events = in_range
+    messages = []
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("source") == "worker":
+            continue
+        payload = event.get("payload") or {}
+        if payload.get("type") != "user":
+            continue
+        blocks = message_blocks(payload)
+        if not blocks:
+            continue
+        message_uuid = payload.get("uuid")
+        if not isinstance(message_uuid, str) or not message_uuid:
+            message_uuid = event.get("event_id")
+        messages.append({
+            "uuid": message_uuid if isinstance(message_uuid, str) else "",
+            "content": blocks,
+        })
+    return messages
 
 
 def resume_id(events):
@@ -448,6 +527,33 @@ def fetch_history(session, token):
         return events
     status, document = request("/v1/code/sessions/%s/events" % quoted, token=token)
     return ((document or {}).get("data") or []) if isinstance(document, dict) else []
+
+
+def fetch_events_after(session, token, after_sequence_num):
+    """Every durable event above the bridge's delivery floor, oldest first.
+
+    The turn's own transcript tail can be shorter than the gap between the
+    floor and now (a long turn, or a session that has been running for hours),
+    and a user message stranded at the floor must not be missed because of it.
+    Pages are walked with the events route's own cursor.
+    """
+    quoted = urllib.parse.quote(session)
+    events = []
+    cursor = None
+    for _ in range(50):
+        query = "after_sequence_num=%d&limit=1000" % after_sequence_num
+        if cursor is not None:
+            query += "&cursor=%s" % urllib.parse.quote(str(cursor))
+        status, document = request(
+            "/v1/code/sessions/%s/events?%s" % (quoted, query), token=token)
+        if status != 200 or not isinstance(document, dict):
+            break
+        page = document.get("data") or []
+        events.extend(page)
+        cursor = document.get("next_cursor")
+        if not cursor:
+            break
+    return events
 
 
 def latest_control_request(events, subtype):
@@ -1120,30 +1226,44 @@ def apply_cancellations(items):
     return applied
 
 
-def run_agent(argv, cwd, content, write, interrupt=None, usage_hook=None):
-    """Run one turn, streaming its events back to the bridge.
+def run_agent(argv, cwd, messages, write, interrupt=None, rewind=None, steer=None,
+              usage_hook=None):
+    """One headless turn of the agent: the prompts in, the event stream out.
 
-    `write` puts one event on the turn's open stream (see open_event_stream):
-    each token is written to the connection as it arrives, with no request of
-    its own and no coalescing delay.
+    `messages` is the ordered list of client user messages this turn answers
+    (`{uuid, content}`, see content_of). Each becomes its own stream-json user
+    message on stdin, the channel the SDK uses, carrying the bridge event's
+    uuid so the conversation's own transcript names the messages the Code
+    surface names. The agent answers each as its own query; the stream is
+    closed after the last, which is what tells it the input is complete.
+    Every assistant message, tool result and partial update is queued to a
+    writer thread so a slow bridge never stalls the agent's own output pipe.
+
+    `rewind`, when present, is applied to the agent's conversation before any
+    prompt: the agent's own `rewind_conversation` control request truncates
+    the transcript at the target message and answers with the `prefillText`
+    shape the surface uses. That is what makes a rewound conversation stay
+    rewound on the next turn instead of the `--resume` replaying messages the
+    user took back.
 
     `interrupt` is an event set by the poll loop when the bridge carries a
     Stop. The child is signalled the way the terminal would (SIGINT) so it can
     flush and unwind; a child that ignores that is terminated, then killed.
 
-    `usage_hook` asks the agent for `get_context_usage` when its result lands,
-    while that process still holds the conversation (see
-    remember_context_usage), then ends the turn as usual.
-    """
-    """One headless turn of the agent: the prompt in, the event stream out.
+    `steer` keeps stdin open for the life of the turn and polls the bridge for
+    client messages that landed after its floor. Each is written to the child
+    as a stream-json user message; a real prompt is followed by the CLI's
+    native `interrupt` control request with `send_now`, which stops the turn
+    under way and runs the message immediately — stock steering, not a queue
+    for the next turn (see watch_steering).
 
-    `content` is the user message's content — a string, or the block list the
-    transcript carries (text and images) — written as a stream-json user
-    message on stdin, the channel the SDK uses. Stdin ends there, which is what
-    tells the agent the turn's input is complete. Every assistant message, tool
-    result and partial update is queued to a writer thread so a slow bridge
-    never stalls the agent's own output pipe. Returns (exit code, result event
-    or None, timed out, forwarded count, write failures, stderr lines).
+    `usage_hook` asks the agent for `get_context_usage` once every message has
+    its result, while the live child still holds the conversation (see
+    remember_context_usage), and before the input is closed.
+
+    Returns (exit code, result event or None, timed out, interrupted,
+    forwarded count, write failures, stderr lines, rewind answered,
+    results written live).
     """
     environment = dict(os.environ)
     if os.path.isdir(RUNNER_HOME):
@@ -1253,12 +1373,70 @@ def run_agent(argv, cwd, content, write, interrupt=None, usage_hook=None):
     if interrupt is not None:
         threading.Thread(target=watch_interrupt, daemon=True).start()
 
-    def end_after_result():
+    forwarded = 0
+    result_count = 0
+    result = None
+    results_emitted = 0
+    # One result per user message the agent is given, including a steered one
+    # (the CLI answers each message as its own query). The watcher increments
+    # it; the list keeps the count shared without another lock.
+    expected_results = [max(1, len(messages or []))]
+    stdin_closed = []
+    stdin_lock = threading.Lock()
+    steer_stop = threading.Event()
+    steer_state = {
+        # The transcript sequence this turn has already handed the agent. The
+        # watcher reads above it; the initial prompts are at or below it.
+        "floor": 0,
+        "delivered": set(),
+        "steered": False,
+        "last_result_at": None,
+        "last_delivery_at": None,
+        "session": None,
+        "token": None,
+    }
+    if isinstance(steer, dict):
+        try:
+            steer_state["floor"] = max(0, int(steer.get("floor") or 0))
+        except (TypeError, ValueError):
+            steer_state["floor"] = 0
+        steer_state["session"] = steer.get("session")
+        steer_state["token"] = steer.get("token")
+
+    def write_stdin(payload):
+        """Write one stream-json line to the live agent, or False once its
+        input is complete (the turn is settling or the child is gone)."""
+        with stdin_lock:
+            if stdin_closed:
+                return False
+            try:
+                process.stdin.write(json.dumps(payload) + "\n")
+                process.stdin.flush()
+                return True
+            except OSError:
+                return False  # the agent died before reading; its exit says why
+
+    def close_stdin():
+        with stdin_lock:
+            if stdin_closed:
+                return
+            stdin_closed.append(True)
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
         # A build that keeps waiting for more input after its result must not
-        # hold the session; stdin has already ended, so give it a moment to
-        # exit on its own, then end the whole group (a grandchild can hold the
-        # stdout pipe open after the agent itself is gone).
-        for _ in range(6):
+        # hold the session; give it a moment to exit on its own, then end the
+        # whole group (a grandchild can hold the stdout pipe open after the
+        # agent itself is gone). A steered turn may still be draining queries
+        # whose messages were written before the close, so it gets a longer
+        # grace than a plain turn.
+        grace = STEER_EXIT_GRACE_SECONDS if steer_state["steered"] else 3.0
+        threading.Thread(target=end_after_result, args=(grace,), daemon=True).start()
+
+    def end_after_result(grace_seconds=3.0):
+        deadline = time.time() + grace_seconds
+        while time.time() < deadline:
             if process.poll() is not None:
                 return
             time.sleep(0.5)
@@ -1267,50 +1445,44 @@ def run_agent(argv, cwd, content, write, interrupt=None, usage_hook=None):
         if process.poll() is None:
             signal_group(signal.SIGKILL)
 
-    state = {"forwarded": 0, "result": None}
-    stdout_done = threading.Event()
-    usage_done = threading.Event()
-    turn_over = [False]
-    usage_finished = [False]
-    usage_timer = [None]
-    usage_request_id = "context-usage-%d" % int(time.time() * 1000)
+    control_responses = {}
+    control_lock = threading.Lock()
 
-    def end_turn_now():
-        """End the agent's input and let a lingering process go.
+    def ask_for_context_usage():
+        """Ask the agent for this turn's context breakdown before its input ends.
 
-        Once per turn: the context answer (or its timeout) and a result with
-        no question both land here.
+        The agent computes it from the conversation it just ran; the answer is
+        kept for the Code meter (see remember_context_usage). One question per
+        turn, and a short ceiling so a failed agent cannot hold the release.
         """
-        if usage_finished[0]:
+        request_id = "context-usage-%d" % int(time.time() * 1000)
+        if not write_stdin({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "get_context_usage", "detail": "full"},
+        }):
             return
-        usage_finished[0] = True
-        if usage_timer[0] is not None:
-            usage_timer[0].cancel()
-        try:
-            process.stdin.close()
-        except (OSError, ValueError):
-            pass
-        threading.Thread(target=end_after_result, daemon=True).start()
-        usage_done.set()
-
-    def ask_for_usage():
-        # Sent while the process still holds the conversation that just
-        # finished; the answer is what the context meter shows until the next
-        # turn. `full` is a superset of `summary`, so one answer serves both.
-        message = {"type": "control_request", "request_id": usage_request_id,
-                   "request": {"subtype": "get_context_usage", "detail": "full"}}
-        try:
-            process.stdin.write(json.dumps(message) + "\n")
-            process.stdin.flush()
-        except (OSError, ValueError):
-            end_turn_now()
+        answer = None
+        deadline = time.time() + CONTEXT_USAGE_WAIT
+        while time.time() < deadline:
+            with control_lock:
+                answer = control_responses.get(request_id)
+            if answer is not None:
+                break
+            time.sleep(0.1)
+        if not isinstance(answer, dict) or answer.get("subtype") != "success":
             return
-        timer = threading.Timer(CONTEXT_USAGE_WAIT, end_turn_now)
-        timer.daemon = True
-        usage_timer[0] = timer
-        timer.start()
+        try:
+            usage_hook(answer.get("response"))
+        except Exception as error:  # noqa: BLE001 - best effort
+            log("could not remember context usage: %s" % error)
 
-    def read_stdout():
+    def stdout_reader():
+        # The agent's stream-json on stdout: transcript events to the writer
+        # queue, control responses set aside for a request the runner made,
+        # and the turn's own `result` terminals. Read on a thread so the
+        # runner can write a steer or a rewind while the agent is working.
+        nonlocal forwarded, result_count, result, results_emitted
         try:
             for line in process.stdout:
                 line = line.strip()
@@ -1321,77 +1493,265 @@ def run_agent(argv, cwd, content, write, interrupt=None, usage_hook=None):
                 except ValueError:
                     log("agent printed a non-json line: %s" % line[:200])
                     continue
-                if not isinstance(event, dict):
-                    continue
                 kind = event.get("type")
                 if kind == "control_response":
                     response = event.get("response")
-                    if (usage_hook is not None and isinstance(response, dict)
-                            and response.get("request_id") == usage_request_id):
-                        if response.get("subtype") == "success":
-                            try:
-                                usage_hook(response.get("response"))
-                            except Exception as error:  # noqa: BLE001 - best effort
-                                log("could not remember context usage: %s" % error)
-                        end_turn_now()
-                    continue
-                if turn_over[0]:
-                    # The turn is over; anything else the process says (late
-                    # notices, prompt suggestions) belongs to no turn and must
-                    # not enter the transcript.
+                    request_id = response.get("request_id") if isinstance(response, dict) else None
+                    if isinstance(request_id, str):
+                        with control_lock:
+                            control_responses[request_id] = response
                     continue
                 if kind in ("assistant", "user", "stream_event"):
                     pending.put(event)
-                    state["forwarded"] += 1
+                    forwarded += 1
                 elif kind == "result":
-                    state["result"] = event
-                    turn_over[0] = True
-                    if usage_hook is not None:
-                        ask_for_usage()
-                    else:
-                        end_turn_now()
+                    result_count += 1
+                    result = event
+                    steer_state["last_result_at"] = time.time()
+                    # A steered turn has more than one result: the interrupted
+                    # turn's, then the message's. Each closes its own turn in
+                    # the transcript, so they go out as they arrive; a plain
+                    # turn keeps its single result for run_turn to write.
+                    if steer_state["steered"]:
+                        pending.put(event)
+                        results_emitted += 1
                 elif kind == "system" and event.get("subtype") == "init":
                     log("agent %s initialized (model %s, permission %s)" % (
                         event.get("claude_code_version"), event.get("model"),
                         event.get("permissionMode")))
         finally:
-            end_turn_now()
-            stdout_done.set()
+            # Only after every line has been queued may the writer stop: an
+            # assistant message read after the process wait would otherwise
+            # land behind the sentinel and never be written.
+            pending.put(None)
 
-    reader_thread = threading.Thread(target=read_stdout, daemon=True)
+    def steer_message(event):
+        """Deliver one client message above the floor to the live child.
+
+        Returns (written, uuid, answerable). The message goes on stdin first;
+        the caller sends the `send_now` interrupt once every message in the
+        batch is queued, because one interrupt releases the whole queue — an
+        interrupt per message would stop the turn again under the message
+        that just started.
+        """
+        payload = event.get("payload") or {}
+        if payload.get("type") != "user":
+            return (False, "", False)
+        blocks = message_blocks(payload)
+        if not blocks:
+            return (False, "", False)
+        message_uuid = payload.get("uuid")
+        if not isinstance(message_uuid, str) or not message_uuid:
+            message_uuid = event.get("event_id")
+        if not isinstance(message_uuid, str) or not message_uuid:
+            message_uuid = str(uuid.uuid4())
+        if message_uuid in steer_state["delivered"]:
+            return (False, "", False)
+        steer_state["delivered"].add(message_uuid)
+        outbound = {"type": "user", "uuid": message_uuid,
+                    "message": {"role": "user", "content": blocks},
+                    "parent_tool_use_id": None, "session_id": ""}
+        if not write_stdin(outbound):
+            return (False, "", False)
+        steer_state["last_delivery_at"] = time.time()
+        expected_results[0] += 1
+        return (True, message_uuid, is_steerable(payload, blocks))
+
+    def send_steer_interrupt(message_uuid):
+        """The CLI's native Send now: stop the running turn for the message
+        already queued on stdin and run it immediately. The CLI advertises the
+        capability as `interrupt_send_now_v1`; without it the request is a
+        plain interrupt and the message runs at the next turn."""
+        nonlocal results_emitted
+        if not steer_state["steered"]:
+            steer_state["steered"] = True
+            # A turn that ended just before this message did not close on the
+            # page (a plain turn's result is held for run_turn); release it so
+            # the steered turn opens on its own.
+            if result is not None and results_emitted == 0:
+                pending.put(result)
+                results_emitted += 1
+        write_stdin({
+            "type": "control_request",
+            "request_id": "steer-%s" % message_uuid,
+            "request": {"subtype": "interrupt",
+                        "message_uuid": message_uuid,
+                        "send_now": True},
+        })
+        log("session %s: steered the running turn for %s"
+            % (steer_state["session"], message_uuid[:8]))
+
+    def watch_steering():
+        # The bridge is the only way the guest learns about a message typed
+        # while the turn runs (nothing forwards into the VM). Poll its
+        # transcript tail and hand each new client message to the child as it
+        # appears; the held poll's separate loop cannot do this because the
+        # child's stdin belongs to this turn.
+        session_id = steer_state["session"]
+        token = steer_state["token"]
+        if not isinstance(session_id, str) or not session_id:
+            return
+        quoted_session = urllib.parse.quote(session_id)
+        floor = steer_state["floor"]
+        while not steer_stop.is_set() and process.poll() is None:
+            events = []
+            try:
+                cursor = None
+                for _ in range(5):
+                    query = "after_sequence_num=%d&limit=200" % floor
+                    if cursor is not None:
+                        query += "&cursor=%s" % urllib.parse.quote(str(cursor))
+                    status, document = request(
+                        "/v1/code/sessions/%s/events?%s" % (quoted_session, query),
+                        token=token)
+                    if status != 200 or not isinstance(document, dict):
+                        break
+                    events.extend(document.get("data") or [])
+                    cursor = document.get("next_cursor")
+                    if not cursor:
+                        break
+            except Exception as error:  # noqa: BLE001 - steering is best-effort
+                log("session %s: steer poll failed: %s" % (session_id, error))
+                events = []
+            delivered = False
+            steer_uuid = None
+            for event in events:
+                if not isinstance(event, dict) or event.get("source") == "worker":
+                    continue
+                try:
+                    sequence = int(event.get("sequence_num") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if sequence <= floor:
+                    continue
+                # The watch is a tail cursor: every client event moves it, so
+                # a control request does not make the next poll re-read it.
+                floor = max(floor, sequence)
+                payload = event.get("payload") or {}
+                if payload.get("type") != "user":
+                    continue
+                written, message_uuid, answerable = steer_message(event)
+                if written:
+                    delivered = True
+                    if answerable and steer_uuid is None:
+                        steer_uuid = message_uuid
+            if steer_uuid is not None:
+                # Every message in the batch is queued now; one send_now stops
+                # the turn and releases them all, in order.
+                send_steer_interrupt(steer_uuid)
+            if delivered:
+                steer_state["floor"] = floor
+                # The bridge stamps the message and, with nothing left above
+                # the point, drops the next-turn requeue it queued when the
+                # message landed mid-turn (see recordClaim).
+                try:
+                    request("/v1/code/runners/self-hosted/sessions/%s/claim"
+                            % quoted_session,
+                            {"through_sequence_num": floor}, token)
+                except Exception as error:  # noqa: BLE001 - the next turn retries
+                    log("session %s: could not record steered messages: %s"
+                        % (session_id, error))
+            steer_stop.wait(max(0.1, STEER_POLL_SECONDS))
+
+    reader_thread = threading.Thread(target=stdout_reader, daemon=True)
     reader_thread.start()
+    watch_thread = None
+
+    rewind_done = False
+    rewind_request_id = ""
     try:
-        blocks = ([{"type": "text", "text": content}]
-                  if isinstance(content, str) else content)
-        message = {"type": "user",
-                   "message": {"role": "user", "content": blocks},
-                   "parent_tool_use_id": None,
-                   "session_id": ""}
-        try:
-            process.stdin.write(json.dumps(message) + "\n")
-            process.stdin.flush()
-        except OSError:
-            pass  # the agent died before reading; its exit says why
-        # Stdin stays open until the turn's result: closing it is how the
-        # runner tells the agent its input is complete, and the context query
-        # rides that same channel just before the close (see end_turn_now).
-        if usage_hook is not None:
-            # The result has landed; wait only for the context answer (or its
-            # short ceiling) so the cache is warm before the bridge releases.
-            while not stdout_done.is_set() and not usage_done.is_set():
-                time.sleep(0.05)
-            code = process.wait() if stdout_done.is_set() else process.poll()
-        else:
-            reader_thread.join()
-            code = process.wait()
+        # The bridge answered a rewind for the surface and queued it for this
+        # turn. The agent applies it over the same stdin channel: it truncates
+        # its conversation at the target and answers with the prefill text.
+        # The prompt is not written until the agent has answered, so it runs
+        # against the rewound conversation rather than the one that still
+        # remembers the messages the user took back.
+        if isinstance(rewind, dict) and isinstance(rewind.get("target_message_uuid"), str) \
+                and rewind.get("target_message_uuid"):
+            candidate = rewind.get("request_id")
+            rewind_request_id = candidate if isinstance(candidate, str) and candidate \
+                else str(uuid.uuid4())
+            control = {
+                "type": "control_request",
+                "request_id": rewind_request_id,
+                "request": {
+                    "subtype": "rewind_conversation",
+                    "target_message_uuid": rewind["target_message_uuid"],
+                    "interrupt_if_running": False,
+                },
+            }
+            last_seen = rewind.get("last_seen_user_message_uuid")
+            if isinstance(last_seen, str) and last_seen:
+                control["request"]["last_seen_user_message_uuid"] = last_seen
+            write_stdin(control)
+            answer = None
+            deadline = time.time() + REWIND_TIMEOUT
+            while REWIND_TIMEOUT > 0 and time.time() < deadline:
+                with control_lock:
+                    answer = control_responses.get(rewind_request_id)
+                if answer is not None:
+                    break
+                time.sleep(0.1)
+            body = answer.get("response") if isinstance(answer, dict) else None
+            # Answered is enough to stop carrying the rewind: an agent that
+            # could not find the target (its transcript was rebuilt, or the
+            # message never reached it) will never accept it on a later turn.
+            rewind_done = isinstance(body, dict)
+            log("rewind %s at %s: %s" % (
+                rewind.get("target_message_uuid"),
+                rewind_request_id or "agent",
+                ("applied" if body.get("rewound") is True else "declined")
+                if isinstance(body, dict) else "no answer from the agent"))
+        for message in messages or []:
+            blocks = message.get("content")
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}]
+            if not isinstance(blocks, list) or not blocks:
+                continue
+            payload = {"type": "user",
+                       "message": {"role": "user", "content": blocks},
+                       "parent_tool_use_id": None,
+                       "session_id": ""}
+            message_uuid = message.get("uuid")
+            if isinstance(message_uuid, str) and message_uuid:
+                payload["uuid"] = message_uuid
+            if not write_stdin(payload):
+                break  # the agent died before reading; its exit says why
+        # Only now may the watcher hand over new messages: anything it sees
+        # must follow the prompts this turn was started for.
+        if isinstance(steer, dict):
+            watch_thread = threading.Thread(target=watch_steering, daemon=True)
+            watch_thread.start()
+        # Input stays open while the turn runs: that is what lets a message
+        # typed now reach the live child (see watch_steering). The turn ends
+        # once every message it has been given has a result; the context
+        # question rides the still-open input, then EOF lets the child drain
+        # and exit.
+        usage_asked = False
+        while process.poll() is None:
+            if result_count >= expected_results[0]:
+                if usage_hook is not None and not usage_asked:
+                    usage_asked = True
+                    ask_for_context_usage()
+                close_stdin()
+            time.sleep(0.15)
+        code = process.wait()
     finally:
+        steer_stop.set()
         if watchdog is not None:
             watchdog.cancel()
         interrupt_done.set()
-        pending.put(None)
+        close_stdin()
+        # The reader closes the writer queue itself at EOF (see stdout_reader);
+        # this join only bounds a child whose grandchild keeps stdout open.
+        reader_thread.join(timeout=60)
+        if reader_thread.is_alive():
+            pending.put(None)
         writer_thread.join(timeout=60)
-    return (code, state["result"], bool(timed_out), bool(interrupted),
-            state["forwarded"], failures, errors)
+        if watch_thread is not None:
+            watch_thread.join(timeout=5)
+    return (code, result, bool(timed_out), bool(interrupted), forwarded,
+            failures, errors, rewind_done, results_emitted)
 
 
 def mcp_config_of(servers):
@@ -1440,60 +1800,6 @@ def mcp_config_of(servers):
     return {"mcpServers": mapping} if mapping else None
 
 
-def agent_options(config, events):
-    """The settings a turn runs with, from the session and its own events.
-
-    The create config carries the composer's picks; a change made while the
-    session was already running is a control request in the transcript, and the
-    latest one wins over the create config (the start intent emits the same
-    subtype, so this also covers a mode the create body dropped).
-    """
-    model = config.get("model")
-    model = model if isinstance(model, str) and model else None
-    permission_mode = config.get("permission_mode")
-    permission_mode = (permission_mode if isinstance(permission_mode, str)
-                       and permission_mode else None)
-    effort = config.get("effort_level")
-    effort = effort if isinstance(effort, str) and effort else None
-    control = latest_control_request(events, "set_permission_mode")
-    if isinstance(control, dict):
-        mode = control.get("mode")
-        if isinstance(mode, str) and mode:
-            permission_mode = mode
-    control = latest_control_request(events, "set_model")
-    if isinstance(control, dict):
-        chosen = control.get("model")
-        if isinstance(chosen, str) and chosen:
-            model = chosen
-    # The effort picker writes the SDK's `apply_flag_settings` request, whose
-    # settings carry `effortLevel`. It is the only way a running session's
-    # effort changes; the create config is written once. Newer builds may send
-    # the same value at the top level, so accept both spellings.
-    control = latest_control_request(events, "apply_flag_settings")
-    if isinstance(control, dict):
-        settings = control.get("settings")
-        level = settings.get("effortLevel") if isinstance(settings, dict) else None
-        if not isinstance(level, str):
-            level = control.get("effortLevel")
-        if isinstance(level, str) and level:
-            effort = level
-    return model, permission_mode, effort, mcp_config_of(config.get("mcp_servers"))
-
-
-def agent_argv(model, permission_mode, effort, mcp_config):
-    """The product runner's own spawn flags, with the session's choices."""
-    argv = [CLAUDE_BIN] + AGENT_ARGS
-    if model is not None:
-        argv += ["--model", model]
-    if permission_mode is not None:
-        argv += ["--permission-mode", permission_mode]
-    if effort is not None:
-        argv += ["--effort", effort]
-    if mcp_config is not None:
-        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
-    return argv
-
-
 def run_session(hint, interrupt=None):
     session = hint["session_uuid"]
     quoted = urllib.parse.quote(session)
@@ -1534,24 +1840,31 @@ def run_session(hint, interrupt=None):
         log("session %s: %s" % (session, reason))
         return session, exit_code
 
-    # Only the tail is needed; the whole log is re-downloaded on every turn
-    # otherwise, which is both slow and (for a long session) a large burst into
-    # the bridge's heap.
+    # The tail carries the conversation to resume, the latest settings, and a
+    # Stop; the prompt itself is read from the bridge's delivery floor when it
+    # has one. A message typed while the previous turn ran sits above that
+    # floor but *before* the previous turn's `result`, so the old "after the
+    # last result" read dropped it and the page kept showing "Sending…".
+    floor = hint.get("prompt_after_sequence_num")
+    floor = floor if isinstance(floor, int) and not isinstance(floor, bool) and floor >= 0 else None
     events = fetch_history(session, token)
-    content = content_of(events)
+    pending_events = fetch_events_after(session, token, floor) if floor is not None else []
+    messages = content_of(pending_events, floor) if floor is not None else content_of(events)
     # The composer places the session first and posts the user's message next.
     # If this claim won the race, give the send a moment to land instead of
     # failing a turn nobody has asked for yet. The bridge withholds a session
     # with no prompt, so this is the stale-bridge path.
-    if not content and PROMPT_GRACE_SECONDS > 0:
+    if not messages and PROMPT_GRACE_SECONDS > 0:
         deadline = time.time() + PROMPT_GRACE_SECONDS
-        while not content and time.time() < deadline:
+        while not messages and time.time() < deadline:
             time.sleep(0.25)
-            status, history = request("/v1/code/sessions/%s/events" % quoted,
-                                      token=token)
-            events = (history or {}).get("data") if isinstance(history, dict) else []
-            content = content_of(events)
-        if content:
+            events = fetch_history(session, token)
+            if floor is not None:
+                pending_events = fetch_events_after(session, token, floor)
+                messages = content_of(pending_events, floor)
+            else:
+                messages = content_of(events)
+        if messages:
             log("session %s: the prompt arrived while the claim was waiting" % session)
     resume = resume_id(events)
     # Tell the bridge how far this turn's transcript read went. Anything a
@@ -1560,7 +1873,8 @@ def run_session(hint, interrupt=None):
     # that landed between the claim and this read looked like a mid-turn
     # message and started a duplicate turn.
     highest = max(
-        (int(event.get("sequence_num") or 0) for event in (events or [])),
+        (int(event.get("sequence_num") or 0)
+         for event in list(events or []) + list(pending_events or [])),
         default=0,
     )
     try:
@@ -1581,7 +1895,39 @@ def run_session(hint, interrupt=None):
     # answers as whatever its default is. The same config carries the start
     # options (folder, branch, worktree).
     config = session_settings(session)
-    model, permission_mode, effort, mcp_config = agent_options(config, events)
+    model = config.get("model")
+    model = model if isinstance(model, str) and model else None
+    permission_mode = config.get("permission_mode")
+    permission_mode = (permission_mode if isinstance(permission_mode, str)
+                       and permission_mode else None)
+    effort = config.get("effort_level")
+    effort = effort if isinstance(effort, str) and effort else None
+    # A change made while the session is already running is a control request
+    # in the transcript, not a rewritten session document. The latest one wins
+    # over the create config (the start intent emits the same subtype, so this
+    # also covers a mode the create body dropped).
+    control = latest_control_request(events, "set_permission_mode")
+    if isinstance(control, dict):
+        mode = control.get("mode")
+        if isinstance(mode, str) and mode:
+            permission_mode = mode
+    control = latest_control_request(events, "set_model")
+    if isinstance(control, dict):
+        chosen = control.get("model")
+        if isinstance(chosen, str) and chosen:
+            model = chosen
+    # The effort picker writes the SDK's `apply_flag_settings` request, whose
+    # settings carry `effortLevel`. It is the only way a running session's
+    # effort changes; the create config is written once. Newer builds may send
+    # the same value at the top level, so accept both spellings.
+    control = latest_control_request(events, "apply_flag_settings")
+    if isinstance(control, dict):
+        settings = control.get("settings")
+        level = settings.get("effortLevel") if isinstance(settings, dict) else None
+        if not isinstance(level, str):
+            level = control.get("effortLevel")
+        if isinstance(level, str) and level:
+            effort = level
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
@@ -1590,7 +1936,7 @@ def run_session(hint, interrupt=None):
         reason = "%s is not an executable file in the guest" % CLAUDE_BIN
         return fail(reason, 127, setup_failure_kind="missing_binary")
 
-    if not content:
+    if not messages:
         # The composer places a session and posts its first message next; a
         # claim that slips between the two reads an empty transcript. That is
         # not a failed turn — there is no turn yet. The bridge withholds a
@@ -1608,8 +1954,17 @@ def run_session(hint, interrupt=None):
     # The session's MCP servers: a routine fire's per-invocation connectors (or
     # the session MCP editor's saved set). This is what makes the URL a fire
     # carried — with whatever per-run id it held — the server the agent dials.
-    # (agent_options built `--mcp-config` from the same field above.)
-    argv = agent_argv(model, permission_mode, effort, mcp_config)
+    mcp_config = mcp_config_of(config.get("mcp_servers"))
+
+    argv = [CLAUDE_BIN] + AGENT_ARGS
+    if model is not None:
+        argv += ["--model", model]
+    if permission_mode is not None:
+        argv += ["--permission-mode", permission_mode]
+    if effort is not None:
+        argv += ["--effort", effort]
+    if mcp_config is not None:
+        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
     # The working directory comes from the session's start options. With none,
     # the account's shared workspace is where the work happens (see
     # session_workdir). The virtiofs mount can arrive after this service, so
@@ -1646,6 +2001,15 @@ def run_session(hint, interrupt=None):
             stream["write"], stream["close"] = open_stream()
             stream["write"](payload)
 
+    # A rewind the bridge already answered for the page; the agent applies it
+    # before this turn's prompts so `--resume` cannot replay what was taken
+    # back. The bridge keeps carrying it in the hint until this turn reports
+    # that the agent answered it.
+    rewind = hint.get("pending_rewind")
+    rewind = rewind if isinstance(rewind, dict) else None
+
+    steer = {"session": session, "token": token, "floor": highest}
+
     # The context meter's answer is refreshed while this turn's process still
     # holds the conversation (see remember_context_usage). The settings that
     # shaped this turn are part of the key: a later change makes the cached
@@ -1657,11 +2021,11 @@ def run_session(hint, interrupt=None):
         remember_context_usage(session, usage_config, usage)
 
     def turn(extra):
-        return run_agent(argv + extra, cwd, content, write_event, interrupt,
-                         remember_usage)
+        return run_agent(argv + extra, cwd, messages, write_event, interrupt, rewind,
+                         steer, remember_usage)
 
-    code, result, timed_out, was_interrupted, forwarded, failures, errors = turn(
-        ["--resume", resume] if resume else [])
+    (code, result, timed_out, was_interrupted, forwarded, failures, errors,
+     rewind_done, results_emitted) = turn(["--resume", resume] if resume else [])
     if (not was_interrupted and resume and forwarded == 0 and failures == []
             and result is not None
             and result.get("is_error")
@@ -1671,13 +2035,26 @@ def run_session(hint, interrupt=None):
         # not — start a fresh one rather than failing the turn.
         log("session %s: no conversation %s in the guest; starting a new one"
             % (session, resume))
-        code, result, timed_out, was_interrupted, forwarded, failures, errors = turn([])
+        (code, result, timed_out, was_interrupted, forwarded, failures, errors,
+         rewind_done, results_emitted) = turn([])
+    if rewind is not None and rewind_done:
+        # The agent answered (applied or declined); stop carrying it in the
+        # hint. A timeout — no answer — keeps it for the next turn.
+        try:
+            request("/v1/code/runners/self-hosted/sessions/%s/claim" % quoted,
+                    {"through_sequence_num": highest,
+                     "applied_rewind_request_id": rewind.get("request_id")}, token)
+        except Exception as error:  # noqa: BLE001 - the next turn can retry it
+            log("session %s: could not clear the applied rewind: %s"
+                % (session, error))
 
     # Every turn ends with a `result`: the session view closes the turn on it,
     # and a failure that writes none leaves the page spinning forever. The
     # agent's own terminal wins when it produced one (an error result included:
     # its `result` field is the reason).
+    synthesized = False
     if result is None:
+        synthesized = True
         if was_interrupted:
             result = synthetic_result("Request interrupted by user", resume, started,
                                       interrupted=True)
@@ -1701,12 +2078,17 @@ def run_session(hint, interrupt=None):
     # sees one holds the turn open — rows around tool calls stay unplaced).
     # Written after the retry decision, so a discarded first attempt leaves
     # nothing behind.
-    delivered = False
-    try:
-        write_event(result)
-        delivered = True
-    except Exception as error:  # noqa: BLE001 - fall back to a plain append
-        failures.append("result stream: %s" % error)
+    # A plain turn's single result was held by run_agent and is written here.
+    # A steered turn already wrote each result as it arrived (the interrupted
+    # turn's and the message's own), so writing the last one again would
+    # duplicate the terminal the page closes a turn on.
+    delivered = results_emitted > 0 and not synthesized
+    if not delivered:
+        try:
+            write_event(result)
+            delivered = True
+        except Exception as error:  # noqa: BLE001 - fall back to a plain append
+            failures.append("result stream: %s" % error)
     try:
         stream["close"]()
     except Exception as error:  # noqa: BLE001 - recorded with the run
@@ -1737,10 +2119,7 @@ def run_session(hint, interrupt=None):
         # requeues it. A session that was deleted mid-turn is already gone, so
         # the release is allowed to find nothing.
         finish("release", {}, strict=False)
-    elif code in (0, None) and not result.get("is_error"):
-        # The process may still be exiting when the context answer returns;
-        # its own result is the turn's terminal. (A process that dies right
-        # after its result still had a clean turn.)
+    elif code == 0 and not result.get("is_error"):
         finish("release", {})
     else:
         reason = ""
@@ -1897,9 +2276,7 @@ def main():
         # a stop is never queued behind a folder lookup.
         apply_cancellations(polled.get("cancellations") or [])
         # The web Code composer's folder/git lookups ride the same poll. They
-        # are answered from inside the VM, before any session is started. A
-        # context-usage request is answered from the cache the last turn left;
-        # like the lookups, it is a local read and does not block the loop.
+        # are answered from inside the VM, before any session is started.
         requests = polled.get("requests") or []
         for item in requests:
             handle_runner_request(item)

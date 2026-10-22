@@ -43,13 +43,14 @@ const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 const gatewayLoopbackHttpPatchId = "gateway-url-any-host-http";
 const gatewayLoopbackHttpMessage = "must use https (or http on loopback)";
 // The native file preview draws into an Electron view over Desktop's own window,
-// which the browser never composites, so an Office or PDF file showed a blank
-// pane. This patch swaps the preview component's rendered children for an
+// which the browser never composites, so an Office, PDF, HTML or SVG file showed
+// a blank pane. This patch swaps the preview component's rendered children for an
 // <iframe> at the bridge's own preview route (`/api/remote/files/preview`), which
-// serves the file as a PDF — Office converted by the office-preview sidecar, PDF
-// passed through. It fires only for those extensions; every other file keeps the
-// component's original output. The component is pinned by the one className its
-// container renders, which appears nowhere else in the renderer graph.
+// serves the file as a PDF for Office/PDF — Office converted by the
+// office-preview sidecar, PDF passed through — and serves HTML/SVG as themselves.
+// It fires only for those extensions; every other file keeps the component's
+// original output. The component is pinned by the one className its container
+// renders, which appears nowhere else in the renderer graph.
 const filePreviewPatchId = "native-file-preview-bridge";
 const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
 // A browser-identified renderer resolves its internal code route to claude.ai's
@@ -653,6 +654,32 @@ const permissionBypassOff = "!1";
 // required.
 const draftBypassPatchId = "web-draft-bypass-mode";
 const draftBypassWire = '"bypassPermissions"';
+// While a session's permission mode is `bypassPermissions`, the renderer draws an
+// "unsupervised" banner above the composer: "Skip all approvals is on. Claude
+// never pauses, even for unsafe actions…", with a safe-use link. That copy
+// describes the mode this deployment deliberately offers (see
+// CLAUDE_REMOTE_COWORK_SKIP_APPROVALS), and every session here runs inside the
+// operator's own VM — the warning is addressed to a cloud user who chose the mode
+// on a shared machine, not to this operator. This patch stops the session arm
+// drawing; the component's Auto-mode arms and its scheduled-task notice are
+// untouched.
+//
+// The component is pinned by the four i18n message ids of its bypass copy (each a
+// content hash of a variant: connectors only, connectors plus Chrome, connectors
+// plus apps, and all three). They are matched only as parsed literals, so a
+// comment or string that spells them cannot establish the target, and the
+// component must also destructure `mode` and `surface` — the props whose
+// `bypassPermissions` and `"session"` values select these arms. The splice is
+// inserted immediately before the component's final return, after every hook
+// call: an early return at the top would change the hook count between modes and
+// React forbids that within a mounted component.
+// Applied in every generation, like the provider-card removal: a deployment that
+// does not offer the mode never renders the banner, so the patch is inert there
+// rather than needing a flag of its own. Deliberately not in `required` — if the
+// ids change upstream the warning simply returns, visibly, rather than failing
+// candidate preparation.
+const skipApprovalsBannerPatchId = "cowork-skip-approvals-banner";
+const skipApprovalsBannerMessageIds = ["czjJheYzVl", "zWwXOQjfS6", "6yQiJRpovh", "WpCGgQYgl9"];
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -1793,6 +1820,47 @@ function draftModeMapper(ast) {
   return found;
 }
 
+// A formatted message descriptor, `{defaultMessage: …, id: "…"}`. Requiring it
+// (rather than any literal that spells the id) keeps an unrelated string from
+// establishing a component.
+function messageDescriptor(node, id) {
+  return node.type === "ObjectExpression"
+    && node.properties.some(entry => key(entry, "id") && literal(entry.value, id))
+    && node.properties.some(entry => key(entry, "defaultMessage"));
+}
+
+// The unsupervised permission banner's session arms (see
+// skipApprovalsBannerPatchId): the one function whose body carries all four
+// bypass message descriptors and whose destructured first parameter binds both
+// `mode` and `surface`. The props may carry defaults, so an AssignmentPattern is
+// read through to its identifier. Returns the bindings and the final return —
+// the statement all the hook calls precede — so the caller can insert an early
+// exit there.
+function skipApprovalsBannerTarget(ast) {
+  const found = [];
+  const binding = (param, name) => {
+    for (const entry of param.properties) {
+      if (entry.type !== "Property" || !key(entry, name)) continue;
+      const value = entry.value?.type === "AssignmentPattern" ? entry.value.left : entry.value;
+      if (value?.type === "Identifier") return value.name;
+    }
+    return undefined;
+  };
+  walk(ast, [], (node) => {
+    if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return;
+    if (!skipApprovalsBannerMessageIds.every(id =>
+      contains(node.body, child => messageDescriptor(child, id)))) return;
+    const param = node.params?.[0];
+    if (param?.type !== "ObjectPattern") return;
+    const mode = binding(param, "mode");
+    const surface = binding(param, "surface");
+    const statement = node.body.body.at(-1);
+    if (!mode || !surface || statement?.type !== "ReturnStatement") return;
+    found.push({ mode, surface, statement });
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -2120,21 +2188,27 @@ function filePreviewPatch(node, ancestors, source, array) {
   const cacheBuster = destructuredPropName(scope, "cacheBuster");
   const factory = arrayElementFactory(array);
   if (!path || !factory) return;
-  // The bridge route answers with a PDF; cacheBuster re-requests when the file's
-  // content changes. Office and PDF only — any other file keeps the original
-  // children, so html/svg stay on their existing path. The `#toolbar=0` fragment
-  // is a PDF open parameter Chrome's viewer reads off the URL: it hides the
-  // viewer's own toolbar, leaving the pane to show only the document instead of
-  // a second set of controls (its Download would save the converted `.docx.pdf`).
+  // The bridge route answers with a PDF for Office/PDF and with the document
+  // itself for HTML/SVG; cacheBuster re-requests when the file's content
+  // changes. The `#toolbar=0` fragment is a PDF open parameter Chrome's viewer
+  // reads off the URL: it hides the viewer's own toolbar, leaving the pane to
+  // show only the document instead of a second set of controls (its Download
+  // would save the converted `.docx.pdf`). HTML/SVG get a sandboxed iframe and
+  // no fragment: their scripts run in an opaque origin, so a saved document
+  // cannot call the bridge's same-origin `/api/remote/*` routes. Every other
+  // file keeps the original children.
   const url = `"/api/remote/files/preview?path="+encodeURIComponent(${path})`
-    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "")
-    + '+"#toolbar=0"';
-  const iframe = `${factory}("iframe",{src:${url},className:"h-full w-full border-0",`
-    + 'title:"File preview"})';
+    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "");
+  const pdf = `${factory}("iframe",{src:${url}+"#toolbar=0",`
+    + 'className:"h-full w-full border-0",title:"File preview"})';
+  const document = `${factory}("iframe",{src:${url},`
+    + 'className:"h-full w-full border-0",title:"File preview",'
+    + 'sandbox:"allow-scripts allow-forms allow-modals allow-popups allow-downloads"})';
   const original = source.slice(array.start, array.end);
-  const condition = `/(?:pdf|docx?|pptx?|xlsx?)$/i.test(${path})`;
+  const documents = `/\\.(?:html?|svg)$/i.test(${path})`;
+  const office = `/\\.(?:pdf|docx?|pptx?|xlsx?)$/i.test(${path})`;
   return { original,
-    replacement: `(${condition}?[${iframe}]:[${original.slice(1, -1)}])` };
+    replacement: `(${documents}?[${document}]:${office}?[${pdf}]:[${original.slice(1, -1)}])` };
 }
 
 // The Desktop-only checks slot: the one component rendering a call whose props
@@ -2355,6 +2429,9 @@ export const prefilterNeedles = [
   // The shared Checkbox the composer's worktree toggle renders; its chunk
   // publishes it for the routine forms (routine-worktree-control-publish).
   '"data-cds":"Checkbox"',
+  // The unsupervised "Skip all approvals" warning banner and its dismiss key
+  // (cowork-skip-approvals-banner). The key lives in that one chunk.
+  "cowork-unsupervised-banner-dont-show",
   // Bypass permissions availability and the session-host mode list.
   "bypassPermissionsPrefEnabled",
   "permission_modes:{available:",
@@ -2801,6 +2878,11 @@ function sessionNormalizerRepoInfoTarget(node) {
 // object and its `eZ({environmentId: row.environmentId})` declaration; the
 // setter by the ssh guard and its `setSelectedFolder` binding.
 const folderPrefillPatchId = "web-code-folder-prefill";
+// The composer core reads the trusted folder, not the selected one — correct
+// for a local executor, wrong for a self-hosted place whose folder has no
+// local trust. The core's folder for a draft on a `ccpool_…` place is the
+// draft store's `selectedFolder`; see selfHostedCoreFolderTarget.
+const selfHostedCoreFolderPatchId = "web-code-selfhosted-core-folder";
 
 function objectProperties(node) {
   const properties = new Map();
@@ -2972,7 +3054,55 @@ function poolWorkerFolderKeepTarget(node, ancestors) {
       }
     }
   });
-  return kindTest ? { call: node, worker } : undefined;
+  // The conjunction itself, not only the kind test: a self-hosted place is
+  // spelled `environment` before the env list resolves and `pool` after, and
+  // both carry the same `ccpool_…` id. Keep the folder for either.
+  return kindTest ? { condition: parent, worker } : undefined;
+}
+
+// The composer core's folder (`af` in the bundle). It reads the draft store's
+// `trustedSelectedFolder`, the folder a *local* session has been granted to
+// run in; the store's `selectedFolder` is only what the chip draws. A
+// self-hosted place is not a local executor: its folder is a path in the
+// account workspace that the bridge and guest validate, and nothing in the
+// web shell grants it through the local trust store. So a folder picked or
+// prefilled for a `ccpool_…` place never became the core's `selectedFolder`,
+// and the start intent was built without `cwd` (and the branch hook without a
+// folder to read). From the start options' point of view this is a draft-only
+// fallback: a session page keeps reading the trusted folder as before.
+function selfHostedCoreFolderTarget(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") {
+    return undefined;
+  }
+  const session = identifier(node.params?.[0]);
+  if (!session || node.params.length < 1) return undefined;
+  let trusted;
+  let worker;
+  let hook;
+  walk(node.body, [], (child) => {
+    if (child.type !== "VariableDeclarator" || child.id?.type !== "Identifier") return;
+    const init = unwrap(child.init);
+    if (init?.type !== "CallExpression" || !init.arguments?.length) return;
+    const argument = unwrap(init.arguments[0]);
+    if (argument?.type !== "ArrowFunctionExpression" || argument.params.length !== 1) return;
+    const body = unwrap(argument.body);
+    if (property(body, "trustedSelectedFolder")) {
+      trusted = child.id.name;
+      hook = identifier(init.callee);
+    } else if (property(body, "worker")) {
+      worker = child.id.name;
+    }
+  });
+  if (!trusted || !worker || !hook) return undefined;
+  // Only the function's own return; the component has nested arrows and
+  // callbacks with returns of their own.
+  const returns = node.body.body.filter(statement => statement.type === "ReturnStatement");
+  if (returns.length !== 1) return undefined;
+  // `return <effect call>, {…}` — the object is the sequence's last element.
+  const returned = renderedExpression(returns[0].argument);
+  const member = objectMember(returned, "selectedFolder");
+  if (!member || identifier(member.value) !== trusted) return undefined;
+  return { statement: returns[0], member, session, worker, trusted, hook };
 }
 
 // The draft store's folder setter, traced so a later clear can be attributed
@@ -4052,6 +4182,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     const plusTraces = [];
     const folderSetterTraces = [];
     const poolFolderKeeps = [];
+    const coreFolders = [];
     const codeGroups = [];
     const projectGates = [];
     const codeSurfaces = [];
@@ -4087,6 +4218,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       if (folderSetter) folderSetterTraces.push(folderSetter);
       const poolFolderKeep = poolWorkerFolderKeepTarget(node, ancestors);
       if (poolFolderKeep) poolFolderKeeps.push(poolFolderKeep);
+      const coreFolder = selfHostedCoreFolderTarget(node);
+      if (coreFolder) coreFolders.push(coreFolder);
       const listFields = sessionListFieldsTarget(node);
       if (listFields) sessionListFields.push(listFields);
       const contextFields = sessionContextFieldsTarget(node);
@@ -4218,11 +4351,24 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           + `prefill:${prefill}}),` });
     }
     if (poolFolderKeeps.length === 1) {
-      const { call, worker } = poolFolderKeeps[0];
-      patches.push({ id: folderPrefillPatchId, start: call.start, end: call.end,
-        original: source.slice(call.start, call.end),
-        replacement: `(${source.slice(call.start, call.end)}`
+      const { condition, worker } = poolFolderKeeps[0];
+      patches.push({ id: folderPrefillPatchId, start: condition.start, end: condition.end,
+        original: source.slice(condition.start, condition.end),
+        replacement: `(${source.slice(condition.start, condition.end)}`
           + `||String(${worker}.id).startsWith("ccpool_"))` });
+    }
+    if (coreFolders.length === 1) {
+      const { statement, member, session, worker, trusted, hook } = coreFolders[0];
+      patches.push({ id: selfHostedCoreFolderPatchId, start: statement.start,
+        end: statement.start, original: "",
+        replacement: `let __claudeskSelectedFolder=`
+          + `${hook}(__claudeskState=>__claudeskState.selectedFolder);` });
+      patches.push({ id: selfHostedCoreFolderPatchId,
+        start: member.value.start, end: member.value.end,
+        original: source.slice(member.value.start, member.value.end),
+        replacement: `(!${session}&&(${worker}.type==="pool"`
+          + `||String(${worker}.id).startsWith("ccpool_"))`
+          + `?__claudeskSelectedFolder:${trusted})` });
     }
     if (folderSetterTraces.length === 1) {
       const { body, param } = folderSetterTraces[0];
@@ -4713,6 +4859,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     patches.push({ id, start: node.start, end: node.end, original,
       replacement: node.operator.includes("!") ? `(${original}&&!(${remote}))` : `(${original}||${remote})` });
   });
+  // The "Skip all approvals" banner (see skipApprovalsBannerPatchId). Accepted
+  // only when exactly one component of that shape is in the chunk; the exit is
+  // inserted before its final return, so every hook still runs on every render.
+  const skipApprovalsBanner = skipApprovalsBannerTarget(ast);
+  if (skipApprovalsBanner) {
+    const { mode, surface, statement } = skipApprovalsBanner;
+    patches.push({ id: skipApprovalsBannerPatchId, start: statement.start,
+      end: statement.start, original: "",
+      replacement: `if(${mode}==="bypassPermissions"&&${surface}==="session")return null;` });
+  }
   // The caught-error handler takes the error and React's error info and returns
   // nothing; the wrapper logs both (the raw error prints its stack) and then
   // delegates, so the app's own reporting still runs. A throw from the log line

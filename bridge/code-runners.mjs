@@ -47,7 +47,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { createInterface } from "node:readline";
 
 const stateFileName = "code-runners.json";
@@ -281,6 +281,91 @@ function clearInterrupted(session) {
   delete session.interrupt_request_id;
 }
 
+/** The text of a user payload, for a rewind's composer prefill. */
+function userMessageText(payload) {
+  const content = (isRecord(payload?.message) ? payload.message : {}).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => isRecord(part) && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+/**
+ * Act on the renderer's `rewind_conversation` control request — the Code
+ * surface's rewind (the message menu, Esc Esc, `/rewind`). The cloud product's
+ * agent answers this itself because it keeps the conversation in a live child;
+ * this deployment ends the child with each turn, so the bridge answers the
+ * renderer (the response is the `conversation_rewound` marker a reopened page
+ * rebuilds its transcript from) and leaves `pending_rewind` for the guest to
+ * apply to the agent's own transcript at the next turn (see the hint's
+ * `pending_rewind` and guest/runner.py).
+ *
+ * The target is a message uuid from the transcript; its text is what the
+ * composer gets back. `interrupt_if_running` (default true, what the surface
+ * sends) stops the live turn the same way a Stop does; the rewound turn cannot
+ * answer anything anyway.
+ */
+function conversationRewind(session, request, requestId) {
+  const targetUuid = typeof request?.target_message_uuid === "string"
+    ? request.target_message_uuid : "";
+  const events = Array.isArray(session.events) ? session.events : [];
+  const target = targetUuid
+    ? events.find((event) => isRecord(event?.payload) && event.payload.uuid === targetUuid)
+    : undefined;
+  const response = (body) => ({
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: requestId,
+      response: body,
+    },
+  });
+  if (!target) {
+    return {
+      response: response({
+        rewound: false,
+        reason: "target_not_found",
+        targetMessageUuid: targetUuid,
+        precedingAssistantUuid: null,
+        prefillText: null,
+      }),
+    };
+  }
+  let precedingAssistantUuid = null;
+  for (let index = events.indexOf(target) - 1; index >= 0; index -= 1) {
+    const payload = events[index]?.payload;
+    if (isRecord(payload) && payload.type === "assistant"
+      && typeof payload.uuid === "string" && payload.uuid) {
+      precedingAssistantUuid = payload.uuid;
+      break;
+    }
+  }
+  // The agent has not seen anything past this message; the next turn answers
+  // only what was appended after it (see `delivered_through`).
+  const targetSequence = Number(target.sequence_num) || 0;
+  session.delivered_through = Math.max(Number(session.delivered_through) || 0, targetSequence);
+  session.pending_rewind = {
+    request_id: requestId,
+    target_message_uuid: targetUuid,
+    preceding_assistant_uuid: precedingAssistantUuid,
+  };
+  if (request?.interrupt_if_running !== false) {
+    // No request id: this is not the Stop the interrupt receipt is for, and
+    // synthesizing a second `interrupt` response would confuse the Stop button.
+    markInterrupted(session);
+  }
+  return {
+    response: response({
+      rewound: true,
+      targetMessageUuid: targetUuid,
+      precedingAssistantUuid,
+      prefillText: userMessageText(target.payload),
+    }),
+  };
+}
+
 /** The `config` of a session document — see `sessionConfigKeys`. Sessions the
  * store already held before this shape keep their sources at the top level,
  * so both spellings are read. */
@@ -511,6 +596,75 @@ function isUserMessage(entry) {
   return false;
 }
 
+// Attachments the composer staged for a session host arrive beside the message
+// text (`staged_files`, the renderer's own field), not inside it: the host is
+// expected to have put the bytes where its agent can read them and to tell the
+// agent where. A real session host does that itself; this deployment's guest
+// runner does not, so the bridge adds the same `<uploaded_files>` reminder the
+// app uses for local attachments. Only paths inside the shared workspace are
+// eligible — the guest sees that directory and nothing else of the container
+// at the same spelling.
+const stagedFileRoots = ["/workspace/", "/mnt/.virtiofs-root/workspace/"];
+const stagedFileLimit = 20;
+
+function stagedFilePaths(files) {
+  if (!Array.isArray(files)) return [];
+  const paths = [];
+  for (const file of files.slice(0, stagedFileLimit)) {
+    const mounted = isRecord(file) && typeof file.mount_path === "string"
+      ? file.mount_path : "";
+    if (!mounted.startsWith("/") || mounted.includes("\u0000")) continue;
+    const normalized = posix.normalize(mounted);
+    if (normalized.includes("/../") || normalized.endsWith("/..")) continue;
+    if (!stagedFileRoots.some((root) => normalized.startsWith(root))) continue;
+    if (!paths.includes(normalized)) paths.push(normalized);
+  }
+  return paths;
+}
+
+function xmlText(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** The reminder the agent reads to find the files a turn attached. */
+function stagedFilesReminder(paths) {
+  return [
+    "<system-reminder>",
+    "<uploaded_files>",
+    ...paths.map((path) => `<file><file_path>${xmlText(path)}</file_path></file>`),
+    "</uploaded_files>",
+    "</system-reminder>",
+  ].join("\n");
+}
+
+/**
+ * The entries to store for one client append: the caller's own, plus a
+ * reminder after each user message that carries staged files. A file-only
+ * send (no text) is a prompt too — the reminder is then the turn's only
+ * content, which is exactly what makes the runner run it.
+ */
+function withStagedFileReminders(entries, sessionId) {
+  const result = [];
+  for (const entry of entries) {
+    result.push(entry);
+    const payload = isRecord(entry?.payload) ? entry.payload : entry;
+    if (!isRecord(payload) || payload.type !== "user") continue;
+    const paths = stagedFilePaths(payload.staged_files);
+    if (paths.length === 0) continue;
+    result.push({
+      payload: {
+        type: "user",
+        uuid: randomUUID(),
+        session_id: sessionId,
+        parent_tool_use_id: null,
+        shouldQuery: false,
+        message: { role: "user", content: stagedFilesReminder(paths) },
+      },
+    });
+  }
+  return result;
+}
+
 /** Is this a user payload with anything the agent can answer? Text or an
  *  image counts; a tool result does not (the runner's own `user` frames are
  *  tool results, and are written with `source: "worker"`). */
@@ -613,7 +767,7 @@ export function createRunnerBackend({
   // "unknown request method", which would surface as an error instead of a
   // breakdown.
   const runnerMethodMinimums = new Map([
-    ["get_context_usage", [2, 5, 0]],
+    ["get_context_usage", [2, 7, 0]],
   ]);
   function versionParts(value) {
     const text = String(value ?? "").trim();
@@ -1547,6 +1701,7 @@ export function createRunnerBackend({
   // `work_order_jwt` is the runner's opaque order token; nothing here verifies
   // it, but the field is non-optional so it must be a string.
   function hintFor(session) {
+    const delivered = Number(session.delivered_through);
     return {
       session_uuid: session.session_uuid,
       attempt: session.attempt,
@@ -1555,6 +1710,18 @@ export function createRunnerBackend({
       // sessions the store held before that keep them top-level, and both are
       // read (see sessionConfigOf).
       sources: sessionConfigOf(session).sources,
+      // The highest transcript sequence the agent has actually been given.
+      // A user message above it was typed while a turn ran — after that turn's
+      // read, so the agent never saw it — and is answered by this turn even
+      // though it sits before the previous turn's `result` in the log. Absent
+      // on a session that has not recorded a claim yet (see recordClaim), where
+      // the runner keeps its old "after the last result" read.
+      ...(Number.isSafeInteger(delivered) && delivered >= 0
+        ? { prompt_after_sequence_num: delivered } : {}),
+      // A rewind the bridge has answered but the agent has not applied yet;
+      // the runner sends it to the agent before this turn's prompt.
+      ...(session.pending_rewind
+        ? { pending_rewind: { ...session.pending_rewind } } : {}),
     };
   }
 
@@ -1975,20 +2142,37 @@ export function createRunnerBackend({
       if (!Number.isSafeInteger(through) || through < 0) return {};
       await ensureEvents(session);
       session.claimed_through = through;
+      // The delivery floor the *next* turn reads from. A message appended
+      // after this point was never handed to the agent (the runner closes the
+      // child's stdin after its prompt), however early it landed in the log
+      // before that turn's `result`; the next turn must answer it.
+      session.delivered_through = Math.max(Number(session.delivered_through) || 0, through);
+      // The guest applies a bridge-answered rewind to the agent's own
+      // transcript at the start of the next turn and names it here once the
+      // agent has seen it. Until then the hint keeps carrying it.
+      if (typeof body?.applied_rewind_request_id === "string"
+        && body.applied_rewind_request_id
+        && session.pending_rewind?.request_id === body.applied_rewind_request_id) {
+        delete session.pending_rewind;
+      }
       markProcessed(session, through);
       // A message the turn's read did not include is answered by the next one.
       // Only a live turn can release into that retry; a session stopped in the
       // meantime (or released) takes the next client message through the
-      // ordinary requeue path.
-      if (session.state === "active" || session.state === "offered") {
-        for (const envelope of session.events ?? []) {
-          if (envelope.source === "worker") continue;
-          if (!isUserMessage(envelope)) continue;
-          if (Number(envelope.sequence_num) > through) {
-            session.requeue_after_release = true;
-            break;
-          }
+      // ordinary requeue path. A runner that later delivers the message to the
+      // live child (steering) reports it here with a higher `through`: with
+      // nothing left above the point, the next-turn requeue is dropped — the
+      // running agent is answering it now, and a requeue would run it twice.
+      const undelivered = (session.events ?? []).some((envelope) =>
+        envelope.source !== "worker"
+        && isUserMessage(envelope)
+        && Number(envelope.sequence_num) > through);
+      if (undelivered) {
+        if (session.state === "active" || session.state === "offered") {
+          session.requeue_after_release = true;
         }
+      } else {
+        delete session.requeue_after_release;
       }
       await save();
       return {};
@@ -2330,7 +2514,11 @@ export function createRunnerBackend({
       // control request, or an eager first message); they land in the same log
       // the runner reads and the stream replays.
       if (Array.isArray(body?.events)) {
-        const { durable, volatile } = appendIncoming(session, body.events, source);
+        // Placement may carry the first message (a routine or API fire), and a
+        // composer may place with attachments; the same reminder applies.
+        const events = source === "worker" ? body.events
+          : withStagedFileReminders(body.events, session.session_uuid);
+        const { durable, volatile } = appendIncoming(session, events, source);
         await appendEventsFile(session, durable);
         emitLive(session, durable);
         emitLive(session, volatile);
@@ -2392,10 +2580,15 @@ export function createRunnerBackend({
           const current = session.session_config?.permission_mode;
           return !current || current === "default";
         });
+      // A client send may carry attachments the composer staged for the
+      // session host. Store the reminder beside it so the guest agent can find
+      // them — see withStagedFileReminders.
+      const augmented = fromWorker ? accepted
+        : withStagedFileReminders(accepted, session.session_uuid);
       // Partials from this leg (a runner using the plain append) are live-only
       // too: the durable half goes to the log, both go to the open streams.
       await ensureEvents(session);
-      const { durable: appended, volatile } = appendIncoming(session, accepted,
+      const { durable: appended, volatile } = appendIncoming(session, augmented,
         fromWorker ? "worker" : "client");
       // A user message on a session no runner holds starts its next turn: the
       // session goes back on its pool, the way it was placed the first time,
@@ -2426,6 +2619,25 @@ export function createRunnerBackend({
         // Only the renderer's Stop stops a turn; a worker never writes one.
         if (!fromWorker && request.subtype === "interrupt") {
           const requestId = payload.request_id ?? request.request_id;
+          // Send now is a steer, not a Stop: the message it names is delivered
+          // to the running child by the guest runner, which then sends the
+          // CLI's own `send_now` interrupt. Cancelling the turn here would kill
+          // the process the message is meant to reach, so acknowledge it and
+          // leave the delivery to the runner (a message on a session with no
+          // runner still requeues and runs as the next turn).
+          if (request.send_now === true && request.cancel_queued !== true) {
+            if (typeof requestId === "string" && requestId) {
+              appended.push(...appendToSession(session, [{ payload: {
+                type: "control_response",
+                response: {
+                  subtype: "success",
+                  request_id: requestId,
+                  response: { still_queued: [], send_now: "delivering" },
+                },
+              } }], "worker"));
+            }
+            continue;
+          }
           markInterrupted(session, { requestId });
           if (typeof requestId === "string" && requestId) interruptRequests.add(requestId);
           continue;
@@ -2435,6 +2647,17 @@ export function createRunnerBackend({
           if (typeof requestId === "string" && requestId) {
             contextRequests.push({ requestId, detail: request.detail });
           }
+          continue;
+        }
+        // A rewind is answered here and applied to the agent's own transcript
+        // by the next turn (see conversationRewind). Its response is the marker
+        // the surface truncates its transcript on, and the one a reopened
+        // session replays, so it must be a durable worker event.
+        if (!fromWorker && request.subtype === "rewind_conversation") {
+          const requestId = payload.request_id ?? request.request_id;
+          const outcome = conversationRewind(session, request,
+            typeof requestId === "string" ? requestId : "");
+          appended.push(...appendToSession(session, [{ payload: outcome.response }], "worker"));
           continue;
         }
         const next = { ...(session.session_config || {}) };

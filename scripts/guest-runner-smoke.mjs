@@ -31,10 +31,10 @@ const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
 writeFileSync(stub, `#!/bin/sh
-# One line, not EOF: the runner keeps the turn's stdin open until the agent
-# answers the turn-end context question (guest/runner.py, run_agent).
+# The runner holds stdin open for steering, so read the one message this
+# process answers instead of waiting for EOF.
 IFS= read -r line
-prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 # The argv is echoed inside a JSON string, so escape it — a --mcp-config value
 # carries JSON of its own.
 args=$(printf '%s' "$*" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
@@ -355,10 +355,44 @@ events = [{"payload": {"type": "user", "message": {"role": "user", "content": [
 print(json.dumps(module.content_of(events)))
 `], { encoding: "utf8" });
   assert.equal(contentProbe.status, 0, contentProbe.stderr);
-  assert.deepEqual(JSON.parse(contentProbe.stdout), [
-    { type: "text", text: "look" },
-    { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
-  ], "the guest runner forwards image blocks beside the text");
+  assert.deepEqual(JSON.parse(contentProbe.stdout), [{
+    uuid: "",
+    content: [
+      { type: "text", text: "look" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } },
+    ],
+  }], "the guest runner forwards image blocks beside the text, one message per uuid");
+
+  // A message typed while a turn ran sits before that turn's `result` in the
+  // log. Reading the tail "after the last result" dropped it; the bridge's
+  // delivery floor is what selects it (the caller fetches the events above the
+  // floor, see fetch_events_after).
+  const floorProbe = spawnSync("python3", ["-I", "-c", `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("guest_runner", ${JSON.stringify(join(root, "guest/runner.py"))})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+def user(seq, text, uid, source="client"):
+    return {"sequence_num": str(seq), "source": source, "payload": {
+        "uuid": uid, "type": "user", "message": {"role": "user", "content": text}}}
+events = [
+    user(1, "the opening message", "11111111-1111-4111-8111-111111111111"),
+    user(9, "typed while the turn ran", "99999999-9999-4999-8999-999999999999"),
+    {"sequence_num": "10", "source": "worker", "payload": {"type": "result", "result": "done"}},
+]
+print(json.dumps({
+    "legacy": module.content_of(events),
+    "floor": module.content_of(events, 1),
+}))
+`], { encoding: "utf8" });
+  assert.equal(floorProbe.status, 0, floorProbe.stderr);
+  const floorResult = JSON.parse(floorProbe.stdout);
+  assert.deepEqual(floorResult.legacy, [],
+    "the old tail read stops at the last result");
+  assert.deepEqual(floorResult.floor, [{
+    uuid: "99999999-9999-4999-8999-999999999999",
+    content: [{ type: "text", text: "typed while the turn ran" }],
+  }], "a mid-turn message above the delivery floor is answered by the next turn");
 
   // A turn has no wall-clock cap by default: killing an agent at half an hour
   // threw away work that was still going. CLAUDESK_RUNNER_TIMEOUT_SECONDS can
@@ -438,7 +472,7 @@ print(json.dumps({
   const pwdStub = join(work, "pwd-stub");
   writeFileSync(pwdStub, `#!/bin/sh
 IFS= read -r line
-prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 branch=$(git branch --show-current 2>/dev/null)
 printf '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}\\n'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"cwd: %s | branch: %s | prompt: %s"}]},"session_id":"22222222-2222-4222-8222-222222222222"}\\n' "$PWD" "$branch" "$prompt"
@@ -559,6 +593,7 @@ printf '{"type":"result","subtype":"success","session_id":"22222222-2222-4222-82
   mkdirSync(slowDir, { recursive: true });
   const slowStub = join(slowDir, "claude");
   writeFileSync(slowStub, `#!/bin/sh
+IFS= read -r line
 sleep 6
 printf '{"type":"system","subtype":"init","session_id":"33333333-3333-4333-8333-333333333333"}\\n'
 printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-8333-333333333333","is_error":false,"result":"done"}\\n'
@@ -631,7 +666,7 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   const interruptStub = join(interruptDir, "claude");
   writeFileSync(interruptStub, `#!/bin/sh
 IFS= read -r line
-prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working: %s"}]},"session_id":"44444444-4444-4444-8444-444444444444"}\\n' "$prompt"
 trap 'exit 130' INT TERM
 sleep 60 >/dev/null 2>&1 &
@@ -708,6 +743,193 @@ printf '{"type":"result","subtype":"success","session_id":"44444444-4444-4444-84
   } finally {
     interruptRunner.child.kill("SIGTERM");
     await new Promise((resolve) => interruptRunner.child.once("exit", resolve));
+  }
+
+  // Steering and rewind, on a live poll. A message typed while a turn runs is
+  // appended after that turn's transcript read (so before its `result`); the
+  // bridge's delivery floor is what makes the next turn answer it instead of
+  // stranding it. A rewind is answered by the bridge for the page, then handed
+  // to the agent at the next turn over the same stdin channel the SDK uses —
+  // the stub answers it the way the agent does, and echoes the message uuid it
+  // was given, which is what a rewind target names.
+  const interactiveDir = join(work, "interactive-bin");
+  mkdirSync(interactiveDir, { recursive: true });
+  const interactiveStub = join(interactiveDir, "claude");
+  // The stub answers the way the real CLI does: a long turn runs on a worker
+  // while the main loop keeps reading stdin, so a message sent mid-turn is
+  // already queued when the runner's `interrupt` with `send_now` arrives. That
+  // interrupt aborts the running turn (a terminal result) and the queued
+  // message runs as the next query — stock steering, not a next-turn requeue.
+  writeFileSync(interactiveStub, `#!/usr/bin/env python3
+import json, sys, time, threading, queue
+SESSION = "66666666-6666-4666-8666-666666666666"
+def emit(payload):
+    sys.stdout.write(json.dumps(payload) + "\\n")
+    sys.stdout.flush()
+def assistant(text):
+    emit({"type": "assistant", "session_id": SESSION,
+          "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+def result(subtype, text, error=False, interrupted=False):
+    emit({"type": "result", "subtype": subtype, "is_error": error,
+          "interrupted": interrupted, "session_id": SESSION, "result": text})
+queue_ = queue.Queue()
+cancel = threading.Event()
+def worker():
+    while True:
+        item = queue_.get()
+        if item is None:
+            return
+        text, uid, delay = item
+        cancel.clear()
+        assistant("working: %s | uuid: %s" % (text, uid))
+        deadline = time.time() + delay
+        stopped = False
+        while time.time() < deadline:
+            if cancel.wait(0.05):
+                stopped = True
+                break
+        if stopped:
+            result("error_during_execution", "Request interrupted by user",
+                   error=True, interrupted=True)
+        else:
+            assistant("done: %s | uuid: %s" % (text, uid))
+            result("success", "done")
+threading.Thread(target=worker, daemon=True).start()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if event.get("type") == "control_request":
+        request = event.get("request") or {}
+        subtype = request.get("subtype")
+        if subtype == "rewind_conversation":
+            emit({"type": "control_response", "response": {
+                "subtype": "success", "request_id": event.get("request_id"),
+                "response": {"rewound": True,
+                             "targetMessageUuid": request.get("target_message_uuid"),
+                             "precedingAssistantUuid": None,
+                             "prefillText": "taken back"}}})
+        elif subtype == "interrupt" and request.get("send_now") is True:
+            cancel.set()
+            emit({"type": "control_response", "response": {
+                "subtype": "success", "request_id": event.get("request_id"),
+                "response": {"still_queued": [],
+                             "send_now": "stopped"}}})
+        continue
+    if event.get("type") != "user":
+        continue
+    text = "".join(part.get("text", "") for part in
+                   (event.get("message") or {}).get("content") or []
+                   if isinstance(part, dict) and part.get("type") == "text")
+    queue_.put((text, event.get("uuid", ""),
+                30 if "steer me" in text else 0))
+`);
+  chmodSync(interactiveStub, 0o755);
+  const interactiveRunner = startRunner({ secret, binDir: interactiveDir });
+  const post = (sessionId, events) => request(`/v1/code/sessions/${sessionId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events }),
+  });
+  const messagesOf = async (sessionId) => decodeClientEventsResponse(JSON.parse(
+    (await request(`/v1/code/sessions/${sessionId}/events`)).body))
+    .map((entry) => entry.message);
+  try {
+    assert.equal(await waitFor(
+      () => interactiveRunner.output().includes("registered as"), 10000), true,
+    `the interactive runner did not register: ${interactiveRunner.output()}`);
+    const placed = await request("/v1/code/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "steer smoke", environment_id: poolId }),
+    });
+    const steerSession = JSON.parse(placed.body).session;
+    const firstUuid = "77777777-7777-4777-8777-777777777777";
+    await post(steerSession.id, [{ payload: { type: "user", uuid: firstUuid,
+      message: { role: "user", content: "steer me" } } }]);
+    assert.equal(await waitFor(
+      () => interactiveRunner.output().includes("turn with"), 10000), true,
+    `the first turn did not start: ${interactiveRunner.output()}`);
+    // The turn is sleeping in the agent; this lands after its transcript read.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const secondUuid = "88888888-8888-4888-8888-888888888888";
+    const steerStarted = Date.now();
+    await post(steerSession.id, [{ payload: { type: "user", uuid: secondUuid,
+      message: { role: "user", content: "sent while it worked" } } }]);
+    // The stub's first turn sleeps 30 s. Native steering stops it and runs the
+    // new message now, so the answer must land long before that.
+    assert.equal(await waitFor(async () => (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "assistant")
+      .some((message) => message.message.content[0].text.includes("sent while it worked")),
+    8000), true,
+    `the mid-turn message must steer the running turn: `
+    + `${JSON.stringify(await messagesOf(steerSession.id))} ${interactiveRunner.output()}`);
+    assert.ok(Date.now() - steerStarted < 8000,
+      "the running turn was stopped for the message, not left to finish");
+    assert.equal(await waitFor(
+      () => interactiveRunner.output().includes("steered the running turn"), 3000), true,
+    "the runner hands the message to the live child with send_now");
+    const steered = (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "assistant");
+    assert.ok(steered[1].message.content[0].text.includes(`uuid: ${secondUuid}`),
+      "the agent is given the message's own uuid, so a rewind can name it");
+    const interruptedTerminal = (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "result" && message.interrupted === true);
+    assert.equal(interruptedTerminal.length, 1,
+      "the stopped turn's own terminal is in the transcript");
+    assert.match(String(interruptedTerminal[0].result), /Request interrupted by user/);
+
+    // Rewind to the mid-turn message, exactly as the surface posts it. The
+    // bridge answers for the page; the next turn hands the request to the
+    // agent before its prompt.
+    const rewound = await post(steerSession.id, [{ payload: {
+      type: "control_request", request_id: "rewind-smoke",
+      request: { subtype: "rewind_conversation",
+        target_message_uuid: secondUuid, interrupt_if_running: false } } }]);
+    assert.equal(rewound.status, 200, rewound.body);
+    assert.equal(await waitFor(async () => (await messagesOf(steerSession.id))
+      .some((message) => message.type === "control_response"
+        && message.response?.response?.rewound === true), 5000), true,
+    `the rewind is answered with the marker the page truncates on: `
+    + `${JSON.stringify(await messagesOf(steerSession.id))}`);
+    const marker = (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "control_response")
+      .find((message) => message.response?.response?.rewound === true);
+    assert.equal(marker.response.response.prefillText, "sent while it worked",
+      "the marker carries the text the composer gets back");
+    assert.equal(marker.response.response.targetMessageUuid, secondUuid);
+
+    const thirdUuid = "99999999-9999-4999-8999-999999999999";
+    await post(steerSession.id, [{ payload: { type: "user", uuid: thirdUuid,
+      message: { role: "user", content: "after the rewind" } } }]);
+    assert.equal(await waitFor(async () => (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "assistant")
+      .some((message) => message.message.content[0].text.includes("after the rewind")),
+    10000), true,
+    `the turn after a rewind runs: ${interactiveRunner.output()}`);
+    assert.equal(await waitFor(
+      () => interactiveRunner.output().includes("rewind"), 5000), true,
+    "the runner hands the rewind to the agent");
+    assert.match(interactiveRunner.output(), /rewind .*: applied/,
+      "the agent answered the rewind");
+
+    // A later turn must not carry the same rewind again.
+    await post(steerSession.id, [{ payload: { type: "user",
+      message: { role: "user", content: "one more" } } }]);
+    assert.equal(await waitFor(async () => (await messagesOf(steerSession.id))
+      .filter((message) => message.type === "assistant")
+      .some((message) => message.message.content[0].text.includes("one more")),
+    10000), true, `the later turn runs: ${interactiveRunner.output()}`);
+    assert.equal(
+      (interactiveRunner.output().match(/rewind .*: (applied|declined)/g) || []).length,
+      1, "an applied rewind is cleared and not replayed on the next turn");
+  } finally {
+    interactiveRunner.child.kill("SIGTERM");
+    await new Promise((resolve) => interactiveRunner.child.once("exit", resolve));
   }
 
   // Context usage. The runner asks the agent for `get_context_usage` when the
