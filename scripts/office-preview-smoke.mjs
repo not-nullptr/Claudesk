@@ -65,6 +65,16 @@ try {
   await writeFile(otherDocx, "PK\u0003\u0004 fake docx bytes two");
   const pdf = join(fixtureRoot, "manual.pdf");
   await writeFile(pdf, FAKE_PDF);
+  const pageHtml = Buffer.from(
+    "<!doctype html><title>report</title><script>document.title='ok'</script>",
+  );
+  const html = join(fixtureRoot, "report.html");
+  await writeFile(html, pageHtml);
+  const svgSource = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7"/></svg>',
+  );
+  const svg = join(fixtureRoot, "diagram.svg");
+  await writeFile(svg, svgSource);
   const notes = join(fixtureRoot, "notes.txt");
   await writeFile(notes, "plain text");
   const huge = join(fixtureRoot, "huge.xlsx");
@@ -100,6 +110,27 @@ try {
   assert.equal(passthrough.headers.get("content-type"), "application/pdf");
   assert.deepEqual(Buffer.from(await passthrough.arrayBuffer()), FAKE_PDF);
   assert.equal(fakeConverter.requests.length, 2, "a PDF is not converted");
+
+  // HTML/SVG: served as themselves, inline, in an opaque-origin sandbox. The
+  // response CSP repeats the pane iframe's sandbox so a direct visit is safe,
+  // and it never grants allow-same-origin (which would expose /api/remote/*).
+  const documentResponse = await fetch(previewUrl(html));
+  assert.equal(documentResponse.status, 200);
+  assert.equal(documentResponse.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.match(documentResponse.headers.get("content-disposition"), /^inline;/);
+  const documentCsp = documentResponse.headers.get("content-security-policy");
+  assert.match(documentCsp, /(^|;)\s*sandbox\s+[^;]*allow-scripts/);
+  assert.match(documentCsp, /frame-ancestors 'self'/);
+  assert.doesNotMatch(documentCsp, /allow-same-origin/);
+  assert.deepEqual(Buffer.from(await documentResponse.arrayBuffer()), pageHtml);
+  assert.equal(fakeConverter.requests.length, 2, "HTML is not converted");
+
+  const svgResponse = await fetch(previewUrl(svg));
+  assert.equal(svgResponse.status, 200);
+  assert.equal(svgResponse.headers.get("content-type"), "image/svg+xml");
+  assert.match(svgResponse.headers.get("content-security-policy"), /(^|;)\s*sandbox\b/);
+  assert.deepEqual(Buffer.from(await svgResponse.arrayBuffer()), svgSource);
+  assert.equal(fakeConverter.requests.length, 2, "SVG is not converted");
 
   // Unsupported types get the notice page, not an error.
   const unsupported = await fetch(previewUrl(notes));
