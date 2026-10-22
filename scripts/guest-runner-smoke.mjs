@@ -31,7 +31,10 @@ const stub_dir = join(work, "claude-bin");
 mkdirSync(stub_dir, { recursive: true });
 const stub = join(stub_dir, "claude");
 writeFileSync(stub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+# One line, not EOF: the runner keeps the turn's stdin open until the agent
+# answers the turn-end context question (guest/runner.py, run_agent).
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
 # The argv is echoed inside a JSON string, so escape it — a --mcp-config value
 # carries JSON of its own.
 args=$(printf '%s' "$*" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
@@ -47,7 +50,7 @@ const failing_dir = join(work, "claude-bin-failing");
 mkdirSync(failing_dir, { recursive: true });
 const failingStub = join(failing_dir, "claude");
 writeFileSync(failingStub, `#!/bin/sh
-cat >/dev/null
+IFS= read -r line
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial answer"}]},"session_id":"55555555-5555-4555-8555-555555555555"}\\n'
 exit 3
 `);
@@ -76,7 +79,7 @@ function runRunner({ secret, once = true, binDir = stub_dir, env = {} }) {
 
 // A long-lived runner, for the one behaviour that needs the poll loop and a
 // turn to be live at the same time: a Stop is delivered on that loop.
-function startRunner({ secret, binDir = stub_dir }) {
+function startRunner({ secret, binDir = stub_dir, env = {} }) {
   const child = spawn("python3", ["-I", `${root}guest/runner.py`], {
     env: {
       ...process.env,
@@ -87,6 +90,7 @@ function startRunner({ secret, binDir = stub_dir }) {
       CLAUDESK_RUNNER_HOME: join(work, "home-live"),
       // Ask for the held poll, the protocol's event-driven pickup.
       CLAUDESK_RUNNER_POLL_WAIT: "20",
+      ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -117,6 +121,11 @@ try {
       CLAUDESK_TENANT: "1",
       CLAUDESK_CODE_RUNNERS: "1",
       CLAUDESK_CODE_RUNNER_POOL: "guest-smoke",
+      // The monitor exists to reattach a production bridge to the Desktop's
+      // namespace. This smoke's internal URL is deliberately dead, and the
+      // suite is longer than the default 3 misses; exiting mid-run strands the
+      // runner's held poll instead of testing anything.
+      COWORK_INTERNAL_FAILURE_EXIT_THRESHOLD: "1000",
       // A cold read answers 503 as soon as the bounded wake elapses; the smoke
       // pins that fast refusal rather than the 5 s default.
       CLAUDESK_RUNNER_WAKE_WAIT_MS: "200",
@@ -428,7 +437,8 @@ print(json.dumps({
   // directory and branch off the transcript.
   const pwdStub = join(work, "pwd-stub");
   writeFileSync(pwdStub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
 branch=$(git branch --show-current 2>/dev/null)
 printf '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}\\n'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"cwd: %s | branch: %s | prompt: %s"}]},"session_id":"22222222-2222-4222-8222-222222222222"}\\n' "$PWD" "$branch" "$prompt"
@@ -620,7 +630,8 @@ printf '{"type":"result","subtype":"success","session_id":"33333333-3333-4333-83
   mkdirSync(interruptDir, { recursive: true });
   const interruptStub = join(interruptDir, "claude");
   writeFileSync(interruptStub, `#!/bin/sh
-prompt=$(sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p' | head -1)
+IFS= read -r line
+prompt=$(printf '%s' "$line" | sed -n 's/.*"text": *"\\([^"]*\\)".*/\\1/p')
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working: %s"}]},"session_id":"44444444-4444-4444-8444-444444444444"}\\n' "$prompt"
 trap 'exit 130' INT TERM
 sleep 60 >/dev/null 2>&1 &
@@ -697,6 +708,93 @@ printf '{"type":"result","subtype":"success","session_id":"44444444-4444-4444-84
   } finally {
     interruptRunner.child.kill("SIGTERM");
     await new Promise((resolve) => interruptRunner.child.once("exit", resolve));
+  }
+
+  // Context usage. The runner asks the agent for `get_context_usage` when the
+  // turn's result lands (only that process holds the conversation), keeps the
+  // answer, and serves the Code surface's later control request from that
+  // cache over the UI request lane. The stub answers the way the agent does,
+  // so this pins the turn-end question, the cache and the control_response
+  // the renderer's transport is waiting on.
+  const contextDir = join(work, "context-bin");
+  mkdirSync(contextDir, { recursive: true });
+  const contextStub = join(contextDir, "claude");
+  writeFileSync(contextStub, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *get_context_usage*)
+      rid=$(printf '%s' "$line" | sed -n 's/.*"request_id": *"\\([^"]*\\)".*/\\1/p')
+      detail=$(printf '%s' "$line" | sed -n 's/.*"detail": *"\\([^"]*\\)".*/\\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"categories":[{"name":"System prompt","tokens":2063,"kind":"used"},{"name":"Messages","tokens":900,"kind":"used"}],"totalTokens":2963,"maxTokens":200000,"rawMaxTokens":200000,"percentage":1,"probeDetail":"%s"}}}\\n' "$rid" "$detail"
+      ;;
+    *)
+      printf '{"type":"system","subtype":"init","session_id":"66666666-6666-4666-8666-666666666666"}\\n'
+      printf '{"type":"result","subtype":"success","session_id":"66666666-6666-4666-8666-666666666666","is_error":false,"result":"done"}\\n'
+      ;;
+  esac
+done
+`);
+  chmodSync(contextStub, 0o755);
+  const contextRunner = startRunner({ secret, binDir: contextDir,
+    env: { CLAUDESK_RUNNER_CONTEXT_USAGE_WAIT: "2" } });
+  try {
+    assert.equal(await waitFor(
+      () => contextRunner.output().includes("registered as"), 10000),
+    true, `the context runner did not register: ${contextRunner.output()}`);
+    const contextPlaced = await request("/v1/code/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "context smoke", environment_id: poolId,
+        config: { model: "claude-opus-5-5" } }),
+    });
+    const contextSession = JSON.parse(contextPlaced.body).session;
+    await request(`/v1/code/sessions/${contextSession.id}/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ events: [{ payload: { type: "user",
+        message: { role: "user", content: "ask the context meter" } } }] }),
+    });
+    assert.equal(await waitFor(
+      () => contextRunner.output().includes("turn done"), 10000),
+    true, `the context turn must finish: ${contextRunner.output()}`);
+
+    // Exactly what the Code surface posts when the meter loads.
+    const asked = await request(`/v1/code/sessions/${contextSession.id}/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ events: [{ payload: { type: "control_request",
+        request_id: "context-smoke",
+        request: { subtype: "get_context_usage", detail: "full" } } }] }),
+    });
+    assert.equal(asked.status, 200, asked.body);
+
+    assert.equal(await waitFor(async () => {
+      const history = decodeClientEventsResponse(JSON.parse((await request(
+        `/v1/code/sessions/${contextSession.id}/events`)).body));
+      return history.some((entry) => entry.message.type === "control_response"
+        && entry.message.response?.request_id === "context-smoke");
+    }, 10000), true,
+    `the context answer must reach the session: ${contextRunner.output()}`);
+    const answered = decodeClientEventsResponse(JSON.parse((await request(
+      `/v1/code/sessions/${contextSession.id}/events`)).body));
+    const answer = answered.find((entry) => entry.message.type === "control_response"
+      && entry.message.response?.request_id === "context-smoke").message;
+    assert.equal(answer.response.subtype, "success");
+    assert.equal(answer.response.response.rawMaxTokens, 200000);
+    assert.equal(answer.response.response.probeDetail, "full",
+      "the turn-end question asks for the full breakdown");
+    assert.equal(answer.response.response.categories.find(
+      (category) => category.name === "Messages")?.tokens, 900,
+      "the agent's own breakdown is relayed unchanged");
+    // The answer came from the cache: the turn's process has already been
+    // ended (its result closed stdin and the runner reaps it), so nothing
+    // could have answered a live control request here.
+    assert.equal(await waitFor(
+      () => contextRunner.output().includes("agent exited"), 8000),
+    true, `the turn's agent must end after its result: ${contextRunner.output()}`);
+  } finally {
+    contextRunner.child.kill("SIGTERM");
+    await new Promise((resolve) => contextRunner.child.once("exit", resolve));
   }
 
   // A runner with no secret must refuse to poll rather than guess.

@@ -608,6 +608,13 @@ export function createRunnerBackend({
   // every folder/branch lookup burns the full timeout and reads as a hang. Say
   // so at once instead: 501 is "this runner cannot do that", not "try later".
   const requestLaneVersion = [2, 0, 2];
+  // Methods newer than the lane itself. Context usage needs the runner that
+  // asks the agent for the breakdown at turn end; an older runner answers
+  // "unknown request method", which would surface as an error instead of a
+  // breakdown.
+  const runnerMethodMinimums = new Map([
+    ["get_context_usage", [2, 5, 0]],
+  ]);
   function versionParts(value) {
     const text = String(value ?? "").trim();
     if (!/^\d+(?:\.\d+)*$/.test(text)) return null;
@@ -1040,12 +1047,15 @@ export function createRunnerBackend({
       throw runnerUnavailable("no guest runner is online", 503);
     }
     const live = liveRunner(state, pool);
-    if (live && !versionAtLeast(live.runner_version, requestLaneVersion)) {
+    const minimumVersion = runnerMethodMinimums.get(method) ?? requestLaneVersion;
+    if (live && !versionAtLeast(live.runner_version, minimumVersion)) {
+      const capability = method === "get_context_usage"
+        ? "context usage" : "folder and branch lookups";
       throw runnerUnavailable(
         `the guest runner is version ${live.runner_version || "unknown"}; `
-        + "folder and branch lookups need the runner from this deployment "
-        + "(2.0.2 or newer). Refresh it with scripts/install-guest-runner.sh "
-        + "or deploy.sh.", 501);
+        + `${capability} need${method === "get_context_usage" ? "s" : ""} the runner `
+        + `from this deployment (${minimumVersion.join(".")} or newer). `
+        + "Refresh it with scripts/install-guest-runner.sh or deploy.sh.", 501);
     }
     const outstanding = [...runnerRequests.values()]
       .filter((request) => request.pool_id === pool.pool_id).length;
@@ -1073,6 +1083,66 @@ export function createRunnerBackend({
       log.log(`[code-runners] UI request ${method} queued on pool ${pool.pool_id}`);
       wakePool(pool.pool_id);
     });
+  }
+
+  // Answer a renderer's `get_context_usage` control request with the agent's
+  // own answer. The request is already in the transcript (the renderer
+  // appended it); the request lane carries it to the guest, and the reply is
+  // appended as the `control_response` the renderer's control transport is
+  // waiting on. Fire-and-forget: the POST that carried the request has already
+  // been answered, and the renderer waits on the session stream, not that POST.
+  async function answerContextUsage(sessionId, { requestId, detail }) {
+    let usage = null;
+    let failure = null;
+    const before = await load().catch(() => null);
+    const beforeSession = before ? sessionById(before, sessionId) : null;
+    if (!beforeSession) return;
+    // The answer the runner kept was computed with the settings that shaped
+    // its last turn. Naming them lets it refuse a stale answer after a model
+    // or mode change (the next turn refreshes it).
+    const config = sessionConfigOf(beforeSession);
+    try {
+      usage = await askRunner("get_context_usage", {
+        session_uuid: sessionId,
+        ...(detail === "summary" || detail === "full" ? { detail } : {}),
+        ...(typeof config.model === "string" && config.model
+          ? { model: config.model } : {}),
+        ...(typeof config.permission_mode === "string" && config.permission_mode
+          ? { permission_mode: config.permission_mode } : {}),
+        ...(typeof config.effort_level === "string" && config.effort_level
+          ? { effort_level: config.effort_level } : {}),
+      });
+      if (!isRecord(usage) || !("rawMaxTokens" in usage)) {
+        failure = "the guest runner returned no context usage";
+        usage = null;
+      }
+    } catch (error) {
+      failure = error?.message || String(error);
+    }
+    const state = await load().catch(() => null);
+    const session = state ? sessionById(state, sessionId) : null;
+    if (!session) return;
+    await ensureEvents(session);
+    const response = usage
+      ? { subtype: "success", request_id: requestId, response: usage }
+      : {
+        subtype: "error",
+        request_id: requestId,
+        error: failure || "context usage is unavailable",
+      };
+    const appended = appendToSession(session, [{
+      payload: { type: "control_response", response },
+    }], "worker");
+    if (!appended.length) return;
+    await appendEventsFile(session, appended);
+    emitLive(session, appended);
+    await save();
+    if (usage) {
+      log.log(`[code-runners] session ${sessionId}: context usage answered `
+        + `(${usage.totalTokens ?? "?"} / ${usage.rawMaxTokens ?? "?"} tokens)`);
+    } else {
+      log.warn(`[code-runners] session ${sessionId}: context usage unavailable: ${failure}`);
+    }
   }
 
   // Transcripts live one file per session, append-only. The metadata store
@@ -2343,6 +2413,11 @@ export function createRunnerBackend({
       // appends a control request here, and before this was acted on the turn
       // simply kept running.
       const interruptRequests = new Set();
+      // The Code surface's context breakdown is a control request it expects
+      // the agent to answer. The bridge cannot ask the agent itself (the guest
+      // is not dialable); the request lane asks the runner for the answer it
+      // kept from the turn's own agent (see answerContextUsage).
+      const contextRequests = [];
       for (const item of accepted) {
         const payload = item?.payload ?? item;
         if (!payload || typeof payload !== "object" || payload.type !== "control_request") continue;
@@ -2353,6 +2428,13 @@ export function createRunnerBackend({
           const requestId = payload.request_id ?? request.request_id;
           markInterrupted(session, { requestId });
           if (typeof requestId === "string" && requestId) interruptRequests.add(requestId);
+          continue;
+        }
+        if (!fromWorker && request.subtype === "get_context_usage") {
+          const requestId = payload.request_id ?? request.request_id;
+          if (typeof requestId === "string" && requestId) {
+            contextRequests.push({ requestId, detail: request.detail });
+          }
           continue;
         }
         const next = { ...(session.session_config || {}) };
@@ -2453,6 +2535,14 @@ export function createRunnerBackend({
         wakePool(session.pool_id);
       }
       if (requeued) wakeTurnRunner();
+      // The renderer waits on the session stream for these answers, so they
+      // must not hold this POST open; the runner may need to wake the VM.
+      for (const request of contextRequests) {
+        void answerContextUsage(session.session_uuid, request).catch((error) => {
+          warn(`[code-runners] context usage for ${session.session_uuid} failed: `
+            + `${error?.message || error}`);
+        });
+      }
       return { data: [...appended, ...volatile] };
     },
 

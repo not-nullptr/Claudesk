@@ -820,6 +820,37 @@ earlier it looked for `authd` on the host, which does not exist there, so the
 whole refresh silently did nothing even though the container images were
 current.
 
+**The context meter's breakdown comes from the agent.** The Code surface asks
+its session transport for `get_context_usage` whenever the meter loads — a
+`control_request` appended to the session, the same mechanism as Stop. The
+renderer's fallback reads the usage on assistant messages, and a gateway that
+reports usage only in `message_delta` leaves those at
+`{input_tokens: 0, output_tokens: 0}`; that zero is what the meter showed. The
+bridge relays the request over the same UI request lane
+(`get_context_usage` on the poll) to the runner that ran the last turn, and
+appends the agent's answer as the `control_response` the renderer is waiting
+on. Nothing is estimated in the bridge or the runner.
+
+Only the agent process that ran the conversation can answer: a fresh
+`--resume` process computes `get_context_usage` from an empty live transcript
+until a model turn loads history (its `/context` does not count the resumed
+messages either). The runner therefore asks the agent for the breakdown at the
+end of each turn, while that process still holds the conversation, and keeps
+the answer (`CLAUDESK_RUNNER_CONTEXT_USAGE_WAIT`, default 4 s, bounds the
+wait for a failed agent before the turn ends). The conversation does not
+change between turns, so the answer stays true until the next turn; the cache
+is keyed by the settings that shaped that turn (model, permission mode,
+effort), and a later change makes it a refusal rather than a stale breakdown.
+A session the runner has not turned since it started (a VM restart after the
+last turn) answers with an error instead of a made-up figure; the renderer
+keeps its last locally cached snapshot for that session and refreshes it after
+the next turn.
+
+The method is guest runner **2.5.0+**. The request lane itself is 2.0.2+
+(above); the bridge refuses an older runner for `get_context_usage` with a
+`501` naming its version, rather than forwarding a request the runner would
+answer "unknown request method".
+
 The service runs session turns on their own threads, not inline in the poll
 loop. A turn has no wall-clock cap by default — an agent working a real task may
 run far longer than half an hour — so a long turn keeps its thread while the

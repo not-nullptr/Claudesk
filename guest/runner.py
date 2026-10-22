@@ -41,12 +41,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 2.5.0: The Code surface's context meter asks the agent's own control protocol
+# (`get_context_usage`). Stream-json assistant messages carry zero usage on a
+# gateway that reports it only in `message_delta`, so the renderer's own
+# fallback reads 0; the runner asks at turn end, while the agent still holds the
+# conversation, and serves that answer over the UI request lane. Never
+# estimated here: the runner only relays what the agent published.
 # 2.4.0: Every turn ends with a result. A failure, a timeout or a broken event
 # stream writes the terminal the transcript reader closes a turn on (reopening
 # the stream, or posting the result on its own when it cannot), the poll reports
 # the sessions this runner holds so the bridge can reap a turn whose runner
 # vanished, and the agent's process group — not just its pid — is signalled.
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 
 def env(name, default=""):
@@ -948,9 +954,76 @@ def branch_switch_conflict(params):
     return False
 
 
+# The Code surface's context meter asks a session for `get_context_usage`; its
+# own fallback (the usage on assistant messages) reads 0 here because the
+# gateway reports usage in `message_delta` while stream-json assistant messages
+# keep `message_start`'s zeros. Only the agent process that ran the
+# conversation can compute the breakdown (a resumed process answers from an
+# empty live transcript), so the runner asks the agent once, at the end of each
+# turn, while that process still exists, and keeps the answer. The conversation
+# does not change between turns, so the answer stays true until the next turn;
+# a model/permission/effort change makes it stale, and the next turn refreshes
+# it. Nothing is estimated here: the document is the agent's own.
+CONTEXT_USAGE = {}
+CONTEXT_USAGE_LOCK = threading.Lock()
+# How long a turn waits for the agent's context answer before ending. The agent
+# answers from memory in well under a second; this is a failed-agent ceiling,
+# not a computation budget.
+CONTEXT_USAGE_WAIT = env_seconds("CLAUDESK_RUNNER_CONTEXT_USAGE_WAIT") or 4.0
+
+
+def remember_context_usage(session, config, usage):
+    if not isinstance(usage, dict) or "rawMaxTokens" not in usage:
+        return
+    with CONTEXT_USAGE_LOCK:
+        CONTEXT_USAGE[session] = {
+            "usage": usage,
+            "config": {key: config.get(key)
+                       for key in ("model", "permission_mode", "effort_level")},
+            "at": time.time(),
+        }
+        # A long-lived guest serves many sessions; the documents are tens of
+        # kilobytes each, so keep only the most recently turned ones.
+        while len(CONTEXT_USAGE) > 64:
+            oldest = min(CONTEXT_USAGE, key=lambda key: CONTEXT_USAGE[key]["at"])
+            CONTEXT_USAGE.pop(oldest, None)
+
+
+def get_context_usage(params):
+    """Answer the Code surface's `get_context_usage` from the last turn's agent.
+
+    The request arrives on the runner's poll (the UI request lane) and the
+    bridge appends the answer as the `control_response` the renderer is waiting
+    on. A session the runner has not turned since it started has no answer:
+    saying so is better than inventing one, and the renderer keeps its last
+    cached snapshot until the next turn refreshes it.
+    """
+    session = params.get("session_uuid")
+    if not isinstance(session, str) or not session:
+        raise ValueError("get_context_usage: session_uuid is required")
+    with CONTEXT_USAGE_LOCK:
+        entry = CONTEXT_USAGE.get(session)
+    if entry is None:
+        raise RuntimeError("context usage is not available until this session "
+                           "runs a turn on this runner")
+    # The answer is the state of the turn that produced it. A model or mode
+    # change between turns changes the system prompt and the window, so a
+    # mismatched request waits for the next turn rather than showing stale
+    # categories.
+    for key in ("model", "permission_mode", "effort_level"):
+        wanted = params.get(key)
+        if wanted is None:
+            continue
+        if entry["config"].get(key) != wanted:
+            raise RuntimeError("the session's settings changed since its last "
+                               "turn; context usage refreshes with the next turn")
+    return entry["usage"]
+
+
 REQUEST_HANDLERS = {
     "branch_switch_conflict": branch_switch_conflict,
     "create_folder": create_folder,
+    "get_context_usage": get_context_usage,
     "git_info": git_info,
     "list_branches": list_branches,
     "list_folders": list_folders,
@@ -1047,7 +1120,7 @@ def apply_cancellations(items):
     return applied
 
 
-def run_agent(argv, cwd, content, write, interrupt=None):
+def run_agent(argv, cwd, content, write, interrupt=None, usage_hook=None):
     """Run one turn, streaming its events back to the bridge.
 
     `write` puts one event on the turn's open stream (see open_event_stream):
@@ -1057,6 +1130,10 @@ def run_agent(argv, cwd, content, write, interrupt=None):
     `interrupt` is an event set by the poll loop when the bridge carries a
     Stop. The child is signalled the way the terminal would (SIGINT) so it can
     flush and unwind; a child that ignores that is terminated, then killed.
+
+    `usage_hook` asks the agent for `get_context_usage` when its result lands,
+    while that process still holds the conversation (see
+    remember_context_usage), then ends the turn as usual.
     """
     """One headless turn of the agent: the prompt in, the event stream out.
 
@@ -1190,8 +1267,99 @@ def run_agent(argv, cwd, content, write, interrupt=None):
         if process.poll() is None:
             signal_group(signal.SIGKILL)
 
-    forwarded = 0
-    result = None
+    state = {"forwarded": 0, "result": None}
+    stdout_done = threading.Event()
+    usage_done = threading.Event()
+    turn_over = [False]
+    usage_finished = [False]
+    usage_timer = [None]
+    usage_request_id = "context-usage-%d" % int(time.time() * 1000)
+
+    def end_turn_now():
+        """End the agent's input and let a lingering process go.
+
+        Once per turn: the context answer (or its timeout) and a result with
+        no question both land here.
+        """
+        if usage_finished[0]:
+            return
+        usage_finished[0] = True
+        if usage_timer[0] is not None:
+            usage_timer[0].cancel()
+        try:
+            process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        threading.Thread(target=end_after_result, daemon=True).start()
+        usage_done.set()
+
+    def ask_for_usage():
+        # Sent while the process still holds the conversation that just
+        # finished; the answer is what the context meter shows until the next
+        # turn. `full` is a superset of `summary`, so one answer serves both.
+        message = {"type": "control_request", "request_id": usage_request_id,
+                   "request": {"subtype": "get_context_usage", "detail": "full"}}
+        try:
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+        except (OSError, ValueError):
+            end_turn_now()
+            return
+        timer = threading.Timer(CONTEXT_USAGE_WAIT, end_turn_now)
+        timer.daemon = True
+        usage_timer[0] = timer
+        timer.start()
+
+    def read_stdout():
+        try:
+            for line in process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    log("agent printed a non-json line: %s" % line[:200])
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("type")
+                if kind == "control_response":
+                    response = event.get("response")
+                    if (usage_hook is not None and isinstance(response, dict)
+                            and response.get("request_id") == usage_request_id):
+                        if response.get("subtype") == "success":
+                            try:
+                                usage_hook(response.get("response"))
+                            except Exception as error:  # noqa: BLE001 - best effort
+                                log("could not remember context usage: %s" % error)
+                        end_turn_now()
+                    continue
+                if turn_over[0]:
+                    # The turn is over; anything else the process says (late
+                    # notices, prompt suggestions) belongs to no turn and must
+                    # not enter the transcript.
+                    continue
+                if kind in ("assistant", "user", "stream_event"):
+                    pending.put(event)
+                    state["forwarded"] += 1
+                elif kind == "result":
+                    state["result"] = event
+                    turn_over[0] = True
+                    if usage_hook is not None:
+                        ask_for_usage()
+                    else:
+                        end_turn_now()
+                elif kind == "system" and event.get("subtype") == "init":
+                    log("agent %s initialized (model %s, permission %s)" % (
+                        event.get("claude_code_version"), event.get("model"),
+                        event.get("permissionMode")))
+        finally:
+            end_turn_now()
+            stdout_done.set()
+
+    reader_thread = threading.Thread(target=read_stdout, daemon=True)
+    reader_thread.start()
     try:
         blocks = ([{"type": "text", "text": content}]
                   if isinstance(content, str) else content)
@@ -1204,39 +1372,26 @@ def run_agent(argv, cwd, content, write, interrupt=None):
             process.stdin.flush()
         except OSError:
             pass  # the agent died before reading; its exit says why
-        finally:
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
-        for line in process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                log("agent printed a non-json line: %s" % line[:200])
-                continue
-            kind = event.get("type")
-            if kind in ("assistant", "user", "stream_event"):
-                pending.put(event)
-                forwarded += 1
-            elif kind == "result":
-                result = event
-                threading.Thread(target=end_after_result, daemon=True).start()
-            elif kind == "system" and event.get("subtype") == "init":
-                log("agent %s initialized (model %s, permission %s)" % (
-                    event.get("claude_code_version"), event.get("model"),
-                    event.get("permissionMode")))
-        code = process.wait()
+        # Stdin stays open until the turn's result: closing it is how the
+        # runner tells the agent its input is complete, and the context query
+        # rides that same channel just before the close (see end_turn_now).
+        if usage_hook is not None:
+            # The result has landed; wait only for the context answer (or its
+            # short ceiling) so the cache is warm before the bridge releases.
+            while not stdout_done.is_set() and not usage_done.is_set():
+                time.sleep(0.05)
+            code = process.wait() if stdout_done.is_set() else process.poll()
+        else:
+            reader_thread.join()
+            code = process.wait()
     finally:
         if watchdog is not None:
             watchdog.cancel()
         interrupt_done.set()
         pending.put(None)
         writer_thread.join(timeout=60)
-    return code, result, bool(timed_out), bool(interrupted), forwarded, failures, errors
+    return (code, state["result"], bool(timed_out), bool(interrupted),
+            state["forwarded"], failures, errors)
 
 
 def mcp_config_of(servers):
@@ -1283,6 +1438,60 @@ def mcp_config_of(servers):
             spec["headers"] = {str(key): str(value) for key, value in headers.items()}
         mapping[str(name)] = spec
     return {"mcpServers": mapping} if mapping else None
+
+
+def agent_options(config, events):
+    """The settings a turn runs with, from the session and its own events.
+
+    The create config carries the composer's picks; a change made while the
+    session was already running is a control request in the transcript, and the
+    latest one wins over the create config (the start intent emits the same
+    subtype, so this also covers a mode the create body dropped).
+    """
+    model = config.get("model")
+    model = model if isinstance(model, str) and model else None
+    permission_mode = config.get("permission_mode")
+    permission_mode = (permission_mode if isinstance(permission_mode, str)
+                       and permission_mode else None)
+    effort = config.get("effort_level")
+    effort = effort if isinstance(effort, str) and effort else None
+    control = latest_control_request(events, "set_permission_mode")
+    if isinstance(control, dict):
+        mode = control.get("mode")
+        if isinstance(mode, str) and mode:
+            permission_mode = mode
+    control = latest_control_request(events, "set_model")
+    if isinstance(control, dict):
+        chosen = control.get("model")
+        if isinstance(chosen, str) and chosen:
+            model = chosen
+    # The effort picker writes the SDK's `apply_flag_settings` request, whose
+    # settings carry `effortLevel`. It is the only way a running session's
+    # effort changes; the create config is written once. Newer builds may send
+    # the same value at the top level, so accept both spellings.
+    control = latest_control_request(events, "apply_flag_settings")
+    if isinstance(control, dict):
+        settings = control.get("settings")
+        level = settings.get("effortLevel") if isinstance(settings, dict) else None
+        if not isinstance(level, str):
+            level = control.get("effortLevel")
+        if isinstance(level, str) and level:
+            effort = level
+    return model, permission_mode, effort, mcp_config_of(config.get("mcp_servers"))
+
+
+def agent_argv(model, permission_mode, effort, mcp_config):
+    """The product runner's own spawn flags, with the session's choices."""
+    argv = [CLAUDE_BIN] + AGENT_ARGS
+    if model is not None:
+        argv += ["--model", model]
+    if permission_mode is not None:
+        argv += ["--permission-mode", permission_mode]
+    if effort is not None:
+        argv += ["--effort", effort]
+    if mcp_config is not None:
+        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
+    return argv
 
 
 def run_session(hint, interrupt=None):
@@ -1372,39 +1581,7 @@ def run_session(hint, interrupt=None):
     # answers as whatever its default is. The same config carries the start
     # options (folder, branch, worktree).
     config = session_settings(session)
-    model = config.get("model")
-    model = model if isinstance(model, str) and model else None
-    permission_mode = config.get("permission_mode")
-    permission_mode = (permission_mode if isinstance(permission_mode, str)
-                       and permission_mode else None)
-    effort = config.get("effort_level")
-    effort = effort if isinstance(effort, str) and effort else None
-    # A change made while the session is already running is a control request
-    # in the transcript, not a rewritten session document. The latest one wins
-    # over the create config (the start intent emits the same subtype, so this
-    # also covers a mode the create body dropped).
-    control = latest_control_request(events, "set_permission_mode")
-    if isinstance(control, dict):
-        mode = control.get("mode")
-        if isinstance(mode, str) and mode:
-            permission_mode = mode
-    control = latest_control_request(events, "set_model")
-    if isinstance(control, dict):
-        chosen = control.get("model")
-        if isinstance(chosen, str) and chosen:
-            model = chosen
-    # The effort picker writes the SDK's `apply_flag_settings` request, whose
-    # settings carry `effortLevel`. It is the only way a running session's
-    # effort changes; the create config is written once. Newer builds may send
-    # the same value at the top level, so accept both spellings.
-    control = latest_control_request(events, "apply_flag_settings")
-    if isinstance(control, dict):
-        settings = control.get("settings")
-        level = settings.get("effortLevel") if isinstance(settings, dict) else None
-        if not isinstance(level, str):
-            level = control.get("effortLevel")
-        if isinstance(level, str) and level:
-            effort = level
+    model, permission_mode, effort, mcp_config = agent_options(config, events)
 
     if not (os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK)):
         # A directory here is the classic miss (the product's own path is one);
@@ -1431,17 +1608,8 @@ def run_session(hint, interrupt=None):
     # The session's MCP servers: a routine fire's per-invocation connectors (or
     # the session MCP editor's saved set). This is what makes the URL a fire
     # carried — with whatever per-run id it held — the server the agent dials.
-    mcp_config = mcp_config_of(config.get("mcp_servers"))
-
-    argv = [CLAUDE_BIN] + AGENT_ARGS
-    if model is not None:
-        argv += ["--model", model]
-    if permission_mode is not None:
-        argv += ["--permission-mode", permission_mode]
-    if effort is not None:
-        argv += ["--effort", effort]
-    if mcp_config is not None:
-        argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
+    # (agent_options built `--mcp-config` from the same field above.)
+    argv = agent_argv(model, permission_mode, effort, mcp_config)
     # The working directory comes from the session's start options. With none,
     # the account's shared workspace is where the work happens (see
     # session_workdir). The virtiofs mount can arrive after this service, so
@@ -1478,8 +1646,19 @@ def run_session(hint, interrupt=None):
             stream["write"], stream["close"] = open_stream()
             stream["write"](payload)
 
+    # The context meter's answer is refreshed while this turn's process still
+    # holds the conversation (see remember_context_usage). The settings that
+    # shaped this turn are part of the key: a later change makes the cached
+    # answer stale rather than wrong.
+    usage_config = {"model": model, "permission_mode": permission_mode,
+                    "effort_level": effort}
+
+    def remember_usage(usage):
+        remember_context_usage(session, usage_config, usage)
+
     def turn(extra):
-        return run_agent(argv + extra, cwd, content, write_event, interrupt)
+        return run_agent(argv + extra, cwd, content, write_event, interrupt,
+                         remember_usage)
 
     code, result, timed_out, was_interrupted, forwarded, failures, errors = turn(
         ["--resume", resume] if resume else [])
@@ -1558,7 +1737,10 @@ def run_session(hint, interrupt=None):
         # requeues it. A session that was deleted mid-turn is already gone, so
         # the release is allowed to find nothing.
         finish("release", {}, strict=False)
-    elif code == 0 and not result.get("is_error"):
+    elif code in (0, None) and not result.get("is_error"):
+        # The process may still be exiting when the context answer returns;
+        # its own result is the turn's terminal. (A process that dies right
+        # after its result still had a clean turn.)
         finish("release", {})
     else:
         reason = ""
@@ -1715,7 +1897,9 @@ def main():
         # a stop is never queued behind a folder lookup.
         apply_cancellations(polled.get("cancellations") or [])
         # The web Code composer's folder/git lookups ride the same poll. They
-        # are answered from inside the VM, before any session is started.
+        # are answered from inside the VM, before any session is started. A
+        # context-usage request is answered from the cache the last turn left;
+        # like the lookups, it is a local read and does not block the loop.
         requests = polled.get("requests") or []
         for item in requests:
             handle_runner_request(item)
