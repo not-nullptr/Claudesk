@@ -11,13 +11,15 @@ import {
 } from "blode-icons-react";
 import { PendingBar } from "./shared";
 
-/** The model picker's layout. A model pinned here sits at the root of every
- *  account's composer menu, in this order; every other model stays selectable
- *  under "More models". The page edits a working copy and commits it as one
+/** The deployment's model settings. The main-model list lays out each account's
+ *  composer menu; the configured model names the model the app's configuration
+ *  health check probes. The page edits working copies and commits them as one
  *  deployment-wide setting. */
 export function ModelsPage() {
   const [mainModels, setMainModels] = useState<string[]>([]);
   const [savedModels, setSavedModels] = useState<string[]>([]);
+  const [configuredModel, setConfiguredModel] = useState("");
+  const [savedConfiguredModel, setSavedConfiguredModel] = useState("");
   const [catalogue, setCatalogue] = useState<ModelOption[]>([]);
   const [catalogueError, setCatalogueError] = useState("");
   const [filter, setFilter] = useState("");
@@ -37,9 +39,13 @@ export function ModelsPage() {
     ]);
 
     if (settingsResult.status === "fulfilled") {
-      const list = settingsResult.value.settings.model_picker_main_models;
+      const { settings } = settingsResult.value;
+      const list = settings.model_picker_main_models;
+      const configured = settings.configured_model ?? "";
       setMainModels(list);
       setSavedModels(list);
+      setConfiguredModel(configured);
+      setSavedConfiguredModel(configured);
       setSettingsLoaded(true);
     } else {
       const reason = settingsResult.reason;
@@ -118,11 +124,14 @@ export function ModelsPage() {
     try {
       const { settings } = await api.updateSettings({
         model_picker_main_models: mainModels,
+        configured_model: configuredModel,
       });
-      // The server trims, de-duplicates and bounds the list; its answer is what
-      // the page shows afterwards.
+      // The server trims, de-duplicates and bounds the values; its answer is
+      // what the page shows afterwards.
       setMainModels(settings.model_picker_main_models);
       setSavedModels(settings.model_picker_main_models);
+      setConfiguredModel(settings.configured_model ?? "");
+      setSavedConfiguredModel(settings.configured_model ?? "");
       setSavedNote("Saved — takes effect the next time a page loads.");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not save the model picker");
@@ -133,6 +142,7 @@ export function ModelsPage() {
 
   function discard() {
     setMainModels(savedModels);
+    setConfiguredModel(savedConfiguredModel);
     setError("");
     setSavedNote("");
   }
@@ -141,7 +151,8 @@ export function ModelsPage() {
     mainModels.length !== savedModels.length ||
     mainModels.some(
       (id, index) => id.toLowerCase() !== savedModels[index].toLowerCase(),
-    );
+    ) ||
+    configuredModel.trim().toLowerCase() !== savedConfiguredModel.trim().toLowerCase();
 
   const needle = filter.trim().toLowerCase();
   const available = catalogue.filter((model) => {
@@ -246,6 +257,58 @@ export function ModelsPage() {
           {savedNote}
         </p>
       ) : null}
+
+      <section className="admin-model-group" aria-labelledby="admin-configured-model">
+        <div className="admin-group-label" id="admin-configured-model">
+          Configured model
+        </div>
+        <div className="admin-field admin-configured-field">
+          <span className="admin-field-label">
+            <label htmlFor="configured-model-input">Model the health check probes</label>
+            {configuredModel.trim() ? (
+              <button
+                type="button"
+                className="admin-text-btn"
+                onClick={() => {
+                  setConfiguredModel("");
+                  touch();
+                }}
+              >
+                Use automatic
+              </button>
+            ) : null}
+          </span>
+          <input
+            id="configured-model-input"
+            className="admin-input"
+            list="admin-configured-model-options"
+            value={configuredModel}
+            onChange={(event) => {
+              setConfiguredModel(event.target.value);
+              touch();
+            }}
+            placeholder="Automatic — Desktop chooses"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <datalist id="admin-configured-model-options">
+            {catalogue.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </datalist>
+        </div>
+        <p className="admin-note">
+          Desktop otherwise chooses this model itself — the shortest entry named
+          like a haiku, sonnet or opus model — and reports it as the configured
+          model when the gateway does not serve it, which is the
+          &ldquo;Configured model not available&rdquo; error. Name a model this
+          gateway serves to clear it, or leave the field empty for Desktop&rsquo;s
+          own choice. This changes only what the health check probes — the
+          composer&rsquo;s model menu is unchanged.
+        </p>
+      </section>
 
       <section className="admin-model-group" aria-labelledby="admin-main-models">
         <div className="admin-group-label" id="admin-main-models">

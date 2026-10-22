@@ -1088,6 +1088,25 @@
   margin-bottom: 32px;
 }
 
+.admin-configured-field {
+  max-width: 420px;
+}
+
+.admin-text-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--admin-text-400);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-text-btn:hover {
+  color: var(--admin-text-000);
+}
+
 .admin-model-group:last-of-type {
   margin-bottom: 36px;
 }

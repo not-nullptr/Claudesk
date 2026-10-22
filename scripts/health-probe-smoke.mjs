@@ -12,7 +12,10 @@ import { fileURLToPath } from "node:url";
 // route and stop — not fan out over the whole model list. This boots the bridge
 // against a mock Desktop (which reports the rejected model) and a mock gateway
 // (which rate limits the canonical route and answers the first alternate), and
-// counts what reached the gateway.
+// counts what reached the gateway. A later pair of bridges sets
+// CLAUDE_CONFIGURED_MODEL, pinning that the operator's chosen model replaces
+// Desktop's pick as the probed model — and that a rejection of the chosen model
+// is reported rather than papered over by an alternate route.
 const root = fileURLToPath(new URL("..", import.meta.url));
 const server = `${root}bridge/server.mjs`;
 const releaseFile = `${root}bridge/release.json`;
@@ -68,6 +71,9 @@ try {
   // probes it first.
   const canonical = "anthropic/claude-opus-5-5";
   const fallback = "fable-cheap";
+  // A route the gateway does not serve at all, for the configured-model error
+  // case: the admin picked it, so the answer is taken at face value.
+  const rejected = "model-not-on-gateway";
   const probes = [];
   const gateway = await listen((request, response) => {
     const chunks = [];
@@ -97,6 +103,11 @@ try {
         if (body.model === canonical) {
           response.writeHead(429, { "content-type": "application/json" });
           response.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error" } }));
+          return;
+        }
+        if (body.model === rejected) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ type: "error", error: { type: "not_found_error" } }));
           return;
         }
         response.writeHead(200, { "content-type": "application/json" });
@@ -142,6 +153,22 @@ try {
   });
   const desktopPort = desktop.address().port;
 
+  // authd's narrow deployment route: the actual source of the admin page's
+  // configured model. Serving it here pins the production path (admin setting →
+  // authd → bridge), not only the env fallback.
+  const authd = await listen((request, response) => {
+    if (request.method === "GET" && request.url === "/api/auth/deployment") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        model_picker_main_models: [],
+        configured_model: fallback,
+      }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const authdPort = authd.address().port;
+
   const port = 8161;
   const request = await boot({
     port,
@@ -174,7 +201,54 @@ try {
     "a second page load inside the cache answers without another inference request");
   assert.equal(healthCalls, 2, "the Desktop's health is still read each time");
 
-  console.log("health-probe-smoke: one alternate route, no model fan-out");
+  // A configured model replaces Desktop's pick as the probed model. The
+  // rejection being corrected names a different model, and that model is not
+  // probed at all: the operator's choice is the one the health check judges.
+  const bootConfigured = async (env) => {
+    const configuredPort = 8162 + children.length;
+    const configuredRequest = await boot({
+      port: configuredPort,
+      env: {
+        COWORK_INTERNAL_URL: `http://127.0.0.1:${desktopPort}`,
+        CLAUDE_GATEWAY_BASE_URL: `http://127.0.0.1:${gatewayPort}`,
+        CLAUDE_GATEWAY_API_KEY: "smoke-gateway-key",
+        CLAUDE_GATEWAY_AUTH_SCHEME: "bearer",
+        CLAUDE_REMOTE_GATEWAY_SETTINGS: "1",
+        ...env,
+      },
+    });
+    const health = JSON.parse((await configuredRequest("/api/remote/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ surface: "Custom3pSetup", method: "getConfigHealth", args: [] }),
+    })).body);
+    return health;
+  };
+
+  // The admin setting's real path: authd's deployment route answers the id.
+  const configuredStart = probes.length;
+  const configured = await bootConfigured({
+    AUTH_IDENTITY_URL: `http://127.0.0.1:${authdPort}`,
+  });
+  assert.equal(configured.ok, true, JSON.stringify(configured));
+  assert.equal(configured.value.state, "healthy",
+    "the authd-configured model answering clears the rejection");
+  assert.equal(configured.value.probedModel, fallback);
+  assert.deepEqual(probes.slice(configuredStart), [fallback],
+    "only the configured model is probed, not Desktop's pick");
+
+  // The env fallback is used when no auth service answers.
+  const rejectedStart = probes.length;
+  const rejectedHealth = await bootConfigured({ CLAUDE_CONFIGURED_MODEL: rejected });
+  assert.equal(rejectedHealth.value.state, "config_model_rejected",
+    "a configured model the gateway rejects keeps the error, naming that model");
+  assert.equal(rejectedHealth.value.probedModel, rejected);
+  assert.match(rejectedHealth.value.message, new RegExp(rejected));
+  assert.deepEqual(probes.slice(rejectedStart), [rejected],
+    "no alternate route papers over the operator's chosen model");
+
+  console.log("health-probe-smoke: one alternate route, no model fan-out;"
+    + " configured model wins over Desktop's pick");
 } finally {
   for (const child of children) child.kill("SIGTERM");
   for (const mock of servers) mock.close();

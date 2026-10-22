@@ -198,6 +198,7 @@ Renderer 在验证全部目标后才发布生成文件，并最后原子更新 m
 | `CLAUDE_GATEWAY_AUTH_SCHEME` | `bearer` | Gateway 认证方案 |
 | `CLAUDE_INFERENCE_MODELS_JSON` | — | Desktop 接受的精确模型 ID JSON 数组 |
 | `CLAUDE_MODEL_PICKER_MAIN_MODELS` | — | 固定在选择器根部的模型 ID（逗号分隔或 JSON 数组），其余模型收进 “More models” 子菜单；在带 `AUTH_IDENTITY_URL` 的部署里只作兜底，通常改由 `/admin/models` 设置 |
+| `CLAUDE_CONFIGURED_MODEL` | — | 配置健康检查所探测的模型 ID；Desktop 未指定时会自行挑选名单里名字含 haiku/sonnet/opus 的最短条目，Gateway 不提供该路由时每个页面都报 “Configured model not available”。带 `AUTH_IDENTITY_URL` 的部署通常改由 `/admin/models` 的 “Configured model” 设置；此处仅作兜底 |
 | `CLAUDE_HEADLESS` | `1` | 无头启动官方 Desktop |
 | `CLAUDE_DISABLE_GPU` | `1` | 服务器环境默认关闭 GPU |
 

@@ -36,14 +36,17 @@ export interface VmStatus {
   [key: string]: unknown;
 }
 
-/** A deployment-wide setting the admin page owns. Only the model picker's layout
- *  exists today: the ordered list of models kept at the root of the composer's
- *  model menu, with every other configured model under "More models". Each
- *  account's instance reads it from the auth service
- *  (`GET /api/auth/deployment`) and lays the picker out from it. An empty list is
- *  the native layout — every model at the root. */
+/** A deployment-wide setting the admin page owns. The model picker's layout is
+ *  the ordered list of models kept at the root of the composer's model menu,
+ *  with every other configured model under "More models"; an empty list is the
+ *  native layout — every model at the root. The configured model names the model
+ *  the app's configuration health check probes, because Desktop otherwise picks
+ *  one itself and reports it as the "configured model" when the gateway does not
+ *  serve it; an empty string leaves that choice to Desktop. Each account's
+ *  instance reads both from the auth service (`GET /api/auth/deployment`). */
 export interface DeploymentSettings {
   model_picker_main_models: string[];
+  configured_model: string;
 }
 
 export class ApiError extends Error {

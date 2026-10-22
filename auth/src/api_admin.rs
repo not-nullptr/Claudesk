@@ -42,6 +42,13 @@ pub struct CreateUserRequest {
 /// bridge reads it (see `/api/auth/deployment`) and rewrites the picker data it
 /// serves. Absent row means "unset" — the native layout, every model at the root.
 pub const MODEL_PICKER_MAIN_MODELS: &str = "model_picker_main_models";
+/// The model the app's configuration health check probes. Desktop otherwise
+/// picks one itself — the shortest entry named like a haiku, sonnet or opus
+/// model — and reports it as the "configured model" in
+/// "Configured model not available", with no setting that reaches that choice.
+/// Each account's bridge reads this and probes it instead of Desktop's pick.
+/// Absent or empty means "let Desktop choose".
+pub const CONFIGURED_MODEL: &str = "configured_model";
 /// How many models an operator may pin, and how long one id may be. The bound is
 /// about a typo or a paste accident, not a real limit: the list is a shortlist.
 const MAX_MAIN_MODELS: usize = 50;
@@ -53,6 +60,10 @@ pub struct UpdateSettingsRequest {
     /// native layout). Order is the picker's root order.
     #[serde(default)]
     pub model_picker_main_models: Option<Vec<String>>,
+    /// Omitted leaves the stored model alone; an empty string clears it (Desktop
+    /// picks the model its health check probes again).
+    #[serde(default)]
+    pub configured_model: Option<String>,
 }
 
 /// The main-model list as it is stored: trimmed, de-duplicated
@@ -82,6 +93,18 @@ pub fn normalize_main_models(raw: &[String]) -> AppResult<Vec<String>> {
         models.push(id.to_string());
     }
     Ok(models)
+}
+
+/// The configured model as it is stored: trimmed and bounded. Empty is a
+/// meaningful value — it clears the setting, returning the choice to Desktop.
+pub fn normalize_configured_model(raw: &str) -> AppResult<String> {
+    let id = raw.trim();
+    if id.len() > MAX_MODEL_ID_LEN {
+        return Err(AppError::BadRequest(format!(
+            "a model id must be at most {MAX_MODEL_ID_LEN} characters"
+        )));
+    }
+    Ok(id.to_string())
 }
 
 #[derive(Deserialize)]
@@ -219,6 +242,19 @@ pub async fn update_settings(
                 .await?;
         }
     }
+    if let Some(raw) = body.configured_model.as_deref() {
+        let model = normalize_configured_model(raw)?;
+        if model.is_empty() {
+            state.store.clear_setting(CONFIGURED_MODEL).await?;
+        } else {
+            let encoded = serde_json::to_string(&model)
+                .map_err(|e| AppError::Internal(format!("setting encode: {e}")))?;
+            state
+                .store
+                .set_setting(CONFIGURED_MODEL, &encoded)
+                .await?;
+        }
+    }
     Ok(Json(json!({ "settings": deployment_settings(&state).await? })))
 }
 
@@ -230,8 +266,9 @@ async fn deployment_settings(state: &AppState) -> AppResult<Value> {
         MODEL_PICKER_MAIN_MODELS.into(),
         json!(main_models(state).await?),
     );
+    settings.insert(CONFIGURED_MODEL.into(), json!(configured_model(state).await?));
     for (key, value) in state.store.settings().await? {
-        if key == MODEL_PICKER_MAIN_MODELS {
+        if key == MODEL_PICKER_MAIN_MODELS || key == CONFIGURED_MODEL {
             continue;
         }
         let decoded = serde_json::from_str(&value).unwrap_or(Value::String(value));
@@ -245,6 +282,15 @@ async fn deployment_settings(state: &AppState) -> AppResult<Value> {
 pub(crate) async fn main_models(state: &AppState) -> AppResult<Vec<String>> {
     let Some(raw) = state.store.setting(MODEL_PICKER_MAIN_MODELS).await? else {
         return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+/// The stored configured model. Unset, or a stored value that is not a string,
+/// answers "" — the same meaning as unset: Desktop picks the model to probe.
+pub(crate) async fn configured_model(state: &AppState) -> AppResult<String> {
+    let Some(raw) = state.store.setting(CONFIGURED_MODEL).await? else {
+        return Ok(String::new());
     };
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
@@ -726,6 +772,18 @@ mod tests {
         let raw = ["".to_string(), "   ".to_string(), "opus".to_string()];
         assert_eq!(normalize_main_models(&raw).unwrap(), vec!["opus"]);
         assert!(normalize_main_models(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn configured_model_is_trimmed_empty_or_bounded() {
+        assert_eq!(
+            normalize_configured_model("  claude-opus-5-5 ").unwrap(),
+            "claude-opus-5-5"
+        );
+        // Empty is how the page clears the setting: Desktop picks the probe model.
+        assert_eq!(normalize_configured_model("   ").unwrap(), "");
+        assert!(normalize_configured_model(&"a".repeat(MAX_MODEL_ID_LEN + 1)).is_err());
+        assert!(normalize_configured_model(&"a".repeat(MAX_MODEL_ID_LEN)).is_ok());
     }
 
     #[test]

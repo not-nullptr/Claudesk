@@ -166,13 +166,15 @@ pub async fn me(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json
 }
 
 /// The deployment settings an account's *instance* needs, which it reads without
-/// a user session: today only the model picker's main-model list, which the
-/// bridge turns into the picker's layout. Deliberately narrow — this route is
-/// reachable without a cookie, so it answers exactly one key and nothing else,
-/// and that key's value is what the picker already shows every signed-in person.
+/// a user session: the model picker's main-model list (the bridge turns it into
+/// the picker's layout) and the model the configuration health check probes (the
+/// bridge judges health against it). Deliberately narrow — this route is
+/// reachable without a cookie, so it answers exactly those two keys and nothing
+/// else, and both are values the picker already shows every signed-in person.
 pub async fn deployment(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     Ok(Json(json!({
         "model_picker_main_models": crate::api_admin::main_models(&state).await?,
+        "configured_model": crate::api_admin::configured_model(&state).await?,
     })))
 }
 

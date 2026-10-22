@@ -299,6 +299,17 @@ const remoteUserName = String(process.env.CLAUDE_REMOTE_USER_NAME || "").trim().
 // list means the native layout: every model at the root, nothing rewritten.
 const MODEL_PICKER_MAX_MODELS = 50;
 const envMainModels = parseModelList(process.env.CLAUDE_MODEL_PICKER_MAIN_MODELS);
+// The model the Desktop's configuration health check probes, named explicitly.
+// Desktop picks one itself — the shortest entry whose name contains haiku,
+// sonnet or opus — and reports that as the "configured model" in "Configured
+// model not available"; no Desktop setting reaches that choice. The admin
+// page's Models setting (authd) is the deployment's value; this env form is for
+// a deployment without an auth service and the fallback when that read fails.
+// Empty keeps Desktop's own pick.
+const MAX_MODEL_ID_LEN = 200;
+const envConfiguredModel = String(process.env.CLAUDE_CONFIGURED_MODEL || "")
+  .trim()
+  .slice(0, MAX_MODEL_ID_LEN);
 
 /** A model-id list from a JSON array, or from a comma/newline-separated string.
  *  A value that opens like JSON but is not an array is a broken list, not a list
@@ -460,21 +471,31 @@ async function authorizeApiRequest(request) {
   return { ok: true, identity };
 }
 
-// The deployment's model-picker layout, as the admin page saved it. It lives in
-// the auth service (authd owns the setting and the admin page that edits it), so
-// this is a plain read of a narrow, cookie-free route — the bootstrap it feeds is
-// fetched on every page load, and the value changes only when an operator edits
-// it, so it is cached briefly. The env list stands in when no auth service is
-// wired up or the read fails, and an empty answer means the native layout.
-const deploymentSettingsCache = { models: null, expires: 0 };
+// The deployment's model settings, as the admin page saved them: the picker's
+// layout and the model its health check probes. They live in the auth service
+// (authd owns the settings and the admin page that edits them), so this is a
+// plain read of a narrow, cookie-free route — the bootstrap it feeds is fetched
+// on every page load, and the values change only when an operator edits them, so
+// they are cached briefly. The env forms stand in when no auth service is wired
+// up or the read fails, and an empty list means the native picker layout.
+const deploymentSettingsCache = { models: null, configuredModel: null, expires: 0 };
 const DEPLOYMENT_SETTINGS_TTL_MS = 30 * 1000;
 
-async function resolveMainModels() {
-  if (!authIdentityUrl) return envMainModels;
+/** Both deployment settings `/api/auth/deployment` answers, read in one request
+ *  and cached together: the picker's layout list and the health check's
+ *  configured model. Either falls back to its env form when the read fails. */
+async function readDeploymentSettings() {
+  if (!authIdentityUrl) {
+    return { models: envMainModels, configuredModel: envConfiguredModel };
+  }
   if (deploymentSettingsCache.models && deploymentSettingsCache.expires > Date.now()) {
-    return deploymentSettingsCache.models;
+    return {
+      models: deploymentSettingsCache.models,
+      configuredModel: deploymentSettingsCache.configuredModel,
+    };
   }
   let models = null;
+  let configuredModel = envConfiguredModel;
   try {
     const response = await fetch(`${authIdentityUrl}/api/auth/deployment`, {
       // A wedged auth service must not hold a page's first load open; the env
@@ -490,12 +511,26 @@ async function resolveMainModels() {
           .map((id) => id.trim())
           .slice(0, MODEL_PICKER_MAX_MODELS);
       }
+      // A string — including "" — is authd's answer, so clearing the setting on
+      // the admin page beats the env value rather than falling back to it.
+      if (typeof body?.configured_model === "string") {
+        configuredModel = body.configured_model.trim().slice(0, MAX_MODEL_ID_LEN);
+      }
     }
-  } catch { /* fall back to the env list */ }
+  } catch { /* fall back to the env forms */ }
   if (models === null) models = envMainModels;
   deploymentSettingsCache.models = models;
+  deploymentSettingsCache.configuredModel = configuredModel;
   deploymentSettingsCache.expires = Date.now() + DEPLOYMENT_SETTINGS_TTL_MS;
-  return models;
+  return { models, configuredModel };
+}
+
+async function resolveMainModels() {
+  return (await readDeploymentSettings()).models;
+}
+
+async function resolveConfiguredModel() {
+  return (await readDeploymentSettings()).configuredModel;
 }
 
 async function resolveRequestAccountIdentity(request) {
@@ -4137,6 +4172,49 @@ async function workingGatewayModel(base, key, scheme, excluded) {
   return null;
 }
 
+/** Health judged against the operator's configured model, when the admin page
+ *  names one. Unlike Desktop's own pick this is a deliberate choice, so its
+ *  answer is taken at face value: a success clears the rejection, a 400/404
+ *  keeps it (naming the chosen id), and any other status is a provider error.
+ *  No alternate-route fan-out here — a model the operator chose and this
+ *  deployment cannot serve should be reported, not papered over with another
+ *  model's success. */
+async function probeConfiguredModelHealth(health, configuredModel, base, key, scheme) {
+  const canonical = await resolveGatewayModelAlias(configuredModel, base, key, scheme);
+  const probed = await probeGatewayModel(canonical, base, key, scheme);
+  if (!probed) return health;
+  const checkedAt = new Date().toISOString();
+  if (probed.ok) {
+    console.log(`[config-health] configured model ${canonical} answered;`
+      + ` clearing the rejection of ${health.probedModel}`);
+    return {
+      ...health,
+      state: "healthy",
+      message: undefined,
+      checkedAt,
+      httpStatus: probed.status,
+      requestUrl: probed.requestUrl,
+      probedModel: canonical,
+      responseBody: undefined,
+    };
+  }
+  const modelRejected = probed.status === 400 || probed.status === 404;
+  console.log(`[config-health] configured model ${canonical} answered HTTP ${probed.status}`
+    + (modelRejected ? "; the gateway does not serve it" : ""));
+  return {
+    ...health,
+    state: modelRejected ? "config_model_rejected" : "provider_error",
+    message: modelRejected
+      ? `Gateway rejected model "${canonical}" (HTTP ${probed.status})`
+      : `Gateway returned HTTP ${probed.status}`,
+    checkedAt,
+    httpStatus: probed.status,
+    requestUrl: probed.requestUrl,
+    probedModel: canonical,
+    responseBody: probed.body || undefined,
+  };
+}
+
 /**
  * The Desktop's config-health probe runs in its main process, against the bare
  * model alias its discovery picked. A gateway that lists `claude-opus-5-5`
@@ -4146,6 +4224,8 @@ async function workingGatewayModel(base, key, scheme, excluded) {
  * gateway does serve: a success clears the false rejection; a rejection of the
  * canonical id is kept (and a rate limit/5xx is retried against another seeded
  * model, so one exhausted route is not reported as a broken configuration).
+ * When the admin page names a configured model, that id is probed instead — see
+ * probeConfiguredModelHealth.
  * Only a browser's settings call reaches this — the native window talks to its
  * main process directly.
  */
@@ -4156,6 +4236,15 @@ async function correctedGatewayHealth(health) {
   const key = process.env.CLAUDE_GATEWAY_API_KEY || "";
   const scheme = process.env.CLAUDE_GATEWAY_AUTH_SCHEME || "bearer";
   if (!base || !key) return health;
+  // An operator-picked configured model wins over Desktop's own pick. That pick
+  // is the shortest haiku/sonnet/opus entry, which no Desktop setting reaches —
+  // exactly the model the banner names when the gateway does not serve it. The
+  // admin page's choice is the deployment's answer to that, so probe it instead
+  // of trying to rescue Desktop's pick.
+  const configuredModel = await resolveConfiguredModel();
+  if (configuredModel) {
+    return probeConfiguredModelHealth(health, configuredModel, base, key, scheme);
+  }
   const canonical = await resolveGatewayModelAlias(health.probedModel, base, key, scheme);
   if (canonical === health.probedModel) return health;
   const probed = await probeGatewayModel(canonical, base, key, scheme);
@@ -6780,6 +6869,10 @@ server.listen(port, host, () => {
   if (envMainModels.length) {
     console.log(`[cowork-bridge] model picker: ${envMainModels.length} main model(s) at the root: `
       + envMainModels.join(", "));
+  }
+  if (envConfiguredModel) {
+    console.log(`[cowork-bridge] config health check probes ${envConfiguredModel}`
+      + " (CLAUDE_CONFIGURED_MODEL; the admin page's setting wins when authd answers)");
   }
   console.log(
     `[cowork-bridge] session-file fallback on, cap ${sessionFileMaxBytes} bytes`

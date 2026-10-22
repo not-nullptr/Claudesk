@@ -130,7 +130,8 @@ instance that has not answered a page load yet falls back to the
 id by hand.
 
 The setting is deployment-wide and lives in `authd` (`settings` table, read back
-through `GET /api/auth/deployment`, which answers that one key and nothing else).
+through `GET /api/auth/deployment`, which answers only deployment-wide keys like
+this one).
 Each account's bridge reads it and rewrites the model list in the bootstrap document
 it already proxies, so no renderer patch is involved: the split is data — a `section`
 of `main` or `overflow` on each entry, with the array order as the root order. A
@@ -142,6 +143,28 @@ Clearing the list restores the native layout. `CLAUDE_MODEL_PICKER_MAIN_MODELS` 
 the same list in env form, for a deployment with no auth service; with
 `AUTH_IDENTITY_URL` set it is only the fallback for a failed read. A list whose ids
 are all absent from the picker is logged and ignored, so a typo cannot empty the menu.
+
+### The configured model
+
+The app's configuration health check probes one model. Desktop chooses that model
+itself — the shortest entry in the model list whose name contains `haiku`,
+`sonnet` or `opus` (else the first entry) — and calls it the *configured model*.
+No Desktop setting reaches the choice, so a gateway that does not serve that
+particular route makes every page show **Configured model not available**, even
+when it serves the models the picker offers. The banner's detail names the model
+it probed.
+
+The **Models** page's **Configured model** field names the model explicitly.
+The setting is deployment-wide, lives in `authd` beside the picker layout, and
+is read by each instance through `GET /api/auth/deployment`. The bridge probes
+the named model (`/v1/messages`, `max_tokens: 1`) instead of Desktop's pick and
+reports the health check from that answer: a success clears the error, a 400/404
+keeps it with the chosen id, and any other status is reported as a provider
+error. Leave the field empty to let Desktop choose again.
+
+`CLAUDE_CONFIGURED_MODEL` is the env form, for a deployment with no auth service
+and the fallback when that read fails. Clearing the field on the admin page wins
+over the env value.
 
 ### Each account gets its own instance
 

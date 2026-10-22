@@ -401,7 +401,8 @@ async fn main() {
             post(api_routines::revoke),
         )
         // Read by an account's instance (no session), so it sits under /api/auth/
-        // where the proxy routes to authd; it answers one key. See api_auth.rs.
+        // where the proxy routes to authd; it answers the deployment-wide model
+        // settings only. See api_auth.rs.
         .route("/api/auth/deployment", get(api_auth::deployment))
         // Internal: the box gateway resolves an account's opaque gateway key to
         // that account's own upstream key. Deliberately outside `/api/*` so the

@@ -285,6 +285,12 @@ services:
       # setting is what this reads and this is only the fallback; empty means the
       # native layout, every model at the root.
       CLAUDE_MODEL_PICKER_MAIN_MODELS: "${CLAUDE_MODEL_PICKER_MAIN_MODELS:-}"
+      # The model the configuration health check probes. Desktop otherwise picks
+      # one itself and names it in "Configured model not available" when the
+      # gateway does not serve it. With AUTH_IDENTITY_URL set, the admin page's
+      # Models setting is what this reads and this is only the fallback; empty
+      # lets Desktop choose. See .env.example.
+      CLAUDE_CONFIGURED_MODEL: "${CLAUDE_CONFIGURED_MODEL:-}"
       # Browser notifications: Web Push subscriptions, the VAPID key they are
       # bound to and the notification-preferences the settings panel writes, all
       # kept here so a restart does not drop every subscription. Contact address
