@@ -43,13 +43,14 @@ const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 const gatewayLoopbackHttpPatchId = "gateway-url-any-host-http";
 const gatewayLoopbackHttpMessage = "must use https (or http on loopback)";
 // The native file preview draws into an Electron view over Desktop's own window,
-// which the browser never composites, so an Office or PDF file showed a blank
-// pane. This patch swaps the preview component's rendered children for an
+// which the browser never composites, so an Office, PDF, HTML or SVG file showed
+// a blank pane. This patch swaps the preview component's rendered children for an
 // <iframe> at the bridge's own preview route (`/api/remote/files/preview`), which
-// serves the file as a PDF — Office converted by the office-preview sidecar, PDF
-// passed through. It fires only for those extensions; every other file keeps the
-// component's original output. The component is pinned by the one className its
-// container renders, which appears nowhere else in the renderer graph.
+// serves the file as a PDF for Office/PDF — Office converted by the
+// office-preview sidecar, PDF passed through — and serves HTML/SVG as themselves.
+// It fires only for those extensions; every other file keeps the component's
+// original output. The component is pinned by the one className its container
+// renders, which appears nowhere else in the renderer graph.
 const filePreviewPatchId = "native-file-preview-bridge";
 const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
 // A browser-identified renderer resolves its internal code route to claude.ai's
@@ -2120,21 +2121,27 @@ function filePreviewPatch(node, ancestors, source, array) {
   const cacheBuster = destructuredPropName(scope, "cacheBuster");
   const factory = arrayElementFactory(array);
   if (!path || !factory) return;
-  // The bridge route answers with a PDF; cacheBuster re-requests when the file's
-  // content changes. Office and PDF only — any other file keeps the original
-  // children, so html/svg stay on their existing path. The `#toolbar=0` fragment
-  // is a PDF open parameter Chrome's viewer reads off the URL: it hides the
-  // viewer's own toolbar, leaving the pane to show only the document instead of
-  // a second set of controls (its Download would save the converted `.docx.pdf`).
+  // The bridge route answers with a PDF for Office/PDF and with the document
+  // itself for HTML/SVG; cacheBuster re-requests when the file's content
+  // changes. The `#toolbar=0` fragment is a PDF open parameter Chrome's viewer
+  // reads off the URL: it hides the viewer's own toolbar, leaving the pane to
+  // show only the document instead of a second set of controls (its Download
+  // would save the converted `.docx.pdf`). HTML/SVG get a sandboxed iframe and
+  // no fragment: their scripts run in an opaque origin, so a saved document
+  // cannot call the bridge's same-origin `/api/remote/*` routes. Every other
+  // file keeps the original children.
   const url = `"/api/remote/files/preview?path="+encodeURIComponent(${path})`
-    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "")
-    + '+"#toolbar=0"';
-  const iframe = `${factory}("iframe",{src:${url},className:"h-full w-full border-0",`
-    + 'title:"File preview"})';
+    + (cacheBuster ? `+"&v="+encodeURIComponent(String(${cacheBuster}??""))` : "");
+  const pdf = `${factory}("iframe",{src:${url}+"#toolbar=0",`
+    + 'className:"h-full w-full border-0",title:"File preview"})';
+  const document = `${factory}("iframe",{src:${url},`
+    + 'className:"h-full w-full border-0",title:"File preview",'
+    + 'sandbox:"allow-scripts allow-forms allow-modals allow-popups allow-downloads"})';
   const original = source.slice(array.start, array.end);
-  const condition = `/(?:pdf|docx?|pptx?|xlsx?)$/i.test(${path})`;
+  const documents = `/\\.(?:html?|svg)$/i.test(${path})`;
+  const office = `/\\.(?:pdf|docx?|pptx?|xlsx?)$/i.test(${path})`;
   return { original,
-    replacement: `(${condition}?[${iframe}]:[${original.slice(1, -1)}])` };
+    replacement: `(${documents}?[${document}]:${office}?[${pdf}]:[${original.slice(1, -1)}])` };
 }
 
 // The Desktop-only checks slot: the one component rendering a call whose props

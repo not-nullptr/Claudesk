@@ -140,18 +140,24 @@ optional chaining. Positive and negative protocol comparisons retain their
 polarity. The patch extends desktop eligibility when the existing remote
 Gateway setting is enabled; it preserves surrounding feature conditions.
 
-The native file preview — the component that draws Office and PDF previews into an
-Electron view over Desktop's own window — is selected by the one className its
-container renders (`h-full w-full relative overflow-hidden`) together with a
-`children` array; that className appears nowhere else in the renderer graph. The
-splice rewrites only that children array: for a `.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/
-`.xlsx`/`.xls` file it renders an `<iframe>` at the bridge's
-`/api/remote/files/preview` route with a `#toolbar=0` fragment — the PDF open
-parameter Chrome's built-in viewer reads off the URL to hide its own toolbar, so
-the pane shows only the document rather than a second set of controls and
-download buttons (that viewer Download would save the converted `….docx.pdf`);
-Firefox and Safari ignore the parameter and keep their viewer chrome. Every other
-file keeps the original output, so html/svg stay on their existing native path. The component's chunk carries none
+The native file preview — the component that draws Office, PDF, HTML and SVG
+previews into an Electron view over Desktop's own window — is selected by the one
+className its container renders (`h-full w-full relative overflow-hidden`)
+together with a `children` array; that className appears nowhere else in the
+renderer graph. The splice rewrites only that children array: for a
+`.pdf`/`.docx`/`.doc`/`.pptx`/`.ppt`/`.xlsx`/`.xls` file it renders an `<iframe>`
+at the bridge's `/api/remote/files/preview` route with a `#toolbar=0` fragment —
+the PDF open parameter Chrome's built-in viewer reads off the URL to hide its own
+toolbar, so the pane shows only the document rather than a second set of controls
+and download buttons (that viewer Download would save the converted `….docx.pdf`);
+Firefox and Safari ignore the parameter and keep their viewer chrome. For a
+`.html`/`.htm`/`.svg` file it renders an `<iframe>` at the same route without the
+fragment, in an opaque-origin `sandbox` (`allow-scripts`, forms, modals, popups
+and downloads, but never `allow-same-origin`): the document's own scripts still
+run, while a workspace file cannot drive the bridge's same-origin
+`/api/remote/*` IPC with the reader's cookies. The route repeats that sandbox in
+a CSP header so opening the preview URL directly is equally sandboxed. Every
+other file keeps the original output. The component's chunk carries none
 of the other selectors' tokens, so the string prefilter also accepts its own
 DeclineReason test id (`native-file-preview-error`) to reach it. Like the download
 button, the injected `iframe` names three mangled locals read back from the same

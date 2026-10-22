@@ -868,9 +868,10 @@ const bannerCompiled = await minify(bannerInputs.get("banner-chunk.js"), {
 assert.ok(patchRendererSources(new Map([["new-banner.js", bannerCompiled.code]]), true).patches
   .some(patch => patch.id === "inference-banner"), "recompiled card must retain the patch");
 // The preview patch rewrites the native preview's children to an <iframe> at the
-// bridge route carrying a `#toolbar=0` fragment (Chrome's viewer reads it and
-// hides its own toolbar), reading the element factory and the filePath/cacheBuster
-// props back from the component. The preview chunk carries none of the other
+// bridge route. Office/PDF carry a `#toolbar=0` fragment (Chrome's viewer reads
+// it and hides its own toolbar); HTML/SVG are served as themselves in an
+// opaque-origin sandbox. The element factory and the filePath/cacheBuster props
+// are read back from the component. The preview chunk carries none of the other
 // anchors, so its own DeclineReason test id must be enough to trigger inspection.
 const previewProbe = `const id="native-file-preview-error";\n${previewComponent};`;
 assert.ok(inspectRenderer(previewProbe, false).patches.some(patch => patch.id === "native-file-preview-bridge"),
@@ -881,9 +882,18 @@ const previewOut = patchRendererSources(previewInputs, false).sources.get("previ
 assert.ok(previewOut.includes(
   's("iframe",{src:"/api/remote/files/preview?path="+encodeURIComponent(v)'
     + '+"&v="+encodeURIComponent(String(y??""))+"#toolbar=0"'),
-  "the preview gains an iframe built from the read-back factory and props");
-assert.ok(previewOut.includes("/(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
-  "only Office and PDF switch to the iframe; everything else keeps the native render");
+  "the preview gains a PDF iframe built from the read-back factory and props");
+assert.ok(previewOut.includes("/\\.(?:html?|svg)$/i.test(v)"),
+  "HTML and SVG switch to the document iframe");
+assert.ok(previewOut.includes("/\\.(?:pdf|docx?|pptx?|xlsx?)$/i.test(v)"),
+  "Office and PDF switch to the PDF iframe");
+assert.ok(previewOut.includes(
+  'sandbox:"allow-scripts allow-forms allow-modals allow-popups allow-downloads"'),
+  "HTML/SVG render in an opaque-origin sandbox");
+assert.ok(!previewOut.includes("allow-same-origin"),
+  "the preview iframe must not grant itself the bridge's origin");
+assert.ok(previewOut.includes("[ready==null?null:s(Spinner"),
+  "every other file keeps the native render path");
 // Two preview containers, or a container whose props are not the ones read back,
 // must refuse rather than splice a preview that would never fire.
 assert.throws(() => patchRendererSources(new Map([["dup-preview.js",

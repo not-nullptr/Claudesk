@@ -6,12 +6,26 @@ import { basename, extname, join } from "node:path";
 import { resolveDownloadTarget } from "./downloads.mjs";
 
 // File types the browser preview route renders. Office documents are converted
-// to PDF by the sidecar; PDFs are served as-is. This is Desktop's own preview
-// set (`soffice` in the Cowork VM produces the same PDF), minus html/svg, which
-// it renders natively and which must not be served inline from this origin.
+// to PDF by the sidecar; PDFs are served as-is; HTML/SVG are user-authored
+// documents and are served as themselves. This is Desktop's own preview set
+// (`soffice` in the Cowork VM produces the same PDF) plus the document types
+// the pane's iframe can render natively.
 export const OFFICE_EXTENSIONS = new Set([
   ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
 ]);
+export const DOCUMENT_EXTENSIONS = new Set([".html", ".htm", ".svg"]);
+const DOCUMENT_CONTENT_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+// A saved HTML/SVG file is untrusted content. `allow-same-origin` is
+// deliberately absent: with it the document would share the bridge's origin and
+// could drive `/api/remote/*` with the reader's cookies. The pane's iframe
+// carries the same sandbox attribute; this header repeats it so opening the
+// preview URL directly is still an opaque-origin document. Scripts stay enabled
+// for the charts, dashboards and interactive pages a model usually produces.
+const DOCUMENT_SANDBOX = "allow-scripts allow-forms allow-modals allow-popups allow-downloads";
 
 const PDF_MAGIC = Buffer.from("%PDF-");
 const CONVERT_TIMEOUT_MS = 60_000;
@@ -35,6 +49,18 @@ function pdfHeaders(filename, length) {
     "Content-Length": length,
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'self'",
     "Content-Type": "application/pdf",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  };
+}
+
+function documentHeaders(filename, contentType, length) {
+  return {
+    "Cache-Control": "no-store",
+    "Content-Disposition": `inline; filename="${safeFilename(filename)}"`,
+    "Content-Length": length,
+    "Content-Security-Policy": `sandbox ${DOCUMENT_SANDBOX}; frame-ancestors 'self'`,
+    "Content-Type": contentType,
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
   };
@@ -141,8 +167,9 @@ async function pruneCache(cacheRoot) {
 
 /**
  * `GET /api/remote/files/preview?path=…` — serves an Office or PDF session file
- * as an inline PDF for the pane's iframe. Paths resolve through the same roots
- * and containment rules as the download route (`resolveDownloadTarget`), so a
+ * as an inline PDF, and an HTML/SVG session file as a sandboxed inline
+ * document, for the pane's iframe. Paths resolve through the same roots and
+ * containment rules as the download route (`resolveDownloadTarget`), so a
  * preview cannot reach a file a download could not. Returns false for other
  * requests so the caller keeps dispatching.
  */
@@ -173,6 +200,13 @@ export function createPreviewHandler({
     const extension = extname(filePath).toLowerCase();
     if (extension === ".pdf") {
       response.writeHead(200, pdfHeaders(basename(filePath), info.size));
+      createReadStream(filePath).pipe(response);
+      return true;
+    }
+    if (DOCUMENT_EXTENSIONS.has(extension)) {
+      response.writeHead(200, documentHeaders(
+        basename(filePath), DOCUMENT_CONTENT_TYPES[extension], info.size,
+      ));
       createReadStream(filePath).pipe(response);
       return true;
     }
