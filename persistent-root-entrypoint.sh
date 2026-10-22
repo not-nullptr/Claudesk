@@ -115,9 +115,34 @@ mount -t tmpfs \
     tmpfs /.oldroot
 
 ###############################################################################
-# Launch original image command (/init)
+# Drop the capability that made the setup possible.
+#
+# Everything above — the overlay, the bind mounts, pivot_root — needs
+# CAP_SYS_ADMIN. Nothing below does. Dropping it from the bounding set is
+# permanent for this process tree: a shell reached through the app, or through
+# its IPC, can still change uid with the container's sudo, but it cannot mount,
+# pivot_root or setns, so it cannot leave this mount namespace.
+#
+# This is what lets the account keep a privileged container for the *setup* and
+# a persistent root, while a malicious tenant or a prompt-injected agent that
+# reaches the container no longer holds the classic host-escape primitive.
+# CLAUDESK_KEEP_SYS_ADMIN=1 restores the old single-user posture for debugging
+# a start failure; it should never be set on a shared box.
 ###############################################################################
 
-echo "[persistent-root] launching: $*"
+if [ "${CLAUDESK_KEEP_SYS_ADMIN:-0}" = "1" ]; then
+    echo "[persistent-root] keeping SYS_ADMIN (CLAUDESK_KEEP_SYS_ADMIN=1)" >&2
+    exec "$@"
+fi
 
-exec "$@"
+if ! command -v setpriv >/dev/null 2>&1; then
+    echo "[persistent-root] setpriv is missing; refusing to launch with SYS_ADMIN" >&2
+    exit 1
+fi
+
+echo "[persistent-root] dropping SYS_ADMIN from the bounding set"
+exec setpriv \
+    --bounding-set=-sys_admin \
+    --inh-caps=-sys_admin \
+    --ambient-caps=-sys_admin \
+    -- "$@"

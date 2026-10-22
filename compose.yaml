@@ -52,6 +52,9 @@ services:
       # container, so the local Code surface is not written on either — see
       # docs/code-in-cowork-vm.md.
       CLAUDESK_TENANT: "${CLAUDESK_TENANT:-0}"
+      # Debug escape hatch for the entrypoint's post-pivot capability drop.
+      # Leave unset on a shared box; see persistent-root-entrypoint.sh.
+      CLAUDESK_KEEP_SYS_ADMIN: "${CLAUDESK_KEEP_SYS_ADMIN:-0}"
       # Read by the container init: on a tenant this flag (not the executor
       # flag) decides whether the Code surface exists at all. The bridge's own
       # service env carries the same value for the pool API and the VM-side
@@ -118,10 +121,12 @@ services:
       - /dev/vhost-vsock:/dev/vhost-vsock
     group_add:
       - "${KVM_GID:-104}"
-    # The overlay's mount(2) and pivot_root(2) need CAP_SYS_ADMIN, which the
-    # base seccomp profile gates and the persistent variant unlocks (see README
-    # "Security boundary"). userns_mode is host because the container re-roots
-    # itself and Electron needs its own user namespace for the Chromium sandbox.
+    # CAP_SYS_ADMIN is needed by the entrypoint's overlay + pivot_root only.
+    # It drops the capability from the bounding set before /init, so the
+    # running app — and anything it can be made to execute — cannot mount,
+    # pivot_root or setns. userns_mode stays host because the container
+    # re-roots itself and Electron needs its own user namespace for the
+    # Chromium sandbox. See SECURITY.md, "Deployment boundary".
     cap_add:
       - SYS_ADMIN
     userns_mode: "host"
