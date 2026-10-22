@@ -1959,6 +1959,69 @@ const mapperCompiled = await minify(draftMappers(), {
 assert.equal(inspectRenderer(mapperCompiled.code, false, true).patches
   .filter(patch => patch.id === "web-draft-bypass-mode").length, 2,
   "mangled mappers must still be widened");
+// The "Skip all approvals" banner. While a session's mode is bypassPermissions
+// the renderer warns "Skip all approvals is on. Claude never pauses, even for
+// unsafe actions…". Every session here is inside the operator's own VM, so the
+// warning is noise; the patch exits the component for that mode and session
+// surface only, before its final return (after every hook) so switching modes
+// cannot change the hook order. It is pinned by the four i18n message ids of the
+// bypass variants, each required as a `{defaultMessage, id}` descriptor, plus
+// the `mode` and `surface` props.
+const unsupervisedBanner = (props = 'mode:e="bypassPermissions"') =>
+  'function UnsupervisedBanner({' + props + ',onDismiss:n,chromeSkipAllPermissionChecks:r,'
+  + 'surface:o="session"}){let C=e==="auto",w=useLocale(),T=useIntl(),E=w&&!T,'
+  + 'D=useStore(s=>s.hasBlockingWarning,"CoworkUnsupervisedBanner"),O=useFlag(),N=useIntl();'
+  + 'return D||o==="session"&&O?null:el(Banner,{variant:C?"neutral":"warning",onDismiss:n,'
+  + 'children:E?r'
+  + '?N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors, Claude in Chrome, and apps on your computer.",id:"czjJheYzVl"})'
+  + ':N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors and apps on your computer.",id:"zWwXOQjfS6"})'
+  + ':r?N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors and Claude in Chrome.",id:"6yQiJRpovh"})'
+  + ':N({defaultMessage:"<bold>Skip all approvals is on.</bold> Claude never pauses, even for unsafe actions. This includes using your connectors.",id:"WpCGgQYgl9"})})}';
+const skipBannerPatches = inspectRenderer(unsupervisedBanner(), false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner");
+assert.equal(skipBannerPatches.length, 1, "the skip-all-approvals banner must be spliced once");
+assert.equal(skipBannerPatches[0].replacement,
+  'if(e==="bypassPermissions"&&o==="session")return null;',
+  "the exit names the component's own mode and surface bindings");
+const skipBannerSource = unsupervisedBanner();
+const skipBannerOut = skipBannerSource.slice(0, skipBannerPatches[0].start)
+  + skipBannerPatches[0].replacement + skipBannerSource.slice(skipBannerPatches[0].end);
+assert.ok(skipBannerOut.includes('if(e==="bypassPermissions"&&o==="session")return null;'
+  + 'return D||o==="session"&&O?null:el(Banner'),
+  "the exit must sit immediately before the final return, after every hook call");
+assert.equal(inspectRenderer(unsupervisedBanner('mode:perm="bypassPermissions"'), false, false)
+  .patches.find(patch => patch.id === "cowork-skip-approvals-banner")?.replacement,
+  'if(perm==="bypassPermissions"&&o==="session")return null;',
+  "a renamed mode binding must be read back from the component's own parameter");
+// The four descriptors are the pin. A function that spells the ids as plain
+// strings, or a banner missing one of the four arms, is not the target; a
+// component without the `mode` prop cannot select the arms either.
+assert.equal(inspectRenderer('function stringOnly({mode:e="bypassPermissions"}){'
+  + 'return ["czjJheYzVl","zWwXOQjfS6","6yQiJRpovh","WpCGgQYgl9"].includes(e)}', false, false)
+  .patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "plain string literals must not establish the banner");
+assert.equal(inspectRenderer(unsupervisedBanner().replace('id:"WpCGgQYgl9"', 'id:"another"'),
+  false, false).patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a banner missing one bypass arm must survive untouched");
+assert.equal(inspectRenderer(unsupervisedBanner("hub:s"), false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a component without the mode prop must survive untouched");
+assert.equal(inspectRenderer(unsupervisedBanner().replace(',surface:o="session"', ''),
+  false, false).patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a component without the surface prop cannot select the session arms");
+assert.equal(inspectRenderer(`${unsupervisedBanner()}\n`
+  + unsupervisedBanner().replace("function UnsupervisedBanner(", "function OtherBanner("), false, false)
+  .patches.filter(patch => patch.id === "cowork-skip-approvals-banner").length, 0,
+  "a chunk with two candidates must refuse rather than splice the wrong component");
+const skipBannerCompiled = await minify(unsupervisedBanner(), {
+  mangle: true, compress: { unused: false }, format: { quote_style: 1 },
+});
+const compiledSkipBannerPatches = inspectRenderer(skipBannerCompiled.code, false, false).patches
+  .filter(patch => patch.id === "cowork-skip-approvals-banner");
+assert.equal(compiledSkipBannerPatches.length, 1, "a mangled banner must still be spliced once");
+assert.match(compiledSkipBannerPatches[0].replacement,
+  /^if\([A-Za-z_$][\w$]*==="bypassPermissions"&&[A-Za-z_$][\w$]*==="session"\)return null;$/,
+  "the mangled banner's exit must name its own mode and surface bindings");
 // The main process bundles the same schema and runs the Gateway connection test
 // and model discovery there, so the renderer splice alone leaves the process
 // that dials the endpoint still refusing it. patchEmbeddedSources applies only

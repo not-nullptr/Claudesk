@@ -182,6 +182,26 @@ the component is otherwise restructured, candidate preparation fails and the
 selector must be updated before the new Desktop is promoted, rather than the card
 returning silently.
 
+The "Skip all approvals" warning banner — drawn above the composer while a
+session's permission mode is `bypassPermissions`, with the copy "Skip all
+approvals is on. Claude never pauses, even for unsafe actions…" — is removed for
+that mode by `cowork-skip-approvals-banner`. The deployment offers the mode
+deliberately (see `CLAUDE_REMOTE_COWORK_SKIP_APPROVALS`), and every session runs
+inside the operator's own VM, so the warning describes a posture the operator
+chose and cannot escape; the component's Auto-mode arms and its scheduled-task
+notice are left alone. It is selected by the four i18n message ids of the bypass
+copy — one per variant (connectors only, plus Chrome, plus apps, all three) —
+each required as a parsed `{defaultMessage, id}` descriptor, together with the
+destructured `mode` and `surface` props whose `bypassPermissions` and `"session"`
+values select those arms. The splice inserts
+`if (mode === "bypassPermissions" && surface === "session") return null;`
+immediately before the component's final return, after every hook call, so
+switching between Auto and bypass cannot change the hook count of a mounted
+component. It is applied in every generation — a deployment that does not offer
+the mode never draws the banner, so the patch is inert there — and, like the
+titlebar picker, it is deliberately **not** required: a bundle that no longer
+matches leaves the warning visible rather than failing candidate preparation.
+
 The titlebar's compact mode switcher — the `Claude`/`Code` pills at the top right
 of the navbar — exists only to move between the home surface and the Code
 surface, so a deployment with Code turned off (the managed default,

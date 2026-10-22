@@ -654,6 +654,32 @@ const permissionBypassOff = "!1";
 // required.
 const draftBypassPatchId = "web-draft-bypass-mode";
 const draftBypassWire = '"bypassPermissions"';
+// While a session's permission mode is `bypassPermissions`, the renderer draws an
+// "unsupervised" banner above the composer: "Skip all approvals is on. Claude
+// never pauses, even for unsafe actions…", with a safe-use link. That copy
+// describes the mode this deployment deliberately offers (see
+// CLAUDE_REMOTE_COWORK_SKIP_APPROVALS), and every session here runs inside the
+// operator's own VM — the warning is addressed to a cloud user who chose the mode
+// on a shared machine, not to this operator. This patch stops the session arm
+// drawing; the component's Auto-mode arms and its scheduled-task notice are
+// untouched.
+//
+// The component is pinned by the four i18n message ids of its bypass copy (each a
+// content hash of a variant: connectors only, connectors plus Chrome, connectors
+// plus apps, and all three). They are matched only as parsed literals, so a
+// comment or string that spells them cannot establish the target, and the
+// component must also destructure `mode` and `surface` — the props whose
+// `bypassPermissions` and `"session"` values select these arms. The splice is
+// inserted immediately before the component's final return, after every hook
+// call: an early return at the top would change the hook count between modes and
+// React forbids that within a mounted component.
+// Applied in every generation, like the provider-card removal: a deployment that
+// does not offer the mode never renders the banner, so the patch is inert there
+// rather than needing a flag of its own. Deliberately not in `required` — if the
+// ids change upstream the warning simply returns, visibly, rather than failing
+// candidate preparation.
+const skipApprovalsBannerPatchId = "cowork-skip-approvals-banner";
+const skipApprovalsBannerMessageIds = ["czjJheYzVl", "zWwXOQjfS6", "6yQiJRpovh", "WpCGgQYgl9"];
 // The web shell's bottom-left account chip leads with an avatar slot, but in this
 // build that component still reads the account view and then renders the
 // deployment mark, discarding the `src` it just read: with a configured
@@ -1794,6 +1820,47 @@ function draftModeMapper(ast) {
   return found;
 }
 
+// A formatted message descriptor, `{defaultMessage: …, id: "…"}`. Requiring it
+// (rather than any literal that spells the id) keeps an unrelated string from
+// establishing a component.
+function messageDescriptor(node, id) {
+  return node.type === "ObjectExpression"
+    && node.properties.some(entry => key(entry, "id") && literal(entry.value, id))
+    && node.properties.some(entry => key(entry, "defaultMessage"));
+}
+
+// The unsupervised permission banner's session arms (see
+// skipApprovalsBannerPatchId): the one function whose body carries all four
+// bypass message descriptors and whose destructured first parameter binds both
+// `mode` and `surface`. The props may carry defaults, so an AssignmentPattern is
+// read through to its identifier. Returns the bindings and the final return —
+// the statement all the hook calls precede — so the caller can insert an early
+// exit there.
+function skipApprovalsBannerTarget(ast) {
+  const found = [];
+  const binding = (param, name) => {
+    for (const entry of param.properties) {
+      if (entry.type !== "Property" || !key(entry, name)) continue;
+      const value = entry.value?.type === "AssignmentPattern" ? entry.value.left : entry.value;
+      if (value?.type === "Identifier") return value.name;
+    }
+    return undefined;
+  };
+  walk(ast, [], (node) => {
+    if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return;
+    if (!skipApprovalsBannerMessageIds.every(id =>
+      contains(node.body, child => messageDescriptor(child, id)))) return;
+    const param = node.params?.[0];
+    if (param?.type !== "ObjectPattern") return;
+    const mode = binding(param, "mode");
+    const surface = binding(param, "surface");
+    const statement = node.body.body.at(-1);
+    if (!mode || !surface || statement?.type !== "ReturnStatement") return;
+    found.push({ mode, surface, statement });
+  });
+  return found.length === 1 ? found[0] : undefined;
+}
+
 // The flag operand of every unified-composer design predicate: a declaration
 // whose body reads the feature — through the binding that holds its name, or as
 // the literal itself — and ends its answer with `… && !isSidePanel()`. Only that
@@ -2362,6 +2429,9 @@ export const prefilterNeedles = [
   // The shared Checkbox the composer's worktree toggle renders; its chunk
   // publishes it for the routine forms (routine-worktree-control-publish).
   '"data-cds":"Checkbox"',
+  // The unsupervised "Skip all approvals" warning banner and its dismiss key
+  // (cowork-skip-approvals-banner). The key lives in that one chunk.
+  "cowork-unsupervised-banner-dont-show",
   // Bypass permissions availability and the session-host mode list.
   "bypassPermissionsPrefEnabled",
   "permission_modes:{available:",
@@ -4789,6 +4859,16 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     patches.push({ id, start: node.start, end: node.end, original,
       replacement: node.operator.includes("!") ? `(${original}&&!(${remote}))` : `(${original}||${remote})` });
   });
+  // The "Skip all approvals" banner (see skipApprovalsBannerPatchId). Accepted
+  // only when exactly one component of that shape is in the chunk; the exit is
+  // inserted before its final return, so every hook still runs on every render.
+  const skipApprovalsBanner = skipApprovalsBannerTarget(ast);
+  if (skipApprovalsBanner) {
+    const { mode, surface, statement } = skipApprovalsBanner;
+    patches.push({ id: skipApprovalsBannerPatchId, start: statement.start,
+      end: statement.start, original: "",
+      replacement: `if(${mode}==="bypassPermissions"&&${surface}==="session")return null;` });
+  }
   // The caught-error handler takes the error and React's error info and returns
   // nothing; the wrapper logs both (the raw error prints its stack) and then
   // delegates, so the app's own reporting still runs. A throw from the log line
