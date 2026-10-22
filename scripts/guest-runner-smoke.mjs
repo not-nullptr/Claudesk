@@ -819,6 +819,14 @@ for line in sys.stdin:
                 "subtype": "success", "request_id": event.get("request_id"),
                 "response": {"still_queued": [],
                              "send_now": "stopped"}}})
+        elif subtype == "get_context_usage":
+            # The turn-end context question the runner asks before it closes
+            # stdin; answering it keeps the turn's release on its normal clock.
+            emit({"type": "control_response", "response": {
+                "subtype": "success", "request_id": event.get("request_id"),
+                "response": {"categories": [], "totalTokens": 0,
+                             "maxTokens": 200000, "rawMaxTokens": 200000,
+                             "percentage": 0}}})
         continue
     if event.get("type") != "user":
         continue
