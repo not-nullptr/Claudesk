@@ -1401,7 +1401,7 @@ const protocolRules = [
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+\/(?:feature_settings|cowork_settings|office_settings)$/i },
-  { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
+  { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/(?:generate_title_and_branch|generate_session_title)$/i },
   { methods: new Set(["PATCH"]), path: /^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i },
 ];
 
@@ -5205,11 +5205,14 @@ function sendSessionsWatchStream(request, response) {
 // The title (and branch) the app asks its backend for when something is named:
 // the Code composer asks before a session's first send, and chapter renaming
 // asks again later. The Desktop main answers these in-process (a custom-3p
-// stub with an on-device model); a browser page fetches its own origin, so the
-// bridge is the only place that can answer them for the web shell. With no
-// on-device model here, the title is derived from the message — the first
-// meaningful line, cleaned and capped — and the branch from the title the way
-// the app's own fallback does (a slug; omitted when nothing survives).
+// stub that runs one small model request); a browser page fetches its own
+// origin, so the bridge is the only place that can answer them for the web
+// shell — and it does that by relaying the request to the same stub over the
+// internal bridge (see desktopGeneratedTitle). The first-meaningful-line title
+// below is only the fallback for a Desktop that cannot answer: returning it as
+// the primary answer would make every new chat look untitled, because the app
+// shows the same first line as the title's placeholder until the generated one
+// lands.
 function suggestedTitle(message) {
   const first = String(message ?? "")
     .split(/\r?\n/)
@@ -5235,7 +5238,84 @@ function suggestedBranch(title) {
     .replace(/-+$/, "");
 }
 
-async function handleDustApi(request, response, kind) {
+// Ask the Desktop main for the generated title (and branch) exactly as the app
+// would in-process: the same `/dust/...` stub, whose handler runs one small
+// model request. A browser page fetches its own origin and never passes
+// through that handler, so without this relay the web shell would only ever
+// get the derived first line — the same text the app uses as its placeholder,
+// which is why both Chat and Code sessions stopped looking titled when the
+// deployment moved to this shape. The relay goes over the internal bridge
+// (`/protocol`), the same channel `titleCodeSessions` uses for its generator.
+//
+// The request must carry a model: with none, Desktop resolves its own small
+// title model, which this stack's gateway refuses (HTTP 403), so no title is
+// produced. The composer normally sends the model it is about to use;
+// CLAUDE_TITLE_MODEL covers the requests that do not, and a Desktop-side
+// failure of any kind returns null so the caller can fall back.
+async function desktopGeneratedTitle(pathname, body) {
+  // The login shell has no account behind it and refuses the API; never spend
+  // a model call on a request it would not have served anyway.
+  if (loginShellEnabled) return null;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const message = typeof body.first_session_message === "string"
+    ? body.first_session_message.trim() : "";
+  if (!message) return null;
+  const payload = { first_session_message: message };
+  if (typeof body.title_style === "string" && body.title_style) {
+    payload.title_style = body.title_style;
+  }
+  if (typeof body.model === "string" && body.model.trim()) {
+    payload.model = body.model.trim();
+  } else if (titleModel) {
+    payload.model = titleModel;
+  }
+  try {
+    const result = await desktop.protocol({
+      method: "POST",
+      pathname,
+      search: "",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      bodyBase64: Buffer.from(JSON.stringify(payload)).toString("base64"),
+    });
+    if ((result?.status || 0) >= 400) return null;
+    const parsed = JSON.parse(
+      Buffer.from(result?.bodyBase64 || "", "base64").toString("utf8"),
+    );
+    const title = typeof parsed?.title === "string"
+      ? parsed.title.replace(/\s+/g, " ").trim() : "";
+    if (!title) return null;
+    return {
+      title,
+      branch: typeof parsed?.branch_name === "string" ? parsed.branch_name.trim() : "",
+    };
+  } catch {
+    // Desktop not reachable yet, the stub refused, or the model call failed —
+    // the derived title below is what the app would show before generation
+    // lands, so the session still gets named rather than left blank.
+    return null;
+  }
+}
+
+async function handleDustApi(request, response, kind, pathname) {
+  // The login shell refuses the whole API, and this bridge-answered corner is
+  // no exception. It is answered before handleApi's own gate (a browser fetches
+  // these paths from the shell itself), so the refusal is repeated here.
+  if (loginShellEnabled) {
+    sendJson(response, 403, { ok: false, error: "not signed in" });
+    return;
+  }
+  // These routes reach this account's Desktop and spend its inference (the
+  // title relay), and a peer container on the shared network can reach this
+  // port without the proxy, so they follow the same session gate as handleApi.
+  const authorization = await authorizeApiRequest(request)
+    .catch(() => ({ ok: false, status: 401, error: "not signed in" }));
+  if (!authorization.ok) {
+    sendJson(response, authorization.status || 401, {
+      ok: false,
+      error: authorization.error || "not signed in",
+    });
+    return;
+  }
   let body = {};
   try {
     body = await readJson(request);
@@ -5249,14 +5329,15 @@ async function handleDustApi(request, response, kind) {
     sendJson(response, 200, { results: [] });
     return;
   }
+  const generated = await desktopGeneratedTitle(pathname, body);
   const message = typeof body?.first_session_message === "string"
     ? body.first_session_message : "";
-  const title = suggestedTitle(message);
+  const title = generated?.title || suggestedTitle(message);
   if (kind === "generate_session_title") {
     sendJson(response, 200, { title });
     return;
   }
-  const branch = suggestedBranch(title);
+  const branch = generated?.branch || suggestedBranch(title);
   sendJson(response, 200, { title, ...(branch ? { branch_name: branch } : {}) });
 }
 
@@ -6539,7 +6620,7 @@ const server = http.createServer(async (request, response) => {
       /^\/api\/organizations\/[0-9a-f-]{36}\/dust\/(generate_title_and_branch|generate_session_title|command_display_names)$/
         .exec(url.pathname);
     if (dustMatch && request.method === "POST") {
-      await handleDustApi(request, response, dustMatch[1]);
+      await handleDustApi(request, response, dustMatch[1], url.pathname);
     } else if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/edge-api/")) {
       await handleApi(request, response, url);
     }

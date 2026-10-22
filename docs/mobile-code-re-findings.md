@@ -992,3 +992,13 @@ drops the one-turn rule — a session is a candidate for as long as its title is
 Desktop's copy of the first message, and is left alone the moment the user or the
 agent has chosen a real one (`titleSource` `user`/`tool`, or a title that no
 longer starts the message).
+
+The poller only sees sessions in the Desktop `LocalSessions` store, so it names
+nothing on a tenant, whose Code runs in the Cowork VM. There the title comes
+from the Code surface's own pre-create request
+(`generate_title_and_branch`): a browser fetches the bridge's origin, and the
+bridge relays it to the same Desktop main stub over the internal `/protocol`
+channel (as it does `generate_session_title` for Chat), passing the composer's
+model. The derived first line is only the fallback for a Desktop that cannot
+answer — as the primary answer it matched the app's own title placeholder, so
+sessions looked untitled.

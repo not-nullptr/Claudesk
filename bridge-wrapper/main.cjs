@@ -1935,7 +1935,11 @@ const protocolRules = [
   { methods: new Set(["PATCH"]), path: /^\/api\/account\/settings$/ },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+$/i },
   { methods: new Set(["GET"]), path: /^\/api\/organizations\/[0-9a-f-]+\/(?:feature_settings|cowork_settings|office_settings)$/i },
-  { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/generate_session_title$/i },
+  // Title generation and the branch preview. The browser's own fetches never
+  // reach the app:// protocol handler, so the bridge relays them here; both
+  // are read-only model requests that answer a title (and, for the second, the
+  // branch name) the app applies to the session it is about to create.
+  { methods: new Set(["POST"]), path: /^\/api\/organizations\/[0-9a-f-]+\/dust\/(?:generate_title_and_branch|generate_session_title)$/i },
   { methods: new Set(["PATCH"]), path: /^\/api\/organizations\/[0-9a-f-]+\/model_selector_state\/[A-Za-z0-9_-]+$/i },
 ];
 

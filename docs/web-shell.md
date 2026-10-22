@@ -127,6 +127,20 @@ app's current-account context reads — so the composer takes the local path thi
 bridge backs over the Desktop IPC. Spliced and required only when
 `CLAUDE_REMOTE_WEB_SHELL=1`.
 
+### Session titles
+
+A browser page names a new Chat or Code session by fetching its own origin —
+`POST /api/organizations/<org>/dust/generate_session_title`, and the Code
+composer's pre-create `…/generate_title_and_branch` — because the Desktop main
+answers those paths in-process through the `app://` protocol, which a browser
+never reaches. The bridge therefore relays the request to that same stub over
+the internal `/protocol` channel (see `docs/code-in-cowork-vm.md`), passing the
+model the composer chose (or `CLAUDE_TITLE_MODEL` when it sent none), so the
+title is the one Desktop's generator writes. If Desktop cannot answer, the
+bridge falls back to the message's first meaningful line — the same text the
+app shows as the title's placeholder, so a session with an unavailable
+generator looks untitled rather than failing.
+
 ### Code sessions stay out of the Chat list
 
 Chat/Cowork and Code are separate stores — `LocalAgentModeSessions` and the

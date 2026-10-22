@@ -34,6 +34,7 @@ const children = [];
 let gateway = null;
 let tenantWorkspace = null;
 let internalWrapper = null;
+let titleDesktop = null;
 
 // Read an SSE stream until it has carried `frames` client events (or it goes
 // quiet), then drop the connection — the stream tails forever by design.
@@ -54,6 +55,16 @@ async function readStream(port, path, frames, timeoutMs = 5000) {
   clearTimeout(timer);
   controller.abort();
   return chunks.join("");
+}
+
+// A port nothing is using, for a bridge this smoke boots once. The fixed ports
+// elsewhere in this file predate the box running other services on them.
+async function freePort() {
+  const probe = http.createServer((request, response) => response.end());
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
 }
 
 async function boot({ port, env }) {
@@ -827,11 +838,97 @@ try {
   });
   assert.equal(ownerModel.status, 404,
     "and the model passthrough belongs to a tenant with runners, not to it");
+
+  // --- titles: the browser's fetch is relayed to the Desktop main -----------
+  // A browser page fetches its own origin, so the app's `/dust/` title calls
+  // land on the bridge and never reach the Desktop main's in-process stub (one
+  // small model request). The bridge relays them over the internal bridge with
+  // the model the composer chose; only a Desktop that cannot answer leaves the
+  // derived first line, which is also the app's placeholder and therefore
+  // looks untitled. Every other bridge in this smoke runs with no Desktop and
+  // already pins that fallback (see the tenant requests above).
+  const titleHits = [];
+  titleDesktop = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const reply = (value) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, value }));
+      };
+      if (request.method === "POST" && request.url === "/protocol") {
+        const envelope = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const raw = Buffer.from(envelope.bodyBase64 || "", "base64").toString("utf8");
+        const sent = raw ? JSON.parse(raw) : {};
+        titleHits.push({ pathname: envelope.pathname, body: sent });
+        if (String(sent.first_session_message).includes("refuse")) {
+          reply({ status: 502, contentType: "application/json",
+            bodyBase64: Buffer.from("{}").toString("base64") });
+          return;
+        }
+        const generated = envelope.pathname.endsWith("generate_title_and_branch")
+          ? { title: "A generated title", branch_name: "a-generated-title" }
+          : { title: "A generated title" };
+        reply({ status: 200, contentType: "application/json",
+          bodyBase64: Buffer.from(JSON.stringify(generated)).toString("base64") });
+        return;
+      }
+      reply({});
+    });
+  });
+  await new Promise((resolve) => titleDesktop.listen(0, "127.0.0.1", resolve));
+  const titleRequest = await boot({
+    port: await freePort(),
+    env: {
+      COWORK_INTERNAL_URL: `http://127.0.0.1:${titleDesktop.address().port}`,
+      CLAUDE_TITLE_MODEL: "title-model",
+    },
+  });
+  const chatTitle = await titleRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_session_title",
+    { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ first_session_message: "Plan a trip to Lisbon" }) });
+  assert.equal(chatTitle.status, 200, chatTitle.body);
+  assert.equal(JSON.parse(chatTitle.body).title, "A generated title",
+    "a chat title comes from Desktop's generator, not the message's first line");
+  assert.deepEqual(titleHits.at(-1), {
+    pathname:
+      "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_session_title",
+    // The composer sent no model, so the operator's title model is supplied:
+    // Desktop's own small model is not served by this gateway.
+    body: { first_session_message: "Plan a trip to Lisbon", model: "title-model" },
+  }, "the relay carries the message and a served model");
+
+  const codeTitle = await titleRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_title_and_branch",
+    { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ first_session_message: "Add dark mode", title_style: "default",
+        model: "composer-model" }) });
+  assert.deepEqual(JSON.parse(codeTitle.body),
+    { title: "A generated title", branch_name: "a-generated-title" },
+    "the Code preview gets Desktop's title and branch");
+  assert.deepEqual(titleHits.at(-1), {
+    pathname:
+      "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_title_and_branch",
+    body: { first_session_message: "Add dark mode", title_style: "default",
+      model: "composer-model" },
+  }, "the composer's own model and title style are passed through");
+
+  const refused = await titleRequest(
+    "/api/organizations/00000000-0000-4000-8000-000000000001/dust/generate_session_title",
+    { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ first_session_message: "## refuse this title\nand more" }) });
+  assert.equal(JSON.parse(refused.body).title, "refuse this title",
+    "a Desktop that cannot answer leaves the derived first line as the fallback");
 } finally {
   for (const child of children) child.kill("SIGTERM");
   if (internalWrapper !== null) {
     internalWrapper.closeAllConnections?.();
     internalWrapper.close();
+  }
+  if (titleDesktop !== null) {
+    titleDesktop.closeAllConnections?.();
+    titleDesktop.close();
   }
   if (gateway !== null) {
     // The bridges keep their upstream connection to the stub alive; close
