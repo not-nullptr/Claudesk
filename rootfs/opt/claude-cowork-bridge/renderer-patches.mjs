@@ -70,6 +70,15 @@ const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
 // matches fails preparation instead of silently losing the tab.
 const settingsExtensionsTabPatchId = "settings-extensions-tab";
 const settingsExtensionsGroupPatchId = "settings-extensions-group";
+// The desktop settings *pages* (Extensions, its advanced/detail pages, and the
+// Developer page) are wrapped by a component that refuses to render them unless
+// the client identifies as the Desktop app — the `Claude/<version>` user-agent
+// token — and `onThisDevice` is true. In the web shell the token is dropped on
+// purpose, and sessions run in the account's guest, so every one of those pages
+// called `notFound()` instead: the tab opened, then the whole view became
+// "Page not found". The page itself is this deployment's own (the wrapper and
+// bridge back its IPC), so the guard is bypassed and the content rendered.
+const desktopSettingsPageGatePatchId = "desktop-settings-page-gate";
 const settingsExtensionsHref = "/settings/desktop/extensions";
 // The "This computer" section heading's message id. It pins the push whose
 // condition is the same Desktop-identity flag.
@@ -2442,6 +2451,7 @@ export const prefilterNeedles = [
   'must use https (or http on loopback)', // gateway URL host rule
   '"app:"', // the two gateway-setup guards
   "settings/desktop/extensions", // the Settings → Extensions nav item
+  'flex flex-col h-full"', // the desktop settings pages' identity/placement gate
   // Web-shell patches.
   "principalDisplayName", // account menu name
   "signOut", // account sign-out row
@@ -4270,6 +4280,37 @@ function extensionsNavArrayName(ancestors) {
   return name;
 }
 
+// The desktop-settings page wrapper (see desktopSettingsPageGatePatchId):
+//
+//   function Page({className:a="flex flex-col h-full", children:o}) {
+//     let s = desktopIdentity(), { onThisDevice: c } = devicePlacement();
+//     return s || notFound(), c ? jsx("main",{className:a,children:o}) : jsx(NotFound,{})
+//   }
+//
+// The return is `(s || notFound(), c ? main : notFound-component)`. Replace it
+// with the `main` arm, keeping the two hook calls above it in place. Pinned by
+// the `onThisDevice` destructuring and the `"main"` element, so no other
+// component is a target.
+function desktopSettingsPageGate(node) {
+  if (!functionTypes.has(node.type) || node.body?.type !== "BlockStatement") return null;
+  const statements = node.body.body;
+  if (statements.length !== 2) return null;
+  const [declaration, returned] = statements;
+  if (declaration.type !== "VariableDeclaration" || returned.type !== "ReturnStatement") {
+    return null;
+  }
+  if (!contains(declaration, child => child.type === "Property" && key(child, "onThisDevice"))) {
+    return null;
+  }
+  const value = unwrap(returned.argument);
+  if (value?.type !== "SequenceExpression" || value.expressions.length !== 2) return null;
+  const conditional = unwrap(value.expressions[1]);
+  if (conditional?.type !== "ConditionalExpression") return null;
+  if (!contains(conditional.consequent, child => literal(child, "main"))) return null;
+  return { start: returned.argument.start, end: returned.argument.end,
+    consequent: conditional.consequent };
+}
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   tenantEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
@@ -4826,6 +4867,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
           replacement: `(${original}||${arrayName}.length>0)` });
       }
     }
+    const settingsPageGate = desktopSettingsPageGate(node);
+    if (settingsPageGate) {
+      patches.push({ id: desktopSettingsPageGatePatchId,
+        start: settingsPageGate.start, end: settingsPageGate.end,
+        original: source.slice(settingsPageGate.start, settingsPageGate.end),
+        replacement: source.slice(settingsPageGate.consequent.start, settingsPageGate.consequent.end) });
+    }
     if (filePaneDownloadTarget(node, ancestors)) {
       button ??= ghostIconButton(ast);
       const patch = filePaneDownloadPatch(node, ancestors, source, button);
@@ -5299,10 +5347,13 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
   // must fail preparation rather than quietly drop the tab again.
   const carriesExtensionsNavigation = [...sources.values()]
     .some(value => value.includes(settingsExtensionsHref));
+  const carriesDesktopSettingsPages = [...sources.values()]
+    .some(value => value.includes("onThisDevice") && value.includes('flex flex-col h-full"'));
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
     ...(carriesExtensionsNavigation
       ? [settingsExtensionsTabPatchId, settingsExtensionsGroupPatchId] : []),
+    ...(carriesDesktopSettingsPages ? [desktopSettingsPageGatePatchId] : []),
     ...(webShellEnabled
       ? [routeAliasPatchId,
           sessionViewerPatchId, localSessionPlacementPatchId,

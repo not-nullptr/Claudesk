@@ -341,6 +341,16 @@ const settingsNav = 'function settingsNav(b,C,E,T,t){'
 const settingsNavDecoy = 'function elsewhere(){return {href:"/settings/desktop/extensions",'
   + 'title:"Extensions"}}'
   + 'function otherGroup(b,c){return b&&c.push({title:"Elsewhere",sections:[]})}';
+// The desktop-settings page wrapper: identity check, placement check, then
+// either the page content or the not-found component. In a browser shell both
+// checks are false, so the page called notFound(); the patch keeps the hooks but
+// renders the content arm.
+const settingsPageGate = 'function DesktopSettingsPage({className:a="flex flex-col h-full",children:o}){'
+  + 'let s=desktopIdentity(),{onThisDevice:c}=placement();'
+  + 'return s||notFound(),c?h("main",{className:a,children:o}):h(NotFound,{})}';
+const settingsPageGateDecoy = 'function Other({className:a="x",children:o}){'
+  + 'let s=desktopIdentity(),{onThisDevice:c}=placement();'
+  + 'return c?h("div",{children:o}):h(Else,{})}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -355,9 +365,9 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${settingsNav}\n${settingsNavDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${settingsNav}\n${settingsNavDecoy}\n${settingsPageGate}\n${settingsPageGateDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
-  assert.equal(result.patches.length, 9);
+  assert.equal(result.patches.length, 10);
   const output = result.sources.get(`changed-chunk-${i}.js`);
   assert.equal(result.patches.filter(p => p.id === "account-sign-out-row").length, 1,
     "the user menu's signOut flag must be spliced exactly once");
@@ -375,7 +385,7 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 23,
+  assert.equal(webResult.patches.length, 24,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts, the toast-manager global and the chunk loader's asset base");
   assert.equal(webResult.patches.filter(p => p.id === "web-shell-asset-base").length, 1,
     "the chunk loader must resolve through the deployment's asset base");
@@ -409,7 +419,7 @@ for (const [i, variant] of variants.entries()) {
   // must resolve to the surface the bridge drives. The isolation guarantee is
   // the environment list and the LocalSessions guard, not the route name.
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 23,
+  assert.equal(tenantResult.patches.length, 24,
     "a tenant's web shell keeps every web-shell patch, the route alias included");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1,
     "a tenant's `/code` must resolve to the surface this bridge drives");
@@ -526,7 +536,8 @@ for (const [i, variant] of variants.entries()) {
   assert.deepEqual(disabled.patches.map(patch => patch.id),
     ["file-pane-download", "inference-banner", "native-file-preview-bridge",
       "account-sign-out-row", "gateway-url-any-host-http",
-      "settings-extensions-tab", "settings-extensions-group"],
+      "settings-extensions-tab", "settings-extensions-group",
+      "desktop-settings-page-gate"],
     "without the Gateway flag only the always-on patches are spliced");
   const disabledOutput = disabled.sources.get(`changed-chunk-${i}.js`);
   assert.ok(disabledOutput.includes('icon:"Download"'), "the download button stays on with the flag off");
@@ -560,10 +571,34 @@ for (const [i, variant] of variants.entries()) {
     "the section group opens when the appended item is the only entry");
   assert.ok(navSource.includes("function elsewhere()"),
     "an href outside a nav conditional must not be spliced");
+  // The desktop settings page renders even though a browser shell is neither
+  // Desktop-identified nor running sessions on this device. The hooks stay in
+  // place; only the return arm changes, and notFound() is never called.
+  assert.equal(webResult.patches.filter(p => p.id === "desktop-settings-page-gate").length, 1,
+    "the desktop settings page guard must be spliced exactly once");
+  let notFoundCalled = false;
+  const gateContext = {
+    desktopIdentity: () => false,
+    placement: () => ({ onThisDevice: false }),
+    notFound: () => { notFoundCalled = true; throw new Error("not found"); },
+    h: (tag, props) => ({ tag, props }),
+    NotFound: () => ({ tag: "not-found" }),
+    callbacks: {}, event: {}, result: null,
+  };
+  vm.runInNewContext(
+    `${navSource}\nresult=DesktopSettingsPage({className:"x",children:"child"});`,
+    gateContext,
+  );
+  assert.equal(gateContext.result.tag, "main",
+    "the page content must render for a browser shell");
+  assert.equal(gateContext.result.props.children, "child");
+  assert.equal(notFoundCalled, false, "the page must not call notFound()");
+  assert.ok(navSource.includes("function Other("),
+    "a component without the main/not-found arms must not be spliced");
   const compiled = await minify(inputs.get(`changed-chunk-${i}.js`), {
     mangle: true, compress: { unused: false }, format: { quote_style: 1 },
   });
-  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 9,
+  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 10,
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
