@@ -3122,6 +3122,25 @@ export function createRunnerBackend({
       return poolEnvironment(pool, { online: true });
     },
 
+    /**
+     * Whether this instance has Code work that needs the guest VM up: an
+     * active, offered or pending session. Surfaced on the unauthenticated
+     * `/api/health` liveness answer because the Desktop-side idle monitor that
+     * reads it has no browser session (see bridge-wrapper/main.cjs's
+     * `codeSessionActivity`). Counted across every pool — one guest backs them
+     * all — so a session placed on a second pool still pins the VM.
+     */
+    async activity() {
+      const state = await load();
+      const count = (value) =>
+        state.sessions.filter((session) => session.state === value).length;
+      return {
+        active_sessions: count("active"),
+        offered_sessions: count("offered"),
+        pending_sessions: count("pending"),
+      };
+    },
+
     /** The pool a runner is pointed at, for provisioning and diagnostics. */
     async primaryPool() {
       const state = await load();

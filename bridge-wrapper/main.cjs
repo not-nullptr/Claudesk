@@ -2489,8 +2489,12 @@ async function readCoworkVmWorkState() {
 // Code sessions run on the guest runner, not in `LocalAgentModeSessions`, so
 // the Cowork-session check below cannot see a turn that is answering right
 // now. Ask the bridge — it shares this container's network namespace — for its
-// runner/session counts. A bridge that cannot answer leaves the existing
-// renderer-based decision in place (fail open) rather than pinning every VM on.
+// runner/session counts. This process has no browser session, and a tenant's
+// bridge gate is always on, so the counts are part of its unauthenticated
+// liveness answer (see `/api/health` in bridge/server.mjs): they are what keeps
+// the guest up under a long turn instead of the ACPI powerdown below cutting it
+// off. A bridge that cannot answer leaves the existing renderer-based decision
+// in place (fail open) rather than pinning every VM on.
 const codeActivityUrl = `http://127.0.0.1:${process.env.COWORK_BRIDGE_PORT || 8080}/api/health`;
 async function codeSessionActivity() {
   try {

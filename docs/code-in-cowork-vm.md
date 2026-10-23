@@ -967,6 +967,13 @@ the wake and its runner's first poll. Without the retry the run sat on
 "Waiting for a runner…" until somebody opened a page, which is what started the
 VM. The wrapper's idle monitor now counts pending sessions as work too, so a
 run that is about to be picked up does not have the guest powered down under it.
+Those counts ride the **unauthenticated** `/api/health` liveness answer — three
+integers, no instance name and no surface list — because the monitor runs in the
+Desktop container and has no browser session. A tenant's bridge gate is always
+on, so keeping the counts behind a session made the monitor blind to Code turns
+entirely: `CLAUDE_COWORK_VM_IDLE_MINUTES` (30 by default) then powered the guest
+down in the middle of a long turn, the runner vanished, and the reaper closed the
+turn with "the runner went offline; this turn was interrupted".
 
 The wake itself is bounded for the interactive reads (`CLAUDESK_RUNNER_WAKE_WAIT_MS`,
 5 s by default), because `startVM` on a cold VM can take a minute. That makes a

@@ -170,6 +170,29 @@ try {
   assert.ok(JSON.parse(registered.body).runner_id.startsWith("ccrunner_"),
     "the runner registers without a browser session");
 
+  // The gate must not blind the Cowork VM's idle monitor. It lives in the
+  // Desktop container with no browser session, so it reads liveness
+  // unauthenticated; without the Code counts it powered the guest down under a
+  // long turn (bridge-wrapper/main.cjs's codeSessionActivity), which surfaced as
+  // "the runner went offline; this turn was interrupted". Counts, not identity.
+  const placed = await request("/v1/code/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...owner },
+    body: JSON.stringify({
+      title: "auth smoke",
+      self_hosted_runner_pool_id: stored.pools[0].pool_id,
+    }),
+  });
+  assert.equal(placed.status, 201, placed.body);
+  const liveness = JSON.parse((await request("/api/health")).body);
+  assert.equal(liveness.instance, undefined,
+    "the liveness answer still names no instance");
+  assert.ok(liveness.codeRunner, "liveness carries the Code counts the idle monitor reads");
+  assert.equal(liveness.codeRunner.pending_sessions, 1,
+    "a placed turn is visible to the unauthenticated idle monitor");
+  assert.equal(liveness.codeRunner.active_sessions, 0);
+  assert.equal(liveness.codeRunner.offered_sessions, 0);
+
   process.stdout.write("bridge-auth-smoke: tenant API gate passed\n");
 } finally {
   for (const child of children) child.kill("SIGTERM");

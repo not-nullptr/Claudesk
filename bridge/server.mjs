@@ -6327,7 +6327,20 @@ async function handleApi(request, response, url) {
     // A peer with no session gets liveness only: the full document names the
     // instance (its account-derived prefix) and the surfaces it exposes.
     if (!authorization.ok) {
-      sendJson(response, 200, { ok: true });
+      // ...except the Code session counts. The Cowork VM's idle monitor runs in
+      // the Desktop container and has no browser session, so on a tenant (where
+      // the gate is always on) it reads this answer unauthenticated. Withholding
+      // the counts made it blind to a Code turn running on the guest runner and
+      // it powered the VM down underneath a long one — the turn then ended as
+      // "the runner went offline". Three integers name no account; everything
+      // identity-bearing or surface-bearing stays behind the session.
+      const activity = codeRunnersEnabled
+        ? await codeRunners.activity().catch(() => null)
+        : null;
+      sendJson(response, 200, {
+        ok: true,
+        ...(activity ? { codeRunner: activity } : {}),
+      });
       return;
     }
     try {
