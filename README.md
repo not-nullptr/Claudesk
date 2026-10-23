@@ -339,19 +339,21 @@ Bridge 的 `/api/remote/ipc` 请求也就永远不返回，面板一直转圈—
 
 ### 桌面扩展（`.mcpb` / MCPB）
 
-官方 Linux 版自带桌面扩展（Settings → Extensions），但三方模式默认关闭它，而且还有三道门：扩展安装授权要求
+官方 Linux 版自带桌面扩展（Settings → Extensions），但三方模式默认关闭它，而且还有多道门：扩展安装授权要求
 `hasOrgPolicyBackend()`（claude.ai 的机构策略服务，本部署没有），Settings 导航里的 “This computer → Extensions”
-只对 Desktop 身份、且“会话在本机运行”的客户端渲染，而 Extensions 页面本身也被同一个 Desktop 身份检查包着
-（不满足时直接 `notFound()`）——浏览器 shell 全都不满足，所以以前既没有标签页也无法安装 `.mcpb`。
+只对 Desktop 身份、且“会话在本机运行”的客户端渲染，Extensions 页面本身也被同一个 Desktop 身份检查包着
+（不满足时直接 `notFound()`），预览弹窗里的 Install 按钮还要求 Desktop 身份且扩展目录可用——浏览器 shell 全都不满足。
 
 现在：`30-claude-config.sh` 在 `claude_desktop_config.json` 写入 `extensions.enabled: true`，并在 Gateway 配置库/
 环境托管配置里写入对应的扁平键 `isDesktopExtensionEnabled: true`（启用可写 3P 配置库时，应用实际读的是配置库里的
-applied entry，而不是前者）；`bridge-wrapper/extensions.cjs` 只在 Extensions 的 IPC 调用期间把部署模式的
-`hasOrgPolicyBackend()` 强制为 true（其它涉及机构策略的读取保持三方模式的答案）；渲染器补丁把官方的 Extensions
-导航项补进浏览器 shell（Desktop 身份下不重复），并让这个页面在浏览器 shell 里真正渲染而不是显示 “Page not found”。
-浏览器里点 “Install extension” 会打开浏览器的文件选择器，把 `.mcpb` 传到共享工作区，再走官方预览弹窗与安装流程；
-VNC 里的 Desktop 窗口则照旧使用原生文件对话框。扩展的 MCP server 由 Desktop 主进程运行，因此 `node`/`python`/`uv`
-运行时、以及 `uv` 安装时的外网依赖下载需要在这个容器内可用。扩展目录（在线目录）、自动更新开关与签名强制仍不可用。
+applied entry，而不是前者）；`patch-main-process.mjs` 把主进程扩展策略里的安装标志改为只看启用状态（Desktop 窗口因此
+也显示安装控件），`bridge-wrapper/extensions.cjs` 仍在 Extensions IPC 期间把 `hasOrgPolicyBackend()` 强制为 true；
+渲染器补丁把官方的 Extensions 导航项补进浏览器 shell（Desktop 身份下不重复）、让页面真正渲染、并打开预览弹窗里
+Install 控件的那个门。浏览器里既可以**拖放** `.mcpb`/`.dxt` 到 Extensions 页面，也可以在 Advanced settings 点
+“Install extension” 选择文件：文件先传到共享工作区，再交给 Desktop 的 `handleDxtFile` 走官方预览与安装流程；
+VNC 里的 Desktop 窗口则使用原生文件对话框和真实路径。扩展的 MCP server 由 Desktop 主进程运行，因此
+`node`/`python`/`uv` 运行时、以及 `uv` 安装时的外网依赖下载需要在这个容器内可用。扩展目录（在线目录）、自动更新开关
+与签名强制仍不可用。
 详见 [桌面扩展文档](docs/desktop-extensions.md)。安全上把 `.mcpb` 当作“在这台机器上安装的程序”：它以 Desktop 用户身份运行，
 每个账户的实例仍在各自的容器里。
 

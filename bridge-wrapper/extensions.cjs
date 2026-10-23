@@ -11,11 +11,14 @@
 // is claude.ai, which this deployment does not have — so the Settings
 // Extensions page, the install button, and every install handler refuse.
 //
-// The operator of this container is the person installing the bundle, so an
-// Extensions IPC call runs with that predicate forced true. The override is
-// scoped to the call: unrelated organization-policy reads (usage, account
-// capabilities, blocklists) that also consult `hasOrgPolicyBackend()` keep the
-// 3P answer outside it.
+// patch-main-process.mjs also rewrites the main process's extensions policy so
+// the Desktop window's renderer sees the install flag as the enablement answer.
+// This module stays as the narrower guard for the IPC calls themselves (and as
+// defense in depth if a future bundle moves that policy): the operator of this
+// container is the person installing the bundle, so an Extensions IPC call runs
+// with that predicate forced true. The override is scoped to the call:
+// unrelated organization-policy reads (usage, account capabilities, blocklists)
+// that also consult `hasOrgPolicyBackend()` keep the 3P answer outside it.
 //
 // The active deployment-mode object is found through the official accessor
 // rather than a minified export name: the accessor is the one function whose

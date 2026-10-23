@@ -12,7 +12,11 @@
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
-import { patchEmbeddedSources } from "./renderer-patches.mjs";
+import {
+  extensionInstallPolicyPatchId,
+  gatewayLoopbackHttpPatchId,
+  patchEmbeddedSources,
+} from "./renderer-patches.mjs";
 
 const root = resolve(process.argv[2] || "");
 if (!process.argv[2]) throw new Error("usage: patch-main-process.mjs EXTRACTED_APP_DIR");
@@ -34,7 +38,8 @@ const sources = new Map();
 for (const file of files) sources.set(file, await readFile(file, "utf8"));
 
 const result = patchEmbeddedSources(sources);
-if (!result.patches.length) {
+const gatewayPatches = result.patches.filter(patch => patch.id === gatewayLoopbackHttpPatchId);
+if (!gatewayPatches.length) {
   throw new Error(
     "main process Gateway URL guard not found; the endpoint would be refused and the gateway would not answer",
   );
@@ -42,9 +47,21 @@ if (!result.patches.length) {
 // The archive builds the schema into more than one entry (the main bundle and
 // the preload), so a file may legitimately be one target — but never two.
 const perFile = new Map();
-for (const patch of result.patches) perFile.set(patch.path, (perFile.get(patch.path) || 0) + 1);
+for (const patch of gatewayPatches) {
+  perFile.set(patch.path, (perFile.get(patch.path) || 0) + 1);
+}
 for (const [path, count] of perFile) {
   if (count !== 1) throw new Error(`main process Gateway URL guard in ${path} expected once, found ${count}`);
+}
+// Extensions policy: without this splice the Desktop window's Extensions page
+// hides every install control in three-party mode. It must match exactly once;
+// a renamed or reshaped policy fails the patch rather than silently reinstating
+// the "disabled on this device" behavior.
+const policyPatches = result.patches.filter(patch => patch.id === extensionInstallPolicyPatchId);
+if (policyPatches.length !== 1) {
+  throw new Error(
+    `extensions install policy expected once, found ${policyPatches.length}; the Desktop window would refuse local installs`,
+  );
 }
 for (const [path, text] of result.sources) {
   if (text === sources.get(path)) continue;
@@ -60,4 +77,7 @@ for (const patch of result.patches) {
     if (entry.includes(base)) await rm(resolve(cacheRoot, entry), { force: true });
   }
 }
-console.log(`patch-main-process: rewrote the Gateway URL guard in ${result.patches[0].path}`);
+console.log(
+  `patch-main-process: rewrote the Gateway URL guard (${gatewayPatches[0].path}) `
+  + `and the extensions install policy (${policyPatches[0].path})`,
+);

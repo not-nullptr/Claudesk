@@ -633,6 +633,56 @@
   // BEGIN desktop extensions (MCPB)
   const extensionBundlePattern = /\.(?:dxt|mcpb)$/i;
 
+  // The Extensions overview installs a dropped bundle through the official
+  // preload's Electron path helper:
+  //
+  //   window.claudeAppSettings.filePickers.getPathForFile(file)
+  //     -> claude.settings.Extensions.handleDxtFile(path)
+  //
+  // A browser has no filesystem path for a File, and the helper is synchronous.
+  // Mint a one-shot token instead, remembering the File; the handleDxtFile
+  // wrapper below resolves the token, uploads the File and calls the Desktop
+  // with the uploaded `/workspace` path. Only extension bundles on the
+  // Extensions settings route are tokenised, so the composer's attachment code
+  // (which consults the same helper for every file) keeps its browser behavior.
+  const extensionBundleTokenPrefix = "claudesk-extension-file:";
+  const pendingExtensionBundles = new Map();
+  let extensionBundleSequence = 0;
+
+  function onExtensionSettingsRoute() {
+    const location = globalThis.location;
+    if (!location) return false;
+    // The app routes in the hash without a slash after it (#settings/...), and
+    // a direct load uses the pathname (/settings/...); match the route alone.
+    return `${location.pathname}${location.hash}`.includes("settings/desktop/extensions");
+  }
+
+  function rememberExtensionBundle(file) {
+    const token = `${extensionBundleTokenPrefix}${Date.now().toString(36)}-${++extensionBundleSequence}`;
+    pendingExtensionBundles.set(token, { file, at: Date.now() });
+    while (pendingExtensionBundles.size > 16) {
+      pendingExtensionBundles.delete(pendingExtensionBundles.keys().next().value);
+    }
+    return token;
+  }
+
+  function browserExtensionPath(file) {
+    if (!file || typeof file.name !== "string" || !extensionBundlePattern.test(file.name)) {
+      return null;
+    }
+    if (!onExtensionSettingsRoute()) return null;
+    return rememberExtensionBundle(file);
+  }
+
+  function takeExtensionBundle(value) {
+    if (typeof value !== "string" || !value.startsWith(extensionBundleTokenPrefix)) return null;
+    const entry = pendingExtensionBundles.get(value);
+    if (!entry) return null;
+    pendingExtensionBundles.delete(value);
+    if (Date.now() - entry.at > 30 * 60 * 1000) return null;
+    return entry.file;
+  }
+
   function reportExtensionProblem(message) {
     console.error("[claudesk]", message);
     const toast = globalThis.__CLAUDESK_TOAST__;
@@ -1408,6 +1458,29 @@
         // so `showInstallDxtDialog` never reaches the native dialog.
         api.isLocalExtensionInstallAllowed = async () => true;
         api.showInstallDxtDialog = installExtensionFromBrowser;
+        // The official preload publishes the Extensions *events* on this same
+        // settings namespace (`onPreviewExtensionInstallation` renders the
+        // install modal after a bundle is uploaded or dropped). The bridge
+        // relays them, but `config.listeners` otherwise only populates
+        // `claude.web.<Surface>`; mirror them here where the page reads them.
+        for (const method of config.listeners?.Extensions || []) {
+          api[method] = (callback) => subscribe("Extensions", method, callback);
+        }
+        // The overview's drop handler receives a token from
+        // `claudeAppSettings.filePickers.getPathForFile` (see above). Resolve
+        // it here, upload the bundle through the same streaming route as the
+        // picker, and hand the Desktop the uploaded path.
+        const forwardHandleDxtFile = api.handleDxtFile;
+        if (typeof forwardHandleDxtFile === "function") {
+          api.handleDxtFile = async (...args) => {
+            const file = args.length === 1 ? takeExtensionBundle(args[0]) : null;
+            if (!file) return forwardHandleDxtFile(...args);
+            const uploaded = await uploadBrowserFiles([file]);
+            const path = uploaded?.paths?.[0];
+            if (!path) throw new Error("The extension upload did not return a path.");
+            return forwardHandleDxtFile(path);
+          };
+        }
         // The preview modal fires this without awaiting, and the Desktop
         // reports failures through a native dialog this side cannot see. The
         // wrapper turns that dialog into a rejected relay, so catch it and
@@ -1436,6 +1509,57 @@
         if (!config.codeSettingsEnabled && !config.codeActionsEnabled) continue;
         settingsRoot[surface] = createCodePreferences();
       } else settingsRoot[surface] = Object.freeze(api);
+    }
+    if (extensionsAvailable) {
+      // The official FilePickers surface is what the Extensions page uses for
+      // its directory/file pickers (advanced settings and user_config fields).
+      // It also gates the overview's drop handler, which reads
+      // `claude.settings.FilePickers` directly before touching a dropped file.
+      // A browser cannot return a container path from a native dialog, so the
+      // chosen files are uploaded to the shared workspace instead; the Desktop
+      // can read the returned `/workspace` paths like any other uploaded file.
+      settingsRoot.FilePickers = Object.freeze({
+        async getDirectoryPath() {
+          const uploaded = await browseBrowserFiles(true);
+          return uploaded ? [uploaded.root] : null;
+        },
+        async getFilePath() {
+          const uploaded = await browseBrowserFiles(false);
+          return uploaded ? uploaded.paths : null;
+        },
+      });
+      // The official preload publishes `claudeAppSettings` with Electron's
+      // synchronous `webUtils.getPathForFile`; the extension drop handler
+      // requires it to exist. Publish only that helper (see above), and only
+      // for extension bundles, so other Desktop-only paths keep their browser
+      // behavior. The attachments code asks for a path for every dropped file
+      // and treats null exactly as it does today.
+      if (!globalThis.claudeAppSettings) {
+        Object.defineProperty(globalThis, "claudeAppSettings", {
+          configurable: true,
+          enumerable: false,
+          value: Object.freeze({
+            filePickers: Object.freeze({ getPathForFile: browserExtensionPath }),
+          }),
+        });
+      }
+      // The Extensions page's *initial* policy snapshot is mapped from the
+      // Desktop's `desktopManagedConfig` global, which a browser does not have.
+      // Without it the first paint says extensions are disabled until the
+      // provider's `isExtensionsEnabled()`/`isLocalExtensionInstallAllowed()`
+      // calls settle. Those calls are the authority; this only mirrors their
+      // deployment answer for the first render. `deploymentMode` is omitted on
+      // purpose: its presence tells other code this is the Desktop app.
+      if (!globalThis.desktopManagedConfig) {
+        Object.defineProperty(globalThis, "desktopManagedConfig", {
+          configurable: true,
+          enumerable: false,
+          value: Object.freeze({
+            extensionsEnabled: true,
+            localExtensionInstallAllowed: true,
+          }),
+        });
+      }
     }
     Object.defineProperty(globalThis, "claude.settings", {
       configurable: false,

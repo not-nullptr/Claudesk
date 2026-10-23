@@ -141,6 +141,39 @@ assert.match(preload, /accept: "\.mcpb,\.dxt,application\/zip"/,
 assert.match(preload, /dispatch\(payload\.surface, payload\.method, payload\.payload, payload\.args\)/,
   "the browser must receive every argument of a multi-argument Desktop event");
 
+// The drag-and-drop path. The overview only installs a dropped file when
+// `claude.settings.FilePickers`, the Extensions API and
+// `window.claudeAppSettings.filePickers.getPathForFile` all exist; a browser
+// has none of them natively. The helper is synchronous, so it hands the
+// wrapper a one-shot token and the wrapper uploads the remembered File.
+assert.match(preload, /settingsRoot\.FilePickers = Object\.freeze\(\{/,
+  "claude.settings.FilePickers must exist for the drop handler's guard");
+assert.match(preload, /filePickers: Object\.freeze\(\{ getPathForFile: browserExtensionPath \}\)/,
+  "the browser must publish the synchronous path helper");
+assert.match(preload, /function browserExtensionPath\(file\)/,
+  "the path helper must tokenise a dropped bundle");
+assert.match(preload, /includes\("settings\/desktop\/extensions"\)/,
+  "the helper must recognise the hash-routed Extensions page");
+assert.match(preload, /api\.handleDxtFile = async \(\.\.\.args\)/,
+  "handleDxtFile must resolve a browser token before the Desktop call");
+assert.match(preload, /uploadBrowserFiles\(\[file\]\)/,
+  "a dropped bundle must be uploaded into the shared workspace");
+assert.match(preload, /for \(const method of config\.listeners\?\.Extensions \|\| \[\]\)/,
+  "the Extensions events must be published on claude.settings, where the page reads them");
+assert.match(preload, /globalThis\.desktopManagedConfig/,
+  "the page's initial extensions policy snapshot must be browser-answerable");
+
+// The Desktop window reads the install authorization from the main process's
+// policy, not from the renderer. In three-party mode that policy ANDs the
+// answer with `hasOrgPolicyBackend()`, so the patch must land or the window's
+// Extensions page hides every install control.
+const mainProcessPatcher = await readFile(
+  new URL("../rootfs/opt/claude-cowork-bridge/patch-main-process.mjs", import.meta.url), "utf8");
+assert.match(mainProcessPatcher, /extensionInstallPolicyPatchId/,
+  "the main-process patcher must apply the extensions install policy");
+assert.match(mainProcessPatcher, /extensions install policy expected once/,
+  "a missing policy splice must fail the patch");
+
 // Both configuration spellings must be written: the app config file carries the
 // nested object, while the environment-seeded managed configuration and the
 // applied config-library entry are validated by the flat-key registry and would

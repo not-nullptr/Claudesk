@@ -40,7 +40,7 @@ const inferenceBannerMessageIds = ["+8XhcAcHfK", "1qPkTh9fMa"];
 // quietly returns, the pane quietly goes blank. This one fails loudly: an
 // unpatched schema refuses the deployment's URL and the gateway stops answering,
 // in the same place an operator is already looking.
-const gatewayLoopbackHttpPatchId = "gateway-url-any-host-http";
+export const gatewayLoopbackHttpPatchId = "gateway-url-any-host-http";
 const gatewayLoopbackHttpMessage = "must use https (or http on loopback)";
 // The native file preview draws into an Electron view over Desktop's own window,
 // which the browser never composites, so an Office, PDF, HTML or SVG file showed
@@ -79,6 +79,17 @@ const settingsExtensionsGroupPatchId = "settings-extensions-group";
 // "Page not found". The page itself is this deployment's own (the wrapper and
 // bridge back its IPC), so the guard is bypassed and the content rendered.
 const desktopSettingsPageGatePatchId = "desktop-settings-page-gate";
+// The main process's extensions policy answers `localExtensionInstallAllowed`
+// as `hasOrgPolicyBackend() && extensions.enabled`. Three-party mode has no
+// claude.ai policy backend, so that predicate is false even though the config
+// enables extensions and this deployment's operator is the installer; the
+// Desktop window's own Extensions page therefore hides the install button and
+// its drop target, and `installDxt`/`handleDxtFile` refuse. The renderer cannot
+// fix that: it reads the boolean from its preload. Rewrite the one policy
+// return in the main-process bundle to take the enablement answer alone, and
+// leave `isDirectoryEnabled()` (which also consults the backend) untouched.
+// Applied by patch-main-process.mjs, not to the renderer assets.
+export const extensionInstallPolicyPatchId = "desktop-extension-install-policy";
 const settingsExtensionsHref = "/settings/desktop/extensions";
 // The "This computer" section heading's message id. It pins the push whose
 // condition is the same Desktop-identity flag.
@@ -2329,6 +2340,52 @@ function scheduledTaskHostsReplacement(gate, source, starter, listener, previewH
     + `${hosts.join(",")}]${tail}}))`;
 }
 
+// The preview modal's install control is rendered only when the page claims to
+// be the Claude Desktop app (the `Claude/<version>` user-agent token) *and*
+// `isDirectoryEnabled()` is true. The web shell keeps the browser user agent on
+// purpose, and three-party mode has no directory backend, so a bundle uploaded
+// from a browser previewed correctly but offered no way to install it. The gate
+// is the test on the one call that renders the install-button component; the
+// component is pinned by its own "Install" copy, which appears nowhere else.
+const settingsExtensionsInstallPatchId = "settings-extensions-install";
+const extensionInstallButtonMessageId = "ubmFc8rrea";
+function extensionInstallControlTarget(ast) {
+  const components = new Set();
+  walk(ast, [], (node) => {
+    if (node.type === "FunctionDeclaration" && node.id) {
+      if (contains(node.body, child => literal(child, extensionInstallButtonMessageId))) {
+        components.add(node.id.name);
+      }
+      return;
+    }
+    if (node.type === "VariableDeclarator" && node.id?.type === "Identifier"
+      && functionTypes.has(node.init?.type)
+      && contains(node.init.body, child => literal(child, extensionInstallButtonMessageId))) {
+      components.add(node.id.name);
+    }
+  });
+  if (components.size !== 1) return undefined;
+  const component = [...components][0];
+  let test;
+  walk(ast, [], (node, ancestors) => {
+    if (test || node.type !== "CallExpression") return;
+    // The bundle renders through a minified createElement helper:
+    // `r(P, {directoryServer: …})`, so the component is the first argument.
+    if (identifier(node.arguments[0]) !== component) return;
+    const props = unwrap(node.arguments[1]);
+    if (props?.type !== "ObjectExpression"
+      || !props.properties.some(entry => key(entry, "directoryServer"))) return;
+    for (const parent of [...ancestors].reverse()) {
+      if (functionTypes.has(parent.type)) return;
+      if (parent.type === "ConditionalExpression") {
+        if (unwrap(parent.consequent) === node) test = parent.test;
+        return;
+      }
+    }
+  });
+  return test;
+}
+
 // The extension-preview host: the component that subscribes to
 // `onPreviewExtensionInstallation` and renders the install modal. Its own
 // fallback copy pins it, so a different subscriber is not mounted.
@@ -2452,6 +2509,7 @@ export const prefilterNeedles = [
   '"app:"', // the two gateway-setup guards
   "settings/desktop/extensions", // the Settings → Extensions nav item
   'flex flex-col h-full"', // the desktop settings pages' identity/placement gate
+  "ubmFc8rrea", // the extension preview's Install-button copy (install-control gate)
   // Web-shell patches.
   "principalDisplayName", // account menu name
   "signOut", // account sign-out row
@@ -4316,6 +4374,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
   const patches = [];
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
+  const installControl = source.includes(extensionInstallButtonMessageId)
+    ? extensionInstallControlTarget(ast) : undefined;
   const redirectScopes = new Map();
   let button;
   let avatarComponent;
@@ -5274,6 +5334,11 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       replacement: `(...__claudeskCaught)=>{try{console.error("[claudesk] render error",`
         + `...__claudeskCaught)}catch{};try{return (${original})(...__claudeskCaught)}catch{}}` });
   }
+  if (installControl) {
+    patches.push({ id: settingsExtensionsInstallPatchId,
+      start: installControl.start, end: installControl.end,
+      original: source.slice(installControl.start, installControl.end), replacement: "!0" });
+  }
   return { evidence, patches };
 }
 
@@ -5283,16 +5348,51 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
 // deployment's endpoint as far as the settings field: the main process validates
 // it again on the way out and refuses an http URL off the loopback, which is
 // what a "Connection test failed. The endpoint URL was rejected." is. This
-// applies only the Gateway URL splice, to the app archive the wrapper already
-// extracts and repacks — the renderer's own required patches have no meaning
-// there.
+// also carries the extensions install-policy splice (see
+// extensionInstallPolicyPatchId); both apply to the app archive the wrapper
+// already extracts and repacks — the renderer's own required patches have no
+// meaning there.
+// The one place in the main-process bundle that answers the extensions policy:
+// a return of `{extensionsEnabled, localExtensionInstallAllowed}` where the
+// latter is `hasOrgPolicyBackend() && enabled`. Replace that value with the
+// enablement value itself; the object and every other caller stay as they were.
+function extensionInstallPolicyPatch(source) {
+  if (!source.includes("localExtensionInstallAllowed")) return undefined;
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  let splice;
+  walk(ast, [], (node) => {
+    if (splice || node.type !== "ReturnStatement" || !node.argument
+      || node.argument.type !== "ObjectExpression") return;
+    const valueOf = (name) => {
+      for (const entry of node.argument.properties) {
+        if (key(entry, name)) return entry.value;
+      }
+      return undefined;
+    };
+    const enabled = valueOf("extensionsEnabled");
+    const allowed = valueOf("localExtensionInstallAllowed");
+    if (!enabled || !allowed) return;
+    splice = {
+      start: allowed.start,
+      end: allowed.end,
+      original: source.slice(allowed.start, allowed.end),
+      replacement: source.slice(enabled.start, enabled.end),
+    };
+  });
+  return splice;
+}
+
 export function patchEmbeddedSources(sources) {
   const output = new Map(sources);
   const patches = [];
   for (const [path, source] of sources) {
-    const applied = inspectRenderer(source, false, false).patches
+    const gateway = inspectRenderer(source, false, false).patches
       .filter(patch => patch.id === gatewayLoopbackHttpPatchId);
-    if (!applied.length) continue;
+    const policy = extensionInstallPolicyPatch(source);
+    if (!gateway.length && !policy) continue;
+    const applied = policy
+      ? [...gateway, { id: extensionInstallPolicyPatchId, ...policy }]
+      : gateway;
     let text = source;
     for (const patch of [...applied].sort((a, b) => b.start - a.start)) {
       text = text.slice(0, patch.start) + patch.replacement + text.slice(patch.end);
@@ -5349,11 +5449,16 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
     .some(value => value.includes(settingsExtensionsHref));
   const carriesDesktopSettingsPages = [...sources.values()]
     .some(value => value.includes("onThisDevice") && value.includes('flex flex-col h-full"'));
+  // The preview modal's install control rides the same bundle; when its copy is
+  // present the splice must land exactly once, in both shells.
+  const carriesExtensionsInstall = [...sources.values()]
+    .some(value => value.includes(extensionInstallButtonMessageId));
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
     ...(carriesExtensionsNavigation
       ? [settingsExtensionsTabPatchId, settingsExtensionsGroupPatchId] : []),
     ...(carriesDesktopSettingsPages ? [desktopSettingsPageGatePatchId] : []),
+    ...(carriesExtensionsInstall ? [settingsExtensionsInstallPatchId] : []),
     ...(webShellEnabled
       ? [routeAliasPatchId,
           sessionViewerPatchId, localSessionPlacementPatchId,

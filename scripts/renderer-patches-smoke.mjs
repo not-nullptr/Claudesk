@@ -351,6 +351,19 @@ const settingsPageGate = 'function DesktopSettingsPage({className:a="flex flex-c
 const settingsPageGateDecoy = 'function Other({className:a="x",children:o}){'
   + 'let s=desktopIdentity(),{onThisDevice:c}=placement();'
   + 'return c?h("div",{children:o}):h(Else,{})}';
+// The extension preview's install control. The button component is pinned by
+// its own "Install" copy; the gate before its one call checks desktop identity
+// and directory enablement, both false in this deployment's browser. Only the
+// gate test is replaced, so the control renders for a local bundle.
+const extensionInstall = 'function InstallButton({directoryServer:n}){'
+  + 'let p=installedState();'
+  + 'return p?r(Label,{defaultMessage:"Uninstall",id:"a8npXIgle+"})'
+  + ':r(Label,{defaultMessage:"Install",id:"ubmFc8rrea"})}'
+  + 'function Detailed({isDetailedView:e,directoryServer:t}){'
+  + 'let o=isDesktopApp(),l=directoryEnabled();'
+  + 'return e?o&&l&&t.manifest?r(InstallButton,{directoryServer:{...t,manifest:t.manifest}}):null:null}';
+const extensionInstallDecoy = 'function Unrelated({directoryServer:t}){'
+  + 'return t.manifest?r(OtherAction,{directoryServer:t}):null}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -365,9 +378,10 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${settingsNav}\n${settingsNavDecoy}\n${settingsPageGate}\n${settingsPageGateDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${settingsNav}\n${settingsNavDecoy}\n${settingsPageGate}\n${settingsPageGateDecoy}\n${
+      extensionInstall}\n${extensionInstallDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
-  assert.equal(result.patches.length, 10);
+  assert.equal(result.patches.length, 11);
   const output = result.sources.get(`changed-chunk-${i}.js`);
   assert.equal(result.patches.filter(p => p.id === "account-sign-out-row").length, 1,
     "the user menu's signOut flag must be spliced exactly once");
@@ -385,7 +399,7 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 24,
+  assert.equal(webResult.patches.length, 25,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts, the toast-manager global and the chunk loader's asset base");
   assert.equal(webResult.patches.filter(p => p.id === "web-shell-asset-base").length, 1,
     "the chunk loader must resolve through the deployment's asset base");
@@ -419,7 +433,7 @@ for (const [i, variant] of variants.entries()) {
   // must resolve to the surface the bridge drives. The isolation guarantee is
   // the environment list and the LocalSessions guard, not the route name.
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 24,
+  assert.equal(tenantResult.patches.length, 25,
     "a tenant's web shell keeps every web-shell patch, the route alias included");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1,
     "a tenant's `/code` must resolve to the surface this bridge drives");
@@ -537,7 +551,7 @@ for (const [i, variant] of variants.entries()) {
     ["file-pane-download", "inference-banner", "native-file-preview-bridge",
       "account-sign-out-row", "gateway-url-any-host-http",
       "settings-extensions-tab", "settings-extensions-group",
-      "desktop-settings-page-gate"],
+      "desktop-settings-page-gate", "settings-extensions-install"],
     "without the Gateway flag only the always-on patches are spliced");
   const disabledOutput = disabled.sources.get(`changed-chunk-${i}.js`);
   assert.ok(disabledOutput.includes('icon:"Download"'), "the download button stays on with the flag off");
@@ -595,10 +609,34 @@ for (const [i, variant] of variants.entries()) {
   assert.equal(notFoundCalled, false, "the page must not call notFound()");
   assert.ok(navSource.includes("function Other("),
     "a component without the main/not-found arms must not be spliced");
+  // The preview modal's install control renders for the browser: the gate that
+  // required the Desktop user agent and an enabled directory is gone, while
+  // the control component itself is untouched.
+  assert.equal(webResult.patches.filter(p => p.id === "settings-extensions-install").length, 1,
+    "the extension preview install control must be spliced exactly once");
+  assert.ok(navSource.includes("!0?r(InstallButton,{directoryServer:"),
+    "the install control must render without the Desktop identity/directory gates");
+  assert.ok(navSource.includes("t.manifest?r(OtherAction,"),
+    "an unrelated component must not be spliced");
+  const installContext = {
+    installedState: () => false,
+    isDesktopApp: () => false,
+    directoryEnabled: () => false,
+    Label: function Label() {},
+    OtherAction: function OtherAction() {},
+    r: (component, props) => ({ component: component?.name ?? null, props }),
+    callbacks: {}, event: {}, result: null,
+  };
+  vm.runInNewContext(
+    `${navSource}\nresult=Detailed({isDetailedView:!0,directoryServer:{manifest:{name:"x"},uuid:"u"}});`,
+    installContext,
+  );
+  assert.equal(installContext.result?.component, "InstallButton",
+    "a browser preview must offer the install control");
   const compiled = await minify(inputs.get(`changed-chunk-${i}.js`), {
     mangle: true, compress: { unused: false }, format: { quote_style: 1 },
   });
-  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 10,
+  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 11,
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
@@ -2123,6 +2161,27 @@ const embeddedCompiled = await minify(gatewayUrlSchema, {
 });
 assert.equal(patchEmbeddedSources(new Map([["main.js", embeddedCompiled.code]])).patches.length, 1,
   "a re-minified main bundle must still be spliced");
+// The main process's extensions policy returns both flags; the install flag is
+// `hasOrgPolicyBackend() && enabled`, which is false in three-party mode and
+// hid the Desktop window's install controls. Only that property's value is
+// replaced with the enablement value; `isDirectoryEnabled()` reads the backend
+// predicate separately and stays shut.
+const extensionPolicySource = 'function CLt(){return enabled()}'
+  + 'function wLt(){let e=CLt();return{extensionsEnabled:e,'
+  + 'localExtensionInstallAllowed:hasOrgPolicyBackend()&&e}}'
+  + 'async function nx(){return wLt().localExtensionInstallAllowed}';
+const embeddedPolicy = patchEmbeddedSources(new Map([["main.js", extensionPolicySource]]));
+assert.equal(embeddedPolicy.patches.length, 1,
+  "the main process's extensions policy must be spliced");
+assert.equal(embeddedPolicy.patches[0].id, "desktop-extension-install-policy");
+assert.ok(embeddedPolicy.sources.get("main.js")
+  .includes("localExtensionInstallAllowed:e}"),
+"the install flag must take the enablement answer");
+assert.ok(!embeddedPolicy.sources.get("main.js").includes("hasOrgPolicyBackend()&&e"),
+  "the backend predicate must be gone from the policy return");
+assert.equal(patchEmbeddedSources(new Map([["main.js",
+  extensionPolicySource.replace("localExtensionInstallAllowed:", "otherFlag:")]])).patches.length, 0,
+"a return without the install flag is not a target");
 // The root's caught-error option. React 19 creates the root with
 // `{onCaughtError, onRecoverableError}` and the bundle hands `onCaughtError` the
 // app's own reporter, which does not log — so a boundary-caught render error

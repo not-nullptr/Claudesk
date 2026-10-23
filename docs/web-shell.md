@@ -83,8 +83,9 @@ Working with the flag on:
   including while every tab is closed, via Web Push (see "Notifications"
   below);
 - **Settings → Extensions** and `.mcpb` installs — the tab is reachable in the
-  browser, the bundle uploads through the bridge, and the official preview
-  modal (mounted by the Desktop-checks host patch) installs it. See
+  browser, a bundle can be dropped on the page or picked from Advanced
+  settings, it uploads through the bridge, and the official preview modal
+  (mounted by the Desktop-checks host patch) installs it. See
   [desktop extensions](desktop-extensions.md).
 
 Not wired up yet (tracked here so it is not mistaken for done):
