@@ -90,6 +90,32 @@ const desktopSettingsPageGatePatchId = "desktop-settings-page-gate";
 // leave `isDirectoryEnabled()` (which also consults the backend) untouched.
 // Applied by patch-main-process.mjs, not to the renderer assets.
 export const extensionInstallPolicyPatchId = "desktop-extension-install-policy";
+
+// A session's MCP servers are built from `getMcpServersConfig()` and then
+// filtered against the client-side extension list (`enabledExtensionIds`).
+// That second filter is redundant — the main process builds configs only for
+// enabled extensions — but when the client store is empty or stale (the web
+// shell, a session started before the connector store hydrated) it removes
+// every extension, and the model starts with no extension tools. Include
+// every configured extension; disabled ones never reach this config.
+export const sessionExtensionServersPatchId = "session-extension-mcp-servers";
+function sessionExtensionServersTarget(ast) {
+  const targets = [];
+  walk(ast, [], (node, ancestors) => {
+    if (node.type !== "LogicalExpression" || node.operator !== "&&") return;
+    const right = unwrap(node.right);
+    if (right?.type !== "CallExpression" || right.arguments.length !== 1) return;
+    const callee = unwrap(right.callee);
+    if (!property(callee, "has")) return;
+    if (!property(unwrap(right.arguments[0]), "extensionId")) return;
+    const scopes = [...ancestors].reverse().filter(parent => functionTypes.has(parent.type));
+    if (!scopes.some(scope => contains(scope.body,
+      child => property(child, "getMcpServersConfig")))) return;
+    targets.push(node);
+  });
+  return targets.length === 1 ? targets[0] : undefined;
+}
+
 // The official preload receives local MCP servers' MessagePorts on `window`
 // and hands them to the app's own attach code. The browser proxy needs those
 // same ports, but it is installed after the app has connected its servers; the
@@ -4430,6 +4456,8 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
   const installControl = source.includes(extensionInstallButtonMessageId)
     ? extensionInstallControlTarget(ast) : undefined;
+  const sessionExtensionServers = source.includes("getMcpServersConfig")
+    ? sessionExtensionServersTarget(ast) : undefined;
   const redirectScopes = new Map();
   let button;
   let avatarComponent;
@@ -5393,6 +5421,12 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
       start: installControl.start, end: installControl.end,
       original: source.slice(installControl.start, installControl.end), replacement: "!0" });
   }
+  if (sessionExtensionServers) {
+    patches.push({ id: sessionExtensionServersPatchId,
+      start: sessionExtensionServers.start, end: sessionExtensionServers.end,
+      original: source.slice(sessionExtensionServers.start, sessionExtensionServers.end),
+      replacement: "!0" });
+  }
   return { evidence, patches };
 }
 
@@ -5510,12 +5544,15 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
   // present the splice must land exactly once, in both shells.
   const carriesExtensionsInstall = [...sources.values()]
     .some(value => value.includes(extensionInstallButtonMessageId));
+  const carriesSessionExtensionServers = [...sources.values()]
+    .some(value => value.includes("getMcpServersConfig") && value.includes(".extensionId"));
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
     ...(carriesExtensionsNavigation
       ? [settingsExtensionsTabPatchId, settingsExtensionsGroupPatchId] : []),
     ...(carriesDesktopSettingsPages ? [desktopSettingsPageGatePatchId] : []),
     ...(carriesExtensionsInstall ? [settingsExtensionsInstallPatchId] : []),
+    ...(carriesSessionExtensionServers ? [sessionExtensionServersPatchId] : []),
     ...(webShellEnabled
       ? [routeAliasPatchId,
           sessionViewerPatchId, localSessionPlacementPatchId,

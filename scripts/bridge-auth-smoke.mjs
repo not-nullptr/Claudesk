@@ -81,7 +81,8 @@ try {
   });
 
   // A stand-in Desktop. The gate is this smoke's subject; only the shape the
-  // health route reads is provided.
+  // health route reads is provided. The release must match the bridge's copy.
+  const release = JSON.parse(readFileSync(`${root}config/release.json`, "utf8"));
   const desktop = await listen((request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     if (request.url === "/runtime") {
@@ -89,9 +90,9 @@ try {
         ok: true,
         value: {
           renderer: {
-            desktopVersion: "2.31226.1",
-            patchRelease: "20261022-1",
-            basePath: "/renderer/2.31226.1/20261022-1",
+            desktopVersion: release.desktopVersion,
+            patchRelease: release.patchRelease,
+            basePath: `/renderer/${release.desktopVersion}/${release.patchRelease}`,
             patches: [],
           },
         },

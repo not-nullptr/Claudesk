@@ -2182,6 +2182,27 @@ assert.ok(!embeddedPolicy.sources.get("main.js").includes("hasOrgPolicyBackend()
 assert.equal(patchEmbeddedSources(new Map([["main.js",
   extensionPolicySource.replace("localExtensionInstallAllowed:", "otherFlag:")]])).patches.length, 0,
 "a return without the install flag is not a target");
+
+// A session's extension MCP config is filtered against the client's extension
+// list. The main process already omits disabled extensions from the config, so
+// the second filter only loses servers when the client store is empty (a new
+// session in the web shell). Include every configured entry.
+const sessionExtensionConfig = 'function sessionConfig(config,enabledIds){'
+  + 'if(!api?.getMcpServersConfig)return;'
+  + 'return Object.fromEntries(Object.entries(config).filter(([name,entry])=>{'
+  + 'if(entry.extensionId==="ant.dir.ant.anthropic.filesystem")return!1;'
+  + 'let isExtension=!!entry.extensionId,enabled=isExtension&&enabledIds.has(entry.extensionId);'
+  + 'return!isExtension||enabled}))}';
+const sessionExtensionPatches = inspectRenderer(sessionExtensionConfig, false, false).patches
+  .filter(patch => patch.id === "session-extension-mcp-servers");
+assert.equal(sessionExtensionPatches.length, 1,
+  "the session extension filter must be spliced once");
+assert.equal(sessionExtensionPatches[0].original, "isExtension&&enabledIds.has(entry.extensionId)",
+  "only the client-side enabled check is removed");
+assert.equal(sessionExtensionPatches[0].replacement, "!0");
+assert.equal(inspectRenderer(sessionExtensionConfig.replace("getMcpServersConfig", "other"),
+  false, false).patches.filter(patch => patch.id === "session-extension-mcp-servers").length, 0,
+"a config builder without the MCP read is not a target");
 // The preload's port forwarding: the proxy needs the app's MessagePort at
 // preload time, before the app connects its servers. The splice runs the
 // listener in the main world (contextBridge.executeInMainWorld), because a

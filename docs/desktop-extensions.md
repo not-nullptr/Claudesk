@@ -111,6 +111,14 @@ Two details keep the attach path from disturbing the Desktop window:
   wrapper evaluates MCP calls in the main renderer specifically (lowest
   webContents id among the binding-capable candidates, excluding the
   `/setup-desktop-3p` window); otherwise every connect times out.
+* A session start builds its `mcpServers` from `getMcpServersConfig()` but then
+  filters that list against the client-side extension store. When the store is
+  empty or stale (a new web-shell session), every extension is removed and the
+  model starts without their tools even though the server is running. The
+  `session-extension-mcp-servers` renderer patch keeps every configured
+  extension: the main process already writes configs only for enabled
+  extensions, so the second filter can only lose servers. Sessions started
+  after the fix list the extension's tools (`mcp__Canvas_LMS__…_canvas_*`).
 
 `claudeAppBindings` is what the claude.ai chat surface uses for local
 connectors, so the same proxy also makes the browser's chat use local MCP
