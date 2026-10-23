@@ -2097,7 +2097,8 @@ function validateInvocation(surface, method, args) {
 // (`local.mcpb.<slug>` / `local.dxt.<slug>`). Bundles relayed from the browser
 // are copied into the shared workspace first, so only that tree is accepted as
 // an install/preview source; a path elsewhere in the container is not.
-const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// `local.mcpb.<author>.<name>`; long manifest fields can exceed 128 characters.
+const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
 const extensionBundlePathPattern = /\.(?:dxt|mcpb)$/i;
 
 function isExtensionBundlePath(value) {

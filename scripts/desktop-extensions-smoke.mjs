@@ -194,6 +194,8 @@ for (const [name, source] of [["bridge", server], ["wrapper", wrapper]]) {
     `${name} must expose the Extensions settings surface`);
   assert.match(source, /"onPreviewExtensionInstallation"/,
     `${name} must relay the extension preview event`);
+  assert.match(source, /A-Za-z0-9\]\[A-Za-z0-9._-\]\{0,255\}/,
+    `${name} must accept the Desktop's full local-bundle id length`);
 }
 
 console.log("desktop-extensions-smoke: policy override, IPC scoping, dialog set and browser wiring passed");

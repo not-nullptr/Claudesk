@@ -3503,7 +3503,11 @@ function validateCodePreference(method, args) {
 // (`local.mcpb.<slug>` / `local.dxt.<slug>`). A browser-uploaded bundle is
 // copied into the shared workspace before it is handed to the Desktop, so only
 // that tree is accepted as an install/preview source.
-const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// The Desktop derives a local bundle's id as `local.mcpb.<author>.<name>`
+// (both slugged); two long fields can exceed 128 characters, so the bound is
+// generous. The id is only a slot name: the Desktop re-derives it from the
+// package and refuses a mismatch.
+const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
 const extensionBundlePathPattern = /\.(?:dxt|mcpb)$/i;
 
 function isExtensionBundlePath(value) {
