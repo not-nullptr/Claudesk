@@ -2466,8 +2466,62 @@ function mcpBridgeInstallExpression() {
   });
 }
 
+let mcpRendererContentsId = null;
+
+function cachedMcpRenderer() {
+  if (mcpRendererContentsId === null) return null;
+  const contents = webContents.fromId(mcpRendererContentsId);
+  if (!contents || contents.isDestroyed()) {
+    mcpRendererContentsId = null;
+    return null;
+  }
+  return contents;
+}
+
+/**
+ * Evaluate in the app's main renderer.
+ *
+ * The main process accepts `connect-to-mcp-server` only from the main
+ * WebContentsView (`fDa(f, B)` in the bundle). Every renderer loaded with
+ * `mainView.js` — the setup window, popouts — exposes the same
+ * `claudeAppBindings` and answers `list-mcp-servers`, so picking the first
+ * candidate that responds installs the proxy in a renderer whose connects are
+ * silently ignored ("ignored for non-mainView sender") and every connect then
+ * times out. The main view is created first with that preload, so among the
+ * binding-capable candidates it has the lowest webContents id.
+ */
+async function evaluateInMcpRenderer(expression) {
+  const cached = cachedMcpRenderer();
+  if (cached) {
+    try {
+      const value = await cached.executeJavaScript(expression, true);
+      if (value !== "__COWORK_BRIDGE_NOT_AVAILABLE__") return value;
+      mcpRendererContentsId = null;
+    } catch {
+      mcpRendererContentsId = null;
+    }
+  }
+  const candidates = rendererCandidates()
+    .filter(contents => !/\/setup-desktop-3p(?:[/?#]|$)/.test(contents.getURL()))
+    .sort((left, right) => left.id - right.id);
+  let lastError = null;
+  for (const contents of candidates) {
+    try {
+      const value = await contents.executeJavaScript(expression, true);
+      if (value === "__COWORK_BRIDGE_NOT_AVAILABLE__") continue;
+      mcpRendererContentsId = contents.id;
+      console.log(`[mcp] using renderer ${contents.id} ${contents.getURL()}`);
+      return value;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error("official Cowork renderer is not ready");
+}
+
 async function callMcpBridge(method, args) {
-  const installed = await evaluateInOfficialRenderer(mcpBridgeInstallExpression());
+  const installed = await evaluateInMcpRenderer(mcpBridgeInstallExpression());
   if (installed !== "__COWORK_BRIDGE_MCP_READY__") {
     throw new Error("the Desktop renderer does not expose local MCP bindings");
   }
@@ -2480,7 +2534,7 @@ async function callMcpBridge(method, args) {
     ));
     return await bridge[request.method](...request.args);
   })()`;
-  const value = await evaluateInOfficialRenderer(expression);
+  const value = await evaluateInMcpRenderer(expression);
   if (value === "__COWORK_BRIDGE_NOT_AVAILABLE__") {
     throw new Error("the Desktop renderer does not expose local MCP bindings");
   }
@@ -3000,17 +3054,19 @@ async function invokeSettings(surface, method, args, argsEncoding) {
   if (surface === "Extensions" || surface === "MCP") {
     // Extensions and MCP live on the official app's own renderer, not the
     // Gateway setup window (the surfaces exist whether or not the writable 3P
-    // configuration library is enabled). The install and preview calls can open
-    // a native dialog; a browser cannot answer it, so answer it for the duration
-    // of this relayed call.
+    // configuration library is enabled). MCP is answered by the main renderer
+    // specifically (see evaluateInMcpRenderer). The install and preview calls
+    // can open a native dialog; a browser cannot answer it, so answer it for
+    // the duration of this relayed call.
+    const evaluate = surface === "MCP" ? evaluateInMcpRenderer : evaluateInOfficialRenderer;
     if (!answerDialogs) {
-      serialized = await evaluateInOfficialRenderer(expression);
+      serialized = await evaluate(expression);
     } else {
       capturedDialogs = [];
       relayedExtensionDialogStack.push(capturedDialogs);
       relayedExtensionDialogs += 1;
       try {
-        serialized = await evaluateInOfficialRenderer(expression);
+        serialized = await evaluate(expression);
       } finally {
         relayedExtensionDialogs -= 1;
         relayedExtensionDialogStack.pop();

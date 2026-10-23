@@ -105,6 +105,12 @@ Two details keep the attach path from disturbing the Desktop window:
   `connectToMcpServer` again — a restart can race a `uv` environment lock and
   fail (the Canvas/`uv` case). A server that genuinely fails to start still
   reports the official failure toast.
+* The main process accepts `connect-to-mcp-server` only from the app's main
+  `WebContentsView`. The setup window and popouts load the same preload, so
+  they answer `listMcpServers` but their connects are silently ignored. The
+  wrapper evaluates MCP calls in the main renderer specifically (lowest
+  webContents id among the binding-capable candidates, excluding the
+  `/setup-desktop-3p` window); otherwise every connect times out.
 
 `claudeAppBindings` is what the claude.ai chat surface uses for local
 connectors, so the same proxy also makes the browser's chat use local MCP

@@ -235,6 +235,15 @@ for (const [name, source] of [["bridge", server], ["wrapper", wrapper]]) {
 // restarting the server (the Canvas/uv failure mode).
 assert.match(mainProcessPatcher, /mcpEarlyPortPatchId/,
   "the main-process patcher must install the early port capture");
+// connect-to-mcp-server is accepted only from the app's main WebContentsView;
+// every mainView preload (setup window, popouts) answers list calls but its
+// connects are ignored. MCP calls must therefore target the main renderer.
+assert.match(wrapper, /evaluateInMcpRenderer/,
+  "MCP calls must use the main-renderer evaluator");
+assert.match(wrapper, /sort\(\(left, right\) => left\.id - right\.id\)/,
+  "the main renderer must be chosen by creation order");
+assert.match(wrapper, /setup-desktop-3p/,
+  "the Gateway setup window must be excluded from the MCP renderer");
 assert.match(await readFile(new URL("../bridge-wrapper/extensions.cjs", import.meta.url), "utf8"),
   /__CLAUDE_REMOTE_MCP_EARLY_PORTS__/,
   "the proxy must adopt the early-captured port");

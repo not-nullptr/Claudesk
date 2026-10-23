@@ -343,7 +343,22 @@ function mcpBridgeInstallExpression({ consolePrefix, maxBytes = 6 * 1024 * 1024 
           waiting,
           new Promise((resolve) => setTimeout(resolve, 30000)),
         ]);
-        if (!ports.has(serverName)) throw new Error("The MCP server did not connect");
+        if (!ports.has(serverName)) {
+          // The attach failed without a port. Ask the main process's own
+          // status for the reason (the handler swallows some launch errors).
+          let detail = "";
+          try {
+            const statuses = await globalThis["claude.settings"]?.MCP
+              ?.getMcpServersConfigWithStatus?.();
+            const status = statuses?.[serverName];
+            if (status) {
+              detail = " status=" + (status.status || "unknown");
+              if (status.error) detail += " error=" + status.error;
+            }
+          } catch {}
+          throw new Error(
+            "The MCP server did not connect (" + location.href + detail + ")");
+        }
       }
       const base = nextBase;
       nextBase += 1000000;
