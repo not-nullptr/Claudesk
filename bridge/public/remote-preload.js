@@ -191,6 +191,13 @@
       unregisterBinding(name) {
         desktopBindings.delete(name);
       },
+      // The official renderer's local-connector attach code
+      // (claude.ai chat and the extension settings page) lists and connects
+      // the account's local MCP servers through these two bindings. The
+      // Desktop preload implements them with MessagePorts a browser cannot
+      // receive; the bridge relays the same JSON-RPC stream instead.
+      listMcpServers: () => listBridgeMcpServers(),
+      connectToMcpServer: (serverName) => connectBridgeMcpServer(serverName),
     }),
     writable: false,
   });
@@ -724,6 +731,93 @@
     }
   }
   // END desktop extensions
+
+  // BEGIN browser MCP bindings
+  // Electron hands a local MCP server's MessagePort to the official renderer;
+  // a browser cannot receive one. The bridge's wrapper keeps the real port in
+  // the Desktop renderer and multiplexes JSON-RPC over desktop-ipc events and
+  // `/api/remote/mcp/*`, so this side only has to look like a MessagePort to
+  // the official `claudeAppBindings` consumers.
+  const bridgeMcpPorts = new Map();
+
+  // A real MessagePort, not a look-alike: the official attach code puts the
+  // port into a MessageEvent, whose `ports` sequence only accepts
+  // MessagePorts. The page owns one end (the SDK attaches to it); this preload
+  // keeps the other and relays its traffic over the bridge.
+  function createBridgeMcpPort(connectionId) {
+    const channel = new MessageChannel();
+    const pagePort = channel.port1;
+    const localPort = channel.port2;
+    let closed = false;
+    localPort.onmessage = (event) => {
+      const message = event.data;
+      void bridgeRequest("/api/remote/mcp/send", { connectionId, message })
+        .catch((error) => {
+          try {
+            // postMessage on the preload's end reaches the page's port.
+            localPort.postMessage({
+              jsonrpc: "2.0",
+              id: message && typeof message === "object" ? message.id : null,
+              error: {
+                code: -32603,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            });
+          } catch {}
+        });
+    };
+    const deliver = (message) => {
+      if (closed) return;
+      try {
+        localPort.postMessage(message);
+      } catch {}
+    };
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      bridgeMcpPorts.delete(connectionId);
+      try {
+        localPort.close();
+      } catch {}
+      void bridgeRequest("/api/remote/mcp/close", { connectionId }).catch(() => {});
+    };
+    localPort.onclose = finish;
+    bridgeMcpPorts.set(connectionId, { deliver, close: finish });
+    return pagePort;
+  }
+
+  function deliverBridgeMcpMessage(payload) {
+    const connectionId = payload?.connectionId;
+    if (typeof connectionId !== "string") return;
+    const entry = bridgeMcpPorts.get(connectionId);
+    if (!entry) return;
+    entry.deliver(payload.message);
+  }
+
+  async function listBridgeMcpServers() {
+    const value = await bridgeRequest("/api/remote/mcp/servers", {});
+    return Array.isArray(value) ? value : [];
+  }
+
+  async function connectBridgeMcpServer(serverName) {
+    if (typeof serverName !== "string" || !serverName || serverName.length > 512) {
+      throw new Error("Invalid MCP server name");
+    }
+    const value = await bridgeRequest("/api/remote/mcp/connect", { serverName });
+    const connectionId = value?.connectionId;
+    if (typeof connectionId !== "string") {
+      throw new Error("The bridge did not return an MCP connection");
+    }
+    const port = createBridgeMcpPort(connectionId);
+    // Deliver the port the way Electron's webContents.postMessage does: the
+    // official attach hook listens for this on window and reads event.ports.
+    globalThis.dispatchEvent(new MessageEvent("message", {
+      data: { type: "mcp-server-connected", serverName, uuid: value.uuid ?? serverName },
+      ports: [port],
+      source: globalThis,
+    }));
+  }
+  // END browser MCP bindings
 
   function openBrowserUrl(url, { downloadName } = {}) {
     const anchor = document.createElement("a");
@@ -2097,6 +2191,10 @@
     events.addEventListener("desktop-ipc", (event) => {
       try {
         const payload = JSON.parse(event.data);
+        if (payload.surface === "McpBridge" && payload.method === "mcpMessage") {
+          deliverBridgeMcpMessage(payload.payload);
+          return;
+        }
         if (payload.payload?.sessionId) latestTranscriptEvents.delete(payload.payload.sessionId);
         dispatch(payload.surface, payload.method, payload.payload, payload.args);
       } catch {}

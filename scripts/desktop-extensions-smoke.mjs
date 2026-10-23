@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 
 import {
   createExtensionPolicy,
@@ -8,6 +9,8 @@ import {
   extensionDialogMethods,
   extensionPolicyMethods,
   findDeploymentModeGetter,
+  mcpBridgeGlobal,
+  mcpBridgeInstallExpression,
 } from "../bridge-wrapper/extensions.cjs";
 
 // The official 3P deployment refuses a local extension install because its
@@ -197,5 +200,140 @@ for (const [name, source] of [["bridge", server], ["wrapper", wrapper]]) {
   assert.match(source, /A-Za-z0-9\]\[A-Za-z0-9._-\]\{0,255\}/,
     `${name} must accept the Desktop's full local-bundle id length`);
 }
+// Local MCP servers: the official renderer attaches them through
+// claudeAppBindings + a MessagePort, which a browser cannot receive. The
+// preload must publish the two bindings, deliver a fake port, and consume the
+// wrapper's multiplexed messages; bridge and wrapper must carry the routes.
+assert.match(preload, /listMcpServers: \(\) => listBridgeMcpServers\(\)/,
+  "the browser must publish listMcpServers");
+assert.match(preload, /connectToMcpServer: \(serverName\) => connectBridgeMcpServer\(serverName\)/,
+  "the browser must publish connectToMcpServer");
+assert.match(preload, /new MessageEvent\("message", \{/,
+  "the browser must deliver the port as a window message");
+assert.match(preload, /payload\.surface === "McpBridge" && payload\.method === "mcpMessage"/,
+  "the browser must route multiplexed MCP messages to the fake port");
+assert.match(server, /\/api\/remote\/mcp\/connect/,
+  "the bridge must expose the browser's MCP connect route");
+assert.match(wrapper, /"\/mcp-connect"/,
+  "the wrapper must expose the renderer's MCP connect route");
+assert.match(wrapper, /"\/mcp-send"/, "the wrapper must carry MCP messages to the renderer");
+assert.match(wrapper, /\["McpBridge", new Set\(\["mcpMessage"\]\)\]/,
+  "the wrapper must let MCP messages through the event relay");
 
-console.log("desktop-extensions-smoke: policy override, IPC scoping, dialog set and browser wiring passed");
+// The browser MCP proxy. The official renderer attaches local MCP servers
+// through `claudeAppBindings` and a MessagePort; the browser cannot receive a
+// port, so this proxy owns the real one and multiplexes browser JSON-RPC
+// clients onto it. Exercise the proxy exactly as it is installed.
+const mcpPrefix = "__MCP_SMOKE__:";
+const mcpEventLog = [];
+const mcpWindowListeners = [];
+let mcpPort = null;
+function makePort() {
+  const listeners = new Set();
+  return {
+    sent: [],
+    onmessage: null,
+    start() {},
+    addEventListener(type, handler) {
+      if (type === "message") listeners.add(handler);
+    },
+    postMessage(message) {
+      this.sent.push(message);
+    },
+    emit(message) {
+      for (const handler of listeners) handler({ data: message });
+    },
+  };
+}
+const mcpSandbox = {
+  console: { debug(message) { mcpEventLog.push(message); } },
+  setTimeout(callback, milliseconds) {
+    const timer = setTimeout(callback, milliseconds);
+    timer.unref?.();
+    return timer;
+  },
+  queueMicrotask(callback) { callback(); },
+  addEventListener(type, handler) {
+    if (type === "message") mcpWindowListeners.push(handler);
+  },
+  claudeAppBindings: {
+    async listMcpServers() {
+      return ["Fixture Extension", "Other Server"];
+    },
+    async connectToMcpServer(name) {
+      mcpPort = makePort();
+      const event = {
+        source: mcpSandbox.__self,
+        data: { type: "mcp-server-connected", serverName: name, uuid: "uuid-1" },
+        ports: [mcpPort],
+      };
+      for (const handler of mcpWindowListeners) handler(event);
+      return true;
+    },
+  },
+  __self: null,
+};
+vm.createContext(mcpSandbox);
+const mcpReady = vm.runInContext(
+  mcpBridgeInstallExpression({ consolePrefix: mcpPrefix }), mcpSandbox);
+vm.runInContext("globalThis.__self = globalThis", mcpSandbox);
+assert.equal(mcpReady, "__COWORK_BRIDGE_MCP_READY__",
+  "the MCP proxy must install over the official bindings");
+const mcpBridge = mcpSandbox[mcpBridgeGlobal];
+const takeMcpEvents = () => mcpEventLog.splice(0)
+  .map(message => JSON.parse(message.slice(mcpPrefix.length)));
+assert.deepEqual(Array.from(await mcpBridge.list()), ["Fixture Extension", "Other Server"]);
+await assert.rejects(mcpBridge.connect("connection-x", "Unknown Server"), /Unknown MCP server/);
+assert.equal((await mcpBridge.connect("connection-1", "Fixture Extension")).uuid, "uuid-1");
+assert.ok(mcpPort, "the real MessagePort must be captured");
+const appHandler = () => {};
+mcpPort.onmessage = appHandler;
+await mcpBridge.send("connection-1", {
+  jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" },
+});
+assert.equal(mcpPort.sent.length, 0, "initialize must not reach the server");
+assert.equal(mcpPort.onmessage, appHandler,
+  "the proxy must leave the app's own onmessage handler alone");
+let events = takeMcpEvents();
+assert.equal(events.length, 1, "the browser must receive its initialize answer");
+assert.equal(events[0].surface, "McpBridge");
+assert.equal(events[0].payload.connectionId, "connection-1");
+assert.equal(events[0].payload.message.id, 0);
+assert.equal(events[0].payload.message.result.protocolVersion, "2025-06-18");
+assert.equal(events[0].payload.message.result.serverInfo.name, "Fixture Extension");
+
+await mcpBridge.send("connection-1", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+assert.equal(mcpPort.sent.length, 1);
+assert.equal(mcpPort.sent[0].id, 1000001, "browser ids must be offset from the app's");
+mcpPort.emit({ jsonrpc: "2.0", id: 1000001, result: { tools: [{ name: "ping" }] } });
+events = takeMcpEvents();
+assert.equal(events.length, 1);
+assert.equal(events[0].payload.message.id, 1, "the response id must be mapped back");
+assert.deepEqual(events[0].payload.message.result.tools, [{ name: "ping" }]);
+mcpPort.emit({ jsonrpc: "2.0", id: 5, result: { tools: [] } });
+assert.equal(takeMcpEvents().length, 0, "the app's own responses must not leak to the browser");
+mcpPort.emit({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+events = takeMcpEvents();
+assert.equal(events.length, 1, "notifications go to every browser connection");
+assert.equal(events[0].payload.connectionId, "connection-1");
+// A real initialize answer from the app's client is reused for later browsers.
+mcpPort.emit({
+  jsonrpc: "2.0", id: 2,
+  result: { protocolVersion: "2025-03-26", capabilities: { tools: {} },
+    serverInfo: { name: "Fixture", version: "2" } },
+});
+assert.equal(takeMcpEvents().length, 0);
+assert.equal((await mcpBridge.connect("connection-2", "Fixture Extension")).uuid, "uuid-1");
+await mcpBridge.send("connection-2", { jsonrpc: "2.0", id: 0, method: "initialize", params: {} });
+events = takeMcpEvents();
+assert.equal(events[0].payload.message.result.protocolVersion, "2025-03-26",
+  "later connections reuse the server's real handshake");
+await mcpBridge.send("connection-2", { jsonrpc: "2.0", id: 2, method: "tools/list" });
+assert.equal(mcpPort.sent.at(-1).id, 2000002, "each connection has its own id range");
+mcpPort.emit({ jsonrpc: "2.0", id: 2000002, result: { tools: [] } });
+events = takeMcpEvents();
+assert.equal(events[0].payload.connectionId, "connection-2");
+await mcpBridge.close("connection-2");
+await assert.rejects(mcpBridge.send("connection-2", { jsonrpc: "2.0", id: 3 }), /not open/);
+
+console.log("desktop-extensions-smoke: policy override, IPC scoping, dialog set, browser wiring and the browser MCP proxy passed");

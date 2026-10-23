@@ -16,6 +16,7 @@ are now answered for this deployment.
 | Settings **page** | Every desktop settings page (Extensions, its advanced and detail pages, Developer) is wrapped by a component that calls `notFound()` unless the client identifies as the Desktop app *and* `onThisDevice` is true | `desktop-settings-page-gate` renderer patch |
 | Preview modal's Install control | Rendered only when the client identifies as the Desktop app *and* `isDirectoryEnabled()` is true. The browser keeps its own user agent, and 3P mode has no directory backend, so an uploaded bundle previewed but offered no way to install | `settings-extensions-install` renderer patch replaces that one gate with `true`; the control itself is the official one, and its Install handler still asks the Desktop to install |
 | Browser drop target | The Extensions overview requires `claude.settings.FilePickers` and `window.claudeAppSettings.filePickers.getPathForFile`, neither of which a browser has | `remote-preload.js` publishes `FilePickers` and the synchronous path helper; a dropped `.mcpb`/`.dxt` becomes a one-shot token, `handleDxtFile` uploads the remembered File and calls the Desktop with the `/workspace` path |
+| Local MCP attach | The chat surface and the extension page connect local servers through `claudeAppBindings` and an Electron `MessagePort`; a browser has neither, so the server ran but never attached | the wrapper's renderer proxy owns the port and multiplexes JSON-RPC over `/api/remote/mcp/*`; the preload publishes the two bindings and hands the page a real `MessageChannel` port |
 
 The policy override in `extensions.cjs` is scoped to Extensions IPC. Unrelated
 organization-policy reads (usage, account capabilities, blocklists) that also
@@ -71,6 +72,32 @@ longer waits on a claude.ai policy backend); the install button opens the
 Electron file picker, drag-and-drop uses the real filesystem path, and the
 confirmation dialog is visible. Nothing browser-specific is involved.
 
+## Using the extension in the browser
+
+The official renderer attaches local MCP servers (extensions included) through
+`window.claudeAppBindings.listMcpServers()` / `connectToMcpServer()`, which the
+Electron preload implements by handing the page a `MessagePort` connected to the
+server the Desktop process spawned. A browser can receive neither the IPC nor
+the port, so without help the extension detail page timed out with "Unable to
+connect to extension server" and the chat surface never saw the extension's
+tools.
+
+The wrapper now runs a proxy in the official renderer: it owns the real
+`MessagePort`, answers each browser client's `initialize` locally (only one
+initialize may reach the server), gives every browser connection a disjoint
+JSON-RPC id range, and multiplexes requests and responses over the bridge's
+authenticated `/api/remote/mcp/*` routes and desktop-ipc event stream. The
+remote preload publishes the two `claudeAppBindings` methods and hands the page
+a real `MessageChannel` port, so the official attach path runs unchanged. The
+extension's tools execute in the Desktop process — not in the browser, the
+bridge, or the Cowork guest — and the detail page lists them (and their
+permission state) once the client attaches.
+
+`claudeAppBindings` is what the claude.ai chat surface uses for local
+connectors, so the same proxy also makes the browser's chat use local MCP
+servers the account configured. The Desktop window keeps its own connection;
+the two clients share the server process but use separate id ranges.
+
 ## Runtime
 
 The extension's MCP server is spawned by the Desktop main process, not by the
@@ -112,3 +139,9 @@ container, and nothing installs without an explicit file pick and an Install
 click, but the operator should treat a bundle exactly like a program installed
 on the host. The extension's own tool calls still go through Claude's normal
 tool-permission UI.
+
+The browser MCP proxy is behind the bridge's session authentication and can
+reach exactly the local servers the Desktop's own renderer lists for the
+signed-in account — the same set the Desktop window's chat attaches. It does
+not create a new network listener; the JSON-RPC rides the authenticated
+`/api/remote/mcp/*` routes and the existing event stream.

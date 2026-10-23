@@ -1129,6 +1129,11 @@ const relayedListeners = new Map([
     "onExtensionsChanged",
     "onPreviewExtensionInstallation",
   ])],
+  // The browser's local MCP clients (claude.settings extensions and the
+  // claude.ai chat's local connectors) speak JSON-RPC to a server this
+  // renderer owns. Responses and notifications are relayed as ordinary
+  // desktop-ipc events; the remote preload feeds them to a MessagePort shim.
+  ["McpBridge", new Set(["mcpMessage"])],
   // Not a `claude.web` surface: the wrapper itself publishes the notifications
   // the official Desktop decides to show, for the remote preload to render in
   // the browser (see the notification relay section below).
@@ -2427,6 +2432,66 @@ async function evaluateInOfficialRenderer(expression) {
   throw new Error("official Cowork renderer is not ready");
 }
 
+// ---------------------------------------------------------------------------
+// Local MCP servers → browser
+//
+// The official Linux renderer attaches the account's local MCP servers (the
+// Desktop extensions, and user-configured local connectors) itself, over a
+// MessagePort handed to it by the main process's `connect-to-mcp-server` IPC.
+// A browser cannot receive that port, so the claude.ai chat surface's attach
+// hook (`claudeAppBindings.listMcpServers` / `connectToMcpServer`) silently
+// does nothing there: an installed extension previews and installs but its
+// tools never appear, and its settings page reports "Unable to connect to
+// extension server".
+//
+// This bridge installs a small proxy in the official renderer: it calls the
+// real bindings, keeps the port, and multiplexes browser JSON-RPC clients onto
+// it. Each browser connection gets a disjoint id range (the app's own client
+// uses small ids) and a local answer to `initialize`, because only one
+// initialize may reach the server. Server responses carrying a browser id are
+// routed back to that connection; notifications go to every connection; the
+// app's own traffic passes through untouched.
+const mcpBridgeGlobal = extensions.mcpBridgeGlobal;
+const mcpConnectionIdPattern = /^[A-Za-z0-9_-]{1,80}$/;
+const mcpMessageMaxBytes = 6 * 1024 * 1024;
+
+function mcpBridgeInstallExpression() {
+  return extensions.mcpBridgeInstallExpression({
+    consolePrefix: relayConsolePrefix,
+    maxBytes: mcpMessageMaxBytes,
+  });
+}
+
+async function callMcpBridge(method, args) {
+  const installed = await evaluateInOfficialRenderer(mcpBridgeInstallExpression());
+  if (installed !== "__COWORK_BRIDGE_MCP_READY__") {
+    throw new Error("the Desktop renderer does not expose local MCP bindings");
+  }
+  const request = Buffer.from(JSON.stringify({ method, args })).toString("base64");
+  const expression = `(async () => {
+    const bridge = globalThis[${JSON.stringify(mcpBridgeGlobal)}];
+    if (!bridge) return "__COWORK_BRIDGE_NOT_AVAILABLE__";
+    const request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(atob(${JSON.stringify(request)}), (character) => character.charCodeAt(0)),
+    ));
+    return await bridge[request.method](...request.args);
+  })()`;
+  const value = await evaluateInOfficialRenderer(expression);
+  if (value === "__COWORK_BRIDGE_NOT_AVAILABLE__") {
+    throw new Error("the Desktop renderer does not expose local MCP bindings");
+  }
+  return value;
+}
+
+function isMcpMessage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8") <= mcpMessageMaxBytes;
+  } catch {
+    return false;
+  }
+}
+
 let coworkVmIdleState = {
   checkedAt: null,
   idleSince: null,
@@ -3609,6 +3674,48 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === "GET" && url.pathname === "/developer-artifact") {
       await serveDeveloperArtifact(response, url.searchParams.get("name"));
+      return;
+    }
+    // Local MCP servers for the browser (see "Local MCP servers → browser").
+    if (request.method === "GET" && url.pathname === "/mcp-list") {
+      sendJson(response, 200, { ok: true, value: await callMcpBridge("list", []) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/mcp-connect") {
+      const body = await readJson(request);
+      if (!mcpConnectionIdPattern.test(body.connectionId || "")) {
+        throw new Error("invalid MCP connection id");
+      }
+      if (typeof body.serverName !== "string" || !body.serverName
+        || body.serverName.length > 512) {
+        throw new Error("invalid MCP server name");
+      }
+      sendJson(response, 200, {
+        ok: true,
+        value: await callMcpBridge("connect", [body.connectionId, body.serverName]),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/mcp-send") {
+      const body = await readJson(request, 8 * 1024 * 1024);
+      if (!mcpConnectionIdPattern.test(body.connectionId || "") || !isMcpMessage(body.message)) {
+        throw new Error("invalid MCP message");
+      }
+      sendJson(response, 200, {
+        ok: true,
+        value: await callMcpBridge("send", [body.connectionId, body.message]),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/mcp-close") {
+      const body = await readJson(request);
+      if (!mcpConnectionIdPattern.test(body.connectionId || "")) {
+        throw new Error("invalid MCP connection id");
+      }
+      sendJson(response, 200, {
+        ok: true,
+        value: await callMcpBridge("close", [body.connectionId]),
+      });
       return;
     }
     // The instance's own VM control, called by the bridge for the admin

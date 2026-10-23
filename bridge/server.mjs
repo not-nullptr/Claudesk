@@ -1420,6 +1420,9 @@ const remoteListenerMethods = new Map([
     "onExtensionsChanged",
     "onPreviewExtensionInstallation",
   ])],
+  // Wrapper-published: JSON-RPC from the local MCP server the official
+  // renderer owns, for the browser's MessagePort shim (see remote-preload.js).
+  ["McpBridge", new Set(["mcpMessage"])],
   // Not a `claude.web` surface on the Desktop side: the wrapper publishes the
   // notifications the official app decides to show, for the remote preload to
   // render in the browser (see bridge/notifications.mjs for the push side).
@@ -1570,6 +1573,35 @@ class DesktopInternalClient {
       method: "POST",
       body: JSON.stringify({ surface, method, args, argsEncoding }),
     }, timeoutMs);
+    return body.value;
+  }
+
+  async mcpListServers() {
+    const body = await this.request("/mcp-list");
+    return Array.isArray(body.value) ? body.value : [];
+  }
+
+  async mcpConnect(connectionId, serverName) {
+    const body = await this.request("/mcp-connect", {
+      method: "POST",
+      body: JSON.stringify({ connectionId, serverName }),
+    });
+    return body.value;
+  }
+
+  async mcpSend(connectionId, message) {
+    const body = await this.request("/mcp-send", {
+      method: "POST",
+      body: JSON.stringify({ connectionId, message }),
+    }, 120000);
+    return body.value;
+  }
+
+  async mcpClose(connectionId) {
+    const body = await this.request("/mcp-close", {
+      method: "POST",
+      body: JSON.stringify({ connectionId }),
+    });
     return body.value;
   }
 
@@ -3516,6 +3548,19 @@ function isExtensionBundlePath(value) {
     return false;
   }
   return !value.split("/").includes("..");
+}
+
+// Local MCP JSON-RPC messages carry tool schemas and results, so the generic
+// 8 KiB string bound is too small; bound the whole message instead.
+const mcpMessageMaxBytes = 6 * 1024 * 1024;
+const mcpConnectionIdPattern = /^[A-Za-z0-9_-]{1,80}$/;
+function isMcpMessage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8") <= mcpMessageMaxBytes;
+  } catch {
+    return false;
+  }
 }
 
 function validateExtensionInvocation(method, args) {
@@ -6265,6 +6310,61 @@ async function handleApi(request, response, url) {
     response.writeHead(200, headers);
     Readable.fromWeb(upstream.body).pipe(response);
     return;
+  }
+
+  // Local MCP servers for the browser. The official chat surface attaches the
+  // account's local connectors (Desktop extensions included) through
+  // `claudeAppBindings`; the wrapper keeps the Electron MessagePort and relays
+  // JSON-RPC here, so the browser can run the same attach path. Tool execution
+  // still happens in the Desktop process, with the extension's own permissions.
+  if (url.pathname.startsWith("/api/remote/mcp/")) {
+    if (!connectorsEnabled) throw new ApiError(404, "Remote MCP connectors are disabled");
+    if (request.method === "POST" && url.pathname === "/api/remote/mcp/servers") {
+      sendJson(response, 200, { ok: true, value: await desktop.mcpListServers() });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/remote/mcp/connect") {
+      const body = await readJson(request);
+      if (typeof body.serverName !== "string" || !body.serverName
+        || body.serverName.length > 512) {
+        throw new ApiError(400, "MCP server name is not allowed");
+      }
+      const connectionId = randomUUID();
+      const value = await desktop.mcpConnect(connectionId, body.serverName);
+      sendJson(response, 200, {
+        ok: true,
+        value: { connectionId, uuid: value?.uuid ?? body.serverName },
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/remote/mcp/send") {
+      const body = await readJson(request, 8 * 1024 * 1024);
+      if (typeof body.connectionId !== "string"
+        || !mcpConnectionIdPattern.test(body.connectionId)) {
+        throw new ApiError(400, "MCP connection is not allowed");
+      }
+      if (!isMcpMessage(body.message)) {
+        throw new ApiError(400, "MCP message is not allowed");
+      }
+      sendJson(response, 200, {
+        ok: true,
+        value: await desktop.mcpSend(body.connectionId, body.message),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/remote/mcp/close") {
+      const body = await readJson(request);
+      if (typeof body.connectionId !== "string"
+        || !mcpConnectionIdPattern.test(body.connectionId)) {
+        throw new ApiError(400, "MCP connection is not allowed");
+      }
+      sendJson(response, 200, {
+        ok: true,
+        value: await desktop.mcpClose(body.connectionId),
+      });
+      return;
+    }
+    throw new ApiError(404, "MCP route not found");
   }
 
   if (request.method === "POST" && url.pathname === "/api/remote/settings") {

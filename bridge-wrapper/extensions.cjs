@@ -202,6 +202,165 @@ function createExtensionPolicy({ modules = defaultModules } = {}) {
   };
 }
 
+// The renderer-side half of the browser MCP proxy. It runs in the official
+// desktop renderer (main world). Exported as source so
+// scripts/desktop-extensions-smoke.mjs can exercise it without Electron.
+//
+// The Electron preload hands local MCP servers a MessagePort through
+// `claudeAppBindings.connectToMcpServer`. That port also carries the app's own
+// MCP client, so this proxy never touches `port.onmessage`: it listens with
+// `addEventListener`, gives each browser connection a disjoint id range, and
+// answers the browser's `initialize` locally (a second initialize must not
+// reach the server). Responses in a browser range go back to that connection;
+// notifications go to all of them; the app's traffic passes through untouched.
+const mcpBridgeGlobal = "__CLAUDE_REMOTE_MCP_BRIDGE_V1__";
+
+function mcpBridgeInstallExpression({ consolePrefix, maxBytes = 6 * 1024 * 1024 } = {}) {
+  if (typeof consolePrefix !== "string" || !consolePrefix) {
+    throw new Error("MCP bridge requires the relay console prefix");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("MCP bridge requires a positive message bound");
+  }
+  return `(() => {
+  const key = ${JSON.stringify(mcpBridgeGlobal)};
+  if (globalThis[key]) return "__COWORK_BRIDGE_MCP_READY__";
+  const bindings = globalThis.claudeAppBindings;
+  if (typeof bindings?.listMcpServers !== "function"
+      || typeof bindings?.connectToMcpServer !== "function") {
+    return "__COWORK_BRIDGE_NOT_AVAILABLE__";
+  }
+  const consolePrefix = ${JSON.stringify(consolePrefix)};
+  const ports = new Map();
+  const connections = new Map();
+  const waiters = new Map();
+  let nextBase = 1000000;
+  const initializeResults = new Map();
+  const protocolVersions = new Map();
+
+  const emit = (connectionId, message) => {
+    let serialized;
+    try {
+      serialized = JSON.stringify({ surface: "McpBridge", method: "mcpMessage",
+        payload: { connectionId, message } });
+    } catch { return; }
+    if (serialized.length > ${maxBytes}) return;
+    console.debug(consolePrefix + serialized);
+  };
+
+  const attach = (serverName, port, uuid) => {
+    ports.set(serverName, { port, uuid });
+    try { port.start?.(); } catch {}
+    port.addEventListener("message", (event) => {
+      const message = event?.data;
+      if (!message || typeof message !== "object") return;
+      if (!initializeResults.has(serverName) && message.result
+          && (message.result.protocolVersion || message.result.serverInfo)) {
+        initializeResults.set(serverName, message.result);
+        protocolVersions.set(serverName, message.result.protocolVersion || null);
+      }
+      if (typeof message.id === "number") {
+        for (const [connectionId, connection] of connections) {
+          if (connection.serverName !== serverName) continue;
+          if (message.id >= connection.base
+              && message.id < connection.base + 1000000) {
+            emit(connectionId, { ...message, id: message.id - connection.base });
+            return;
+          }
+        }
+        return;
+      }
+      for (const [connectionId, connection] of connections) {
+        if (connection.serverName === serverName) emit(connectionId, message);
+      }
+    });
+  };
+
+  globalThis.addEventListener("message", (event) => {
+    if (event.source !== globalThis || !event.data) return;
+    if (event.data.type !== "mcp-server-connected") return;
+    const name = event.data.serverName;
+    const port = event.ports && event.ports[0];
+    if (typeof name !== "string" || !port) return;
+    const list = waiters.get(name);
+    if (!list || !list.length) return;
+    waiters.delete(name);
+    attach(name, port, event.data.uuid || name);
+    for (const resolve of list) resolve();
+  });
+
+  const syntheticInitialize = (serverName, params) => ({
+    protocolVersion: (params && params.protocolVersion)
+      || protocolVersions.get(serverName) || "2024-11-05",
+    capabilities: {
+      tools: { listChanged: true },
+      prompts: { listChanged: true },
+      resources: { listChanged: true, subscribe: false },
+    },
+    serverInfo: { name: serverName, version: "0.0.0" },
+  });
+
+  globalThis[key] = {
+    async list() {
+      return await bindings.listMcpServers();
+    },
+    async connect(connectionId, serverName) {
+      if (typeof connectionId !== "string" || typeof serverName !== "string") {
+        throw new Error("Invalid MCP connection");
+      }
+      const names = await bindings.listMcpServers();
+      if (!Array.isArray(names) || !names.includes(serverName)) {
+        throw new Error("Unknown MCP server");
+      }
+      if (!ports.has(serverName)) {
+        const waiting = new Promise((resolve) => {
+          const list = waiters.get(serverName) || [];
+          list.push(resolve);
+          waiters.set(serverName, list);
+        });
+        await bindings.connectToMcpServer(serverName);
+        await Promise.race([
+          waiting,
+          new Promise((resolve) => setTimeout(resolve, 30000)),
+        ]);
+        if (!ports.has(serverName)) throw new Error("The MCP server did not connect");
+      }
+      const base = nextBase;
+      nextBase += 1000000;
+      connections.set(connectionId, { serverName, base });
+      return { uuid: ports.get(serverName).uuid };
+    },
+    async send(connectionId, message) {
+      const connection = connections.get(connectionId);
+      if (!connection || !message || typeof message !== "object") {
+        throw new Error("MCP connection is not open");
+      }
+      const port = ports.get(connection.serverName)?.port;
+      if (!port) throw new Error("MCP server is not connected");
+      if (message.method === "initialize") {
+        emit(connectionId, {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: initializeResults.get(connection.serverName)
+            || syntheticInitialize(connection.serverName, message.params),
+        });
+        return true;
+      }
+      if (message.method === "notifications/initialized") return true;
+      const forwarded = { ...message };
+      if (typeof forwarded.id === "number") forwarded.id += connection.base;
+      port.postMessage(forwarded);
+      return true;
+    },
+    async close(connectionId) {
+      connections.delete(connectionId);
+      return true;
+    },
+  };
+  return "__COWORK_BRIDGE_MCP_READY__";
+})()`;
+}
+
 module.exports = {
   createExtensionPolicy,
   deploymentModeInitMessage,
@@ -209,4 +368,6 @@ module.exports = {
   extensionDialogMethods,
   extensionPolicyMethods,
   findDeploymentModeGetter,
+  mcpBridgeGlobal,
+  mcpBridgeInstallExpression,
 };

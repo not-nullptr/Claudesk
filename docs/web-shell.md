@@ -85,7 +85,9 @@ Working with the flag on:
 - **Settings → Extensions** and `.mcpb` installs — the tab is reachable in the
   browser, a bundle can be dropped on the page or picked from Advanced
   settings, it uploads through the bridge, and the official preview modal
-  (mounted by the Desktop-checks host patch) installs it. See
+  (mounted by the Desktop-checks host patch) installs it. The installed
+  extension's MCP server is attached through the wrapper's port proxy, so the
+  detail page lists its tools and the chat surface can use them. See
   [desktop extensions](desktop-extensions.md).
 
 Not wired up yet (tracked here so it is not mistaken for done):

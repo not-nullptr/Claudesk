@@ -351,9 +351,11 @@ applied entry，而不是前者）；`patch-main-process.mjs` 把主进程扩展
 渲染器补丁把官方的 Extensions 导航项补进浏览器 shell（Desktop 身份下不重复）、让页面真正渲染、并打开预览弹窗里
 Install 控件的那个门。浏览器里既可以**拖放** `.mcpb`/`.dxt` 到 Extensions 页面，也可以在 Advanced settings 点
 “Install extension” 选择文件：文件先传到共享工作区，再交给 Desktop 的 `handleDxtFile` 走官方预览与安装流程；
-VNC 里的 Desktop 窗口则使用原生文件对话框和真实路径。扩展的 MCP server 由 Desktop 主进程运行，因此
-`node`/`python`/`uv` 运行时、以及 `uv` 安装时的外网依赖下载需要在这个容器内可用。扩展目录（在线目录）、自动更新开关
-与签名强制仍不可用。
+VNC 里的 Desktop 窗口则使用原生文件对话框和真实路径。扩展安装后，浏览器里的官方 chat 界面通过
+`claudeAppBindings` 附加本地 MCP server；浏览器拿不到 Electron 的 MessagePort，所以 wrapper 在官方渲染器里保留该端口，
+把 JSON-RPC 经桥的认证路由多路转发给浏览器（每连接独立 id 段，initialize 本地应答），扩展详情页因此能列出工具、不再
+显示 “Unable to connect to extension server”。扩展的 MCP server 由 Desktop 主进程运行，因此 `node`/`python`/`uv`
+运行时、以及 `uv` 安装时的外网依赖下载需要在这个容器内可用。扩展目录（在线目录）、自动更新开关与签名强制仍不可用。
 详见 [桌面扩展文档](docs/desktop-extensions.md)。安全上把 `.mcpb` 当作“在这台机器上安装的程序”：它以 Desktop 用户身份运行，
 每个账户的实例仍在各自的容器里。
 
