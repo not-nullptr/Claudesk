@@ -337,6 +337,21 @@ Bridge 的 `/api/remote/ipc` 请求也就永远不返回，面板一直转圈—
 就是该实例已认证的用户本人，而官方代码会按文件记录这次批准，所以同一个文件第二次读取根本不会再经过 wrapper。
 详见 [web shell 文档](docs/web-shell.md) 的 “File access consent”。
 
+### 桌面扩展（`.mcpb` / MCPB）
+
+官方 Linux 版自带桌面扩展（Settings → Extensions），但三方模式默认关闭它，而且还有两道门：扩展安装授权要求
+`hasOrgPolicyBackend()`（claude.ai 的机构策略服务，本部署没有），Settings 导航里的 “This computer → Extensions”
+只对 Desktop 身份、且“会话在本机运行”的客户端渲染——浏览器 shell 两条都不满足，所以以前既没有标签页也无法安装 `.mcpb`。
+
+现在：`30-claude-config.sh` 在 `claude_desktop_config.json` 写入 `extensions.enabled: true`；
+`bridge-wrapper/extensions.cjs` 只在 Extensions 的 IPC 调用期间把部署模式的 `hasOrgPolicyBackend()` 强制为 true
+（其它涉及机构策略的读取保持三方模式的答案）；渲染器补丁把官方的 Extensions 导航项补进浏览器 shell，Desktop 身份下不重复。
+浏览器里点 “Install extension” 会打开浏览器的文件选择器，把 `.mcpb` 传到共享工作区，再走官方预览弹窗与安装流程；
+VNC 里的 Desktop 窗口则照旧使用原生文件对话框。扩展的 MCP server 由 Desktop 主进程运行，因此 `node`/`python`/`uv`
+运行时、以及 `uv` 安装时的外网依赖下载需要在这个容器内可用。扩展目录（在线目录）、自动更新开关与签名强制仍不可用。
+详见 [桌面扩展文档](docs/desktop-extensions.md)。安全上把 `.mcpb` 当作“在这台机器上安装的程序”：它以 Desktop 用户身份运行，
+每个账户的实例仍在各自的容器里。
+
 ### 浏览器通知
 
 官方 Desktop 决定何时通知（回合结束、“需要你的输入”、工具许可与 AskUserQuestion 卡片等），并在主进程里弹出原生通知——

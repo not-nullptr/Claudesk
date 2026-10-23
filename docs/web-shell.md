@@ -81,7 +81,11 @@ Working with the flag on:
 - browser notifications for everything the Desktop app would notify about —
   finished turns, "needs your input", tool permission cards, AskUserQuestion —
   including while every tab is closed, via Web Push (see "Notifications"
-  below).
+  below);
+- **Settings → Extensions** and `.mcpb` installs — the tab is reachable in the
+  browser, the bundle uploads through the bridge, and the official preview
+  modal (mounted by the Desktop-checks host patch) installs it. See
+  [desktop extensions](desktop-extensions.md).
 
 Not wired up yet (tracked here so it is not mistaken for done):
 

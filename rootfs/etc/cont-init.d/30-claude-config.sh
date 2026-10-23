@@ -247,6 +247,14 @@ printf '[claude-config] official Developer menu follows CLAUDE_REMOTE_GATEWAY_SE
 # answers and reports models found. The mode chooser is what normally records
 # the choice, and a managed deployment disables the chooser, so record it here.
 # A value that is already set is left exactly as it is.
+#
+# `extensions.enabled` turns on the desktop-extension (MCPB) feature. The
+# official build defaults it off in three-party mode — there is no claude.ai
+# organization policy backend here to authorize installs — so without it the
+# Settings "Extensions" page does not exist and no `.mcpb` bundle can be
+# installed. The wrapper supplies the install authorization and the browser UI
+# uploads the bundle (see docs/desktop-extensions.md). Any other keys already
+# in the object are preserved.
 app_config="$user_data_dir/claude_desktop_config.json"
 if [ -L "$app_config" ]; then
     printf '[claude-config] ERROR: app config must not be a symlink\n' >&2
@@ -263,6 +271,7 @@ if [ -f "$app_config" ]; then
             coworkScheduledTasksEnabled: true
         })
         | del(.vmMemoryGB, .vmCpuCount, .coworkScheduledTasksEnabled)
+        | .extensions = ((.extensions // {}) + {enabled: true})
         | if (.deploymentMode // "") == "" then . + {deploymentMode: "3p"} else . end' \
         "$app_config" > "$app_config_tmp"
 else
@@ -274,6 +283,7 @@ else
             vmCpuCount: $cpu_count,
             coworkScheduledTasksEnabled: true
         },
+        extensions: {enabled: true},
         deploymentMode: "3p"}' > "$app_config_tmp"
 fi
 install -o "$user_id" -g "$group_id" -m 0600 "$app_config_tmp" "$app_config"

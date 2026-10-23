@@ -53,6 +53,27 @@ const gatewayLoopbackHttpMessage = "must use https (or http on loopback)";
 // renders, which appears nowhere else in the renderer graph.
 const filePreviewPatchId = "native-file-preview-bridge";
 const filePreviewStaticClassName = "h-full w-full relative overflow-hidden";
+// Settings → Extensions (MCPB bundles). The Settings nav builds its "This
+// computer" section only for a Desktop-identified client — the version check
+// parses the `Claude/<version>` user-agent token — and puts the Extensions item
+// in it only when sessions run on this device. This deployment is used from the
+// browser (the web shell drops the token on purpose) and its sessions run in
+// the account's Cowork guest, so both predicates are false and the tab was
+// absent; a `.mcpb` could not be installed. The config enables the feature
+// (`extensions.enabled`), the wrapper authorizes the install, and this patch
+// makes the item reachable: the item's own guard is forced on, and when the
+// whole section is not rendered the same item is appended to the nav list. In
+// a Desktop-identified window the original list already carries it, so the
+// appended arm is empty there and the item appears once. The item object is
+// pinned by its href and reused verbatim; the outer conditional and the
+// section push are separate required patches so a bundle that no longer
+// matches fails preparation instead of silently losing the tab.
+const settingsExtensionsTabPatchId = "settings-extensions-tab";
+const settingsExtensionsGroupPatchId = "settings-extensions-group";
+const settingsExtensionsHref = "/settings/desktop/extensions";
+// The "This computer" section heading's message id. It pins the push whose
+// condition is the same Desktop-identity flag.
+const thisComputerMessageId = "YY998h82la";
 // A browser-identified renderer resolves its internal code route to claude.ai's
 // cloud Code — which the org reports admin-disabled, so every Code route lands on
 // `/code/disabled` — while the Desktop identity resolves the same route to the
@@ -2284,13 +2305,39 @@ function desktopChecksGate(slot) {
   if (!hostFactory) return undefined;
   return { alternate: unwrap(argument.alternate), wrapper, elementFactory, hostFactory, props, children };
 }
-function scheduledTaskHostsReplacement(gate, source, starter, listener) {
+function scheduledTaskHostsReplacement(gate, source, starter, listener, previewHost) {
   const head = source.slice(gate.props.start + 1, gate.children.start);
   // `props.end` is one past the closing brace; the brace is kept explicitly
   // because the children property is removed and re-emitted here.
   const tail = source.slice(gate.children.end, gate.props.end - 1);
+  const hosts = [`${gate.hostFactory}(${starter},{})`, `${gate.hostFactory}(${listener},{})`];
+  // The extension-preview host subscribes to the main process's
+  // `previewExtensionInstallation` event and renders the install modal. It is
+  // the same Desktop-only slot, so a browser that installs a `.mcpb` needs it
+  // mounted too, or the uploaded bundle is previewed into nothing.
+  if (previewHost) hosts.push(`${gate.hostFactory}(${previewHost},{})`);
   return `(${gate.elementFactory}(${gate.wrapper},{${head}children:[`
-    + `${gate.hostFactory}(${starter},{}),${gate.hostFactory}(${listener},{})]${tail}}))`;
+    + `${hosts.join(",")}]${tail}}))`;
+}
+
+// The extension-preview host: the component that subscribes to
+// `onPreviewExtensionInstallation` and renders the install modal. Its own
+// fallback copy pins it, so a different subscriber is not mounted.
+const extensionPreviewHostMessageId = "yTU1HsZc8m";
+function extensionPreviewHost(ast) {
+  const names = new Set();
+  walk(ast, [], (node, ancestors) => {
+    if (node.type !== "CallExpression") return;
+    const callee = unwrap(node.callee);
+    if (!property(callee, "onPreviewExtensionInstallation")) return;
+    const scope = [...ancestors].reverse().find(parent => parent.type === "FunctionDeclaration"
+      && parent.id);
+    if (!scope || !contains(scope.body, child => literal(child, extensionPreviewHostMessageId))) {
+      return;
+    }
+    names.add(scope.id.name);
+  });
+  return names.size === 1 ? [...names][0] : undefined;
 }
 // The Cowork session-starter host: the component that publishes the session
 // starter into the app's own store — the declarator whose initialiser writes an
@@ -2394,6 +2441,7 @@ export const prefilterNeedles = [
   "avatar_image_url", // account chip avatar
   'must use https (or http on loopback)', // gateway URL host rule
   '"app:"', // the two gateway-setup guards
+  "settings/desktop/extensions", // the Settings → Extensions nav item
   // Web-shell patches.
   "principalDisplayName", // account menu name
   "signOut", // account sign-out row
@@ -4146,6 +4194,82 @@ function codeBypassAvailabilityTarget(node) {
   return body;
 }
 
+// --- Settings → Extensions nav (see settingsExtensionsTabPatchId) ------------
+//
+// The shipping nav builder is one assignment:
+//
+//   let a = b ? [{System}, ...C ? [{Extensions}] : [], ...E ? [{Developer}] : []] : []
+//
+// and, when the Desktop-only layout is not the unified one, one group push:
+//
+//   b && c.push({title:"This computer", sections:a})
+//
+// The item is pinned by its href; the outer and inner conditionals are read
+// back from the ancestors. Only the inner test is replaced, and the same item
+// object literal is appended behind an arm that is empty when the outer list
+// was rendered — so the item appears exactly once either way.
+function extensionsNavigationItem(node) {
+  if (node?.type !== "ObjectExpression") return false;
+  return node.properties.some(entry => key(entry, "href")
+    && entry.value?.type === "Literal" && entry.value.value === settingsExtensionsHref);
+}
+
+function extensionsSettingsNav(node, ancestors) {
+  if (!extensionsNavigationItem(node)) return null;
+  let conditional = null;
+  let index = -1;
+  for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+    const candidate = ancestors[i];
+    if (candidate.type === "ConditionalExpression"
+      && contains(candidate.consequent, child => child === node)) {
+      conditional = candidate;
+      index = i;
+      break;
+    }
+  }
+  if (!conditional) return null;
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const candidate = ancestors[i];
+    if (candidate.type === "ConditionalExpression"
+      && candidate.consequent.type === "ArrayExpression"
+      && candidate.test.type === "Identifier"
+      && contains(candidate.consequent, child => child === conditional)) {
+      return { conditional, outerConditional: candidate, item: node };
+    }
+  }
+  return null;
+}
+
+// The `b && c.push({title:"This computer", …})` group. Returns the logical
+// expression's left (the Desktop-identity flag) so the splice can extend it to
+// "…or the nav list has entries" — our appended item is such an entry when the
+// section is not rendered.
+function thisComputerNavigationGroup(node, ancestors) {
+  if (node?.type !== "CallExpression" || !property(node.callee, "push")) return null;
+  const [group] = node.arguments;
+  if (!group || group.type !== "ObjectExpression") return null;
+  if (!contains(group, child => literal(child, thisComputerMessageId))) return null;
+  const parent = ancestors.at(-1);
+  if (parent?.type !== "LogicalExpression" || parent.right !== node) return null;
+  if (parent.left.type !== "Identifier") return null;
+  return { left: parent.left };
+}
+
+// The nav list's variable name, read from the declarator whose initializer is
+// the outer conditional. The group push is later in the same function body, so
+// this is found by scanning that function for the same assignment shape.
+function extensionsNavArrayName(ancestors) {
+  const scope = [...ancestors].reverse().find(entry => functionTypes.has(entry.type));
+  if (!scope) return null;
+  let name = null;
+  walk(scope.body, [], node => {
+    if (name || node.type !== "VariableDeclarator" || node.id?.type !== "Identifier"
+      || node.init?.type !== "ConditionalExpression") return;
+    if (contains(node.init.consequent, extensionsNavigationItem)) name = node.id.name;
+  });
+  return name;
+}
+
 export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   tenantEnabled = false) {
   const evidence = Object.fromEntries(markerIds.map(id => [id, []]));
@@ -4156,6 +4280,7 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
   let avatarComponent;
   let starterHost;
   let listenerHost;
+  let extensionHost;
   let toastBinding;
   let toastPublished = false;
   const crashLogOptions = [];
@@ -4678,6 +4803,29 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
     }
   }
   walk(ast, [], (node, ancestors) => {
+    const extensionsNav = extensionsSettingsNav(node, ancestors);
+    if (extensionsNav) {
+      const { conditional, outerConditional, item } = extensionsNav;
+      const outerSource = source.slice(outerConditional.start, outerConditional.end);
+      const testStart = conditional.test.start - outerConditional.start;
+      const testEnd = conditional.test.end - outerConditional.start;
+      const forcedList = outerSource.slice(0, testStart) + "!0" + outerSource.slice(testEnd);
+      const itemSource = source.slice(item.start, item.end);
+      const identity = source.slice(outerConditional.test.start, outerConditional.test.end);
+      patches.push({ id: settingsExtensionsTabPatchId, start: outerConditional.start,
+        end: outerConditional.end, original: outerSource,
+        replacement: `(${forcedList}).concat(${identity}?[]:!0?[${itemSource}]:[])` });
+    }
+    const extensionsGroup = thisComputerNavigationGroup(node, ancestors);
+    if (extensionsGroup) {
+      const arrayName = extensionsNavArrayName(ancestors);
+      if (arrayName) {
+        const original = source.slice(extensionsGroup.left.start, extensionsGroup.left.end);
+        patches.push({ id: settingsExtensionsGroupPatchId,
+          start: extensionsGroup.left.start, end: extensionsGroup.left.end, original,
+          replacement: `(${original}||${arrayName}.length>0)` });
+      }
+    }
     if (filePaneDownloadTarget(node, ancestors)) {
       button ??= ghostIconButton(ast);
       const patch = filePaneDownloadPatch(node, ancestors, source, button);
@@ -4782,11 +4930,13 @@ export function inspectRenderer(source, gatewayEnabled, webShellEnabled = false,
         if (gate) {
           starterHost ??= scheduledTaskStarterHost(ast);
           listenerHost ??= scheduledTaskListenerHost(ast);
+          extensionHost ??= extensionPreviewHost(ast);
           if (starterHost && listenerHost) {
             patches.push({ id: scheduledTaskHostsPatchId,
               start: gate.alternate.start, end: gate.alternate.end,
               original: source.slice(gate.alternate.start, gate.alternate.end),
-              replacement: scheduledTaskHostsReplacement(gate, source, starterHost, listenerHost) });
+              replacement: scheduledTaskHostsReplacement(
+                gate, source, starterHost, listenerHost, extensionHost) });
           }
         }
       }
@@ -5142,8 +5292,17 @@ export function assembleRenderer(sources, analyses, gatewayEnabled, webShellEnab
   // surface this bridge drives, exactly as on the deployment's own instance.
   // What keeps a tenant's Code off its container is the environment list and
   // the IPC guard, not the route name.
+  // The Settings → Extensions item is only required from a bundle that carries
+  // its route at all. Every reviewed ion-dist does; a synthetic or older tree
+  // without the page has no tab to lose. When it is present, both halves of the
+  // splice must match exactly once — a Desktop update that reshapes the nav
+  // must fail preparation rather than quietly drop the tab again.
+  const carriesExtensionsNavigation = [...sources.values()]
+    .some(value => value.includes(settingsExtensionsHref));
   const required = [downloadPatchId, inferenceBannerPatchId, filePreviewPatchId,
     accountSignOutPatchId,
+    ...(carriesExtensionsNavigation
+      ? [settingsExtensionsTabPatchId, settingsExtensionsGroupPatchId] : []),
     ...(webShellEnabled
       ? [routeAliasPatchId,
           sessionViewerPatchId, localSessionPlacementPatchId,

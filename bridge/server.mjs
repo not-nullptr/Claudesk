@@ -1368,6 +1368,31 @@ const allowedSettingsMethods = gatewaySettingsEnabled
     ])
   : new Map();
 
+// Desktop extensions (MCPB bundles) are not a Gateway-settings feature, so the
+// surface is exposed even when the writable 3P configuration library is off.
+// `showInstallDxtDialog` is deliberately absent: the browser preload publishes
+// its own upload flow under that name; forwarding it would open the native
+// picker nobody can reach. `isLocalExtensionInstallAllowed` is answered by the
+// preload for the same reason. The wrapper answers the rest against the
+// official renderer (see bridge-wrapper/main.cjs).
+const extensionSettingsMethods = new Set([
+  "deleteExtension",
+  "getAvailableExtensionRuntimes",
+  "getExtensionSettings",
+  "getInstalledExtensionsWithState",
+  "getIsUpdateAvailable",
+  "getManifestCompatibilityResult",
+  "handleDxtFile",
+  "installExtensionFromPreview",
+  "isDesktopExtensionDirectoryEnabled",
+  "isDesktopExtensionSignatureRequired",
+  "isDirectoryEnabled",
+  "isExtensionsEnabled",
+  "refreshAllowlistCheck",
+  "setExtensionSettings",
+]);
+allowedSettingsMethods.set("Extensions", extensionSettingsMethods);
+
 const remoteListenerMethods = new Map([
   ["ClaudeVM", new Set([
     "onDownloadProgress",
@@ -1387,6 +1412,14 @@ const remoteListenerMethods = new Map([
   ["CCDScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
+  // Desktop extensions publish these from `claude.settings.Extensions`; the
+  // wrapper subscribes there and relays them like the `claude.web` events.
+  ["Extensions", new Set([
+    "onExtensionDownloadProgress",
+    "onExtensionSettingsChanged",
+    "onExtensionsChanged",
+    "onPreviewExtensionInstallation",
+  ])],
   // Not a `claude.web` surface on the Desktop side: the wrapper publishes the
   // notifications the official app decides to show, for the remote preload to
   // render in the browser (see bridge/notifications.mjs for the push side).
@@ -1498,14 +1531,14 @@ const mimeTypes = {
 };
 
 class DesktopInternalClient {
-  async request(pathname, options = {}) {
+  async request(pathname, options = {}, timeoutMs = 120000) {
     const response = await fetch(`${coworkInternalUrl}${pathname}`, {
       ...options,
       headers: {
         "Content-Type": "application/json",
         ...(options.headers || {}),
       },
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) {
@@ -1526,10 +1559,17 @@ class DesktopInternalClient {
   }
 
   async invokeSettings(surface, method, args, argsEncoding) {
+    // An extension install may download the uv runtime and resolve Python
+    // dependencies before it answers; still bounded, but not on the 2-minute
+    // budget of an ordinary settings call.
+    const timeoutMs = surface === "Extensions"
+      && (method === "handleDxtFile" || method === "installExtensionFromPreview")
+      ? 10 * 60 * 1000
+      : 120000;
     const body = await this.request("/settings-invoke", {
       method: "POST",
       body: JSON.stringify({ surface, method, args, argsEncoding }),
-    });
+    }, timeoutMs);
     return body.value;
   }
 
@@ -3459,14 +3499,84 @@ function validateCodePreference(method, args) {
   }
 }
 
+// Extension ids are minted by the official installer from the manifest name
+// (`local.mcpb.<slug>` / `local.dxt.<slug>`). A browser-uploaded bundle is
+// copied into the shared workspace before it is handed to the Desktop, so only
+// that tree is accepted as an install/preview source.
+const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const extensionBundlePathPattern = /\.(?:dxt|mcpb)$/i;
+
+function isExtensionBundlePath(value) {
+  if (typeof value !== "string" || value.length > 4096) return false;
+  if (!extensionBundlePathPattern.test(value) || !value.startsWith("/workspace/")) {
+    return false;
+  }
+  return !value.split("/").includes("..");
+}
+
+function validateExtensionInvocation(method, args) {
+  const id = index => typeof args[index] === "string"
+    && extensionIdPattern.test(args[index]);
+  switch (method) {
+    case "getInstalledExtensionsWithState":
+    case "getAvailableExtensionRuntimes":
+    case "isDesktopExtensionDirectoryEnabled":
+    case "isDesktopExtensionSignatureRequired":
+    case "isDirectoryEnabled":
+    case "isExtensionsEnabled":
+    case "refreshAllowlistCheck":
+      if (args.length !== 0) throw new ApiError(400, "Extension method does not accept arguments");
+      return;
+    case "getIsUpdateAvailable":
+      if (args.length !== 2
+        || !id(0)
+        || typeof args[1] !== "string" || args[1].length > 128) {
+        throw new ApiError(400, "Extension update check is not allowed");
+      }
+      return;
+    case "getManifestCompatibilityResult":
+      if (args.length !== 1 || !args[0] || typeof args[0] !== "object"
+        || Array.isArray(args[0]) || !isBoundedJsonValue(args[0])) {
+        throw new ApiError(400, "Extension manifest check is not allowed");
+      }
+      return;
+    case "getExtensionSettings":
+    case "deleteExtension":
+      if (args.length !== 1 || !id(0)) throw new ApiError(400, "Extension id is not allowed");
+      return;
+    case "setExtensionSettings":
+      if (args.length !== 2 || !id(0) || !args[1] || typeof args[1] !== "object"
+        || Array.isArray(args[1]) || !isBoundedJsonValue(args[1])) {
+        throw new ApiError(400, "Extension settings update is not allowed");
+      }
+      return;
+    case "handleDxtFile":
+      if (args.length !== 1 || !isExtensionBundlePath(args[0])) {
+        throw new ApiError(400, "Extension bundle path is not allowed");
+      }
+      return;
+    case "installExtensionFromPreview":
+      if (args.length !== 2 || !id(0) || !isExtensionBundlePath(args[1])) {
+        throw new ApiError(400, "Extension install is not allowed");
+      }
+      return;
+    default:
+      throw new ApiError(400, "Extension method is not allowed");
+  }
+}
+
 function validateSettingsInvocation(surface, method, args) {
-  if (!gatewaySettingsEnabled) {
+  if (!gatewaySettingsEnabled && surface !== "Extensions") {
     throw new ApiError(404, "Remote Gateway settings are disabled");
   }
   if (!allowedSettingsMethods.get(surface)?.has(method)) {
     throw new ApiError(400, "Gateway settings method is not allowed");
   }
   if (!Array.isArray(args)) throw new ApiError(400, "args must be an array");
+  if (surface === "Extensions") {
+    validateExtensionInvocation(method, args);
+    return;
+  }
   if (surface === "AppPreferences") {
     // A tenant has no local Code executor (`codeActionsEnabled` is false by
     // construction) but does have a real Code surface on its self-hosted

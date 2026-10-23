@@ -8,9 +8,55 @@ const { lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile }
 const { basename, dirname, extname, join, normalize, resolve } = require("node:path");
 const { promisify } = require("node:util");
 const { gunzip, gzip } = require("node:zlib");
-const { app, BrowserWindow, ipcMain, Menu, net, webContents } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, webContents } = require("electron");
 
+const extensions = require("./extensions.cjs");
 const sessionAttachments = require("./session-attachments.cjs");
+
+// See extensions.cjs. The policy is created before the official app loads so
+// windows can be wrapped as they appear, and `ensure()` retries until the
+// official deployment mode is initialized.
+const extensionPolicy = extensions.createExtensionPolicy();
+let relayedExtensionDialogs = 0;
+// One entry per browser-relayed extension call that may raise native dialogs.
+// The official install path reports failures through an error dialog and then
+// returns null/undefined, which the page's fire-and-forget call would otherwise
+// never see; the captured detail is turned into a rejected relay so the
+// preload can show it as a toast.
+const relayedExtensionDialogStack = [];
+
+// The install confirmation and the error dialogs are native message boxes. A
+// browser cannot see them; `invokeSettings` brackets the relayed
+// install/preview calls below and this wrapper answers them at once, with the
+// first button (Install / OK). Native calls from the Desktop window itself are
+// outside that bracket and keep their dialog.
+if (typeof dialog?.showMessageBox === "function") {
+  const originalShowMessageBox = dialog.showMessageBox.bind(dialog);
+  dialog.showMessageBox = (...args) => {
+    if (relayedExtensionDialogs <= 0) return originalShowMessageBox(...args);
+    const options = args.find((argument) => argument && typeof argument === "object"
+      && ("message" in argument || "title" in argument));
+    if (options) {
+      const capture = relayedExtensionDialogStack.at(-1);
+      capture?.push({
+        title: String(options.title || ""),
+        message: String(options.message || ""),
+        detail: String(options.detail || ""),
+        type: String(options.type || ""),
+        buttons: Array.isArray(options.buttons) ? options.buttons.length : 0,
+      });
+    }
+    const answer = { response: 0, checkboxChecked: false };
+    // Electron accepts a trailing callback instead of a promise. The install
+    // path awaits the promise form; keep the callback form working anyway.
+    const callback = args.find((argument) => typeof argument === "function");
+    if (callback) {
+      queueMicrotask(() => callback(answer));
+      return undefined;
+    }
+    return Promise.resolve(answer);
+  };
+}
 
 // The official Desktop computes each notification's final title and body inside
 // its own (minified) notification service, so the relay below cannot re-derive
@@ -595,6 +641,17 @@ app.on("web-contents-created", (_event, contents) => {
       error?.message || error,
     );
   }
+  try {
+    // The install-authorization Extensions handlers run with the 3P policy
+    // override in place, whether the caller is the Desktop window or the
+    // browser relayed through the internal endpoint (see extensions.cjs).
+    extensionPolicy.wrapIpc(contents?.ipc);
+  } catch (error) {
+    console.warn(
+      "[cowork-wrapper] could not wrap this window's extension IPC:",
+      error?.message || error,
+    );
+  }
 });
 
 const allowedMethods = new Map([
@@ -1008,6 +1065,31 @@ const allowedSettingsMethods = gatewaySettingsEnabled
     ])
   : new Map();
 
+// Desktop extensions (MCPB bundles) are not a Gateway-settings feature, so the
+// surface is exposed even when the writable 3P configuration library is off.
+// `showInstallDxtDialog` is deliberately absent: the browser preload publishes
+// its own file picker under that name instead of opening the native dialog,
+// which nobody can reach here. `isLocalExtensionInstallAllowed` is likewise
+// answered by the preload (installs are supported through the browser), and
+// the main process would refuse without the policy override in extensions.cjs.
+const extensionSettingsMethods = new Set([
+  "deleteExtension",
+  "getAvailableExtensionRuntimes",
+  "getExtensionSettings",
+  "getInstalledExtensionsWithState",
+  "getIsUpdateAvailable",
+  "getManifestCompatibilityResult",
+  "handleDxtFile",
+  "installExtensionFromPreview",
+  "isDesktopExtensionDirectoryEnabled",
+  "isDesktopExtensionSignatureRequired",
+  "isDirectoryEnabled",
+  "isExtensionsEnabled",
+  "refreshAllowlistCheck",
+  "setExtensionSettings",
+]);
+allowedSettingsMethods.set("Extensions", extensionSettingsMethods);
+
 const allowedSurfaces = new Set(allowedMethods.keys());
 
 const allowedStores = new Map([
@@ -1038,6 +1120,15 @@ const relayedListeners = new Map([
   ["CCDScheduledTasks", new Set(["onOnScheduledTaskEvent"])],
   ["CoworkSpaces", new Set(["onOnSpaceEvent"])],
   ["DocumentFunnel", new Set(["onWorkingDocumentsChanged"])],
+  // Desktop extensions live on `claude.settings`, not `claude.web`; the relay
+  // resolves each surface's own root (see ensureRelayedEventsRegistered). The
+  // browser's Extensions page drives installs through these events.
+  ["Extensions", new Set([
+    "onExtensionDownloadProgress",
+    "onExtensionSettingsChanged",
+    "onExtensionsChanged",
+    "onPreviewExtensionInstallation",
+  ])],
   // Not a `claude.web` surface: the wrapper itself publishes the notifications
   // the official Desktop decides to show, for the remote preload to render in
   // the browser (see the notification relay section below).
@@ -2002,12 +2093,84 @@ function validateInvocation(surface, method, args) {
   if (!Array.isArray(args)) throw new Error("args must be an array");
 }
 
+// Extension ids are minted by the official installer from the manifest name
+// (`local.mcpb.<slug>` / `local.dxt.<slug>`). Bundles relayed from the browser
+// are copied into the shared workspace first, so only that tree is accepted as
+// an install/preview source; a path elsewhere in the container is not.
+const extensionIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const extensionBundlePathPattern = /\.(?:dxt|mcpb)$/i;
+
+function isExtensionBundlePath(value) {
+  if (typeof value !== "string" || value.length > 4096) return false;
+  if (!extensionBundlePathPattern.test(value) || !value.startsWith("/workspace/")) {
+    return false;
+  }
+  return !value.split("/").includes("..");
+}
+
+function validateExtensionInvocation(method, args) {
+  const id = index => typeof args[index] === "string"
+    && extensionIdPattern.test(args[index]);
+  switch (method) {
+    case "getInstalledExtensionsWithState":
+    case "getAvailableExtensionRuntimes":
+    case "isDesktopExtensionDirectoryEnabled":
+    case "isDesktopExtensionSignatureRequired":
+    case "isDirectoryEnabled":
+    case "isExtensionsEnabled":
+    case "refreshAllowlistCheck":
+      if (args.length !== 0) throw new Error("Extension method does not accept arguments");
+      return;
+    case "getIsUpdateAvailable":
+      if (args.length !== 2
+        || !id(0)
+        || typeof args[1] !== "string" || args[1].length > 128) {
+        throw new Error("Extension update check is not allowed");
+      }
+      return;
+    case "getManifestCompatibilityResult":
+      if (args.length !== 1 || !args[0] || typeof args[0] !== "object"
+        || Array.isArray(args[0]) || !isBoundedJsonValue(args[0])) {
+        throw new Error("Extension manifest check is not allowed");
+      }
+      return;
+    case "getExtensionSettings":
+    case "deleteExtension":
+      if (args.length !== 1 || !id(0)) throw new Error("Extension id is not allowed");
+      return;
+    case "setExtensionSettings":
+      if (args.length !== 2 || !id(0) || !args[1] || typeof args[1] !== "object"
+        || Array.isArray(args[1]) || !isBoundedJsonValue(args[1])) {
+        throw new Error("Extension settings update is not allowed");
+      }
+      return;
+    case "handleDxtFile":
+      if (args.length !== 1 || !isExtensionBundlePath(args[0])) {
+        throw new Error("Extension bundle path is not allowed");
+      }
+      return;
+    case "installExtensionFromPreview":
+      if (args.length !== 2 || !id(0) || !isExtensionBundlePath(args[1])) {
+        throw new Error("Extension install is not allowed");
+      }
+      return;
+    default:
+      throw new Error("Extension method is not allowed");
+  }
+}
+
 function validateSettingsInvocation(surface, method, args) {
-  if (!gatewaySettingsEnabled) throw new Error("Remote Gateway settings are disabled");
+  if (!gatewaySettingsEnabled && surface !== "Extensions") {
+    throw new Error("Remote Gateway settings are disabled");
+  }
   if (!allowedSettingsMethods.get(surface)?.has(method)) {
     throw new Error("Gateway settings method is not allowed");
   }
   if (!Array.isArray(args)) throw new Error("args must be an array");
+  if (surface === "Extensions") {
+    validateExtensionInvocation(method, args);
+    return;
+  }
   if (surface === "AppPreferences") {
     if (!codeActionsEnabled && !codeSurfaceEnabled) throw new Error("Code settings are disabled");
     validateCodePreference(method, args);
@@ -2756,13 +2919,51 @@ async function invokeSettings(surface, method, args, argsEncoding) {
       });
     }
   })()`;
-  const contents = await gatewaySettingsRenderer();
-  const serialized = await contents.executeJavaScript(expression, true);
-  if (serialized === "__COWORK_BRIDGE_NOT_AVAILABLE__") {
-    throw new Error("Gateway settings IPC is unavailable in the official setup window");
+  let serialized;
+  const answerDialogs = surface === "Extensions"
+    && extensions.extensionDialogMethods.has(method);
+  let capturedDialogs = null;
+  if (surface === "Extensions") {
+    // Extensions live on the official app's own renderer, not the Gateway setup
+    // window (the surface exists whether or not the writable 3P configuration
+    // library is enabled). The install and preview calls can open a native
+    // dialog; a browser cannot answer it, so answer it for the duration of
+    // this relayed call.
+    if (!answerDialogs) {
+      serialized = await evaluateInOfficialRenderer(expression);
+    } else {
+      capturedDialogs = [];
+      relayedExtensionDialogStack.push(capturedDialogs);
+      relayedExtensionDialogs += 1;
+      try {
+        serialized = await evaluateInOfficialRenderer(expression);
+      } finally {
+        relayedExtensionDialogs -= 1;
+        relayedExtensionDialogStack.pop();
+      }
+    }
+  } else {
+    const contents = await gatewaySettingsRenderer();
+    serialized = await contents.executeJavaScript(expression, true);
+    if (serialized === "__COWORK_BRIDGE_NOT_AVAILABLE__") {
+      throw new Error("Gateway settings IPC is unavailable in the official setup window");
+    }
   }
   const result = JSON.parse(serialized);
   if (!result.ok) throw new Error(result.error || "Gateway settings IPC call failed");
+  if (answerDialogs) {
+    // A one-button dialog is the install path's error/notice box (the install
+    // confirmation has Install and Cancel). The Desktop reports the reason there
+    // and then resolves null, so surface that reason to the browser.
+    const failure = capturedDialogs.find(dialog => dialog.buttons <= 1);
+    if (failure) {
+      throw new Error(failure.detail || failure.message || failure.title
+        || "The desktop extension operation failed");
+    }
+    if (method === "installExtensionFromPreview" && result.value == null) {
+      throw new Error("The extension was not installed; the Desktop returned no extension id");
+    }
+  }
   if (surface === "AppPreferences" && method === "getPreferences") {
     const source = result.value || {};
     const allowed = {};
@@ -2842,6 +3043,7 @@ async function ensureRelayedEventsRegistered() {
   );
   const expression = `(() => {
     const root = globalThis["claude.web"];
+    const settingsRoot = globalThis["claude.settings"];
     if (typeof root?.LocalAgentModeSessions?.onOnEvent !== "function") return "__COWORK_BRIDGE_NOT_AVAILABLE__";
     const relayKey = "__CLAUDE_REMOTE_EVENT_RELAY_V2__";
     if (!globalThis[relayKey]) {
@@ -2850,19 +3052,31 @@ async function ensureRelayedEventsRegistered() {
       const consolePrefix = ${JSON.stringify(relayConsolePrefix)};
       for (const [surface, methods] of Object.entries(listeners)) {
         for (const method of methods) {
-          const subscribe = root[surface]?.[method];
+          // Extensions (and any other settings surface) are published on
+          // claude.settings; everything else is claude.web.
+          const subscribe = (root[surface] ?? settingsRoot?.[surface])?.[method];
           if (typeof subscribe !== "function") continue;
           try {
-            const unsubscribe = subscribe((payload) => {
-              let value = null;
+            // Desktop's preload adapters are not uniform: some events carry one
+            // payload, others forward several positional arguments (the
+            // extension preview is manifest/path/id/signature; settings
+            // changes are id/settings). Keep the full argument list so the
+            // browser callback receives the same shape.
+            const unsubscribe = subscribe((...args) => {
+              let values;
               try {
-                value = JSON.parse(JSON.stringify(payload, (_key, item) =>
+                values = JSON.parse(JSON.stringify(args, (_key, item) =>
                   typeof item === "bigint" ? item.toString() : item
                 ));
               } catch {
-                value = { type: "unserializable-event" };
+                values = [{ type: "unserializable-event" }];
               }
-              console.debug(consolePrefix + JSON.stringify({ surface, method, payload: value }));
+              console.debug(consolePrefix + JSON.stringify({
+                surface,
+                method,
+                payload: values[0],
+                ...(values.length > 1 ? { args: values } : {}),
+              }));
             });
             if (typeof unsubscribe === "function") relay.unsubscribers.push(unsubscribe);
           } catch {}
@@ -3527,6 +3741,19 @@ app.whenReady().then(() => {
     }
   }, 500);
   notificationDiscoveryPoll.unref();
+
+  // The official deployment mode is initialized during startup; patch its
+  // extension-policy predicate as soon as it exists so the first Extensions
+  // call (including one from the native menu's Install Extension…) already
+  // runs inside the override. The IPC wrapper calls ensure() lazily too.
+  let extensionPolicyAttempts = 0;
+  const extensionPolicyPoll = setInterval(() => {
+    extensionPolicyAttempts += 1;
+    if (extensionPolicy.ensure() || extensionPolicyAttempts >= 600) {
+      clearInterval(extensionPolicyPoll);
+    }
+  }, 500);
+  extensionPolicyPoll.unref();
 
   if (coworkHostBashEnabled) {
     console.warn("[cowork-wrapper] container-host Bash enabled; Cowork VM startup bypassed");

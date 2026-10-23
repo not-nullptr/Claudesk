@@ -489,10 +489,15 @@
     return () => callbacks.delete(callback);
   }
 
-  function dispatch(surface, method, payload) {
+  function dispatch(surface, method, payload, args) {
+    // Some Desktop events are single-payload, others carry several positional
+    // arguments (the extension preview is manifest/path/id/signature). The
+    // wrapper relays the whole argument list in `args` when there is more than
+    // one; single-payload events keep their original one-argument shape.
+    const callArgs = Array.isArray(args) ? args : [payload];
     for (const callback of listenerCallbacks.get(listenerKey(surface, method)) || []) {
       try {
-        callback(payload);
+        callback(...callArgs);
       } catch {}
     }
   }
@@ -531,11 +536,12 @@
     };
   }
 
-  function chooseBrowserFiles({ directory = false, multiple = true } = {}) {
+  function chooseBrowserFiles({ directory = false, multiple = true, accept = "" } = {}) {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
       input.multiple = multiple;
+      if (accept) input.accept = accept;
       if (directory) {
         input.setAttribute("webkitdirectory", "");
         input.setAttribute("directory", "");
@@ -623,6 +629,51 @@
     const files = await chooseBrowserFiles({ directory, multiple: true });
     return uploadBrowserFiles(files);
   }
+
+  // BEGIN desktop extensions (MCPB)
+  const extensionBundlePattern = /\.(?:dxt|mcpb)$/i;
+
+  function reportExtensionProblem(message) {
+    console.error("[claudesk]", message);
+    const toast = globalThis.__CLAUDESK_TOAST__;
+    if (toast && typeof toast.add === "function") {
+      toast.add({ title: "Extension install", description: message, timeout: 0 });
+      return;
+    }
+    try {
+      globalThis.alert(message);
+    } catch {}
+  }
+
+  // The Extensions page's install button. The official implementation opens a
+  // native file picker and returns a path inside the container, which a
+  // browser cannot do. The bundle is uploaded through the same streaming route
+  // as every other browser file (it lands in the shared workspace), then
+  // Desktop previews it exactly as if it had been opened from disk; the
+  // official preview modal takes over from there.
+  async function installExtensionFromBrowser() {
+    try {
+      const files = await chooseBrowserFiles({
+        directory: false,
+        multiple: false,
+        accept: ".mcpb,.dxt,application/zip",
+      });
+      if (!files.length) return;
+      const file = files[0];
+      if (!extensionBundlePattern.test(file.name)) {
+        throw new Error("Choose a .mcpb or .dxt extension bundle.");
+      }
+      const uploaded = await uploadBrowserFiles([file]);
+      const path = uploaded?.paths?.[0];
+      if (!path) throw new Error("The extension upload did not return a path.");
+      await invokeSettings("Extensions", "handleDxtFile", [path]);
+    } catch (error) {
+      reportExtensionProblem(
+        `Couldn't open the extension: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  // END desktop extensions
 
   function openBrowserUrl(url, { downloadName } = {}) {
     const anchor = document.createElement("a");
@@ -1319,9 +1370,19 @@
     writable: false,
   });
 
-  if (config.gatewaySettingsEnabled) {
+  // Desktop extensions are published on the settings root, not `claude.web`.
+  // The official Settings → Extensions page reads them through
+  // `claude.settings.Extensions`; build that namespace whenever either the
+  // Gateway settings surfaces or the Extensions surface is exposed. An install
+  // the browser starts is uploaded into the shared workspace and handed to the
+  // Desktop through `handleDxtFile`, the same preview path a `.mcpb` opened in
+  // the Desktop window takes.
+  const settingsMethods = config.settingsMethods || {};
+  const extensionMethods = settingsMethods.Extensions;
+  const extensionsAvailable = Array.isArray(extensionMethods) && extensionMethods.length > 0;
+  if (config.gatewaySettingsEnabled || extensionsAvailable) {
     const settingsRoot = Object.create(null);
-    for (const [surface, methods] of Object.entries(config.settingsMethods || {})) {
+    for (const [surface, methods] of Object.entries(settingsMethods)) {
       const api = Object.create(null);
       for (const method of methods) {
         if (surface === "Custom3pSetup" && method === "openSetupWindow") {
@@ -1337,6 +1398,34 @@
           api[method] = (...args) => relaunchDesktop(args);
         } else {
           api[method] = (...args) => invokeSettings(surface, method, args);
+        }
+      }
+      if (surface === "Extensions") {
+        // The main process requires an organization policy backend to
+        // authorize a local install; this deployment has none, so the preload
+        // reports that browser installs are supported and publishes its own
+        // picker. The server-side allowlist forwards only the methods above,
+        // so `showInstallDxtDialog` never reaches the native dialog.
+        api.isLocalExtensionInstallAllowed = async () => true;
+        api.showInstallDxtDialog = installExtensionFromBrowser;
+        // The preview modal fires this without awaiting, and the Desktop
+        // reports failures through a native dialog this side cannot see. The
+        // wrapper turns that dialog into a rejected relay, so catch it and
+        // show the reason as a toast instead of an unhandled rejection.
+        const forwardInstall = api.installExtensionFromPreview;
+        if (typeof forwardInstall === "function") {
+          api.installExtensionFromPreview = async (...args) => {
+            try {
+              const value = await forwardInstall(...args);
+              if (value == null) throw new Error("The extension was not installed.");
+              return value;
+            } catch (error) {
+              reportExtensionProblem(
+                `Couldn't install the extension: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+            }
+          };
         }
       }
       if (surface === "AppPreferences") {
@@ -1885,7 +1974,7 @@
       try {
         const payload = JSON.parse(event.data);
         if (payload.payload?.sessionId) latestTranscriptEvents.delete(payload.payload.sessionId);
-        dispatch(payload.surface, payload.method, payload.payload);
+        dispatch(payload.surface, payload.method, payload.payload, payload.args);
       } catch {}
     });
     events.addEventListener("sessions", (event) => {

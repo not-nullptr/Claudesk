@@ -324,6 +324,23 @@ const modePickerDecoys = 'function markerWithoutSwitcher(){'
   + 'return h(Frame,{"data-compact-mode-switcher":!0,children:h(Other,{})})}'
   + 'function switcherWithoutSegments(){return h(Frame,{"data-compact-mode-switcher":!0,'
   + 'children:h(Segmented,{value:"cowork"})})}';
+// Settings → Extensions. The nav item lives behind two gates — the Desktop
+// client identity (`b`) and sessions running on this device (`C`) — and its
+// section group is pushed behind the identity flag. The patch forces the item
+// guard on and appends the same item object when the section itself was not
+// rendered, so a browser sees the tab exactly once. The decoy carries the same
+// href outside a nav conditional and must not match.
+const settingsNav = 'function settingsNav(b,C,E,T,t){'
+  + 'let a=b?[{id:"desktop",href:"/settings/desktop",label:"System"},'
+  + '...C?[{id:"desktop/extensions",href:"/settings/desktop/extensions",'
+  + 'label:S(X,{defaultMessage:"Extensions",id:"nb2FlN/G2m"}),icon:OS}]:[],'
+  + '...E?[{id:"desktop/developer",href:"/settings/desktop/developer",label:"Developer"}]:[]]:[],c;'
+  + 'if(T){c=UC({sections:[...t,...a]})}else{c=[{title:"Settings",sections:t}],'
+  + 'b&&c.push({title:S(X,{defaultMessage:"This computer",id:"YY998h82la"}),sections:a})}'
+  + 'return{groups:c}}';
+const settingsNavDecoy = 'function elsewhere(){return {href:"/settings/desktop/extensions",'
+  + 'title:"Extensions"}}'
+  + 'function otherGroup(b,c){return b&&c.push({title:"Elsewhere",sections:[]})}';
 const variants = [
   { comparison: 'window.location.protocol==="app:"', windowCheck: 'typeof window<"u"' },
   { comparison: "'app:' == window [ 'location' ] [ 'protocol' ]", windowCheck: "typeof window !== 'undefined'" },
@@ -338,9 +355,9 @@ for (const [i, variant] of variants.entries()) {
   const route = `const route=()=>{const ${gate}=(${variant.windowCheck})&&(${variant.comparison});router['replace']('/new');return ${gate};};`;
   const decoy = `// window.location.protocol==="app:"\nconst text='window.location.protocol==="app:"';function other(){return window.location.protocol==="app:"}`;
   const inputs = new Map([[`changed-chunk-${i}.js`,
-    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${decoy}`]]);
+    `${native}\n${signin}\n${route}\n${filePane}\n${bannerCard}\n${previewComponent}\n${aliasResolver}\n${sessionLayout}\n${sessionPlacement}\n${codeSubscription}\n${codeSubscriptionDecoy}\n${codeSubscriptionDefaults}\n${chatListGate}\n${accountChip}\n${accountPhotoDecoys}\n${accountMenuName}\n${accountMenuNameDecoys}\n${accountSignOut}\n${accountSignOutDecoys}\n${desktopRoot}\n${desktopChecks}\n${desktopChecksDecoy}\n${scheduledTaskHosts}\n${scheduledTaskHostsDecoy}\n${toastHost}\n${toastHostDecoy}\n${scheduledTaskRunner}\n${scheduledTaskRunnerDecoy}\n${pushEnable}\n${pushEnableDecoy}\n${gatewayUrlSchema}\n${gatewayUrlDecoy}\n${signingDecoy}\n${settingsNav}\n${settingsNavDecoy}\n${decoy}`]]);
   const result = patchRendererSources(inputs, true);
-  assert.equal(result.patches.length, 7);
+  assert.equal(result.patches.length, 9);
   const output = result.sources.get(`changed-chunk-${i}.js`);
   assert.equal(result.patches.filter(p => p.id === "account-sign-out-row").length, 1,
     "the user menu's signOut flag must be spliced exactly once");
@@ -358,7 +375,7 @@ for (const [i, variant] of variants.entries()) {
   assert.ok(output.includes('!hosts.has(h)},'),
     "a schema without the loopback-http copy must not be spliced");
   const webResult = patchRendererSources(inputs, true, true);
-  assert.equal(webResult.patches.length, 21,
+  assert.equal(webResult.patches.length, 23,
     "the web shell adds the Code route alias, the session Desktop gate, the local session placement, the Code subscription's SSE transport, the session list's Code exclusion, the account-chip avatar, the account photo fallback, the user-menu identity seed, the Cowork permission wiring, the notification-enable bridge, the scheduled-task runner gate, the scheduled-task hosts, the toast-manager global and the chunk loader's asset base");
   assert.equal(webResult.patches.filter(p => p.id === "web-shell-asset-base").length, 1,
     "the chunk loader must resolve through the deployment's asset base");
@@ -392,7 +409,7 @@ for (const [i, variant] of variants.entries()) {
   // must resolve to the surface the bridge drives. The isolation guarantee is
   // the environment list and the LocalSessions guard, not the route name.
   const tenantResult = patchRendererSources(inputs, true, true, true);
-  assert.equal(tenantResult.patches.length, 21,
+  assert.equal(tenantResult.patches.length, 23,
     "a tenant's web shell keeps every web-shell patch, the route alias included");
   assert.equal(tenantResult.patches.filter(p => p.id === "desktop-code-route-alias").length, 1,
     "a tenant's `/code` must resolve to the surface this bridge drives");
@@ -508,16 +525,45 @@ for (const [i, variant] of variants.entries()) {
   const disabled = patchRendererSources(inputs, false);
   assert.deepEqual(disabled.patches.map(patch => patch.id),
     ["file-pane-download", "inference-banner", "native-file-preview-bridge",
-      "account-sign-out-row", "gateway-url-any-host-http"],
+      "account-sign-out-row", "gateway-url-any-host-http",
+      "settings-extensions-tab", "settings-extensions-group"],
     "without the Gateway flag only the always-on patches are spliced");
   const disabledOutput = disabled.sources.get(`changed-chunk-${i}.js`);
   assert.ok(disabledOutput.includes('icon:"Download"'), "the download button stays on with the flag off");
   assert.ok(!disabledOutput.includes("gatewaySettingsEnabled"), "the Gateway guards stay off with the flag off");
   assert.ok(disabledOutput.endsWith(decoy), "the download button must not disturb the tail");
+  // The Extensions tab is reachable in both client identities and appears
+  // exactly once. The item guard is forced on, and the section is appended
+  // only when the Desktop-identity list was empty.
+  const navSource = webResult.sources.get(`changed-chunk-${i}.js`);
+  const navIds = (desktop) => {
+    const context = {
+      S: () => ({}), X: () => null, OS: null,
+      // The shared fixture head reads these at module scope.
+      callbacks: {}, event: {}, result: null,
+    };
+    vm.runInNewContext(
+      `${navSource}\nresult=settingsNav(${desktop ? "!0" : "!1"},!1,!1,!1,[]);`,
+      context,
+    );
+    return JSON.parse(JSON.stringify(
+      context.result.groups.map(group => group.sections.map(row => row.id)),
+    ));
+  };
+  assert.deepEqual(navIds(false), [[], ["desktop/extensions"]],
+    "a browser-identified client must get the Extensions tab, appended to the This computer group");
+  assert.deepEqual(navIds(true), [[], ["desktop", "desktop/extensions"]],
+    "a Desktop-identified client keeps System and gains Extensions exactly once");
+  assert.ok(navSource.includes('href:"/settings/desktop/extensions"'),
+    "the appended item reuses the official nav object");
+  assert.ok(navSource.includes("(b||a.length>0)"),
+    "the section group opens when the appended item is the only entry");
+  assert.ok(navSource.includes("function elsewhere()"),
+    "an href outside a nav conditional must not be spliced");
   const compiled = await minify(inputs.get(`changed-chunk-${i}.js`), {
     mangle: true, compress: { unused: false }, format: { quote_style: 1 },
   });
-  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 7,
+  assert.equal(patchRendererSources(new Map([["new-hash.js", compiled.code]]), true).patches.length, 9,
     "compiler-generated variants must retain every patch");
   assert.throws(() => patchRendererSources(new Map([...inputs, ["duplicated.js", signin]]), true), /expected once, found 2/);
 }
