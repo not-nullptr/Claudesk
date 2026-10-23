@@ -37,6 +37,9 @@ try {
       BRIDGE_PORT: String(port),
       BRIDGE_HOST: "127.0.0.1",
       COWORK_BRIDGE_STATE_DIR: stateDir,
+      // No shutdown hold: the test removes the state directory as soon as the
+      // child exits, and the bridge persists its restart notice there first.
+      CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS: "0",
       AUTH_IDENTITY_URL: "http://127.0.0.1:9",
       // The gate is pinned by bridge-auth-smoke.mjs; this smoke drives the
       // runner and session legs directly.
@@ -153,7 +156,11 @@ try {
   assert.equal(failed.session.status, "active");
   assert.equal(failed.session.worker_status, "idle", "a failed run leaves the session idle");
 } finally {
-  if (child) child.kill("SIGTERM");
+  if (child && child.exitCode === null && child.signalCode === null) {
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    child.kill("SIGTERM");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2000))]);
+  }
   if (createdRelease) rmSync(releaseFile, { force: true });
   rmSync(stateDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 }

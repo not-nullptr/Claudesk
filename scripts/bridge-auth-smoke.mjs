@@ -37,6 +37,9 @@ async function boot({ port, env }) {
       BRIDGE_PORT: String(port),
       BRIDGE_HOST: "127.0.0.1",
       COWORK_BRIDGE_STATE_DIR: stateDir,
+      // The bridge persists its restart notice in the state dir on SIGTERM;
+      // the test removes that directory as soon as every child has stopped.
+      CLAUDE_REMOTE_SHUTDOWN_NOTICE_MS: "0",
       CLAUDE_REMOTE_LOGIN_SHELL: "0",
       ...env,
     },
@@ -195,8 +198,18 @@ try {
 
   process.stdout.write("bridge-auth-smoke: tenant API gate passed\n");
 } finally {
-  for (const child of children) child.kill("SIGTERM");
+  const exits = children
+    .filter((child) => child.exitCode === null && child.signalCode === null)
+    .map((child) => {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGTERM");
+      return exited;
+    });
+  await Promise.race([
+    Promise.all(exits),
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ]);
   for (const mock of servers) mock.close();
-  rmSync(stateDir, { force: true, recursive: true });
+  rmSync(stateDir, { force: true, recursive: true, maxRetries: 20, retryDelay: 50 });
   if (createdRelease) rmSync(releaseFile, { force: true });
 }
