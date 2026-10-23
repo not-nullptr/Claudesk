@@ -10,7 +10,7 @@ are now answered for this deployment.
 
 | Gate | Official behaviour | Here |
 | --- | --- | --- |
-| `extensions.enabled` | Unset in 3P mode, so `isExtensionsEnabled()` is false | `30-claude-config.sh` writes `"extensions": {"enabled": true}` into `claude_desktop_config.json` |
+| `extensions.enabled` | Unset in 3P mode, so `isExtensionsEnabled()` is false | `30-claude-config.sh` writes `"extensions": {"enabled": true}` into `claude_desktop_config.json`, and the flat `isDesktopExtensionEnabled: true` into the environment-seeded managed configuration / applied config-library entry (the source the app actually reads when the writable 3P configuration library is in use) |
 | `hasOrgPolicyBackend()` | The 3P deployment mode answers false (the policy service is claude.ai), so `isLocalExtensionInstallAllowed()` is false and every install handler refuses | `bridge-wrapper/extensions.cjs` finds the active deployment-mode object and forces that one predicate true for the duration of an Extensions IPC call |
 | Settings nav | The "This computer" section is rendered only for a Desktop-identified client, and the Extensions item only when sessions run on this device; the web shell is neither | `settings-extensions-tab` / `settings-extensions-group` renderer patches |
 | Settings **page** | Every desktop settings page (Extensions, its advanced and detail pages, Developer) is wrapped by a component that calls `notFound()` unless the client identifies as the Desktop app *and* `onThisDevice` is true | `desktop-settings-page-gate` renderer patch |

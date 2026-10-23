@@ -141,6 +141,19 @@ assert.match(preload, /accept: "\.mcpb,\.dxt,application\/zip"/,
 assert.match(preload, /dispatch\(payload\.surface, payload\.method, payload\.payload, payload\.args\)/,
   "the browser must receive every argument of a multi-argument Desktop event");
 
+// Both configuration spellings must be written: the app config file carries the
+// nested object, while the environment-seeded managed configuration and the
+// applied config-library entry are validated by the flat-key registry and would
+// silently drop a nested `extensions` key.
+const configInit = await readFile(
+  new URL("../rootfs/etc/cont-init.d/30-claude-config.sh", import.meta.url), "utf8");
+assert.match(configInit, /isDesktopExtensionEnabled: true/,
+  "the managed/config-library seed must use the flat key");
+assert.match(configInit, /\.extensions = \(\(\.extensions \/\/ \{\}\) \+ \{enabled: true\}\)/,
+  "claude_desktop_config.json must carry the nested object");
+assert.match(configInit, /\.isDesktopExtensionEnabled \/\/ empty/,
+  "an existing applied config-library entry must be checked for the flat key");
+
 const server = await readFile(new URL("../bridge/server.mjs", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../bridge-wrapper/main.cjs", import.meta.url), "utf8");
 for (const [name, source] of [["bridge", server], ["wrapper", wrapper]]) {

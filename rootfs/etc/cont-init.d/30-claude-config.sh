@@ -197,7 +197,8 @@ jq -n \
         disableDeploymentModeChooser: ($remote == "0"),
         chatTabEnabled: true,
         coworkTabEnabled: true,
-        isClaudeCodeForDesktopEnabled: ($code == "1")
+        isClaudeCodeForDesktopEnabled: ($code == "1"),
+        isDesktopExtensionEnabled: true
     } + if $models == null then {} else {inferenceModels: $models} end
       + if $desktop_home == "" then {} else {desktopHome: $desktop_home} end
       + if $allowed_egress_hosts == null then {} else {coworkEgressAllowedHosts: $allowed_egress_hosts} end)' > "$tmp_file"
@@ -255,6 +256,11 @@ printf '[claude-config] official Developer menu follows CLAUDE_REMOTE_GATEWAY_SE
 # installed. The wrapper supplies the install authorization and the browser UI
 # uploads the bundle (see docs/desktop-extensions.md). Any other keys already
 # in the object are preserved.
+#
+# It is written here *and* into the config-library entry below / the
+# environment-seeded managed configuration: with the writable 3P configuration
+# library enabled the app reads its configuration keys from the applied entry,
+# not from this file, which still supplies deploymentMode and preferences.
 app_config="$user_data_dir/claude_desktop_config.json"
 if [ -L "$app_config" ]; then
     printf '[claude-config] ERROR: app config must not be a symlink\n' >&2
@@ -378,6 +384,23 @@ if [ "$remote_gateway_settings" = "1" ]; then
         fi
         printf '[claude-config] official Code surface follows CLAUDE_REMOTE_CODE_ACTIONS=%s (surface=%s, runners=%s)\n' \
             "$remote_code_actions" "$remote_code_surface" "$code_runners"
+        # Desktop extensions follow the environment the same way. In this mode
+        # the app reads its configuration keys from the applied config-library
+        # entry, not from claude_desktop_config.json (that file still carries
+        # deploymentMode/preferences), so a library seeded before extensions
+        # were enabled would keep reporting them disabled forever. Merge the key
+        # in place and leave every other extension setting alone. Written only
+        # when it differs, so a steady state does not rewrite on every boot.
+        if [ "$(jq -r '.isDesktopExtensionEnabled // empty' \
+                "$config_library/$applied_id.json")" != "true" ]; then
+            extensions_tmp="$(mktemp "$config_library/.extensions.XXXXXX")"
+            jq '. + {isDesktopExtensionEnabled: true}' \
+                "$config_library/$applied_id.json" > "$extensions_tmp"
+            install -o "$user_id" -g "$group_id" -m 0600 \
+                "$extensions_tmp" "$config_library/$applied_id.json"
+            rm -f "$extensions_tmp"
+            printf '[claude-config] desktop extensions enabled in the applied 3P configuration\n'
+        fi
         # The endpoint and its credential are provisioning values: the Cowork VM
         # makes the model calls and is confined to the guest, so an account whose
         # endpoint is not reachable from there simply cannot infer, and one whose
