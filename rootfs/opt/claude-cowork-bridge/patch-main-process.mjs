@@ -15,6 +15,7 @@ import { resolve, sep } from "node:path";
 import {
   extensionInstallPolicyPatchId,
   gatewayLoopbackHttpPatchId,
+  mcpEarlyPortPatchId,
   patchEmbeddedSources,
 } from "./renderer-patches.mjs";
 
@@ -63,6 +64,15 @@ if (policyPatches.length !== 1) {
     `extensions install policy expected once, found ${policyPatches.length}; the Desktop window would refuse local installs`,
   );
 }
+// The early port capture is what lets the browser reuse a connection the app
+// already made instead of restarting the server. Missing it is not fatal for
+// discovery, but a uv server can fail its restart; require the splice.
+const earlyPortPatches = result.patches.filter(patch => patch.id === mcpEarlyPortPatchId);
+if (earlyPortPatches.length !== 1) {
+  throw new Error(
+    `MCP early port capture expected once, found ${earlyPortPatches.length}; the browser would restart local MCP servers`,
+  );
+}
 for (const [path, text] of result.sources) {
   if (text === sources.get(path)) continue;
   await writeFile(path, text);
@@ -78,6 +88,7 @@ for (const patch of result.patches) {
   }
 }
 console.log(
-  `patch-main-process: rewrote the Gateway URL guard (${gatewayPatches[0].path}) `
-  + `and the extensions install policy (${policyPatches[0].path})`,
+  `patch-main-process: rewrote the Gateway URL guard (${gatewayPatches[0].path}), `
+  + `the extensions install policy (${policyPatches[0].path}) `
+  + `and MCP early port capture (${earlyPortPatches[0].path})`,
 );

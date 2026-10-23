@@ -803,7 +803,13 @@
     if (typeof serverName !== "string" || !serverName || serverName.length > 512) {
       throw new Error("Invalid MCP server name");
     }
-    const value = await bridgeRequest("/api/remote/mcp/connect", { serverName });
+    let value;
+    try {
+      value = await bridgeRequest("/api/remote/mcp/connect", { serverName });
+    } catch (error) {
+      console.error(`[claudesk] Could not connect to MCP server ${serverName}`, error);
+      throw error;
+    }
     const connectionId = value?.connectionId;
     if (typeof connectionId !== "string") {
       throw new Error("The bridge did not return an MCP connection");

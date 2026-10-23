@@ -1089,6 +1089,10 @@ const extensionSettingsMethods = new Set([
   "setExtensionSettings",
 ]);
 allowedSettingsMethods.set("Extensions", extensionSettingsMethods);
+// Read-only MCP configuration for the local-connector attach path (see
+// "Local MCP servers → browser"). The renderer uses it to skip servers the
+// account never configured, such as the internal `mcp-registry`.
+allowedSettingsMethods.set("MCP", new Set(["getMcpServersConfig"]));
 
 const allowedSurfaces = new Set(allowedMethods.keys());
 
@@ -2166,7 +2170,7 @@ function validateExtensionInvocation(method, args) {
 }
 
 function validateSettingsInvocation(surface, method, args) {
-  if (!gatewaySettingsEnabled && surface !== "Extensions") {
+  if (!gatewaySettingsEnabled && surface !== "Extensions" && surface !== "MCP") {
     throw new Error("Remote Gateway settings are disabled");
   }
   if (!allowedSettingsMethods.get(surface)?.has(method)) {
@@ -2993,12 +2997,12 @@ async function invokeSettings(surface, method, args, argsEncoding) {
   const answerDialogs = surface === "Extensions"
     && extensions.extensionDialogMethods.has(method);
   let capturedDialogs = null;
-  if (surface === "Extensions") {
-    // Extensions live on the official app's own renderer, not the Gateway setup
-    // window (the surface exists whether or not the writable 3P configuration
-    // library is enabled). The install and preview calls can open a native
-    // dialog; a browser cannot answer it, so answer it for the duration of
-    // this relayed call.
+  if (surface === "Extensions" || surface === "MCP") {
+    // Extensions and MCP live on the official app's own renderer, not the
+    // Gateway setup window (the surfaces exist whether or not the writable 3P
+    // configuration library is enabled). The install and preview calls can open
+    // a native dialog; a browser cannot answer it, so answer it for the duration
+    // of this relayed call.
     if (!answerDialogs) {
       serialized = await evaluateInOfficialRenderer(expression);
     } else {
@@ -3690,10 +3694,16 @@ const server = http.createServer(async (request, response) => {
         || body.serverName.length > 512) {
         throw new Error("invalid MCP server name");
       }
-      sendJson(response, 200, {
-        ok: true,
-        value: await callMcpBridge("connect", [body.connectionId, body.serverName]),
-      });
+      try {
+        sendJson(response, 200, {
+          ok: true,
+          value: await callMcpBridge("connect", [body.connectionId, body.serverName]),
+        });
+      } catch (error) {
+        console.error(`[mcp] connect ${body.serverName} failed: ${
+          error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      }
       return;
     }
     if (request.method === "POST" && url.pathname === "/mcp-send") {

@@ -93,6 +93,19 @@ extension's tools execute in the Desktop process — not in the browser, the
 bridge, or the Cowork guest — and the detail page lists them (and their
 permission state) once the client attaches.
 
+Two details keep the attach path from disturbing the Desktop window:
+
+* The attach hook reads `claude.settings.MCP.getMcpServersConfig` to tell a
+  server the account never configured (the internal `mcp-registry`) from a real
+  local one. The bridge exposes that one method read-only; without it the
+  browser tried to connect `mcp-registry` and showed a failure toast.
+* The preload installs a main-world listener at startup that remembers every
+  port the app receives. When the browser connects a server the Desktop window
+  already attached, the proxy reuses that port instead of calling
+  `connectToMcpServer` again — a restart can race a `uv` environment lock and
+  fail (the Canvas/`uv` case). A server that genuinely fails to start still
+  reports the official failure toast.
+
 `claudeAppBindings` is what the claude.ai chat surface uses for local
 connectors, so the same proxy also makes the browser's chat use local MCP
 servers the account configured. The Desktop window keeps its own connection;
@@ -103,13 +116,17 @@ the two clients share the server process but use separate id ranges.
 The extension's MCP server is spawned by the Desktop main process, not by the
 Cowork guest. What a bundle needs must therefore exist in this container:
 
-* `server.type: "node"` — the system Node.js, or the Node runtime the app
-  downloads itself (`Use built-in Node.js for MCP` on the advanced page).
-* `server.type: "python"` — a system Python that satisfies the manifest.
+* `server.type: "node"` — the system Node.js (installed in the image), or the
+  Node runtime the app downloads itself (`Use built-in Node.js for MCP` on the
+  advanced page).
+* `server.type: "python"` — the image's system `python3` (installed explicitly
+  so a Python extension and `uv` do not depend on a base-image accident).
 * `server.type: "uv"` — the app downloads `uv` into `userData/uv-runtime` and
   runs `uv sync` in the extension directory during install; this needs egress
   to GitHub releases and to the package index. A failed setup fails the
   install with the official error dialog (reported as a toast in the browser).
+  `uv` can use the image's `python3`, so a reinstall does not depend on a
+  separately downloaded interpreter.
 
 Installed servers are added to the same MCP configuration the local Chat /
 Cowork sessions use. Enabling or disabling an extension takes effect for

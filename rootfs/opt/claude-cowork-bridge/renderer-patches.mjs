@@ -90,6 +90,60 @@ const desktopSettingsPageGatePatchId = "desktop-settings-page-gate";
 // leave `isDirectoryEnabled()` (which also consults the backend) untouched.
 // Applied by patch-main-process.mjs, not to the renderer assets.
 export const extensionInstallPolicyPatchId = "desktop-extension-install-policy";
+// The official preload receives local MCP servers' MessagePorts on `window`
+// and hands them to the app's own attach code. The browser proxy needs those
+// same ports, but it is installed after the app has connected its servers; the
+// late listener only sees a server's port after a reconnect. Capture every
+// port at preload time so the proxy can reuse the app's connection instead of
+// restarting the server (a restart can race a uv environment lock). This patch
+// only adds the listener next to `exposeInMainWorld("claudeAppBindings", …)`;
+// the proxy still owns the protocol.
+export const mcpEarlyPortPatchId = "mcp-early-port-capture";
+// The official preload forwards each local MCP server's MessagePort to the app
+// with `window.postMessage`. The browser proxy is installed after the app has
+// connected its servers, so its own listener would only see a port after a
+// reconnect — and reconnecting can race a uv environment lock. Install a
+// main-world listener from the preload (before the app's scripts run) so the
+// proxy can reuse the app's connection instead of restarting the server.
+// `contextBridge.executeInMainWorld` is the only way to run main-world code
+// from a context-isolated preload; without it the splice is a no-op and the
+// proxy falls back to reconnecting.
+function mcpEarlyPortPatch(source) {
+  if (!source.includes("claudeAppBindings")) return undefined;
+  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
+  let splice;
+  walk(ast, [], (node, ancestors) => {
+    if (splice || node.type !== "CallExpression") return;
+    const callee = unwrap(node.callee);
+    if (!property(callee, "exposeInMainWorld")) return;
+    if (!literal(unwrap(node.arguments?.[0]), "claudeAppBindings")) return;
+    const bridge = callee.object;
+    if (bridge?.type !== "MemberExpression" || !property(bridge, "contextBridge")) return;
+    const statement = [...ancestors].reverse()
+      .find(parent => parent.type === "ExpressionStatement");
+    if (!statement) return;
+    const bridgeSource = source.slice(bridge.start, bridge.end);
+    const mainWorld = "function(){try{"
+      + "if(globalThis.__CLAUDE_REMOTE_MCP_EARLY_PORTS__ instanceof Map)return;"
+      + "globalThis.__CLAUDE_REMOTE_MCP_EARLY_PORTS__=new Map();"
+      + "window.addEventListener(\"message\",function(event){try{"
+      + "if(event.source!==window||!event.data||event.data.type!==\"mcp-server-connected\")return;"
+      + "var port=event.ports&&event.ports[0];"
+      + "if(!port||typeof event.data.serverName!==\"string\")return;"
+      + "globalThis.__CLAUDE_REMOTE_MCP_EARLY_PORTS__.set(event.data.serverName,"
+      + "{port:port,uuid:event.data.uuid||event.data.serverName});"
+      + "}catch(error){}});"
+      + "}catch(error){}}";
+    splice = {
+      start: statement.end,
+      end: statement.end,
+      original: "",
+      replacement: `;try{${bridgeSource}.executeInMainWorld&&`
+        + `${bridgeSource}.executeInMainWorld({func:${mainWorld}})}catch(error){}`,
+    };
+  });
+  return splice;
+}
 const settingsExtensionsHref = "/settings/desktop/extensions";
 // The "This computer" section heading's message id. It pins the push whose
 // condition is the same Desktop-identity flag.
@@ -5389,10 +5443,13 @@ export function patchEmbeddedSources(sources) {
     const gateway = inspectRenderer(source, false, false).patches
       .filter(patch => patch.id === gatewayLoopbackHttpPatchId);
     const policy = extensionInstallPolicyPatch(source);
-    if (!gateway.length && !policy) continue;
-    const applied = policy
-      ? [...gateway, { id: extensionInstallPolicyPatchId, ...policy }]
-      : gateway;
+    const earlyPort = mcpEarlyPortPatch(source);
+    if (!gateway.length && !policy && !earlyPort) continue;
+    const applied = [
+      ...gateway,
+      ...(policy ? [{ id: extensionInstallPolicyPatchId, ...policy }] : []),
+      ...(earlyPort ? [{ id: mcpEarlyPortPatchId, ...earlyPort }] : []),
+    ];
     let text = source;
     for (const patch of [...applied].sort((a, b) => b.start - a.start)) {
       text = text.slice(0, patch.start) + patch.replacement + text.slice(patch.end);

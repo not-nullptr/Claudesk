@@ -219,6 +219,25 @@ assert.match(wrapper, /"\/mcp-connect"/,
 assert.match(wrapper, /"\/mcp-send"/, "the wrapper must carry MCP messages to the renderer");
 assert.match(wrapper, /\["McpBridge", new Set\(\["mcpMessage"\]\)\]/,
   "the wrapper must let MCP messages through the event relay");
+// The attach hook reads the MCP config to skip an internal server the account
+// never configured (mcp-registry), and the main renderer answers it.
+assert.match(server, /allowedSettingsMethods\.set\("MCP", new Set\(\["getMcpServersConfig"\]\)\)/,
+  "the bridge must expose the read-only MCP configuration");
+assert.match(wrapper, /allowedSettingsMethods\.set\("MCP", new Set\(\["getMcpServersConfig"\]\)\)/,
+  "the wrapper must expose the read-only MCP configuration");
+assert.match(wrapper, /surface === "Extensions" \|\| surface === "MCP"/,
+  "MCP reads must run in the official app renderer, not the setup window");
+for (const [name, source] of [["bridge", server], ["wrapper", wrapper]]) {
+  assert.match(source, /surface !== "Extensions" && surface !== "MCP"/,
+    `${name} must allow the read-only MCP surface without the Gateway editor`);
+}
+// The preload-time capture lets the proxy reuse the app's port instead of
+// restarting the server (the Canvas/uv failure mode).
+assert.match(mainProcessPatcher, /mcpEarlyPortPatchId/,
+  "the main-process patcher must install the early port capture");
+assert.match(await readFile(new URL("../bridge-wrapper/extensions.cjs", import.meta.url), "utf8"),
+  /__CLAUDE_REMOTE_MCP_EARLY_PORTS__/,
+  "the proxy must adopt the early-captured port");
 
 // The browser MCP proxy. The official renderer attaches local MCP servers
 // through `claudeAppBindings` and a MessagePort; the browser cannot receive a
@@ -335,5 +354,25 @@ events = takeMcpEvents();
 assert.equal(events[0].payload.connectionId, "connection-2");
 await mcpBridge.close("connection-2");
 await assert.rejects(mcpBridge.send("connection-2", { jsonrpc: "2.0", id: 3 }), /not open/);
+
+// A server the Desktop window connected before the proxy was installed is
+// adopted from the preload-time port map instead of being restarted.
+const earlyPort = makePort();
+vm.runInContext("globalThis.__CLAUDE_REMOTE_MCP_EARLY_PORTS__ = new Map()", mcpSandbox);
+mcpSandbox.__CLAUDE_REMOTE_MCP_EARLY_PORTS__.set("Early Server", {
+  port: earlyPort,
+  uuid: "uuid-early",
+});
+mcpSandbox.claudeAppBindings.listMcpServers = async () => ["Early Server"];
+let earlyConnects = 0;
+mcpSandbox.claudeAppBindings.connectToMcpServer = async () => {
+  earlyConnects += 1;
+};
+const early = await mcpBridge.connect("connection-3", "Early Server");
+assert.equal(earlyConnects, 0, "an already-connected server must not be restarted");
+assert.equal(early.uuid, "uuid-early");
+await mcpBridge.send("connection-3", { jsonrpc: "2.0", id: 7, method: "tools/list" });
+assert.equal(earlyPort.sent.at(-1).id, 3000007,
+  "the adopted port must carry the third connection's id range");
 
 console.log("desktop-extensions-smoke: policy override, IPC scoping, dialog set, browser wiring and the browser MCP proxy passed");

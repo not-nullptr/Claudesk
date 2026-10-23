@@ -251,6 +251,11 @@ function mcpBridgeInstallExpression({ consolePrefix, maxBytes = 6 * 1024 * 1024 
   const attach = (serverName, port, uuid) => {
     ports.set(serverName, { port, uuid });
     try { port.start?.(); } catch {}
+    try {
+      port.addEventListener("close", () => {
+        if (ports.get(serverName)?.port === port) ports.delete(serverName);
+      });
+    } catch {}
     port.addEventListener("message", (event) => {
       const message = event?.data;
       if (!message || typeof message !== "object") return;
@@ -283,10 +288,14 @@ function mcpBridgeInstallExpression({ consolePrefix, maxBytes = 6 * 1024 * 1024 
     const port = event.ports && event.ports[0];
     if (typeof name !== "string" || !port) return;
     const list = waiters.get(name);
-    if (!list || !list.length) return;
-    waiters.delete(name);
-    attach(name, port, event.data.uuid || name);
-    for (const resolve of list) resolve();
+    if (list && list.length) {
+      waiters.delete(name);
+      attach(name, port, event.data.uuid || name);
+      for (const resolve of list) resolve();
+      return;
+    }
+    // The app reconnected on its own: keep the newest port for later clients.
+    if (ports.has(name)) attach(name, port, event.data.uuid || name);
   });
 
   const syntheticInitialize = (serverName, params) => ({
@@ -311,6 +320,17 @@ function mcpBridgeInstallExpression({ consolePrefix, maxBytes = 6 * 1024 * 1024 
       const names = await bindings.listMcpServers();
       if (!Array.isArray(names) || !names.includes(serverName)) {
         throw new Error("Unknown MCP server");
+      }
+      if (!ports.has(serverName)) {
+        // A preload-time listener captures every port the app receives, so a
+        // server the Desktop window already connected is reused instead of
+        // restarted (a restart races uv's environment lock, for example).
+        const early = globalThis.__CLAUDE_REMOTE_MCP_EARLY_PORTS__;
+        const captured = early instanceof Map ? early.get(serverName) : undefined;
+        if (captured) {
+          early.delete(serverName);
+          attach(serverName, captured.port, captured.uuid || serverName);
+        }
       }
       if (!ports.has(serverName)) {
         const waiting = new Promise((resolve) => {

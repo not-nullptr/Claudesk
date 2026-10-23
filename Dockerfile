@@ -60,6 +60,7 @@ RUN add-pkg \
         nodejs \
         ovmf \
         procps \
+        python3 \
         qemu-system-x86 \
         xvfb \
         xdg-utils && \

@@ -1392,6 +1392,11 @@ const extensionSettingsMethods = new Set([
   "setExtensionSettings",
 ]);
 allowedSettingsMethods.set("Extensions", extensionSettingsMethods);
+// The local-connector attach code reads the MCP configuration to tell an
+// unconfigured internal server (mcp-registry) from a real local one, and the
+// session paths use it to filter enabled extension servers. Read-only; the
+// browser otherwise tries to connect `mcp-registry` and reports a failure.
+allowedSettingsMethods.set("MCP", new Set(["getMcpServersConfig"]));
 
 const remoteListenerMethods = new Map([
   ["ClaudeVM", new Set([
@@ -3615,7 +3620,7 @@ function validateExtensionInvocation(method, args) {
 }
 
 function validateSettingsInvocation(surface, method, args) {
-  if (!gatewaySettingsEnabled && surface !== "Extensions") {
+  if (!gatewaySettingsEnabled && surface !== "Extensions" && surface !== "MCP") {
     throw new ApiError(404, "Remote Gateway settings are disabled");
   }
   if (!allowedSettingsMethods.get(surface)?.has(method)) {
@@ -6330,7 +6335,14 @@ async function handleApi(request, response, url) {
         throw new ApiError(400, "MCP server name is not allowed");
       }
       const connectionId = randomUUID();
-      const value = await desktop.mcpConnect(connectionId, body.serverName);
+      let value;
+      try {
+        value = await desktop.mcpConnect(connectionId, body.serverName);
+      } catch (error) {
+        console.error(`[cowork-bridge] MCP connect ${body.serverName} failed: ${
+          error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      }
       sendJson(response, 200, {
         ok: true,
         value: { connectionId, uuid: value?.uuid ?? body.serverName },

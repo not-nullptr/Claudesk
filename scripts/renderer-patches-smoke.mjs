@@ -2182,6 +2182,28 @@ assert.ok(!embeddedPolicy.sources.get("main.js").includes("hasOrgPolicyBackend()
 assert.equal(patchEmbeddedSources(new Map([["main.js",
   extensionPolicySource.replace("localExtensionInstallAllowed:", "otherFlag:")]])).patches.length, 0,
 "a return without the install flag is not a target");
+// The preload's port forwarding: the proxy needs the app's MessagePort at
+// preload time, before the app connects its servers. The splice runs the
+// listener in the main world (contextBridge.executeInMainWorld), because a
+// context-isolated preload's globals are not visible to the page.
+const earlyPortPreload = 'e.contextBridge.exposeInMainWorld("claudeAppBindings",'
+  + '{listMcpServers:()=>e.ipcRenderer.invoke(N.ListMcpServers)}),'
+  + 'e.contextBridge.exposeInMainWorld("claudeAppSettings",Mr),'
+  + 'e.ipcRenderer.on(N.McpServerConnected,(e,t)=>{window.postMessage(t,"*",e.ports)});';
+const embeddedEarly = patchEmbeddedSources(new Map([["mainView.js", earlyPortPreload]]));
+const earlyPatches = embeddedEarly.patches.filter(patch => patch.id === "mcp-early-port-capture");
+assert.equal(earlyPatches.length, 1, "the early port capture must be spliced once");
+const earlyText = embeddedEarly.sources.get("mainView.js");
+assert.ok(earlyText.includes("executeInMainWorld({func:function(){"),
+  "the listener must run in the page's main world");
+assert.ok(earlyText.includes("__CLAUDE_REMOTE_MCP_EARLY_PORTS__")
+  && earlyText.includes('"mcp-server-connected"')
+  && earlyText.includes("event.ports&&event.ports[0]"),
+"the listener must remember each server's port");
+const forwarding = 'e.ipcRenderer.on(N.McpServerConnected,(e,t)=>{window.postMessage(t,"*",e.ports)});';
+assert.ok(earlyText.includes(forwarding), "the preload's own forwarding must remain");
+assert.ok(earlyText.indexOf("executeInMainWorld") > earlyText.indexOf(forwarding),
+  "the capture must be installed after the preload's bridge setup");
 // The root's caught-error option. React 19 creates the root with
 // `{onCaughtError, onRecoverableError}` and the bundle hands `onCaughtError` the
 // app's own reporter, which does not log — so a boundary-caught render error
